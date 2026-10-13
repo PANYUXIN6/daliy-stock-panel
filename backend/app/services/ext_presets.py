@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import logging
 import math
+from collections.abc import Callable
 from pathlib import Path
 
 from app.services.ext_data import (
@@ -55,7 +56,7 @@ def _concept_preset() -> ExtConfig:
             ExtField("股票简称", "string", "股票简称"),
             ExtField("所属概念", "string", "所属概念"),
         ],
-        description="同花顺概念分类 (启动仅创建配置, 在概念/行业页手动获取)",
+        description="同花顺概念分类 (启动仅创建配置, 在数据页手动获取)",
         symbol_map={"type": "mapped", "col": "股票代码"},
         code_map={"type": "computed", "from": "symbol", "method": "strip_exchange"},
         pull=PullConfig(
@@ -86,7 +87,7 @@ def _industry_preset() -> ExtConfig:
             ExtField("股票简称", "string", "股票简称"),
             ExtField("所属同花顺行业", "string", "所属同花顺行业"),
         ],
-        description="同花顺行业分类 (启动仅创建配置, 在概念/行业页手动获取)",
+        description="同花顺行业分类 (启动仅创建配置, 在数据页手动获取)",
         symbol_map={"type": "mapped", "col": "股票代码"},
         code_map={"type": "computed", "from": "symbol", "method": "strip_exchange"},
         pull=PullConfig(
@@ -237,7 +238,7 @@ def get_preset(config_id: str) -> ExtConfig | None:
 async def ensure_builtin_presets(data_dir: Path) -> None:
     """启动时: 为缺失的预设创建 config.json (含 pull 配置), 但【不拉取数据】。
 
-    设计: 数据获取改为用户在概念/行业页手动点「获取数据」触发, 避免启动时
+    设计: 数据获取改为用户在数据页手动点「获取数据」触发, 避免启动时
     网络请求阻塞, 也避免「自动拉取」与「用户自主控制」的预期冲突。
 
     安全保证:
@@ -254,8 +255,8 @@ async def ensure_builtin_presets(data_dir: Path) -> None:
         try:
             store.upsert(config)
             logger.info("内置扩展表 %s 配置已就绪 (待用户手动获取数据)", config.id)
-        except Exception as e:
-            logger.warning("内置扩展表 %s 配置写入失败 (不影响启动): %s", config.id, e)
+        except Exception as e:  # noqa: BLE001 — 内置扩展配置的单项准备失败不阻断其他预设及应用启动
+            logger.warning("内置扩展表 %s 配置写入失败 (不影响启动): %s", config.id, e, exc_info=True)
 
 
 async def fetch_preset(config_id: str, data_dir: Path) -> int:
@@ -279,3 +280,19 @@ async def fetch_preset(config_id: str, data_dir: Path) -> int:
     n = await _seed_one(config, flatten, data_dir)
     logger.info("内置扩展表 %s 手动拉取成功: %d 行", config_id, n)
     return n
+
+
+async def sync_classifications(
+    data_dir: Path,
+    results: dict[str, int],
+    on_progress: Callable[[str, int, str], None],
+) -> dict[str, int]:
+    """板块模块顺序同步两表, 保留已写行数供任务退出时发布部分结果。"""
+    presets = _presets()
+    for index, config in enumerate(presets):
+        on_progress("classifications", int(index * 95 / len(presets)), f"同步{config.label}…")
+        results[config.id] = await fetch_preset(config.id, data_dir)
+        # 先记录已写入数据, 再让进度回调检查取消, 保证取消也会发布本表。
+        on_progress("classifications", int((index + 1) * 95 / len(presets)), f"{config.label}同步完成, {results[config.id]} 行")
+    on_progress("done", 100, "概念与行业分类同步完成")
+    return results

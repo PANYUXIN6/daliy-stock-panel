@@ -1,6 +1,7 @@
 """扩展数据 API — CRUD + 文件上传 + JSON 写入 + 定时拉取 + schema 发现。"""
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import math
@@ -8,9 +9,9 @@ import re
 import shutil
 import tempfile
 import time
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal
 
 import polars as pl
 from fastapi import APIRouter, File, HTTPException, Query, Request, UploadFile
@@ -29,9 +30,8 @@ from app.services.ext_data import (
     fix_symbol_format,
     get_ext_api_key,
     infer_fields_from_df,
-    parse_upload_file,
-    write_ext_parquet,
     rows_to_parquet,
+    write_ext_parquet,
 )
 from app.services.ext_pull import _request_json, fetch_and_ingest, pull_scheduler
 
@@ -317,6 +317,7 @@ def _with_instrument_name(df: pl.DataFrame, data_dir: Path) -> pl.DataFrame:
             inst = inst.select(["symbol", "name"]).unique(subset=["symbol"], keep="last")
             return df.join(inst, on="symbol", how="left")
     except Exception:
+        logger.exception("instrument name decoration failed")
         return df
     return df
 
@@ -407,6 +408,30 @@ def list_configs(request: Request):
     return {"items": items}
 
 
+@router.post("/presets/sync")
+async def sync_classifications(request: Request):
+    """板块分类作为一个后台任务同步, 保留原单表接口供维护使用。"""
+    from app.api.data import invalidate_storage_cache
+    from app.api.pipeline import _submit_job
+    from app.services.ext_presets import sync_classifications as run_classifications
+
+    repo = request.app.state.repo
+    written: dict[str, int] = {}
+
+    def finalize():
+        if written:
+            _refresh_views(request)
+            invalidate_storage_cache()
+        else:
+            repo.refresh_cache()
+
+    return await _submit_job(
+        repo, getattr(request.app.state, "quote_service", None),
+        lambda progress: lambda: asyncio.run(run_classifications(_data_dir(request), written, progress)),
+        request_key="classifications", finalize=finalize,
+    )
+
+
 @router.post("/presets/{config_id}/fetch")
 async def fetch_preset_data(request: Request, config_id: str):
     """手动触发内置预设 (概念/行业) 的数据拉取。
@@ -424,7 +449,7 @@ async def fetch_preset_data(request: Request, config_id: str):
     except Exception as e:
         raise HTTPException(400, f"拉取失败: {e}") from e
 
-    _refresh_views(request)
+    await asyncio.to_thread(_refresh_views, request)
     return {"status": "ok", "rows": n}
 
 
@@ -689,6 +714,11 @@ _DIMENSION_INTRADAY_CACHE_TTL_S = 60.0
 _DIMENSION_INTRADAY_FFILL_CAP = 2000
 
 
+def invalidate_dimension_intraday_cache() -> None:
+    """成分、分钟或前收数据更新后，下一次读取重新聚合。"""
+    _DIMENSION_INTRADAY_CACHE.clear()
+
+
 def _bare_symbol_expr(col: str = "symbol") -> pl.Expr:
     """'000001.SZ' → '000001'; 已是裸代码则原样。"""
     return pl.col(col).cast(pl.String).str.strip_chars().str.split(".").list.first()
@@ -907,7 +937,7 @@ async def _write_upload_capped(file: UploadFile, dest: Path, max_bytes: int) -> 
 async def upload_data(
     request: Request,
     config_id: str,
-    file: UploadFile = File(...),
+    file: Annotated[UploadFile, File()],
     snapshot_date: str | None = None,
 ):
     """上传 CSV/Excel 文件写入扩展数据。"""
@@ -964,7 +994,7 @@ async def upload_data(
     rows = write_ext_parquet(df, config, _data_dir(request), snapshot_date=snap)
 
     # 刷新 DuckDB 视图
-    _refresh_views(request)
+    await asyncio.to_thread(_refresh_views, request)
 
     return {"status": "ok", "rows": rows, "date": snap.isoformat()}
 
@@ -1124,12 +1154,12 @@ async def run_pull(request: Request, config_id: str):
 
     try:
         n, d = await fetch_and_ingest(config, _data_dir(request))
-        _refresh_views(request)
+        await asyncio.to_thread(_refresh_views, request)
         # 写回执行状态, 让前端"上次执行"面板立即反映
         updated = store.get(config_id)
         if updated and updated.pull:
-            from datetime import datetime, timezone
-            updated.pull.last_run = datetime.now(timezone.utc).isoformat()
+            from datetime import datetime
+            updated.pull.last_run = datetime.now(UTC).isoformat()
             updated.pull.last_status = "success"
             updated.pull.last_message = f"{n} rows @ {d}"
             updated.pull.last_rows = n
@@ -1139,8 +1169,8 @@ async def run_pull(request: Request, config_id: str):
         # 失败也写回状态, 记录错误信息
         failed = store.get(config_id)
         if failed and failed.pull:
-            from datetime import datetime, timezone
-            failed.pull.last_run = datetime.now(timezone.utc).isoformat()
+            from datetime import datetime
+            failed.pull.last_run = datetime.now(UTC).isoformat()
             failed.pull.last_status = "error"
             failed.pull.last_message = str(e)[:200]
             store.upsert(failed)
@@ -1175,7 +1205,7 @@ async def backfill_history_ep(
         result = await backfill_history(config, _data_dir(request), start_d, end_d)
     except ValueError as e:
         raise HTTPException(400, str(e)) from e
-    _refresh_views(request)
+    await asyncio.to_thread(_refresh_views, request)
     return {"status": "ok", **result}
 
 
@@ -1205,7 +1235,7 @@ def fix_symbol(request: Request, config_id: str):
 @router.post("/detect-fields")
 async def detect_fields(
     request: Request,
-    file: UploadFile = File(...),
+    file: Annotated[UploadFile, File()],
 ):
     """上传 CSV/Excel 文件，自动检测列名和类型。
 
@@ -1272,8 +1302,9 @@ def _find_row_arrays(data, prefix: str = "", limit: int = 8) -> list[str]:
 @router.post("/detect-url")
 async def detect_url(body: DetectUrlReq):
     """请求外部 URL，自动检测 JSON 行数据的字段和标的代码列。"""
-    from app.services.ext_pull import _extract_rows, _apply_field_map
     import httpx
+
+    from app.services.ext_pull import _apply_field_map, _extract_rows
 
     method = body.method.upper()
     if method not in ("GET", "POST"):
@@ -1353,6 +1384,7 @@ def discover_schema(request: Request, config_id: str):
         ).fetchall()
         return {"columns": [{"name": r[0], "type": r[1]} for r in rows]}
     except Exception:
+        logger.exception("extension schema discovery failed")
         # 无数据时返回配置中定义的字段
         return {"columns": [f.to_dict() for f in config.fields]}
 
@@ -1374,6 +1406,7 @@ def discover_all_schemas(request: Request):
             field_labels = {f.name: f.label for f in config.fields}
             columns = [{"name": r[0], "type": r[1], "label": field_labels.get(r[0], r[0])} for r in cols]
         except Exception:
+            logger.exception("extension schema discovery failed: %s", config.id)
             columns = [f.to_dict() for f in config.fields]
 
         result.append({
@@ -1407,7 +1440,7 @@ def _refresh_views(request: Request) -> None:
             try:
                 db.execute(sql)
             except Exception:
-                pass
+                logger.exception("extension view refresh failed")
 
     # 注册新路径视图：每个扩展表一个视图 ext_{config_id}
     ext_base = Path(d) / "ext_data"
@@ -1437,10 +1470,15 @@ def _refresh_views(request: Request) -> None:
                     )
                     db.execute(sql)
             except Exception:
-                pass
+                logger.exception("extension view refresh failed")
 
     # 扩展列已接入 enriched 帧 (compute_signals/compute_enriched_today 注入):
     # repo 内存 enriched 缓存 (_enriched_cache/_etf_/_index_) 持有含旧扩展列的
     # 帧, 必须一并清理, 否则写入后监控/列表仍用旧值 (服务层已清扩展帧与策略缓存)。
-    if hasattr(repo, "clear_cache"):
-        repo.clear_cache()
+    repo.clear_cache()
+    repo.refresh_cache()
+    invalidate_dimension_intraday_cache()
+    from app.services.shared_runtime import publish_data_update, publish_quotes
+
+    publish_quotes(request.app.state.quote_service)
+    publish_data_update(repo.store.data_dir, ["ext_data", "enriched"])

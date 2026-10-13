@@ -164,43 +164,19 @@ def test_sync_minute_batch_naive_window_is_beijing_wall_clock(monkeypatch):
     )]
 
 
-def _minute_batch_request(local: pl.DataFrame) -> MagicMock:
-    repo = MagicMock()
-    repo.get_etf_symbol_set.return_value = set()
-    repo.get_minute_batch.return_value = local
-    capset = MagicMock()
-    capset.has.return_value = True
-    capset.limits.return_value = None
-    request = MagicMock()
-    request.app.state.repo = repo
-    request.app.state.capabilities = capset
-    return request
-
-
-def test_minute_batch_endpoint_pull_windows_are_beijing_wall_clock(monkeypatch):
-    """/api/kline/minute-batch 补拉: 全天窗口 09:25-15:05 与增量起点 (本地最后一根) 均为北京墙钟。
-
-    端点用 naive 北京墙钟构造窗口; 若按服务器本地时区换算, UTC 主机上请求的是
-    北京 17:25-23:05, 自选分时补拉恒为空。
-    """
-    from app.api import kline as kline_api
+def test_explicit_minute_collection_window_is_beijing_wall_clock(monkeypatch, tmp_path):
+    """显式采集沿本地日历构造北京时间窗口，服务器时区不改变供应商请求。"""
+    from app.services import ordinary_minute
+    from app.tickflow.repository import DataStore, KlineRepository
 
     windows, offsets = _capture_tickflow_minute_batch(monkeypatch)
-    empty_symbol = "600000.SH"
-    tail_symbol = "600519.SH"  # 本地有 09:31-09:33 连续三根 → 尾部落后, 从最后一根增量拉
-    local = pl.DataFrame({
-        "symbol": [tail_symbol] * 3,
-        "datetime": [datetime(2026, 8, 14, 9, 31) + timedelta(minutes=i) for i in range(3)],
-        "close": [10.0] * 3,
-    })
-
-    kline_api.get_minute_batch(
-        _minute_batch_request(local),
-        {"symbols": [empty_symbol, tail_symbol], "date": "2026-08-14"},
-    )
-
+    repo = KlineRepository(DataStore(tmp_path))
+    monkeypatch.setattr(repo, 'resolve_asset_type', lambda symbol: 'stock')
+    monkeypatch.setattr(ordinary_minute, 'cn_now', lambda: datetime(2026, 8, 14, 15, tzinfo=CN_TZ))
+    monkeypatch.setattr(ordinary_minute.trading_day, 'calendar_status', lambda root: {'days': ['2026-08-14']})
+    try:
+        ordinary_minute.sync_symbol_minutes(repo, CapabilitySet({Cap.KLINE_MINUTE_BATCH: CapabilityLimits()}), '600000.SH', 1)
+    finally:
+        repo.db.close()
     assert offsets and all(offset == timedelta(hours=8) for offset in offsets)
-    assert sorted(windows) == [
-        (datetime(2026, 8, 14, 9, 25, tzinfo=CN_TZ), datetime(2026, 8, 14, 15, 5, tzinfo=CN_TZ)),
-        (datetime(2026, 8, 14, 9, 33, tzinfo=CN_TZ), datetime(2026, 8, 14, 15, 5, tzinfo=CN_TZ)),
-    ]
+    assert windows == [(datetime(2026, 8, 14, 9, 30, tzinfo=CN_TZ), datetime(2026, 8, 14, 15, tzinfo=CN_TZ))]

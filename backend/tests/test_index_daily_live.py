@@ -83,6 +83,7 @@ def test_index_daily_injects_live_candle(monkeypatch) -> None:
     from app.api import kline as kline_api
 
     monkeypatch.setattr(kline_api, "cn_today", lambda: TODAY)
+    monkeypatch.setattr(indices, "cn_today", lambda: TODAY)
     repo = _IndexRepo()
     result = indices.get_index_daily(
         _index_request(repo), symbol="000001.SH", days=5, start_date=None, end_date=None,
@@ -108,6 +109,7 @@ def test_index_daily_skips_live_candle_when_cache_unusable(monkeypatch, latest) 
     from app.api import kline as kline_api
 
     monkeypatch.setattr(kline_api, "cn_today", lambda: TODAY)
+    monkeypatch.setattr(indices, "cn_today", lambda: TODAY)
     repo = _IndexRepo(latest=latest)
     result = indices.get_index_daily(
         _index_request(repo), symbol="000001.SH", days=5, start_date=None, end_date=None,

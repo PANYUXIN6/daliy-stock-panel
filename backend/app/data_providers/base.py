@@ -16,6 +16,10 @@ import polars as pl
 AssetType = Literal["stock", "index", "etf"]
 
 
+class ProviderRateLimitError(RuntimeError):
+    """上游要求停止取数；同步任务必须失败，不能把限流当作无数据。"""
+
+
 @dataclass(frozen=True)
 class ProviderCapabilities:
     instruments: bool = False

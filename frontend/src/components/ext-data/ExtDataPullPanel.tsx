@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { Loader2, Search, Check, Clock, Zap, Settings2, AlertCircle, CheckCircle2, Calendar, History, KeyRound } from 'lucide-react'
 import { api, type ExtDataBackfillResult, type ExtDataConfig, type ExtPullAuth } from '@/lib/api'
 import { toast } from '@/components/Toast'
+import { useCollectionSyncConfirmation } from '@/lib/useCollectionSyncConfirmation'
 
 const AUTH_TYPE_LABELS: Record<ExtPullAuth['type'], string> = {
   none: '无',
@@ -75,6 +76,11 @@ export function ExtDataPullPanel({ config, onSaved }: {
 
   // 有效超时 (5~300 归一): 后端配置、前端 fetch 的 timeoutMs 共用同一口径
   const effTimeoutSec = Number.isFinite(timeoutSec) && timeoutSec >= 5 && timeoutSec <= 300 ? timeoutSec : 30
+  const confirmation = useCollectionSyncConfirmation(JSON.stringify([
+    config.id, config.pull, url, method, headerStr, body, responsePath, fieldMapStr, schedule,
+    timeWindowStart, timeWindowEnd, dateParam, dateFormat, timeField, timeoutSec,
+    pageParam, pageSizeParam, pageSize, maxPages, enabled, authType, authHeader, authParam,
+  ]))
 
   // 构建保存 payload (复用当前编辑态), enabledOverride 用于开关自动保存
   const buildPayload = (enabledOverride?: boolean) => {
@@ -142,8 +148,12 @@ export function ExtDataPullPanel({ config, onSaved }: {
   }
 
   const handleRun = () => {
-    setRunning(true); setError(''); setRunResult(null)
-    api.extDataPullRun(config.id, effTimeoutSec)
+    const configId = config.id
+    const timeout = effTimeoutSec
+    setError('')
+    confirmation.run({ kind: 'ext', config_id: configId }, () => {
+      setRunning(true); setRunResult(null)
+      api.extDataPullRun(configId, timeout)
       .then(r => {
         setRunResult({ rows: r.rows, date: r.date })
         onSaved()
@@ -151,6 +161,7 @@ export function ExtDataPullPanel({ config, onSaved }: {
       })
       .catch(e => setError(e.message || '执行失败'))
       .finally(() => setRunning(false))
+    })
   }
 
   const handleBackfill = () => {
@@ -520,7 +531,7 @@ export function ExtDataPullPanel({ config, onSaved }: {
           </button>
           <button
             onClick={handleRun}
-            disabled={running || !url}
+            disabled={running || confirmation.busy || !url}
             className="inline-flex items-center justify-center gap-1 px-2 py-2 rounded-btn bg-accent/90 text-white text-xs font-medium hover:bg-accent disabled:opacity-40 transition-colors"
           >
             {running ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Zap className="h-3.5 w-3.5" />}
@@ -623,6 +634,8 @@ export function ExtDataPullPanel({ config, onSaved }: {
           {error}
         </div>
       )}
+      {confirmation.error && <p role="alert" className="text-xs text-danger">{confirmation.error}</p>}
+      {confirmation.dialog}
     </div>
   )
 }

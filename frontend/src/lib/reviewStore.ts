@@ -84,16 +84,17 @@ export async function startReviewGeneration(
   state = { phase: 'loading', content: '', error: '', meta: null, focus }
   notify()
 
-  abortCtrl = new AbortController()
+  const controller = new AbortController()
+  abortCtrl = controller
   // 捕获 signal 局部引用: 外部中止 (查看历史/取消) 会把 abortCtrl 置空,
   // 循环与 catch 若仍解引用模块变量会空指针
-  const signal = abortCtrl.signal
+  const signal = controller.signal
   let buf = ''
-  let failed = false
+  let completed = false
   let doneMeta: ReviewMeta | null = null
 
   try {
-    for await (const evt of api.reviewStream(asOf, focus)) {
+    for await (const evt of api.reviewStream(asOf, focus, signal)) {
       if (signal.aborted) break
       if (evt.type === 'meta') {
         doneMeta = evt
@@ -104,22 +105,20 @@ export async function startReviewGeneration(
         state = { ...state, content: buf, phase: 'streaming' }
         notify()
       } else if (evt.type === 'error') {
-        failed = true
         state = { ...state, error: evt.message ?? '复盘失败', phase: 'error' }
         notify()
         return
       } else if (evt.type === 'done') {
+        completed = true
         state = { ...state, phase: 'done' }
         notify()
       }
     }
-    // 流正常结束但无 done 事件,按 done 处理; 被中止的流半途内容不归档,
-    // 状态由中止发起方 (查看历史/取消按钮) 自行设定, 这里不动
-    if (buf && !failed && !signal.aborted) {
-      state = { ...state, phase: 'done' }
-      notify()
-      // 自动归档(仅手动流: 定时流由后端归档, SSE done 不走这里)
-      if (buf && !failed) {
+    if (!signal.aborted) {
+      if (!completed) {
+        state = { ...state, phase: 'error', error: '复盘流已中断，未收到完成确认，请重试' }
+        notify()
+      } else if (buf) {
         onDone?.(buf, doneMeta)
       }
     }
@@ -129,8 +128,10 @@ export async function startReviewGeneration(
       notify()
     }
   } finally {
-    abortCtrl = null
-    generatingSource = null
+    if (abortCtrl === controller) {
+      abortCtrl = null
+      generatingSource = null
+    }
   }
 }
 
@@ -143,6 +144,7 @@ export function abortReviewGeneration(): void {
 export function cancelReviewGeneration(): void {
   abortCtrl?.abort()
   abortCtrl = null
+  generatingSource = null
   state = { ...INITIAL }
   notify()
 }
@@ -157,6 +159,7 @@ export function setViewingReport(report: {
 }): void {
   abortCtrl?.abort()
   abortCtrl = null
+  generatingSource = null
   state = {
     phase: 'done',
     content: report.content,

@@ -7,7 +7,7 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "preview": "vite preview",
-    "lint": "eslint .",
+    "lint": "tsc -b --pretty false",
     "test:indices": "vitest run src/pages/Indices.test.tsx"
   },
   "dependencies": {

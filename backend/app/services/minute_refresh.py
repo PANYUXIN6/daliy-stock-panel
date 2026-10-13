@@ -146,7 +146,8 @@ class MinuteRefreshService:
             from app.tickflow.capabilities import Cap
 
             return capset.has(Cap.INTRADAY_UNIVERSE)
-        except Exception:
+        except Exception:  # noqa: BLE001 — 能力检测异常保持关闭门控，禁止执行本轮采集
+            logger.debug("全量分钟能力检测失败", exc_info=True)
             return False
 
     def active_provider(self) -> str:
@@ -183,7 +184,7 @@ class MinuteRefreshService:
 
     def repair_only(self) -> bool:
         """当前生效源只能全天修复轮 (无廉价增量端点) — 节奏下限抬到 60s。"""
-        provider, name = self._resolve_custom()
+        provider, _name = self._resolve_custom()
         return provider is not None and not self._custom_supports_increment(provider)
 
     def _effective_interval(self) -> int:
@@ -201,11 +202,11 @@ class MinuteRefreshService:
             return "capability"
         if not _in_continuous_session():
             return "outside_trading_hours"
-        # 节假日 (工作日但休市): 周几门控覆盖不到, 由交易日探针剔除。
-        # 未知 (None) 维持现状 — 空轮升级机制兜底 (探针失灵时的第二道防线)。
+        # 仅在本地日历确认的交易日采集。
+        # 日历未覆盖 (None) 或确认休市时停止本轮。
         from app.services import trading_day
 
-        if trading_day.is_trading_day() is False:
+        if trading_day.is_trading_day() is not True:
             return "holiday"
         return None
 
@@ -235,9 +236,9 @@ class MinuteRefreshService:
                             break
                         self._stop.wait(min(_LOOP_STEP_S, max(0.0, self._state.next_round_at - now)))
                     continue
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001 — 采集轮次异常记入 last_error，不终止后续独立轮次
                 self._state.last_error = f"round failed: {e}"
-                logger.warning("全量分钟轮次异常: %s", e)
+                logger.warning("全量分钟轮次异常: %s", e, exc_info=True)
             self._stop.wait(_LOOP_STEP_S)
 
     # ------------------------------------------------------------------
@@ -287,7 +288,8 @@ class MinuteRefreshService:
             # 无廉价增量端点的源: 增量轮退化为修复轮 (全天批量幂等覆盖, 数据不丢)
             mode = "full"
         mode_label = "增量" if mode == "increment" else "全天修复"
-        with self._round_lock:
+        from app.services.ordinary_minute import MINUTE_COLLECTION_LOCK
+        with self._round_lock, MINUTE_COLLECTION_LOCK:
             if mode == "increment":
                 # fetch 计时只覆盖网络取数; full 分支的 universe 维表读取不计入
                 fetch_started = time.perf_counter()
@@ -326,9 +328,14 @@ class MinuteRefreshService:
                 return
             self._empty_rounds = 0
             write_started = time.perf_counter()
-            written = kline_sync._write_minute_partition(
-                df, self._repo.store.data_dir / "kline_minute",
-            )
+            with self._repo._write_lock:
+                written = kline_sync._write_minute_partition(
+                    df, self._repo.store.data_dir / "kline_minute",
+                )
+            from app.jobs.daily_pipeline import _refresh_single_view
+            from app.services.shared_runtime import publish_data_update
+            _refresh_single_view(self._repo, "kline_minute")
+            publish_data_update(self._repo.store.data_dir, ["minute"])
             write_ms = (time.perf_counter() - write_started) * 1000
 
         self._state.rounds += 1

@@ -8,11 +8,11 @@
  * 美化对齐 Dashboard 设计语言: 半透明 surface 卡片 + 渐变竖条标题 + 语义色。
  */
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { useQuery } from '@tanstack/react-query'
 import * as echarts from 'echarts'
 import {
-  Activity, RefreshCw, Loader2, Gauge, TrendingUp, TrendingDown, Minus,
-  Pencil, CalendarDays, Repeat, Rows3, LayoutGrid, Flame, Layers, Filter, X,
+  Activity, RefreshCw, Gauge, TrendingUp, TrendingDown, Minus,
+  Pencil, CalendarDays, Repeat, Rows3, LayoutGrid, Flame, Layers, X,
 } from 'lucide-react'
 import {
   api, type RegimeRow, type RegimeState, type MarketPhase,
@@ -138,10 +138,9 @@ const cardCls = 'rounded-card border border-border bg-surface/80 shadow-[0_1px_2
 
 // ── 主组件 ────────────────────────────────────────────────
 export function Regime() {
-  const qc = useQueryClient()
   const [range, setRange] = useState<RangePreset>('1y')
   // 视图 tab: 市场环境(状态/趋势/日历) 与 情绪周期(阶段/主线) 两组内容同页切换,
-  // 避免单页过长需要大幅滚动。两组共用时间范围与重算入口。
+  // 避免单页过长需要大幅滚动。两组共用时间范围。
   const [view, setView] = useState<'regime' | 'phase'>('regime')
   const [customOpen, setCustomOpen] = useState(false)
   // 日历热力图显示模式: false=单行(月份网格横向排列+滚动条, 默认), true=展开(换行完整网格)
@@ -176,7 +175,6 @@ export function Regime() {
     staleTime: 5 * 60 * 1000,
   })
   const [mainlineKind, setMainlineKind] = useState<'concept' | 'industry'>('concept')
-  const [filterOpen, setFilterOpen] = useState(false)
   // 时间轴点击选中的交易日 (当日快照联动); null = 未选。窗口切换后失效。
   const [selDate, setSelDate] = useState<string | null>(null)
   useEffect(() => { setSelDate(null) }, [histRange.start, histRange.end])
@@ -185,7 +183,6 @@ export function Regime() {
     queryFn: () => api.regimeMainline(histRange.start, histRange.end, 10, mainlineKind),
     staleTime: 5 * 60 * 1000,
   })
-  const [recomputing, setRecomputing] = useState(false)
 
   const rows: RegimeRow[] = history.data?.rows ?? []
   const latest = rows.length > 0 ? rows[rows.length - 1] : null
@@ -629,24 +626,9 @@ export function Regime() {
     }
   }, [calendarExpanded, calendarMonths])
 
-  const handleRecompute = async () => {
-    setRecomputing(true)
-    try {
-      const r = await api.regimeRecompute()
-      toast(r.computed > 0 ? `重算完成 · 新增 ${r.computed} 天` : '重算完成 · 数据已是最新', 'success')
-      await Promise.all([
-        qc.invalidateQueries({ queryKey: ['regime-history'] }),
-        qc.invalidateQueries({ queryKey: ['regime-states'] }),
-        qc.invalidateQueries({ queryKey: ['regime-latest'] }),
-        qc.invalidateQueries({ queryKey: ['regime-phases'] }),
-        qc.invalidateQueries({ queryKey: ['regime-mainline'] }),
-        qc.invalidateQueries({ queryKey: QK.regimeCoverage }),
-      ])
-    } catch (e) {
-      toast(`重算失败 · ${String((e as Error)?.message || e)}`, 'error')
-    } finally {
-      setRecomputing(false)
-    }
+  const refreshing = [coverage, history, states, phases, mainline].some(query => query.isFetching)
+  const handleRefresh = () => {
+    for (const query of [coverage, history, states, phases, mainline]) void query.refetch()
   }
 
   // 自定义按钮标签
@@ -695,11 +677,11 @@ export function Regime() {
                 {customLabel}
               </button>
             </div>
-            {/* 重算 */}
-            <button onClick={handleRecompute} disabled={recomputing}
+            {/* 本地数据刷新 */}
+            <button onClick={handleRefresh} disabled={refreshing}
               className="inline-flex items-center gap-1.5 h-7 px-3 rounded-btn border border-border bg-base text-xs text-secondary hover:text-accent disabled:opacity-50">
-              {recomputing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
-              {recomputing ? '重算中…' : '重算'}
+              <RefreshCw className={`h-3.5 w-3.5 ${refreshing ? 'animate-spin' : ''}`} />
+              刷新
             </button>
           </div>
         </div>
@@ -789,7 +771,7 @@ export function Regime() {
         </div>
       ) : (
         <div className="rounded-card border border-dashed border-border p-4 text-center text-xs text-muted">
-          市场阶段(情绪周期)数据尚未生成 — 点击右上角「重算」即可回填全部历史阶段与主线
+          后台尚未生成市场阶段、情绪周期与主线数据
         </div>
       )}
 
@@ -948,21 +930,10 @@ export function Regime() {
         </div>
       )}
 
-      {/* ── 主线排行 (窗口内持续性 + 过滤设置) ── */}
+      {/* ── 主线排行 (窗口内持续性) ── */}
       <div className={cn(cardCls, 'p-3')}>
         <SectionTitle icon={Layers} title="主线排行"
-          hint={
-            <span className="flex items-center gap-2">
-              <span className="hidden sm:inline text-[9px] text-muted">{mainline.data?.membership_note}</span>
-              <button
-                onClick={() => setFilterOpen(v => !v)}
-                className={cn('inline-flex items-center gap-1 rounded-btn border px-2 py-0.5 text-[10px] transition-colors',
-                  filterOpen ? 'border-accent/50 text-accent' : 'border-border bg-base text-secondary hover:text-accent')}
-              >
-                <Filter className="h-3 w-3" /> 过滤
-              </button>
-            </span>
-          }
+          hint={<span className="hidden sm:inline text-[9px] text-muted">{mainline.data?.membership_note}</span>}
         />
         <div className="mt-2 flex items-center gap-2">
           <div className="flex items-center rounded-btn border border-border bg-base/60 p-0.5">
@@ -974,17 +945,8 @@ export function Regime() {
               </button>
             ))}
           </div>
-          <span className="text-[10px] text-muted">窗口内 top1 天数排序 · 点击「过滤」配置宽基概念屏蔽</span>
+          <span className="text-[10px] text-muted">窗口内 top1 天数排序</span>
         </div>
-        {filterOpen && (
-          <MainlineFilterPanel
-            filter={mainline.data?.filter}
-            onDone={async () => {
-              await qc.invalidateQueries({ queryKey: ['regime-mainline'] })
-              await qc.invalidateQueries({ queryKey: ['regime-phases'] })
-            }}
-          />
-        )}
         <div className="mt-2 overflow-x-auto">
           <table className="w-full min-w-[560px] text-left text-[11px]">
             <thead>
@@ -1016,7 +978,7 @@ export function Regime() {
                         </button>
                       </span>
                     )
-                    : <span className="text-muted">暂无主线数据 — 点击「重算」回填, 或检查过滤设置</span>}
+                    : <span className="text-muted">后台尚未生成主线数据</span>}
                 </td></tr>
               )}
             </tbody>
@@ -1118,7 +1080,7 @@ export function Regime() {
                 </button>
               </span>
             )
-            : <span className="text-muted">暂无环境数据，请先运行盘后管道或点击「重算」</span>}
+            : <span className="text-muted">后台尚未生成该范围的市场环境数据</span>}
         </div>
       )}
 
@@ -1267,136 +1229,6 @@ export function Regime() {
           onApply={(d) => { setRange({ custom: d }); setCustomOpen(false) }}
         />
       )}
-    </div>
-  )
-}
-
-// ── 主线过滤设置面板 ──────────────────────────────────────
-// 宽基/风格标签(融资融券/沪深股通等数千成分)会霸占主线榜首。默认按成员数
-// 上限过滤; 用户可调阈值并按名称屏蔽特定概念, 保存后自动重算主线。
-// ST 剔除开关联动情绪周期口径 — 切换时额外触发 regime 全量重算。
-function MainlineFilterPanel({ filter, onDone }: {
-  filter: { min_members: number; max_members: number; blacklist: string[]; exclude_st?: boolean } | undefined
-  onDone: () => Promise<void>
-}) {
-  const [minMembers, setMinMembers] = useState(String(filter?.min_members ?? 4))
-  const [maxMembers, setMaxMembers] = useState(String(filter?.max_members ?? 600))
-  const [blacklist, setBlacklist] = useState<string[]>(filter?.blacklist ?? [])
-  const [excludeSt, setExcludeSt] = useState(filter?.exclude_st ?? true)
-  const [input, setInput] = useState('')
-  const [saving, setSaving] = useState(false)
-
-  // 面板可能先于过滤配置查询挂载: 首次拿到真实 filter 时回填一次, 避免用户在
-  // 默认值上点「保存并重算」用 4/600 覆盖真实过滤配置; 只同步首轮, 不打断编辑
-  const seededRef = useRef(false)
-  useEffect(() => {
-    if (!filter || seededRef.current) return
-    seededRef.current = true
-    setMinMembers(String(filter.min_members))
-    setMaxMembers(String(filter.max_members))
-    setBlacklist(filter.blacklist)
-    setExcludeSt(filter.exclude_st ?? true)
-  }, [filter])
-
-  const addTag = () => {
-    const v = input.trim()
-    if (v && !blacklist.includes(v)) setBlacklist([...blacklist, v])
-    setInput('')
-  }
-
-  const save = async () => {
-    setSaving(true)
-    try {
-      await api.mainlineFilterUpdate({
-        min_members: Math.max(1, Number(minMembers) || 4),
-        max_members: Math.max(50, Number(maxMembers) || 600),
-        blacklist,
-        exclude_st: excludeSt,
-      })
-      const stChanged = excludeSt !== (filter?.exclude_st ?? true)
-      if (stChanged) {
-        // 口径切换影响情绪周期驱动指标, 需全量重算 regime+主线(较重, 需等待)
-        await api.regimeRecompute()
-        toast('过滤已保存, 主线与情绪周期已全量重算', 'success')
-      } else {
-        await api.regimeMainlineRecompute()
-        toast('过滤已保存, 主线已重算', 'success')
-      }
-      await onDone()
-    } catch (e) {
-      toast(`保存失败 · ${String((e as Error)?.message || e)}`, 'error')
-    } finally {
-      setSaving(false)
-    }
-  }
-
-  return (
-    <div className="mt-2 rounded-btn border border-border bg-base/40 p-2.5">
-      <div className="flex flex-wrap items-end gap-3">
-        <label className="flex flex-col gap-1">
-          <span className="text-[10px] text-muted">成员数上限(过滤宽基标签)</span>
-          <input type="number" min={50} max={5000} value={maxMembers}
-            onChange={e => setMaxMembers(e.target.value)}
-            className="h-7 w-24 rounded-input border border-border bg-base px-2 text-xs text-foreground outline-none focus:border-accent" />
-        </label>
-        <label className="flex flex-col gap-1">
-          <span className="text-[10px] text-muted">成员数下限</span>
-          <input type="number" min={1} max={200} value={minMembers}
-            onChange={e => setMinMembers(e.target.value)}
-            className="h-7 w-20 rounded-input border border-border bg-base px-2 text-xs text-foreground outline-none focus:border-accent" />
-        </label>
-        <div className="flex min-w-[220px] flex-1 flex-col gap-1">
-          <span className="text-[10px] text-muted">按名称屏蔽(回车添加)</span>
-          <div className="flex items-center gap-1.5">
-            <input value={input} onChange={e => setInput(e.target.value)}
-              onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); addTag() } }}
-              placeholder="如: 融资融券、沪股通"
-              className="h-7 flex-1 rounded-input border border-border bg-base px-2 text-xs text-foreground outline-none focus:border-accent" />
-          </div>
-          {blacklist.length > 0 && (
-            <div className="mt-1 flex flex-wrap gap-1">
-              {blacklist.map(b => (
-                <span key={b} className="inline-flex items-center gap-1 rounded bg-accent/10 px-1.5 py-px text-[10px] text-accent">
-                  {b}
-                  <button onClick={() => setBlacklist(blacklist.filter(x => x !== b))} className="hover:text-foreground">
-                    <X className="h-2.5 w-2.5" />
-                  </button>
-                </span>
-              ))}
-            </div>
-          )}
-        </div>
-        <button onClick={save} disabled={saving}
-          className="h-7 rounded-btn bg-accent px-3 text-xs font-medium text-white hover:bg-accent/90 disabled:opacity-50">
-          {saving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : '保存并重算'}
-        </button>
-      </div>
-      <div className="mt-2 flex items-center gap-2 border-t border-border/60 pt-2">
-        <button
-          type="button"
-          role="switch"
-          aria-checked={excludeSt}
-          aria-label="统计剔除 ST 股"
-          onClick={() => setExcludeSt(v => !v)}
-          className={cn(
-            'relative inline-flex h-4.5 w-8 items-center rounded-full border transition-all duration-200',
-            excludeSt ? 'border-accent/50 bg-accent' : 'border-border bg-elevated hover:border-muted',
-          )}
-        >
-          <span className={cn(
-            'inline-block h-3 w-3 rounded-full border border-black/5 bg-white shadow-sm transition-transform duration-200',
-            excludeSt ? 'translate-x-[17px]' : 'translate-x-0.5',
-          )} />
-        </button>
-        <span className="text-[11px] text-secondary">
-          统计剔除 ST 股
-          <span className="ml-1.5 text-[9px] text-muted">主线 + 情绪周期统一口径; 切换后自动全量重算(约 1-2 分钟)</span>
-        </span>
-      </div>
-      <div className="mt-1.5 text-[9px] text-muted">
-        说明: 成分股数超过上限的概念(如 融资融券~7700家/沪深股通~3300家)视为宽基/风格标签, 不参与主线排名;
-        风险警示股(名称含 ST)不参与涨停梯队统计 — 主板 5% 便宜板时代曾系统性霸榜, 且 ST 是状态桶而非题材。修改后自动重算全部历史(秒级~分钟级)。
-      </div>
     </div>
   )
 }

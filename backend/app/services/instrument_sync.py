@@ -13,6 +13,7 @@ from pathlib import Path
 
 import polars as pl
 
+from app.market_time import cn_today
 from app.services.fs_utils import atomic_write_parquet
 from app.tickflow.client import get_client
 
@@ -88,14 +89,14 @@ def sync_instruments(data_dir: Path) -> int:
                 if items:
                     all_rows.extend(_flatten_instruments(items))
                     logger.info("instruments %s: %d stocks", ex, len(items))
-            except Exception as e:
-                logger.warning("get_instruments(%s) failed: %s", ex, e)
+            except Exception as e:  # noqa: BLE001 — 供应商单交易所失败独立留痕，其他交易所继续取数
+                logger.warning("get_instruments(%s) failed: %s", ex, e, exc_info=True)
 
     if not all_rows:
         return 0
 
     df = pl.DataFrame(all_rows)
-    df = df.with_columns(pl.lit(date.today()).alias("as_of"))
+    df = df.with_columns(pl.lit(cn_today()).alias("as_of"))
 
     out = data_dir / "instruments" / "instruments.parquet"
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -103,6 +104,19 @@ def sync_instruments(data_dir: Path) -> int:
 
     logger.info("instruments synced: %d rows → %s", df.height, out)
     return df.height
+
+
+def instruments_synced_on(data_dir: Path, day: date) -> bool:
+    """非空维表的 as_of 才是同步成功证据，名称补充的文件时间不能代替。"""
+    path = data_dir / "instruments" / "instruments.parquet"
+    if not path.is_file():
+        return False
+    try:
+        frame = pl.read_parquet(path, columns=["as_of"])
+        return frame.height > 0 and frame["as_of"].eq(day).fill_null(False).all()
+    except (OSError, pl.exceptions.PolarsError) as exc:
+        logger.warning("instruments 同步日期不可读取，不作为完成证据: %s", exc)
+        return False
 
 
 def enrich_names_from_quotes(

@@ -1,5 +1,5 @@
 import { useCallback, useMemo, useState, type ReactNode } from 'react'
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import { useQuery } from '@tanstack/react-query'
 import { AnimatePresence } from 'framer-motion'
 import {
   Activity,
@@ -14,7 +14,7 @@ import {
 } from 'lucide-react'
 import { PageHeader } from '@/components/PageHeader'
 import { EmptyState } from '@/components/EmptyState'
-import { AnalysisConfigDialog, DimensionHeatmap, PresetFetchState, type AnalysisFieldConfig } from '@/components/analysis-shared'
+import { AnalysisConfigDialog, DimensionHeatmap, type AnalysisFieldConfig } from '@/components/analysis-shared'
 import { StockPreviewDialog } from '@/components/StockPreviewDialog'
 import { toNavItems, type NavItem } from '@/lib/listNav'
 import { RpsRotationDialog } from '@/components/RpsRotationDialog'
@@ -81,11 +81,16 @@ function saveConfig(c: AnalysisFieldConfig) {
 function pickBestConfig(
   configs: { id: string; label: string; description?: string; fields: { name: string; label: string }[] }[],
 ): string {
-  let best = '', bestScore = 0
+  let best = '', bestScore = 0, bestDescriptionScore = 0
   for (const c of configs) {
-    const haystack = [c.id, c.label, c.description ?? '', ...c.fields.flatMap(f => [f.name, f.label])].join(' ').toLowerCase()
+    // 描述可能同时提及概念/行业页面，名称和字段更能表明数据的实际维度。
+    const haystack = [c.id, c.label, ...c.fields.flatMap(f => [f.name, f.label])].join(' ').toLowerCase()
     const score = KEYWORDS.reduce((n, k) => n + (haystack.includes(k) ? 1 : 0), 0)
-    if (score > bestScore) { bestScore = score; best = c.id }
+    const description = (c.description ?? '').toLowerCase()
+    const descriptionScore = KEYWORDS.reduce((n, k) => n + (description.includes(k) ? 1 : 0), 0)
+    if (score > bestScore || (score === bestScore && descriptionScore > bestDescriptionScore)) {
+      bestScore = score; bestDescriptionScore = descriptionScore; best = c.id
+    }
   }
   return best
 }
@@ -301,21 +306,6 @@ export function IndustryAnalysis() {
     enabled: !!activeConfigId,
   })
 
-  // 内置行业预设 (ext_hy_ths) 手动获取数据
-  const PRESET_INDUSTRY_ID = 'ext_hy_ths'
-  const queryClient = useQueryClient()
-  const fetchMutation = useMutation({
-    mutationFn: () => api.extDataPresetFetch(PRESET_INDUSTRY_ID),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: QK.extData })
-      queryClient.invalidateQueries({ queryKey: QK.extDataRows(PRESET_INDUSTRY_ID, undefined, PAGE_LIMIT) })
-    },
-  })
-  // 是否处于「内置行业预设存在但无数据」状态 → 显示获取按钮
-  const needsIndustryFetch =
-    !!activeConfig && activeConfig.id === PRESET_INDUSTRY_ID &&
-    !rowsQuery.isLoading && (rowsQuery.data?.total ?? 0) === 0
-
   const marketQuery = useQuery({
     queryKey: QK.marketSnapshot,
     queryFn: api.marketSnapshot,
@@ -386,25 +376,25 @@ export function IndustryAnalysis() {
   }
 
   if (!activeConfig) {
-    // 极端情况: 无任何行业配置。仍提供一键获取内置行业数据入口
+    // 尚无可展示的本地行业数据。
     return (
       <>
         <div className="flex h-full flex-col">
           <PageHeader
             title="行业分析"
             right={
-              <button onClick={() => setShowConfig(true)} className="p-1.5 text-muted hover:bg-surface hover:text-accent" title="配置数据源">
-                <Settings2 className="h-4 w-4" />
-              </button>
+              <div className="flex items-center gap-1">
+                <button type="button" onClick={() => void configsQuery.refetch()} disabled={configsQuery.isFetching}
+                  className="p-1.5 text-muted hover:bg-surface disabled:opacity-50" title="刷新">
+                  <RefreshCw className={cn('h-4 w-4', configsQuery.isFetching && 'animate-spin')} />
+                </button>
+                <button onClick={() => setShowConfig(true)} className="p-1.5 text-muted hover:bg-surface hover:text-accent" title="配置分析字段">
+                  <Settings2 className="h-4 w-4" />
+                </button>
+              </div>
             }
           />
-          <PresetFetchState
-            title="暂无行业数据"
-            hint="从同花顺获取行业分类数据后即可使用行业分析"
-            isLoading={fetchMutation.isPending}
-            error={fetchMutation.error}
-            onFetch={() => fetchMutation.mutate()}
-          />
+          <EmptyState icon={Layers3} title="暂无行业数据" hint="后台尚未采集行业分类数据" />
         </div>
         <AnimatePresence>
           {showConfig && <AnalysisConfigDialog currentConfig={fieldConfig} onSave={handleSaveConfig} onClose={() => setShowConfig(false)} showHierarchyLevel />}
@@ -438,7 +428,7 @@ export function IndustryAnalysis() {
             >
               <RefreshCw className={cn('h-4 w-4', (rowsQuery.isFetching || marketQuery.isFetching) && 'animate-spin')} />
             </button>
-            <button onClick={() => setShowConfig(true)} className="p-1.5 text-muted hover:bg-surface hover:text-accent" title="配置数据源">
+            <button onClick={() => setShowConfig(true)} className="p-1.5 text-muted hover:bg-surface hover:text-accent" title="配置分析字段">
               <Settings2 className="h-4 w-4" />
             </button>
           </div>
@@ -486,14 +476,8 @@ export function IndustryAnalysis() {
             </div>
           ) : rowsQuery.isLoading ? (
             <div className="rounded-2xl border border-border bg-surface px-6 py-16 text-center text-sm text-muted">正在计算行业强度...</div>
-          ) : needsIndustryFetch ? (
-            <PresetFetchState
-              title="未获取行业数据"
-              hint="内置行业数据源已就绪,点击下方按钮从同花顺获取行业分类数据"
-              isLoading={fetchMutation.isPending}
-              error={fetchMutation.error}
-              onFetch={() => fetchMutation.mutate()}
-            />
+          ) : (rowsQuery.data?.total ?? 0) === 0 ? (
+            <EmptyState icon={Layers3} title="暂无行业数据" hint="后台尚未采集行业分类数据" />
           ) : (
             <EmptyState icon={Layers3} title="未匹配到行业数据" hint={resolved.hint || '请检查扩展数据是否包含行业/板块相关字段'} />
           )}

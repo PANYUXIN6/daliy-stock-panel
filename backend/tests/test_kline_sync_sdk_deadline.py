@@ -16,7 +16,6 @@ import pytest
 from app.services import kline_sync
 from app.services.kline_sync import SDKCallTimeoutError, _sdk_call_with_deadline
 
-
 # ── 包装器单元行为 ──────────────────────────────────────────────────────
 
 def test_result_passthrough():

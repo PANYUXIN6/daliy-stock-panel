@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """AI 策略迭代闭环的定向测试 (stub 生成器与工具循环, 不依赖真实 AI key 与数据)。
 
 覆盖三层:
@@ -16,10 +15,11 @@ import tempfile
 import types
 from pathlib import Path
 
-from app.strategy import ai_iterator as it
-from app.strategy.ai_generator import AIStrategyGenerator as RealGen, find_meta_assignment
-from app.strategy.ai_iterator import AIStrategyIterator, _rewrite_meta_id
 from app.services import tool_catalog
+from app.strategy import ai_iterator as it
+from app.strategy.ai_generator import AIStrategyGenerator as RealGen
+from app.strategy.ai_generator import find_meta_assignment
+from app.strategy.ai_iterator import AIStrategyIterator, _rewrite_meta_id
 
 V1_CODE = '''"""v1 策略"""
 import polars as pl

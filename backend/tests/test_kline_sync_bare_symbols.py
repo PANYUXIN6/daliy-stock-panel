@@ -129,7 +129,7 @@ def test_sync_tickflow_path_normalizes_and_reports_zero(monkeypatch, tmp_path):
     assert zero == ["600000", "000001.SH"]
 
 
-def test_api_sync_batch_returns_zero_row_symbols(monkeypatch, tmp_path):
+async def test_api_sync_batch_returns_zero_row_symbols(monkeypatch, tmp_path):
     from app.api import kline as kline_api
 
     _write_instruments(tmp_path, ["600000.SH"])
@@ -144,7 +144,21 @@ def test_api_sync_batch_returns_zero_row_symbols(monkeypatch, tmp_path):
         repo=repo, capabilities=SimpleNamespace(has=lambda cap: True, limits=lambda cap: None),
     )))
 
-    resp = kline_api.sync_batch(request, symbols=["600000", "000001.SH"], days=250)
+    import asyncio
 
+    from app.api import pipeline
+    from app.services import pipeline_jobs
+
+    jobs = pipeline_jobs.JobStore(store_dir=tmp_path / 'jobs')
+    monkeypatch.setattr(pipeline_jobs, 'job_store', jobs)
+    monkeypatch.setattr(pipeline, 'job_store', jobs)
+    monkeypatch.setattr(pipeline_jobs, '_run_slot_owner', None)
+    resp = await kline_api.sync_batch(request, symbols=["600000", "000001.SH"], days=250)
+    assert resp['status'] == 'started'
+    await asyncio.gather(*list(pipeline._tasks))
+    job = jobs.get(resp['job_id'])
+    assert job['status'] == 'succeeded'
+    resp = job['result']
+    repo.db.close()
     assert resp["rows_written"] == 0
     assert resp["zero_row_symbols"] == ["600000", "000001.SH"]

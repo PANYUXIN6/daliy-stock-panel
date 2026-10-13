@@ -90,8 +90,8 @@ def load_all(data_dir: Path) -> list[dict]:
     for f in sorted(_dir(data_dir).glob("lot_*.json")):
         try:
             out.append(normalize_lot(json.loads(f.read_text(encoding="utf-8"))))
-        except Exception as e:
-            logger.warning("lot load failed %s: %s", f.name, e)
+        except Exception as e:  # noqa: BLE001 - 单条用户策略组合的读取与规范化失败按文件隔离。
+            logger.warning("lot load failed %s: %s", f.name, e, exc_info=True)
     return out
 
 

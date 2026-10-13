@@ -1,6 +1,7 @@
 """Load custom data source definitions from user data files."""
 from __future__ import annotations
 
+import contextlib
 import importlib
 import logging
 import math
@@ -134,14 +135,16 @@ def probe_plugin_key(name: str, api_key: str) -> tuple[bool, str]:
         return False, f"插件 '{name}' entry 非法"
     try:
         module = importlib.import_module(entry.split(":", 1)[0])
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 — 可选插件模块的任意加载异常独立返回
+        logger.warning("plugin %s key probe module load failed", name, exc_info=True)
         return False, f"插件模块加载失败: {e}"
     probe = getattr(module, "probe_api_key", None)
     if probe is None:
         return False, f"插件 '{name}' 未提供 Key 探测"
     try:
         return probe(api_key)
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 — 第三方探测方法失败不影响其他插件
+        logger.warning("plugin %s key probe failed", name, exc_info=True)
         return False, f"探测失败: {e}"
 
 
@@ -260,9 +263,9 @@ def uninstall_plugin(name: str) -> tuple[bool, str]:
         if not req.exists():
             return False, "Python 型插件缺少 requirements.txt, 无法自动卸载"
         # 读 requirements.txt 拿包名, 逐个 pip uninstall -y
-        pkgs = [l.strip().split("==")[0].split(">=")[0].strip()
-                for l in req.read_text().splitlines()
-                if l.strip() and not l.startswith("#")]
+        pkgs = [line.strip().split("==")[0].split(">=")[0].strip()
+                for line in req.read_text().splitlines()
+                if line.strip() and not line.startswith("#")]
         if not pkgs:
             return True, "requirements.txt 无有效包名"
         import sys
@@ -444,15 +447,11 @@ def _sanitize_dataset(ds_name: str, ds_cfg: dict) -> dict:
     method = str(ds_cfg.get("method", "GET") or "GET").upper()
     out["method"] = method
     if ds_cfg.get("batch") is not None:
-        try:
+        with contextlib.suppress(TypeError, ValueError):
             out["batch"] = int(ds_cfg["batch"])
-        except (TypeError, ValueError):
-            pass
     if ds_cfg.get("rpm") is not None:
-        try:
+        with contextlib.suppress(TypeError, ValueError):
             out["rpm"] = int(ds_cfg["rpm"])
-        except (TypeError, ValueError):
-            pass
     if ds_cfg.get("timeout") is not None:
         try:
             timeout = float(ds_cfg["timeout"])

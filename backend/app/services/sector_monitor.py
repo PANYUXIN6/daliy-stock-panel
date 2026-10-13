@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import math
 import re
 from collections import deque
@@ -11,9 +12,11 @@ from typing import Any
 
 import polars as pl
 
-from app.services import preferences
 from app.services.ext_data import ExtConfig, ExtConfigStore
 from app.services.index_const import CORE_INDEX_NAMES as CORE_INDICES
+
+logger = logging.getLogger(__name__)
+
 SECTOR_KINDS = {"index", "concept", "industry"}
 _VALUE_SEP = re.compile(r"[\u3001,\uff0c;\uff1b|]+")
 _NULL_VALUES = {"nan", "none", "null", "<na>", "n/a", "-"}
@@ -138,8 +141,8 @@ class SectorMonitorService:
                     symbol = str(row.get("symbol") or "").strip().upper()
                     if symbol:
                         index_names[symbol] = str(row.get("name") or symbol)
-        except Exception:
-            pass
+        except Exception:  # noqa: BLE001 — 可选扩展指数目录读取失败保留核心指数，继续板块监控
+            logger.debug("板块监控指数目录读取失败", exc_info=True)
 
         # 指数标的恒可实时监控: quote_service 对核心四只 + 启用规则标的显式拉取
         for symbol, name in sorted(index_names.items()):
@@ -228,7 +231,7 @@ class SectorMonitorService:
             return pl.DataFrame()
         try:
             return pl.read_parquet(files)
-        except Exception:
+        except (OSError, pl.exceptions.PolarsError):
             return pl.DataFrame()
 
     @staticmethod

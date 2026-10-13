@@ -1,11 +1,12 @@
 import { useState } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
-import { Activity, Settings } from 'lucide-react'
+import { Activity, Settings, Download, Loader2 } from 'lucide-react'
 import { Skeleton } from './Skeleton'
 
-export function QuoteConfigCard({ enabled, running, isTrading, lastFetchMs, intervalS, intervalMin, intervalMax, loading, onToggle, toggling, showIntervalEdit, onShowIntervalEdit, onIntervalChange }: {
+export function QuoteConfigCard({ enabled, running, paused, isTrading, lastFetchMs, intervalS, intervalMin, intervalMax, loading, onToggle, toggling, showIntervalEdit, onShowIntervalEdit, onIntervalChange, onRefresh, refreshing, canRefresh, refreshError }: {
   enabled: boolean
   running: boolean
+  paused: boolean
   isTrading: boolean
   lastFetchMs: number | null
   intervalS: number
@@ -17,20 +18,28 @@ export function QuoteConfigCard({ enabled, running, isTrading, lastFetchMs, inte
   showIntervalEdit: boolean
   onShowIntervalEdit: () => void
   onIntervalChange: (v: number) => void
+  onRefresh: () => void
+  refreshing: boolean
+  canRefresh: boolean
+  refreshError?: string
 }) {
-  const statusColor = running && isTrading
-    ? 'bg-accent shadow-[0_0_6px_rgba(61,214,140,0.5)]'
-    : enabled && running
-      ? 'bg-warning/60'
-      : 'bg-muted'
+  const statusColor = paused
+    ? 'bg-warning/60'
+    : running && isTrading
+      ? 'bg-accent shadow-[0_0_6px_rgba(61,214,140,0.5)]'
+      : enabled && running
+        ? 'bg-warning/60'
+        : 'bg-muted'
 
-  const statusText = !enabled
-    ? '已关闭'
-    : !isTrading
-      ? '非交易时段'
-      : running
-        ? '行情运行中'
-        : '已停止'
+  const statusText = paused
+    ? '同步期间暂停'
+    : !enabled
+      ? '已关闭'
+      : !isTrading
+        ? '非交易时段'
+        : running
+          ? '行情运行中'
+          : '已停止'
 
   const lastFetchTime = lastFetchMs
     ? new Date(lastFetchMs).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' })
@@ -46,6 +55,9 @@ export function QuoteConfigCard({ enabled, running, isTrading, lastFetchMs, inte
         <button
           onClick={() => onToggle(!enabled)}
           disabled={toggling}
+          role="switch"
+          aria-label="自动采集实时行情"
+          aria-checked={enabled}
           className={`relative inline-flex h-4 w-7 items-center rounded-full shrink-0 transition-colors duration-200 ${
             enabled
               ? 'bg-accent shadow-[0_0_6px_rgba(59,130,246,0.3)]'
@@ -70,7 +82,7 @@ export function QuoteConfigCard({ enabled, running, isTrading, lastFetchMs, inte
           <div className="flex items-center justify-between text-[11px]">
             <span className="text-muted">状态</span>
             <div className="flex items-center gap-1.5">
-              <span className={`inline-block h-1.5 w-1.5 rounded-full ${statusColor} ${running && isTrading ? 'animate-pulse' : ''}`} />
+              <span className={`inline-block h-1.5 w-1.5 rounded-full ${statusColor} ${!paused && running && isTrading ? 'animate-pulse' : ''}`} />
               <span className="font-mono text-secondary">{statusText}</span>
             </div>
           </div>
@@ -116,6 +128,16 @@ export function QuoteConfigCard({ enabled, running, isTrading, lastFetchMs, inte
           </motion.div>
         )}
       </AnimatePresence>
+      <div className="mt-3 pt-3 border-t border-border/50 space-y-2">
+        <button type="button" onClick={onRefresh} disabled={!canRefresh || paused || refreshing}
+          className="inline-flex items-center gap-1.5 px-2 py-1 rounded-btn border border-border text-xs text-secondary hover:text-accent disabled:opacity-40">
+          {refreshing ? <Loader2 className="h-3 w-3 animate-spin" /> : <Download className="h-3 w-3" />}
+          {refreshing ? '获取中…' : '手动获取行情'}
+        </button>
+        {!canRefresh && <p className="text-[11px] text-muted">当前实时数据源不可用，请在数据源设置中配置。</p>}
+        {paused && <p className="text-[11px] text-warning">数据同步期间暂停行情采集，完成后可手动获取。</p>}
+        {refreshError && <p role="alert" className="text-xs text-danger">{refreshError}</p>}
+      </div>
     </div>
   )
 }

@@ -1,11 +1,13 @@
 import { useEffect, useRef, useCallback, useSyncExternalStore } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
-import { SSE_INVALIDATE_PREFIXES, QK } from './queryKeys'
+import { SSE_INVALIDATE_PREFIXES, QK, DATASET_QUERY_PREFIXES, dataUpdateQueryPrefixes } from './queryKeys'
 import { klineDailyLatestQueryOptions, mergeLatestKlineRow } from './kline'
 import { getQueryConfig } from './useQueryConfig'
 import { toast } from '@/components/Toast'
 import { pushAlertToasts } from '@/components/AlertToast'
 import { feedReviewEvent } from './reviewStore'
+import { loadHistory as loadStockAnalysisHistory } from './stockAnalysisStore'
+import { loadHistory as loadFinancialAnalysisHistory } from './aiReportStore'
 import type { KlineDailyResponse, StrategyAlertEvent } from './api'
 
 // ===== 全局 SSE 连接状态 (模块级 store, 仿 AlertToast.tsx 模式) =====
@@ -120,6 +122,11 @@ export function useQuoteStream(
       esRef.current = es
 
       es.onopen = () => {
+        // 连接期间可能遗漏落盘与任务事件；只补读这些共享数据，保留已有页面数据。
+        const prefixes = dataUpdateQueryPrefixes(Object.keys(DATASET_QUERY_PREFIXES))
+        void qc.invalidateQueries({ predicate: query => prefixes.has(String(query.queryKey[0])) })
+        void loadStockAnalysisHistory()
+        void loadFinancialAnalysisHistory()
         // 连接成功: 重置退避与 toast 标记
         failCount = 0
         toastFired = false
@@ -181,6 +188,19 @@ export function useQuoteStream(
               }
             })
             .catch(() => {})
+        }
+      })
+
+      es.addEventListener('data_updated', (e: MessageEvent) => {
+        try {
+          const data = JSON.parse(e.data)
+          if (!Array.isArray(data.datasets)) return
+          if (data.datasets.includes('analysis') || data.datasets.includes('all')) void loadStockAnalysisHistory()
+          if (data.datasets.includes('financials') || data.datasets.includes('all')) void loadFinancialAnalysisHistory()
+          const prefixes = dataUpdateQueryPrefixes(data.datasets)
+          void qc.invalidateQueries({ predicate: query => prefixes.has(String(query.queryKey[0])) })
+        } catch {
+          // 忽略非有效事件，下一次连接仍会补读共享状态。
         }
       })
 

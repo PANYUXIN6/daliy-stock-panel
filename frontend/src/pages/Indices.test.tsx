@@ -11,32 +11,45 @@ type MinuteResponse = {
   date: string
   rows: { datetime: string; close: number }[]
 }
+type DailyResponse = {
+  symbol: string
+  rows: { date: string; open: number; high: number; low: number; close: number; volume: number }[]
+}
 const fixtures = vi.hoisted(() => ({
   pending: [] as { symbol: string; day: string; resolve: (value: MinuteResponse) => void }[],
+  pendingDaily: [] as { symbol: string; resolve: (value: DailyResponse) => void }[],
+  deferDaily: false,
   mounts: 0,
+  minuteCap: true,
+  dailyCap: true,
+  sync: vi.fn(),
 }))
 
 vi.mock('@/lib/api', () => ({
   api: {
+    syncIndexDaily: fixtures.sync,
     indexQuotes: async () => ({ rows: [] }),
-    indexDaily: async (symbol: string) => ({
-      symbol,
-      rows: ['2026-09-09', '2026-09-10', '2026-09-11'].map(date => ({
-        date, open: 10, high: 12, low: 9, close: 11, volume: 1,
-      })),
-    }),
+    indexDaily: (symbol: string) => fixtures.deferDaily
+      ? new Promise<DailyResponse>(resolve => fixtures.pendingDaily.push({ symbol, resolve }))
+      : Promise.resolve({
+        symbol,
+        rows: ['2026-09-09', '2026-09-10', '2026-09-11'].map(date => ({
+          date, open: 10, high: 12, low: 9, close: 11, volume: 1,
+        })),
+      }),
     indexMinute: (symbol: string, day: string) => new Promise<MinuteResponse>(resolve => {
       fixtures.pending.push({ symbol, day, resolve })
     }),
   },
 }))
 vi.mock('@/lib/useSharedQueries', () => ({
-  useCapabilities: () => ({ data: { capabilities: { 'kline.minute.batch': true } } }),
+  useCapabilityMatrix: () => ({ data: undefined }),
+  useCapabilities: () => ({ data: { capabilities: { 'kline.minute.batch': fixtures.minuteCap, 'kline.daily.batch': fixtures.dailyCap } } }),
 }))
 vi.mock('@/components/EChartsCandlestick', () => ({
-  EChartsCandlestick: ({ data, onDateClick }: {
-    data: { date: string }[]; onDateClick: (date: string) => void
-  }) => <div>{data.map(row => (
+  EChartsCandlestick: ({ data, onDateClick, symbol }: {
+    data: { date: string; close: number }[]; onDateClick: (date: string) => void; symbol: string
+  }) => <div data-daily-chart data-symbol={symbol} data-close={data.at(-1)?.close}>{data.map(row => (
     <button key={row.date} data-day={row.date} onClick={() => onDateClick(row.date)}>{row.date}</button>
   ))}</div>,
 }))
@@ -54,7 +67,12 @@ let client: QueryClient
 beforeEach(() => {
   Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true })
   fixtures.pending.length = 0
+  fixtures.pendingDaily.length = 0
+  fixtures.deferDaily = false
   fixtures.mounts = 0
+  fixtures.minuteCap = true
+  fixtures.dailyCap = true
+  fixtures.sync.mockReset().mockResolvedValue({ job_id: 'index-job', reused: false })
   host = document.createElement('div')
   document.body.append(host)
   root = createRoot(host)
@@ -122,4 +140,64 @@ it('keeps selected dates isolated across delayed, out-of-order and cached respon
   await resolveDay('2026-09-11', 12)
   expect(chart()?.textContent).toBe('2026-09-11|2026-09-11T09:35:00|12')
   expect(chart()?.dataset.mount).toBe(mount11)
+})
+
+it('shows saved local index minutes when the provider minute capability is unavailable', async () => {
+  fixtures.minuteCap = false
+  fixtures.dailyCap = false
+  await act(async () => root.render(<MemoryRouter><QueryClientProvider client={client}><Indices /></QueryClientProvider></MemoryRouter>))
+  await settle()
+  await resolveDay('2026-09-11', 11)
+  expect(host.querySelector('[data-chart]')?.textContent).toBe('2026-09-11|2026-09-11T09:35:00|11')
+  const refresh = [...host.querySelectorAll('button')].find(b => b.textContent === '刷新')!
+  await act(async () => refresh.click()); await settle()
+  await resolveDay('2026-09-11', 12)
+  expect(host.querySelector('[data-chart]')?.textContent).toBe('2026-09-11|2026-09-11T09:35:00|12')
+  expect(fixtures.sync).not.toHaveBeenCalled()
+})
+
+it('isolates daily prices during index changes and keeps the current index during a local refresh', async () => {
+  fixtures.deferDaily = true
+  await act(async () => root.render(
+    <MemoryRouter><QueryClientProvider client={client}><Indices /></QueryClientProvider></MemoryRouter>,
+  ))
+  await settle()
+  const chart = () => host.querySelector<HTMLElement>('[data-daily-chart]')
+  const resolveDaily = async (symbol: string, close: number) => {
+    const index = fixtures.pendingDaily.findIndex(call => call.symbol === symbol)
+    expect(index).toBeGreaterThanOrEqual(0)
+    const [call] = fixtures.pendingDaily.splice(index, 1)
+    await act(async () => call.resolve({
+      symbol,
+      rows: [{ date: '2026-09-11', open: close, high: close, low: close, close, volume: 1 }],
+    }))
+    await settle()
+  }
+  const selectIndex = async (name: string) => {
+    const button = [...host.querySelectorAll<HTMLButtonElement>('aside button')]
+      .find(item => item.textContent?.includes(name))
+    expect(button).toBeDefined()
+    await act(async () => button!.click())
+    await settle()
+  }
+
+  await resolveDaily('000001.SH', 3010)
+  expect(chart()?.dataset.symbol).toBe('000001.SH')
+  expect(chart()?.dataset.close).toBe('3010')
+
+  await selectIndex('深证成指')
+  expect(chart()).toBeNull()
+  expect(host.textContent).toContain('日K加载中')
+  await resolveDaily('399001.SZ', 10050)
+  expect(chart()?.dataset.symbol).toBe('399001.SZ')
+  expect(chart()?.dataset.close).toBe('10050')
+
+  await selectIndex('上证指数')
+  expect(chart()?.dataset.symbol).toBe('000001.SH')
+  expect(chart()?.dataset.close).toBe('3010')
+  await act(async () => { void client.invalidateQueries({ queryKey: ['index-daily'] }) })
+  await settle()
+  expect(chart()?.dataset.close).toBe('3010')
+  await resolveDaily('000001.SH', 3011)
+  expect(chart()?.dataset.close).toBe('3011')
 })

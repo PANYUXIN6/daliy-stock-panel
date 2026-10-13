@@ -19,6 +19,7 @@ def _write_instruments(data_dir, symbols: list[str]) -> None:
 
 
 def test_first_share_sync_fetches_complete_history(tmp_path, monkeypatch):
+    monkeypatch.setattr(financial_sync, "_financial_is_custom", lambda: False)
     _write_instruments(tmp_path, ["600000.SH"])
     calls: list[tuple[list[str], bool]] = []
 
@@ -42,6 +43,7 @@ def test_first_share_sync_fetches_complete_history(tmp_path, monkeypatch):
 
 
 def test_incremental_share_sync_updates_existing_and_backfills_new_symbols(tmp_path, monkeypatch):
+    monkeypatch.setattr(financial_sync, "_financial_is_custom", lambda: False)
     _write_instruments(tmp_path, ["600000.SH", "000001.SZ"])
     path = tmp_path / "financials" / "shares" / "part.parquet"
     path.parent.mkdir(parents=True, exist_ok=True)

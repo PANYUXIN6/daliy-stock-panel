@@ -53,8 +53,8 @@ def load_fundamental_snapshot(data_dir: Path | None) -> pl.DataFrame | None:
         return None
     try:
         frame = pl.read_parquet(path)
-    except Exception as exc:
-        logger.warning("读取财务指标快照失败: %s", exc)
+    except (OSError, pl.exceptions.PolarsError) as exc:
+        logger.warning("读取财务指标快照失败: %s", exc, exc_info=True)
         return None
     needed = {"symbol", "announce_date"} | {
         spec["column"] for spec in FUNDAMENTAL_FACTORS.values()

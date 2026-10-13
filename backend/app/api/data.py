@@ -5,14 +5,17 @@ import logging
 import os
 import threading
 import time
-from datetime import datetime, timezone
+from collections.abc import Callable
+from contextlib import suppress
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from fastapi import APIRouter, Request
 
 from app.enriched_generation import EnrichedPublication
 from app.indicators.pipeline import ENRICHED_COLUMNS
+from app.services.collection_status import CollectionSyncRequest, check_collection_sync
 
 logger = logging.getLogger(__name__)
 
@@ -159,11 +162,9 @@ def _safe_aggregate_enriched(repo) -> dict | None:
     """
     # 字段数：读 schema，不碰数据
     fields = 0
-    try:
+    with suppress(Exception):
         cols = repo.execute_all("DESCRIBE kline_enriched")
         fields = len(cols)
-    except Exception:  # noqa: BLE001
-        pass
 
     # 日期范围：从分区目录名获取，不扫数据
     enriched_dir = repo.store.data_dir / "kline_daily_enriched"
@@ -191,14 +192,12 @@ def _safe_aggregate_enriched(repo) -> dict | None:
 
 def _count_instruments_symbols(repo) -> int:
     """从 instruments 小表取标的数（~5000行，毫秒级）。"""
-    try:
+    with suppress(Exception):
         sym_row = repo.execute_one(
             "SELECT count(DISTINCT symbol) FROM instruments"
         )
         if sym_row and sym_row[0]:
             return int(sym_row[0])
-    except Exception:  # noqa: BLE001
-        pass
     return 0
 
 
@@ -233,11 +232,9 @@ def _safe_aggregate_index_daily(repo) -> dict | None:
 def _safe_aggregate_index_enriched(repo) -> dict | None:
     """指数 enriched 统计。指数数据量较小，直接读取 parquet 元数据统计真实行数。"""
     fields = 0
-    try:
+    with suppress(Exception):
         cols = repo.execute_all("DESCRIBE kline_index_enriched")
         fields = len(cols)
-    except Exception:  # noqa: BLE001
-        pass
     stats = _safe_aggregate(repo, "kline_index_enriched")
     if not stats:
         return None
@@ -298,11 +295,9 @@ def _safe_aggregate_etf_instruments(repo) -> dict | None:
 def _safe_aggregate_etf_enriched(repo) -> dict | None:
     """ETF enriched 统计 — 独立 kline_etf_enriched。"""
     fields = 0
-    try:
+    with suppress(Exception):
         cols = repo.execute_all("DESCRIBE kline_etf_enriched")
         fields = len(cols)
-    except Exception:  # noqa: BLE001
-        pass
     stats = _safe_aggregate(repo, "kline_etf_enriched")
     if not stats:
         return None
@@ -423,6 +418,7 @@ def _safe_aggregate_financials(repo) -> dict | None:
                 tables_info[table] = {"rows": rows, "symbols": symbols}
                 total_rows += rows
             except Exception:
+                logger.exception("financial table statistics failed: %s", table)
                 tables_info[table] = {"rows": 0, "symbols": 0}
         else:
             tables_info[table] = {"rows": 0, "symbols": 0}
@@ -448,10 +444,8 @@ def _scan_dir_stats(dirpath: Path) -> tuple[int, float]:
             count += c
             total += s
         elif entry.is_file(follow_symlinks=False):
-            try:
+            with suppress(OSError):
                 total += entry.stat().st_size
-            except OSError:
-                pass
             count += 1
     return count, round(total / 1048576, 2)
 
@@ -460,20 +454,16 @@ def _scan_dir_recursive(entry: os.DirEntry) -> tuple[int, int]:
     """递归统计一个 DirEntry 下的文件数和总字节数。"""
     count = 0
     total = 0
-    try:
+    with suppress(PermissionError):
         for sub in os.scandir(entry.path):
             if sub.is_dir(follow_symlinks=False):
                 c, s = _scan_dir_recursive(sub)
                 count += c
                 total += s
             elif sub.is_file(follow_symlinks=False):
-                try:
+                with suppress(OSError):
                     total += sub.stat().st_size
-                except OSError:
-                    pass
                 count += 1
-    except PermissionError:
-        pass
     return count, total
 
 
@@ -523,10 +513,8 @@ def _compute_storage(data_dir: Path) -> dict:
     # 根目录散文件
     for entry in os.scandir(data_dir):
         if entry.is_file(follow_symlinks=False):
-            try:
+            with suppress(OSError):
                 total_size += entry.stat().st_size / 1048576
-            except OSError:
-                pass
     stats["total_size_mb"] = round(total_size, 2)
     return stats
 
@@ -535,12 +523,10 @@ def _next_cron_run(scheduler, job_id: str) -> str | None:
     """读 APScheduler 下次执行时间。"""
     if not scheduler:
         return None
-    try:
+    with suppress(Exception):
         job = scheduler.get_job(job_id)
         if job and job.next_run_time:
             return job.next_run_time.isoformat(timespec="seconds")
-    except Exception:  # noqa: BLE001
-        pass
     return None
 
 
@@ -608,10 +594,21 @@ def status(request: Request) -> dict:
         "next_pipeline_run":    _next_cron_run(scheduler, "daily_pipeline"),
         "last_instruments_run": _last_finished("instruments"),
         "last_pipeline_run":    _last_finished("pipeline"),
-        "checked_at": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
+        "checked_at": datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z"),
         # 指标缓存就绪标志 (启动时 enriched 异步预热, 完成前为 false)
         "indicators_ready": getattr(request.app.state, "indicators_ready", True),
     }
+
+
+@router.post("/sync-check")
+def sync_check(scope: CollectionSyncRequest, request: Request) -> dict:
+    """手动同步前查询本地重复证据，不拉取数据、不创建任务。"""
+    try:
+        return check_collection_sync(scope, request.app.state.repo,
+                                     quote_service=getattr(request.app.state, "quote_service", None))
+    except ValueError as exc:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.post("/clear")
@@ -878,5 +875,8 @@ def refresh_cache(request: Request) -> dict:
     invalidate_overview_cache()
     from app.services.screener import ScreenerService
     ScreenerService.clear_history_cache()
+    from app.services.shared_runtime import publish_data_update, publish_quotes
+    publish_quotes(request.app.state.quote_service)
+    publish_data_update(repo.store.data_dir, ["enriched"])
     logger.info("refresh-cache: Polars 缓存已重建")
     return {"ok": True}

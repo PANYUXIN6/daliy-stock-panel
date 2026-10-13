@@ -103,7 +103,7 @@ def list_recent(
                     continue
                 try:
                     ev = json.loads(line)
-                except Exception:
+                except json.JSONDecodeError:
                     continue
                 if ev.get("ts", 0) < cutoff:
                     continue
@@ -112,8 +112,8 @@ def list_recent(
                 if type and ev.get("type") != type:
                     continue
                 out.append(ev)
-    except Exception as e:
-        logger.warning("alert_store read failed: %s", e)
+    except (OSError, UnicodeError, TypeError, AttributeError) as e:
+        logger.warning("alert_store read failed: %s", e, exc_info=True)
         return []
     # 时间倒序 + 截断
     out.sort(key=lambda x: x.get("ts", 0), reverse=True)
@@ -130,8 +130,8 @@ def clear(data_dir: Path) -> int:
         try:
             with p.open("r", encoding="utf-8") as f:
                 count = sum(1 for line in f if line.strip())
-        except Exception:
-            pass
+        except (OSError, UnicodeError):
+            logger.debug("alert_store clear count unavailable", exc_info=True)
         p.write_text("", encoding="utf-8")
         return count
 
@@ -156,14 +156,14 @@ def delete_one(data_dir: Path, ts: int) -> bool:
                         continue
                     try:
                         ev = json.loads(line)
-                    except Exception:
+                    except json.JSONDecodeError:
                         continue
                     if not deleted and ev.get("ts") == ts:
                         deleted = True
                         continue
                     kept.append(ev)
-        except Exception as e:
-            logger.warning("alert_store delete_one read failed: %s", e)
+        except (OSError, UnicodeError, AttributeError) as e:
+            logger.warning("alert_store delete_one read failed: %s", e, exc_info=True)
             return False
         if not deleted:
             return False
@@ -171,8 +171,8 @@ def delete_one(data_dir: Path, ts: int) -> bool:
             with p.open("w", encoding="utf-8") as f:
                 for ev in kept:
                     f.write(json.dumps(ev, ensure_ascii=False) + "\n")
-        except Exception as e:
-            logger.warning("alert_store delete_one write failed: %s", e)
+        except (OSError, UnicodeError, TypeError, ValueError) as e:
+            logger.warning("alert_store delete_one write failed: %s", e, exc_info=True)
             return False
         return True
 
@@ -185,7 +185,7 @@ def count(data_dir: Path) -> int:
     try:
         with _lock, p.open("r", encoding="utf-8") as f:
             return sum(1 for line in f if line.strip())
-    except Exception:
+    except (OSError, UnicodeError):
         return 0
 
 
@@ -202,14 +202,14 @@ def _prune_locked(p: Path) -> None:
                     continue
                 try:
                     ev = json.loads(line)
-                except Exception:
+                except json.JSONDecodeError:
                     continue
                 if ev.get("ts", 0) >= cutoff:
                     kept.append(ev)
     except FileNotFoundError:
         return
-    except Exception as e:
-        logger.warning("alert_store prune read failed: %s", e)
+    except (OSError, UnicodeError, TypeError, AttributeError) as e:
+        logger.warning("alert_store prune read failed: %s", e, exc_info=True)
         return
     # 上限截断 (保留最新的)
     if len(kept) > MAX_RECORDS:
@@ -220,5 +220,5 @@ def _prune_locked(p: Path) -> None:
         with p.open("w", encoding="utf-8") as f:
             for ev in kept:
                 f.write(json.dumps(ev, ensure_ascii=False) + "\n")
-    except Exception as e:
-        logger.warning("alert_store prune write failed: %s", e)
+    except (OSError, UnicodeError, TypeError, ValueError) as e:
+        logger.warning("alert_store prune write failed: %s", e, exc_info=True)

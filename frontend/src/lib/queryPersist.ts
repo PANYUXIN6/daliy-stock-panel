@@ -15,7 +15,7 @@ export const PERSIST_BUSTER = 'v1'
 
 /** 允许持久化的查询键首段 (对齐 lib/queryKeys.ts 各工厂首段与个别内联键) */
 const PERSISTABLE_KEY_ROOTS = new Set([
-  'settings',                 // 应用设置 (OnboardingGuard 依赖; 恢复后打开不再整屏 logo)
+  'settings',                 // 应用设置
   'preferences',              // 用户偏好
   'capability-matrix',        // 能力路由矩阵 (慢变)
   'watchlist',                // 自选清单 (不含 enriched/quotes 等行情族)

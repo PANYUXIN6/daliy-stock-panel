@@ -2,7 +2,7 @@
 
 各功能模块的详细说明。配置见 [configuration.md](./configuration.md),部署见 [deployment.md](./deployment.md),策略相关见 [strategy.md](./strategy.md)。
 
-> 首次使用建议顺序:**设置 → 凭据与能力**(重新检测) → **立即跑盘后管道**(拉日 K + 算指标) → **自选页**加标的 → **选股页**扫描 → **回测页**验证 → **监控中心**配规则。
+> 首页直接进入看板并沿用已有 Key 和数据源路由，基础数据由维护者上线前在数据页准备。首次使用建议顺序:**按需在设置中检测凭据与能力** → **数据页手动跑盘后管道**(拉日 K + 算指标) → **自选页**加标的 → **选股页**扫描 → **回测页**验证 → **监控中心**配规则。
 
 ---
 
@@ -161,7 +161,7 @@
 
 ### 数据源插件化
 
-内置 [TickFlow](https://tickflow.org) 官方 SDK(日 K / 分钟 K / 指数 / 财务 / 实时行情),同时支持接入第三方数据源:YAML 声明自有 HTTP 接口,或开发插件源(参考实现 stock-sdk,Docker 镜像已内置)。多个数据集(日K / 除权因子 / 实时行情 / 分钟K / 五档盘口 / 财务,注册表持续扩展)按源声明自由组合,在「设置 → 数据源」切换。
+内置 [TickFlow](https://tickflow.org) 官方 SDK(日 K / 分钟 K / 指数 / 财务 / 实时行情),同时支持接入第三方数据源:YAML 声明自有 HTTP 接口,或开发插件源(参考实现 stock-sdk,Docker 需通过 `INCLUDE_STOCKSDK=1` 可选构建打包)。多个数据集(日K / 除权因子 / 实时行情 / 分钟K / 五档盘口 / 财务,注册表持续扩展)按源声明自由组合,在「设置 → 数据源」切换。
 
 详见 [custom-data-source.md](./custom-data-source.md) 与 [plugin-development.md](./plugin-development.md)。
 
@@ -286,18 +286,6 @@ curl "http://localhost:8398/api/openapi.json?tier=a"
 ```
 
 返回按网关规则表过滤后的 OpenAPI 3 规范(`x-tier: a`)—— 哪些路径对外开放、需要什么 scope,**规则表是唯一契约源**,生成代码 / Postman 导入即用。开放面有**契约快照测试**守护(`test_openapi_contract.py`):增删开放端点必须显式更新快照,CI 会拦下无意识的契约变更。
-
-### MCP 接入(AI 客户端)
-
-`mcp-server/` 提供 **MCP (Model Context Protocol)** 服务器,把开放接口包装成 AI 可调用工具 — Claude / ZCode / Cursor 等客户端可直接查行情、看市场环境、读策略与告警、触发回测:
-
-```
-AI 客户端 ⇄ MCP stdio (薄桥) ⇄ HTTP + Bearer Token ⇄ 开放网关
-```
-
-- 工具按 Token 的 scope 暴露(12 个:搜索/日K/指数/总览/环境/策略/告警/扩展表读/写/回测),**权限裁决仍在网关** — 桥不持有业务逻辑,面板升级自动受益;
-- 模拟盘交易类端点刻意未包装(不建议把下单交给 AI);
-- 配置方法与工具清单见 [mcp-server/README](../mcp-server/README.md),可运行冒烟测试 `smoke_test.py` 验证连通。
 
 ### 桌面客户端版本清单
 

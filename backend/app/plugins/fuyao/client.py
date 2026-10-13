@@ -10,10 +10,15 @@
 from __future__ import annotations
 
 import logging
+import threading
 import time
+from concurrent.futures import CancelledError
 from pathlib import Path
+from typing import ClassVar
 
 import httpx
+
+from app.data_providers.base import ProviderRateLimitError
 
 logger = logging.getLogger(__name__)
 
@@ -25,9 +30,32 @@ _SNAPSHOT_PAGE_SIZE = 6000
 _SNAPSHOT_MAX_PAGES = 50
 _PAGE_INTERVAL_S = 0.15  # 页间隔, 降低触发限频 (code=4001) 的概率
 
+# 官方仅说明动态限流，没有固定 QPS：沿用项目请求间隔，并让所有入口共用。
+# 预算限于当前采集进程，不代表供应商的账户级额度。
+_REQUEST_INTERVAL_S = 0.12
+_REQUEST_SLOTS = threading.BoundedSemaphore(2)
+_request_lock = threading.Lock()
+_next_request_at = 0.0
+
+
+def _wait_request_slot(cancel_event: threading.Event | None = None) -> None:
+    global _next_request_at
+    with _request_lock:
+        delay = _next_request_at - time.monotonic()
+        if delay > 0:
+            if cancel_event is None:
+                time.sleep(delay)
+            elif cancel_event.wait(delay):
+                raise CancelledError("扶摇取数已取消")
+        _next_request_at = time.monotonic() + _REQUEST_INTERVAL_S
+
 
 class FuyaoError(Exception):
     """扶摇接口错误(配置缺失 / 网络失败 / 信封 code != 0)。"""
+
+
+class FuyaoRateLimitError(FuyaoError, ProviderRateLimitError):
+    """HTTP 429 / code=4001：结束当前同步，不重试。"""
 
 
 class FuyaoClient:
@@ -47,12 +75,23 @@ class FuyaoClient:
         self._http.close()
 
     # ---- 内部 ----
-    def _get(self, path: str, params: dict) -> dict:
+    def _get(self, path: str, params: dict, *, cancel_event: threading.Event | None = None) -> dict:
         """GET + 信封解包。code != 0 时抛 FuyaoError(含 code 与 message)。"""
+        with _REQUEST_SLOTS:
+            if cancel_event is not None and cancel_event.is_set():
+                raise CancelledError("扶摇取数已取消")
+            _wait_request_slot(cancel_event)
+            if cancel_event is not None and cancel_event.is_set():
+                raise CancelledError("扶摇取数已取消")
+            return self._request(path, params)
+
+    def _request(self, path: str, params: dict) -> dict:
         try:
             resp = self._http.get(path, params=params)
         except httpx.HTTPError as e:
             raise FuyaoError(f"网络请求失败: {e}") from e
+        if resp.status_code == 429:
+            raise FuyaoRateLimitError(f"扶摇限流 HTTP 429: {path}")
         if resp.status_code != 200:
             raise FuyaoError(f"HTTP {resp.status_code}: {path}")
         try:
@@ -60,6 +99,8 @@ class FuyaoClient:
         except ValueError as e:
             raise FuyaoError(f"响应不是 JSON: {path}") from e
         code = payload.get("code")
+        if code in (4001, "4001"):
+            raise FuyaoRateLimitError(f"扶摇限流 code={code}: {path}")
         if code not in (0, "0", None):
             raise FuyaoError(f"扶摇接口错误 code={code}: {payload.get('message', '')} ({path})")
         return payload.get("data") or {}
@@ -164,14 +205,15 @@ class FuyaoClient:
     # ---- 财务 ----
     # 端点均单标的(thscode 不接受逗号)。取数模式二选一: limit=最近N期 或 start/end 区间,
     # 这里只用 limit。period=quarterly 覆盖每个季度末(含年报期), 与项目"各报告期累积"口径一致。
-    _STATEMENT_ENDPOINTS = {
+    _STATEMENT_ENDPOINTS: ClassVar[dict[str, str]] = {
         "income": "income-statements",
         "balance_sheet": "balance-sheets",
         "cash_flow": "cash-flow-statements",
     }
 
     def financial_statements(
-        self, stmt: str, thscode: str, limit: int = 1
+        self, stmt: str, thscode: str, limit: int = 1,
+        *, cancel_event: threading.Event | None = None,
     ) -> list[dict]:
         """单标的财务报表多期序列。stmt: income | balance_sheet | cash_flow。
 
@@ -184,11 +226,14 @@ class FuyaoClient:
         data = self._get(
             f"/api/a-share/financials/{endpoint}",
             {"thscode": thscode, "period": "quarterly", "limit": max(1, min(20, limit))},
+            cancel_event=cancel_event,
         )
         rows = data.get("item")
         return rows if isinstance(rows, list) else []
 
-    def financial_indicators(self, thscode: str, report: str) -> list[dict]:
+    def financial_indicators(
+        self, thscode: str, report: str, *, cancel_event: threading.Event | None = None,
+    ) -> list[dict]:
         """单标的单报告期财务指标(report 格式 yyyy-N, N=1..4 对应一季报..年报)。
 
         返回 data.abilities 原始列表 [{ability, indicators: [{index_id, value}]}];
@@ -199,11 +244,14 @@ class FuyaoClient:
         data = self._get(
             "/api/a-share/financials/indicators",
             {"thscode": thscode, "report": report},
+            cancel_event=cancel_event,
         )
         abilities = data.get("abilities")
         return abilities if isinstance(abilities, list) else []
 
-    def valuations_snapshot(self, thscodes: list[str]) -> list[dict]:
+    def valuations_snapshot(
+        self, thscodes: list[str], *, cancel_event: threading.Event | None = None,
+    ) -> list[dict]:
         """批量估值快照(pe_ttm/pe_mrq/pb_mrq/ps_ttm/pcf_ttm), 数值为最新口径。
 
         服务端单次上限 100 只(超出 code=1003), 分批由调用方负责。
@@ -212,11 +260,14 @@ class FuyaoClient:
         data = self._get(
             "/api/a-share/valuations/snapshot",
             {"thscodes": ",".join(thscodes[:100])},
+            cancel_event=cancel_event,
         )
         rows = data.get("item")
         return rows if isinstance(rows, list) else []
 
-    def price_snapshot_batch(self, thscodes: list[str]) -> list[dict]:
+    def price_snapshot_batch(
+        self, thscodes: list[str], *, cancel_event: threading.Event | None = None,
+    ) -> list[dict]:
         """按 thscodes 批量行情快照(最新价等), 用于估值推导的分母。
 
         与全市场分页快照同一端点; thscodes 显式传入时不分页。
@@ -225,6 +276,7 @@ class FuyaoClient:
         data = self._get(
             "/api/a-share/prices/snapshot",
             {"thscodes": ",".join(thscodes[:100])},
+            cancel_event=cancel_event,
         )
         rows = data.get("item")
         return rows if isinstance(rows, list) else []

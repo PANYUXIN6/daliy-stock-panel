@@ -1,13 +1,15 @@
 """设置 API — Key 配置 / 模式切换。
 
-提供面向非开发者的 UI 配置入口,避免逼用户改 .env。
+TickFlow / AI 密钥只由后端管理，网页仅查询状态及修改非密钥选项。
 """
 from __future__ import annotations
 
 import logging
 import time
+from contextlib import suppress
 from typing import Literal
 
+from apscheduler.jobstores.base import JobLookupError
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -26,11 +28,6 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/settings", tags=["settings"])
 
-# 默认端点 —— endpoints.json 列表第一项,UI"当前使用"始终对齐此项。
-# 注意:Free 模式 SDK 实际走 free-api(免费数据通道),但 UI 显示统一用默认节点。
-DEFAULT_PAID_ENDPOINT = "https://api.tickflow.org"
-
-
 def _sync_financial_scheduler_caps(app_state, capset) -> None:
     """把重新探测出的能力同步给财务调度器。
 
@@ -46,45 +43,58 @@ def _sync_financial_scheduler_caps(app_state, capset) -> None:
         logging.getLogger(__name__).warning("update financial_scheduler capabilities failed: %s", e)
 
 
+def _refresh_data_source_runtime(request: Request) -> None:
+    """数据源变更在 collector 同步生效，包括启动时尚不可用的日历。"""
+    from app.services import trading_day
+
+    state = request.app.state
+    capset = detect_capabilities()
+    state.capabilities = capset
+    _sync_financial_scheduler_caps(state, capset)
+    try:
+        result = trading_day.sync_calendar(state.datastore.data_dir)
+        if not result.get("updated"):
+            logger.warning("交易日历未更新: %s", result.get("reason"))
+    except Exception:
+        logger.exception("数据源更新后交易日历同步失败")
+
+
 class TickflowKeyIn(BaseModel):
     api_key: str
 
 
 @router.get("")
 def get_settings() -> dict:
-    """返回当前配置概况(Key 脱敏)。"""
+    """返回当前配置概况，不返回密钥或其片段。"""
     from app.config import settings
-    from app.services import preferences
     from app.services.ai_provider import (
         ai_configured,
+        current_ai_context_window,
+        current_ai_max_output_tokens,
         current_ai_model,
+        current_ai_round_checkpoint,
         current_codex_command,
         current_codex_model,
         current_codex_reasoning_effort,
         current_openai_model,
         current_openai_reasoning_effort,
-        current_ai_context_window,
-        current_ai_max_output_tokens,
-        current_ai_round_checkpoint,
     )
 
     key = secrets_store.get_tickflow_key()
     ai_provider = secrets_store.get_ai_config("ai_provider", settings.ai_provider)
     return {
         "mode": tf_client.current_mode(),
-        "tickflow_api_key_masked": secrets_store.mask(key),
+        "tickflow_api_key_masked": "",
         "has_tickflow_key": bool(key),
         "tier_label": tier_label(),
         "current_endpoint": tf_client.current_endpoint(),
         "probe_log": probe_log(),
         "missing_caps": missing_caps(),
         "extras_caps": extras_caps(),
-        # 首次使用引导
-        "onboarding_completed": preferences.get_onboarding_completed(),
         # AI 配置
         "ai_provider": ai_provider,
         "ai_base_url": secrets_store.get_ai_config("ai_base_url", settings.ai_base_url),
-        "ai_api_key_masked": secrets_store.mask(secrets_store.get_ai_key()),
+        "ai_api_key_masked": "",
         "has_ai_key": bool(secrets_store.get_ai_key()),
         "ai_configured": ai_configured(ai_provider),
         "ai_model": current_ai_model(),
@@ -132,120 +142,14 @@ def switch_endpoint(req: SwitchEndpointIn, request: Request) -> dict:
 
 @router.post("/tickflow-key")
 def save_tickflow_key(req: TickflowKeyIn, request: Request) -> dict:
-    """保存 TickFlow API Key 并立即重新探测能力。
-
-    先探后存(关键改动,修复乱填 key 也会被持久化的问题):
-      1. 临时用新 key 探测(付费端点),判定档位
-      2. 判定为 none(连单只日K都拿不到)→ key 无效:不存,清除已存的,
-         返回 {ok: false, reason: "invalid"},前端提示「Key 无效」
-      3. 判定为 free(免费有效 key)→ 存 key,客户端切到 free-api 服务器
-      4. 判定为 starter+ → 存 key,切到付费端点(现有逻辑)
-
-    端点联动:从无 key 升级到付费 key 时,残留的 free-api 端点不可用,
-    故自动切到默认付费端点(api.tickflow.org);free 档则清除自定义端点。
-    """
-    from app.tickflow.policy import (
-        base_tier_name, is_invalid_key,
-    )
-
-    key = req.api_key.strip()
-    if not key:
-        return {"ok": False, "error": "key empty"}
-
-    # ===== 1) 临时存 key + 重置客户端,让探测走付费端点 =====
-    secrets_store.save({"tickflow_api_key": key})
-    tf_client.reset_clients()
-
-    # 立即重新探测(此时 client 已按档位判定,但首次探测必然走付费端点验证)
-    capset = detect_capabilities(force=True)
-    request.app.state.capabilities = capset
-    _sync_financial_scheduler_caps(request.app.state, capset)
-
-    # ===== 2) 判定为无效 key(连单只日K都拿不到)→ 不存,清除 =====
-    if is_invalid_key() or base_tier_name() == "none":
-        # 无效 key:清除刚存的,避免乱填被持久化;退回 none 档
-        secrets_store.clear("tickflow_api_key", "tickflow_base_url")
-        tf_client.reset_clients()
-        capset = detect_capabilities(force=True)
-        request.app.state.capabilities = capset
-        _sync_financial_scheduler_caps(request.app.state, capset)
-        return {
-            "ok": False,
-            "reason": "invalid",
-            "error": "Key 无效或已过期,请检查后重试",
-            "mode": "none",
-            "tier_label": tier_label(),
-            "current_endpoint": tf_client.current_endpoint(),
-            "probe_log": [],
-            "capabilities_count": len(capset.all()),
-        }
-
-    # ===== 3) free 档(免费有效 key)→ 存 key,切到 free-api 服务器 =====
-    if base_tier_name() == "free":
-        # 免费档运行时走 free-api 服务器,清除付费端点的自定义配置
-        secrets_store.clear("tickflow_base_url")
-        tf_client.reset_clients()
-        return {
-            "ok": True,
-            "tickflow_api_key_masked": secrets_store.mask(key),
-            "mode": "free",
-            "tier_label": tier_label(),
-            "current_endpoint": tf_client.current_endpoint(),
-            "probe_log": [],
-            "capabilities_count": len(capset.all()),
-        }
-
-    # ===== 4) starter+ 付费档 → 确保走付费端点(现有逻辑) =====
-    # 若之前是 none/free(无自定义付费端点),切到默认付费端点
-    base = secrets_store.load().get("tickflow_base_url")
-    if not base:
-        secrets_store.save({"tickflow_base_url": DEFAULT_PAID_ENDPOINT})
-    tf_client.reset_clients()
-
-    return {
-        "ok": True,
-        "tickflow_api_key_masked": secrets_store.mask(key),
-        "mode": "api_key",
-        "tier_label": tier_label(),
-        "current_endpoint": tf_client.current_endpoint(),
-        "probe_log": [],
-        "capabilities_count": len(capset.all()),
-    }
+    """旧客户端的密钥写入入口明确拒绝，避免改写后端凭据。"""
+    raise HTTPException(status_code=403, detail="TickFlow API Key 由后端配置，请修改后端 .env 后重启服务")
 
 
 @router.delete("/tickflow-key")
 def clear_tickflow_key(request: Request) -> dict:
-    """清除 Key,退回无档(none)。
-
-    同时清除 tickflow_base_url(测速切换的自定义端点),使客户端走 free-api
-    服务器取历史日K;档位标签为 None(无档)。
-    """
-    secrets_store.clear("tickflow_api_key", "tickflow_base_url")
-    tf_client.reset_clients()
-
-    capset = detect_capabilities(force=True)
-    request.app.state.capabilities = capset
-    _sync_financial_scheduler_caps(request.app.state, capset)
-
-    return {
-        "ok": True,
-        "mode": "none",
-        "tier_label": tier_label(),
-        "current_endpoint": tf_client.current_endpoint(),
-        "capabilities_count": len(capset.all()),
-    }
-
-
-@router.post("/onboarding/complete")
-def complete_onboarding() -> dict:
-    """标记首次使用向导完成。
-
-    写入 preferences.json,前端守卫据此判断是否需要再次展示向导。
-    跨设备/清缓存安全 —— 状态落在后端文件,不依赖浏览器本地存储。
-    """
-    from app.services import preferences
-    done = preferences.set_onboarding_completed(True)
-    return {"ok": True, "onboarding_completed": done}
+    """网页不能清除后端管理的密钥。"""
+    raise HTTPException(status_code=403, detail="TickFlow API Key 由后端配置，不能在网页清除")
 
 
 class AiSettingsIn(BaseModel):
@@ -264,21 +168,23 @@ class AiSettingsIn(BaseModel):
 
 @router.post("/ai")
 def save_ai_settings(req: AiSettingsIn) -> dict:
-    """保存 AI 配置（全部持久化到 secrets.json）"""
+    """保存 AI 非密钥选项；密钥由后端环境配置提供。"""
+    if req.api_key is not None:
+        raise HTTPException(status_code=403, detail="AI API Key 由后端配置，请修改后端 .env 后重启服务")
     from app.config import settings
     from app.services.ai_provider import (
         OPENAI_PROVIDER,
         ai_configured,
+        current_ai_context_window,
+        current_ai_max_output_tokens,
         current_ai_model,
         current_ai_provider,
+        current_ai_round_checkpoint,
         current_codex_command,
         current_codex_model,
         current_codex_reasoning_effort,
         current_openai_model,
         current_openai_reasoning_effort,
-        current_ai_context_window,
-        current_ai_max_output_tokens,
-        current_ai_round_checkpoint,
         normalize_codex_command,
         normalize_codex_model,
         normalize_codex_reasoning_effort,
@@ -303,13 +209,6 @@ def save_ai_settings(req: AiSettingsIn) -> dict:
         if req.base_url:
             updates["ai_base_url"] = req.base_url
             settings.ai_base_url = req.base_url
-        if req.api_key is not None:
-            if req.api_key:
-                updates["ai_api_key"] = req.api_key
-                settings.ai_api_key = req.api_key
-            else:
-                secrets_store.clear("ai_api_key")
-                settings.ai_api_key = ""
         if req.model:
             updates["ai_model"] = req.model
             settings.ai_model = req.model
@@ -359,39 +258,13 @@ def save_ai_settings(req: AiSettingsIn) -> dict:
 
 @router.delete("/ai")
 def clear_ai_settings() -> dict:
-    """一键清空 AI 配置(provider / base_url / api_key / model)。
-
-    保留 ai_user_agent —— 自定义请求头与凭证解耦,清空凭证不影响绕过 CDN 拦截的设置。
-    """
-    from app.config import settings
-
-    secrets_store.clear(
-        "ai_provider",
-        "ai_base_url",
-        "ai_api_key",
-        "ai_model",
-        "ai_reasoning_effort",
-        "ai_codex_model",
-        "ai_codex_command",
-        "ai_codex_reasoning_effort",
-    )
-    secrets_store.clear("ai_provider", "ai_base_url", "ai_api_key", "ai_model", "ai_codex_command", "ai_codex_reasoning_effort", "ai_max_output_tokens", "ai_context_window")
-    # 同步重置运行时内存(provider 回默认值,其余置空)
-    settings.ai_provider = "openai_compat"
-    settings.ai_base_url = ""
-    settings.ai_api_key = ""
-    settings.ai_model = ""
-    settings.ai_codex_command = "codex"
-    settings.ai_codex_reasoning_effort = ""
-    settings.ai_max_output_tokens = 16384
-    settings.ai_context_window = 128000
-
-    return {"ok": True}
+    """保留旧路由并拒绝清除，防止网页破坏后端 AI 凭据。"""
+    raise HTTPException(status_code=403, detail="AI 密钥由后端配置，不能在网页清空；请修改后端配置")
 
 
 @router.get("/ai/sponsor-models")
 async def list_sponsor_models() -> dict:
-    """代理获取赞助商(RunningHub)的模型列表。
+    """代理获取 RunningHub 的模型列表。
 
     其网关按 Origin 头过滤: 浏览器跨域请求只会拿到国产模型子集,
     服务端请求无 Origin 头可取全量, 故由后端代理转发。
@@ -440,6 +313,10 @@ class MinuteSyncPrefs(BaseModel):
     minute_sync_days: int = 5
     # 单段大小(交易日),None 表示不修改现有值。范围 [5, 30],默认 20。
     minute_sync_segment_days: int | None = None
+
+
+class OrdinaryMinutePrefs(BaseModel):
+    enabled: bool
 
 
 class DataProvidersIn(BaseModel):
@@ -534,6 +411,7 @@ def get_preferences() -> dict:
         "realtime_allowed": _realtime_allowed(),
         "watchlist_groups_in_nav": preferences.get_watchlist_groups_in_nav(),
         "minute_sync_enabled": preferences.get_minute_sync_enabled(),
+        "ordinary_minute_enabled": preferences.get_ordinary_minute_enabled(),
         "minute_sync_days": preferences.get_minute_sync_days(),
         "minute_sync_segment_days": preferences.get_minute_sync_segment_days(),
         "minute_refresh_enabled": preferences.get_minute_refresh_enabled(),
@@ -637,7 +515,7 @@ def get_capability_matrix() -> dict:
 
 
 @router.post("/plugin-key")
-def save_plugin_key(req: PluginKeyIn) -> dict:
+def save_plugin_key(req: PluginKeyIn, request: Request) -> dict:
     """保存插件 API Key(先探后存, 对齐 /tickflow-key 语义)。
 
     流程: probe_plugin_key 用候选 Key 实探 → 有效才写 secrets.json
@@ -654,6 +532,7 @@ def save_plugin_key(req: PluginKeyIn) -> dict:
         return {"ok": False, "reason": "invalid", "error": message}
     secrets_store.save({f"{name}_api_key": key})
     custom_sources.load_all()
+    _refresh_data_source_runtime(request)
     status = next((p for p in custom_sources.list_plugins() if p["name"] == name), None)
     return {
         "ok": True,
@@ -664,7 +543,7 @@ def save_plugin_key(req: PluginKeyIn) -> dict:
 
 
 @router.delete("/plugin-key/{name}")
-def clear_plugin_key(name: str) -> dict:
+def clear_plugin_key(name: str, request: Request) -> dict:
     """清除插件的界面配置 Key(secrets.json);.env 里的同名变量仍然生效。"""
     from app.data_providers import custom as custom_sources
 
@@ -675,6 +554,7 @@ def clear_plugin_key(name: str) -> dict:
         raise HTTPException(status_code=400, detail=f"插件 '{name}' 不支持在界面配置 Key")
     secrets_store.clear(f"{name.lower()}_api_key")
     custom_sources.load_all()
+    _refresh_data_source_runtime(request)
     status = next((p for p in custom_sources.list_plugins() if p["name"] == name), None)
     return {
         "ok": True,
@@ -684,15 +564,16 @@ def clear_plugin_key(name: str) -> dict:
 
 
 @router.post("/data-sources/reload")
-def reload_data_sources() -> dict:
+def reload_data_sources(request: Request) -> dict:
     """重新加载 data_sources/*.yaml。"""
     from app.data_providers import custom as custom_sources
     custom_sources.load_all()
+    _refresh_data_source_runtime(request)
     return list_data_sources()
 
 
 @router.post("/plugins/{name}/install")
-def install_plugin(name: str) -> dict:
+def install_plugin(name: str, request: Request) -> dict:
     """安装指定插件的依赖 (npm install / pip install), 完成后重新扫描。
 
     根据 plugin.yaml 的 runtime 字段决定安装方式。安装可能耗时较长 (网络下载),
@@ -704,6 +585,7 @@ def install_plugin(name: str) -> dict:
     ok, message = custom_sources.install_plugin(name)
     # 无论成功失败都重新扫描, 刷新插件状态 (安装可能部分成功)
     custom_sources.load_all()
+    _refresh_data_source_runtime(request)
     result = list_data_sources()
     result["install_ok"] = ok
     result["install_message"] = message
@@ -711,7 +593,7 @@ def install_plugin(name: str) -> dict:
 
 
 @router.delete("/plugins/{name}/install")
-def uninstall_plugin(name: str) -> dict:
+def uninstall_plugin(name: str, request: Request) -> dict:
     """卸载指定插件的依赖 (删除 node_modules / pip uninstall), 完成后重新扫描。
 
     如果该插件当前正被使用, 自动回退到 tickflow。
@@ -731,6 +613,7 @@ def uninstall_plugin(name: str) -> dict:
         if getter() == name:
             preferences.save({key: default})
     custom_sources.load_all()
+    _refresh_data_source_runtime(request)
     result = list_data_sources()
     result["uninstall_ok"] = ok
     result["uninstall_message"] = message
@@ -748,7 +631,7 @@ def get_data_source(name: str) -> dict:
 
 
 @router.post("/data-sources")
-def save_data_source(req: CustomSourceIn) -> dict:
+def save_data_source(req: CustomSourceIn, request: Request) -> dict:
     """创建或更新一个自定义数据源 yaml, 保存后自动 reload。
 
     先验后存 (对齐插件 Key 的先探后存语义): 用与加载同一套校验试建临时
@@ -770,6 +653,7 @@ def save_data_source(req: CustomSourceIn) -> dict:
     try:
         custom_sources.save_config(config["name"], config)
         custom_sources.load_all()
+        _refresh_data_source_runtime(request)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
     return list_data_sources()
@@ -801,7 +685,7 @@ def delete_data_source(name: str, request: Request) -> dict:
     if updates:
         preferences.save(updates)
     # 删除源可能触发偏好回退 tickflow, 同步刷新能力快照
-    request.app.state.capabilities = detect_capabilities()
+    _refresh_data_source_runtime(request)
     return list_data_sources()
 
 
@@ -823,7 +707,7 @@ def test_data_source(req: CustomSourceTestIn) -> dict:
         else:
             provider = custom_sources.get_provider(req.provider)
         return provider.test_dataset(req.dataset, req.symbols)
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         raise HTTPException(status_code=400, detail=f"自定义数据源测试失败: {e}") from e
     finally:
         if temporary and provider is not None:
@@ -838,7 +722,7 @@ def update_data_providers(req: DataProvidersIn, request: Request) -> dict:
     if updates:
         preferences.save(updates)
     # 刷新能力快照: 当前 provider 变化会改变自定义源能力增广结果 (读缓存, 无网络请求)
-    request.app.state.capabilities = detect_capabilities()
+    _refresh_data_source_runtime(request)
     return {
         "daily_data_provider": preferences.get_daily_data_provider(),
         "adj_factor_provider": preferences.get_adj_factor_provider(),
@@ -983,6 +867,15 @@ def update_minute_sync(req: MinuteSyncPrefs) -> dict:
     }
 
 
+@router.put("/preferences/ordinary-minute")
+def update_ordinary_minute(req: OrdinaryMinutePrefs) -> dict:
+    """保存普通分时自动采集开关，不影响手动分钟同步任务。"""
+    from app.services import preferences
+
+    preferences.save({"ordinary_minute_enabled": req.enabled})
+    return {"ordinary_minute_enabled": preferences.get_ordinary_minute_enabled()}
+
+
 @router.get("/minute-refresh/status")
 def minute_refresh_status(request: Request) -> dict:
     """盘中分钟增量刷新服务状态 (开关/能力门控/最近一轮/下一轮)。"""
@@ -1045,32 +938,6 @@ def update_realtime_quotes(req: RealtimeQuotesPrefs, request: Request) -> dict:
     if req.realtime_quotes_enabled and qs and qs.is_paused():
         # 管道/数据修正运行期间禁止开启实时行情 — 防止写盘竞态
         raise HTTPException(status_code=409, detail="数据同步运行中，实时行情已临时暂停，请稍后再开启")
-    if req.realtime_quotes_enabled:
-        # 历史完整性门禁: 检测到最近交易日的盘中快照/缺口时禁止开启 —
-        # 实时 flush 写出"今天"分区后, 盘后管道的"只刷今天"分支会让停机日的
-        # 半日快照永久留存。同时自动创建修复任务, 修完即可正常开启。
-        from app.services import data_integrity
-
-        repo = getattr(request.app.state, "repo", None)
-        if repo is not None:
-            try:
-                issues = data_integrity.scan_recent_integrity(repo.store.data_dir)
-            except Exception:  # noqa: BLE001
-                issues = []
-            earliest = data_integrity.earliest_issue_day(issues)
-            if issues and data_integrity.within_auto_repair_window(earliest):
-                job_id, is_new = data_integrity.launch_integrity_repair(
-                    request.app.state, earliest, "realtime_gate",
-                )
-                if job_id is not None:
-                    detail = (
-                        f"检测到{data_integrity.describe_issues(issues)}，"
-                        + ("已自动创建修复任务，完成后即可开启实时行情"
-                           if is_new else "修复任务正在进行中，请稍后再开启")
-                        + f"（任务 {job_id}）"
-                    )
-                    raise HTTPException(status_code=409, detail=detail)
-
     preferences.save({"realtime_quotes_enabled": req.realtime_quotes_enabled})
     if qs:
         if req.realtime_quotes_enabled:
@@ -1141,7 +1008,7 @@ def update_realtime_monitor_config(req: RealtimeMonitorConfigIn, request: Reques
                 # reload 规则到引擎
                 monitor_engine.set_rules(mr_store.load_all(data_dir))
             except Exception:
-                pass
+                logger.exception("strategy monitor reload failed")
 
     return result
 
@@ -1263,8 +1130,7 @@ def update_feishu_webhook(req: FeishuWebhookPrefsIn) -> dict:
     - url: 传入空串表示清空配置; 非空则需为合法的飞书自定义机器人地址。
     - secret: 机器人启用了「签名校验」时填密钥, 留空表示不验签。
     """
-    from app.services import preferences
-    from app.services import webhook_adapter
+    from app.services import preferences, webhook_adapter
 
     url = (req.url or "").strip()
     if url and not webhook_adapter.is_valid_feishu_url(url):
@@ -1289,8 +1155,7 @@ def update_wecom_webhook(req: WecomWebhookPrefsIn) -> dict:
     - url: 传入空串表示清空配置; 非空需为合法企业微信群推送 Webhook 地址, 或纯 key。
     - 用户可只填 key (webhook/send?key=xxx 的 xxx 部分), 后端自动补全为完整 URL。
     """
-    from app.services import preferences
-    from app.services import webhook_adapter
+    from app.services import preferences, webhook_adapter
 
     url = (req.url or "").strip()
     if url and not webhook_adapter.is_valid_wecom_url(url):
@@ -1395,8 +1260,7 @@ def test_webhook(req: WebhookTestIn) -> dict:
     未配置 / 地址非法 / 发送失败均返回 HTTP 200 + {ok: False}，
     前端统一读 detail 渲染绿/红，不抛 400。
     """
-    from app.services import preferences
-    from app.services import webhook_adapter
+    from app.services import preferences, webhook_adapter
 
     title = "TickFlow Stock Panel 推送测试"
     body = "如果你看到这条消息，说明推送配置正确 🎉"
@@ -1552,7 +1416,7 @@ def update_quote_interval(req: QuoteIntervalIn, request: Request) -> dict:
     """更新行情轮询间隔。按档位自动 clamp。"""
     qs = getattr(request.app.state, "quote_service", None)
     if not qs:
-        return {"interval": req.interval, "min_interval": 6.0, "max_interval": 60.0}
+        return {"interval": max(30.0, req.interval), "min_interval": 30.0, "max_interval": 60.0}
     clamped = qs.set_interval(req.interval)
     return {
         "interval": clamped,
@@ -1566,7 +1430,7 @@ def get_quote_interval(request: Request) -> dict:
     """获取当前行情轮询间隔和档位限制。"""
     qs = getattr(request.app.state, "quote_service", None)
     if not qs:
-        return {"interval": 6.0, "min_interval": 6.0, "max_interval": 60.0}
+        return {"interval": 30.0, "min_interval": 30.0, "max_interval": 60.0}
     return {
         "interval": qs._interval,
         "min_interval": qs.get_min_interval(),
@@ -1779,26 +1643,9 @@ class PipelineScheduleIn(BaseModel):
 
 @router.put("/preferences/pipeline-schedule")
 def update_pipeline_schedule(req: PipelineScheduleIn, request: Request) -> dict:
-    """保存盘后管道调度时间并立即 reschedule。"""
+    """保留时间偏好接口; 盘后管道由数据页手动触发, 不注册自动任务。"""
     from app.services import preferences
-    sched = preferences.set_pipeline_schedule(req.hour, req.minute)
-
-    # 动态 reschedule
-    from apscheduler.triggers.cron import CronTrigger
-    scheduler = getattr(request.app.state, "scheduler", None)
-    if scheduler:
-        scheduler.reschedule_job(
-            "daily_pipeline",
-            trigger=CronTrigger(
-                day_of_week="mon-fri",
-                hour=sched["hour"],
-                minute=sched["minute"],
-                timezone="Asia/Shanghai",
-            ),
-        )
-        logger.info("pipeline rescheduled to %02d:%02d mon-fri", sched["hour"], sched["minute"])
-
-    return sched
+    return preferences.set_pipeline_schedule(req.hour, req.minute)
 
 
 @router.put("/preferences/instruments-schedule")
@@ -1906,28 +1753,12 @@ class DepthFinalizeTimeIn(BaseModel):
 
 @router.put("/preferences/depth-finalize-time")
 def update_depth_finalize_time(req: DepthFinalizeTimeIn, request: Request) -> dict:
-    """保存盘后 sealed 定版时间(范围15:01~18:00)并立即 reschedule。需 Pro+。"""
+    """保留盘口时间偏好接口; 盘后定版改为手动更新。需 Pro+。"""
     from app.tickflow.capabilities import Cap
     request.app.state.capabilities.require(Cap.DEPTH5_BATCH)
 
     from app.services import preferences
-    sched = preferences.set_depth_finalize_time(req.hour, req.minute)
-
-    from apscheduler.triggers.cron import CronTrigger
-    scheduler = getattr(request.app.state, "scheduler", None)
-    if scheduler:
-        scheduler.reschedule_job(
-            "depth_finalize",
-            trigger=CronTrigger(
-                day_of_week="mon-fri",
-                hour=sched["hour"],
-                minute=sched["minute"],
-                timezone="Asia/Shanghai",
-            ),
-        )
-        logger.info("depth_finalize rescheduled to %02d:%02d mon-fri", sched["hour"], sched["minute"])
-
-    return sched
+    return preferences.set_depth_finalize_time(req.hour, req.minute)
 
 
 class ReviewScheduleIn(BaseModel):
@@ -1959,18 +1790,16 @@ def update_review_schedule(req: ReviewScheduleIn, request: Request) -> dict:
     sched = preferences.set_review_schedule(req.enabled, req.hour, req.minute)
 
     # 动态操作 APScheduler job
-    from app.jobs.daily_pipeline import _register_review_job, REVIEW_JOB_ID
+    from app.jobs.daily_pipeline import REVIEW_JOB_ID, _register_review_job
     scheduler = getattr(request.app.state, "scheduler", None)
     if scheduler:
         if sched["enabled"]:
             _register_review_job(scheduler, request.app.state.repo, sched["hour"], sched["minute"])
             logger.info("scheduled_review enabled @%02d:%02d mon-fri", sched["hour"], sched["minute"])
         else:
-            try:
+            with suppress(JobLookupError):
                 scheduler.remove_job(REVIEW_JOB_ID)
                 logger.info("scheduled_review disabled (job removed)")
-            except Exception:
-                pass  # job 本就不存在(从未开过), 无需处理
 
     return sched
 

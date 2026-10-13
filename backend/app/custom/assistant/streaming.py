@@ -16,14 +16,15 @@ tool_calls 分片, 流结束时统一返回本轮结果, 由 chat_service 决定
 """
 from __future__ import annotations
 
-import asyncio
 from collections.abc import AsyncIterator, Sequence
 from typing import Any
 
+import anyio
 from openai import AsyncOpenAI
 
 from app import secrets_store
 from app.config import settings
+from app.services.ai_capacity import limited_ai
 from app.services.ai_provider import (
     OPENAI_PROVIDER,
     current_ai_model,
@@ -80,6 +81,7 @@ def _client(timeout: float) -> AsyncOpenAI:
     )
 
 
+@limited_ai
 async def stream_openai_round(
     messages: Sequence[dict[str, Any]],
     tools: Sequence[dict[str, Any]],
@@ -115,54 +117,54 @@ async def stream_openai_round(
     calls: dict[int, dict[str, Any]] = {}
     ordered: list[dict[str, Any]] = []
 
-    async for chunk in stream:
-        choices = getattr(chunk, "choices", None) or []
-        if not choices:
-            continue
-        choice = choices[0]
-        reason = getattr(choice, "finish_reason", None)
-        if reason:
-            finish_reason = str(reason)
-        delta = getattr(choice, "delta", None)
-        if delta is None:
-            continue
-        if getattr(delta, "reasoning_content", None):
-            reasoning_seen = True
+    try:
+        async for chunk in stream:
+            choices = getattr(chunk, "choices", None) or []
+            if not choices:
+                continue
+            choice = choices[0]
+            reason = getattr(choice, "finish_reason", None)
+            if reason:
+                finish_reason = str(reason)
+            delta = getattr(choice, "delta", None)
+            if delta is None:
+                continue
+            if getattr(delta, "reasoning_content", None):
+                reasoning_seen = True
 
-        text = getattr(delta, "content", None)
-        if text:
-            content_seen = True
-            yield {"type": "text", "delta": text}
+            text = getattr(delta, "content", None)
+            if text:
+                content_seen = True
+                yield {"type": "text", "delta": text}
 
-        for tc in getattr(delta, "tool_calls", None) or []:
-            idx = int(getattr(tc, "index", 0) or 0)
-            tc_id = str(getattr(tc, "id", None) or "")
-            entry = calls.get(idx)
-            # Gemini 的兼容接口会把并行调用逐个整条下发且 index 相同(或缺省),
-            # 只靠 index 累积会把两个调用的 name/arguments 拼成一个; 同一 index
-            # 上出现不同的 id 即视为新的调用。
-            if entry is None or (tc_id and entry["id"] and tc_id != entry["id"]):
-                entry = {"id": "", "name": "", "arguments": ""}
-                calls[idx] = entry
-                ordered.append(entry)
-            if tc_id:
-                entry["id"] = tc_id
-            # Gemini 3 在 extra_content.google.thought_signature 里返回思考签名,
-            # 下一轮回传历史时缺了它会被 400 拒绝。
-            extra = getattr(tc, "extra_content", None)
-            if extra and "extra_content" not in entry:
-                entry["extra_content"] = extra
-            fn = getattr(tc, "function", None)
-            if fn is not None:
-                if getattr(fn, "name", None):
-                    entry["name"] += str(fn.name)
-                if getattr(fn, "arguments", None):
-                    entry["arguments"] += str(fn.arguments)
+            for tc in getattr(delta, "tool_calls", None) or []:
+                idx = int(getattr(tc, "index", 0) or 0)
+                tc_id = str(getattr(tc, "id", None) or "")
+                entry = calls.get(idx)
+                # Gemini 的兼容接口会把并行调用逐个整条下发且 index 相同(或缺省),
+                # 只靠 index 累积会把两个调用的 name/arguments 拼成一个; 同一 index
+                # 上出现不同的 id 即视为新的调用。
+                if entry is None or (tc_id and entry["id"] and tc_id != entry["id"]):
+                    entry = {"id": "", "name": "", "arguments": ""}
+                    calls[idx] = entry
+                    ordered.append(entry)
+                if tc_id:
+                    entry["id"] = tc_id
+                # Gemini 3 在 extra_content.google.thought_signature 里返回思考签名,
+                # 下一轮回传历史时缺了它会被 400 拒绝。
+                extra = getattr(tc, "extra_content", None)
+                if extra and "extra_content" not in entry:
+                    entry["extra_content"] = extra
+                fn = getattr(tc, "function", None)
+                if fn is not None:
+                    if getattr(fn, "name", None):
+                        entry["name"] += str(fn.name)
+                    if getattr(fn, "arguments", None):
+                        entry["arguments"] += str(fn.arguments)
 
-    # 让 SDK 流对象尽快释放(部分兼容网关要求显式 close)。
-    close = getattr(stream, "close", None)
-    if close is not None:
-        await asyncio.to_thread(close)
+    finally:
+        with anyio.CancelScope(shield=True):
+            await stream.close()
 
     if calls:
         yield {

@@ -41,8 +41,8 @@ class ConditionModel(BaseModel):
     left: str        # 字段名（日线在白名单 / 盘中在特征白名单）
     op: str          # > >= < <= == != ; 盘中额外: cross_up cross_down
     right: str       # "field:xxx" 或数字字符串
-    leftDays: int = 0    # 左字段取几日前 (0=当日, 默认; 盘中信号必须为 0)
-    rightDays: int = 0   # 右字段取几日前 (仅 right 为字段时有意义; 盘中信号必须为 0)
+    leftDays: int = 0    # noqa: N815 -- 持久化信号及前端沿用此字段名; 左字段取几日前 (0=当日, 默认; 盘中信号必须为 0)
+    rightDays: int = 0   # noqa: N815 -- 持久化信号及前端沿用此字段名; 右字段取几日前 (仅 right 为字段时有意义; 盘中信号必须为 0)
 
 
 class SignalModel(BaseModel):
@@ -83,7 +83,7 @@ def get_options():
         for f in sorted(allowed)
     ]
     # 字段分组 (只包含白名单内的字段, 供前端 optoptgroup 渲染)
-    _GROUP_LABELS = {
+    group_labels = {
         "basic": "基础", "ma": "均线 MA", "ema": "指数均线 EMA",
         "macd": "MACD", "boll": "布林带 BOLL", "kdj": "KDJ",
         "atr": "ATR", "volume": "量价", "extremes": "极值",
@@ -95,7 +95,7 @@ def get_options():
     groups = [{"key": "quote", "label": "行情",
                "fields": [{"key": f, "label": ENRICHED_COLUMNS.get(f, f)}
                           for f in sorted(allowed & quote_fields)]}]
-    for cat, label in _GROUP_LABELS.items():
+    for cat, label in group_labels.items():
         cat_fields = [f for f in ENRICHED_COLUMNS_BY_CATEGORY.get(cat, []) if f in allowed]
         if cat_fields:
             groups.append({"key": cat, "label": label,
@@ -175,7 +175,7 @@ def save_signal(req: SignalModel, request: Request):
     try:
         custom_signals.validate(sig)
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from e
     custom_signals.save_one(_data_dir(request), sig)
     _invalidate(request)
     return {"ok": True, "signal": sig}

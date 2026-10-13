@@ -87,8 +87,8 @@ def load_auto_rules(data_dir: Path, account_id: str = paper.DEFAULT_ACCOUNT_ID, 
             if enabled_only and not r.get("enabled"):
                 continue
             out.append(r)
-        except Exception as e:
-            logger.warning("paper auto rule load failed %s: %s", f.name, e)
+        except Exception as e:  # noqa: BLE001 - 单条自动交易规则读取与规范化失败按文件隔离。
+            logger.warning("paper auto rule load failed %s: %s", f.name, e, exc_info=True)
     return out
 
 

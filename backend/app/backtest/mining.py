@@ -1613,7 +1613,8 @@ def _evaluate_labels(
 ) -> CandidateEvaluation:
     try:
         raw = evaluator(train_labels, test_labels, candidate.definition())
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - 外部评估器失败按候选隔离, 保留该候选错误结果。
+        logger.warning("candidate evaluation failed: %s", exc, exc_info=True)
         return CandidateEvaluation(score=None, error=str(exc))
     return _normalize_evaluation(raw)
 
@@ -1626,7 +1627,8 @@ def _evaluate(
 ) -> CandidateEvaluation:
     try:
         raw = evaluator.evaluate_candidate(train, test, candidate.definition())
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - 评估器实现可替换, 单个候选失败不得中断整批。
+        logger.warning("candidate evaluation failed: %s", exc, exc_info=True)
         return CandidateEvaluation(score=None, error=str(exc))
     return _normalize_evaluation(raw)
 

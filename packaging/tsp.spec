@@ -41,7 +41,7 @@ APP_ICON = str((ROOT / "brand" / "icon.icns") if _IS_MACOS else (ROOT / "brand" 
 # polars / pyarrow / duckdb / fastexcel 都自带共享库子目录
 datas = []
 binaries = []
-hiddenimports = []
+hiddenimports = ["app.collector"]
 
 for pkg in ("polars", "pyarrow", "duckdb", "fastexcel"):
     d, b, h = collect_all(pkg)

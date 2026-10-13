@@ -11,9 +11,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import queue
 import time
 
-from fastapi import APIRouter, Query, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 from sse_starlette.sse import EventSourceResponse
 
 router = APIRouter(prefix="/api/intraday", tags=["quotes"])
@@ -134,12 +135,20 @@ async def quote_stream(request: Request):
             while True:
                 await asyncio.sleep(30)
 
+        from app.services.shared_runtime import runtime_bus
+        updates = runtime_bus.subscribe()
         sub = qs.subscribe()
         try:
             while True:
                 # 等待任一通道有新信号 (5s 超时保持循环, 便于断线时尽快退出)
-                await asyncio.to_thread(sub.wait, 5.0)
+                await asyncio.sleep(0.25)
                 data = sub.pop()
+                while not updates.empty():
+                    try:
+                        update = updates.get_nowait()
+                    except queue.Empty:
+                        break
+                    yield {"event": "data_updated", "data": json.dumps(update["data"])}
 
                 # 告警 (分片推送, 避免单条 SSE 过大)
                 alerts = data["alerts"]
@@ -188,6 +197,7 @@ async def quote_stream(request: Request):
                     }
         finally:
             qs.unsubscribe(sub)
+            runtime_bus.unsubscribe(updates)
 
     return EventSourceResponse(event_generator())
 
@@ -196,6 +206,13 @@ async def quote_stream(request: Request):
 def refresh_quotes(request: Request):
     """手动刷新一次行情数据。"""
     qs = _get_quote_service(request)
-    if qs:
-        return qs.refresh()
-    return {"error": "QuoteService not available"}
+    if qs is None:
+        raise HTTPException(503, "行情采集服务不可用")
+    if qs.is_paused():
+        raise HTTPException(409, "后台数据任务运行中，行情采集已临时暂停")
+    result = qs.refresh()
+    if not result["fetch_succeeded"]:
+        if result["paused"]:
+            raise HTTPException(409, "后台数据任务运行中，行情采集已临时暂停")
+        raise HTTPException(502, "未取得有效行情，请检查数据源状态")
+    return result

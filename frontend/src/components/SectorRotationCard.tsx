@@ -166,10 +166,10 @@ function pctClass(value: number | null | undefined): string {
 }
 
 const NO_DATA_HINTS: Record<string, string> = {
-  minute_missing: '尚无全市场分钟数据 — 需开启全量分钟落盘 (数据源设置 → 全量分钟路由)',
-  minute_schema: '分钟数据分区读取失败, 请检查数据目录',
-  minute_empty: '当日分钟数据为空',
-  members_missing: '板块成分数据缺失 — 请先在数据页获取概念/行业分类扩展数据',
+  minute_missing: '后台尚未采集全市场分钟数据',
+  minute_schema: '后台分钟数据暂时无法读取',
+  minute_empty: '后台尚未采集当日分钟数据',
+  members_missing: '后台尚未采集概念/行业分类数据',
   no_member_bars: '当日分钟数据中没有板块成分股的行情',
 }
 
@@ -791,7 +791,10 @@ export function SectorRotationCard({ kind }: { kind: 'concept' | 'industry' }) {
           >
             {[1, 5, 15].map(value => <option key={value} value={value}>{value}分钟</option>)}
           </select>
-          <RefreshCw className={`h-3 w-3 text-muted ${rotationQuery.isFetching ? 'animate-spin text-accent' : ''}`} />
+          <button type="button" onClick={() => void rotationQuery.refetch()} disabled={rotationQuery.isFetching}
+            className="rounded p-1 text-muted hover:bg-elevated hover:text-foreground disabled:opacity-50" aria-label="刷新板块数据" title="刷新板块数据">
+            <RefreshCw className={`h-3 w-3 ${rotationQuery.isFetching ? 'animate-spin text-accent' : ''}`} />
+          </button>
         </div>
       </div>
 
@@ -803,7 +806,7 @@ export function SectorRotationCard({ kind }: { kind: 'concept' | 'industry' }) {
         </div>
       ) : !data || data.status !== 'ok' ? (
         <div className="flex h-36 items-center justify-center px-6 text-center text-xs text-muted">
-          {NO_DATA_HINTS[data?.reason ?? ''] ?? '暂无板块切换数据 — 请先开启全量分钟能力并获取板块成分'}
+          {NO_DATA_HINTS[data?.reason ?? ''] ?? '后台数据尚未更新，暂无板块切换数据'}
         </div>
       ) : (
         <>

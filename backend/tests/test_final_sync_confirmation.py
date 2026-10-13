@@ -4,13 +4,14 @@
 实时源当时仍返回 14:59:5x 的竞价前快照 (海鸥住工 7.07 而非官方收盘 7.10),
 旧价被永久固化到当日分区; 且重启后的盘后手动刷新会再次写回旧价。修复后:
 
-- _process_full_market_records 收到 final_boundary_ms 时, 快照最大时间戳
-  达到边界 (含容差) 才落盘/评估监控, 否则只更新展示缓存;
+- _process_full_market_records 收到 final_boundary_ms 时, 逐标的校验时间戳
+  达到边界 (含容差) 且不早于本地快照才合并落盘, 未确认标的保留原值;
 - _final_boundary_ms/_past_final_deadline 提供边界与重试窗口 (收盘 15:00/15:30)。
 """
 from __future__ import annotations
 
-from datetime import datetime, time as dt_time
+from datetime import datetime
+from datetime import time as dt_time
 
 import pytest
 
@@ -46,11 +47,17 @@ class _StubRepo:
         import polars as pl
         return pl.DataFrame()
 
+    def get_live_daily_quote_timestamps(self, asset_type: str, day) -> dict[str, int]:
+        return {}
+
     def flush_live_daily(self, df) -> None:
         self.calls.append("daily")
 
     def flush_live_daily_asset(self, asset_type: str, df) -> None:
         self.calls.append(f"daily:{asset_type}")
+
+    def merge_live_daily_asset(self, asset_type: str, df) -> None:
+        self.calls.append(f"merge:{asset_type}")
 
 
 @pytest.fixture
@@ -68,7 +75,7 @@ def service(monkeypatch) -> tuple[QuoteService, _StubRepo, dict]:
 
 
 def test_final_snapshot_before_boundary_skips_disk(service) -> None:
-    """竞价前快照 (时间戳 < 15:00): 只更新展示缓存, 不写 daily/enriched。"""
+    """竞价前快照 (时间戳 < 15:00): 通知读者, 不写 daily/enriched。"""
     qs, repo, events = service
     boundary = _beijing_ms(15, 0)
 
@@ -94,13 +101,13 @@ def test_final_snapshot_after_boundary_writes(service) -> None:
     )
 
     assert qs._last_final_confirmed is True
-    assert repo.calls == ["daily"]
+    assert repo.calls == ["merge:stock"]
     assert events["enriched"] == 1
     assert events["broadcast"] == 1
 
 
 def test_snapshot_without_timestamp_never_confirmed(service) -> None:
-    """无时间戳的快照无法确认定版 → 不落盘 (交由盘后管道兜底)。"""
+    """无时间戳的快照无法确认定版 → 不落盘, 继续等待新快照。"""
     qs, repo, events = service
     rec = _record(0)
     rec.pop("timestamp")

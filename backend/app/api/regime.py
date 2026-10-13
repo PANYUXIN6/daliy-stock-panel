@@ -4,6 +4,7 @@
 """
 from __future__ import annotations
 
+import logging
 import threading
 import time
 from datetime import date
@@ -13,6 +14,8 @@ import polars as pl
 from fastapi import APIRouter, Query, Request
 
 from app.services import regime_builder
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/regime", tags=["regime"])
 
@@ -49,8 +52,8 @@ def _df_to_records(df) -> list[dict]:
 @router.get("/history")
 def regime_history(
     request: Request,
-    start: date | None = Query(None),
-    end: date | None = Query(None),
+    start: Annotated[date | None, Query()] = None,
+    end: Annotated[date | None, Query()] = None,
     limit: int = Query(120, ge=1, le=1000),
 ):
     """历史环境时序(含状态/指标)。默认最近 N 天。"""
@@ -171,6 +174,9 @@ def regime_recompute(request: Request, start: date | None = None, end: date | No
             mainline_rows += rows.height
 
     invalidate_regime_cache()
+    from app.services.shared_runtime import publish_data_update
+
+    publish_data_update(data_dir, ["regime", "mainline"])
     return {
         "ok": True,
         "computed": new_rows.height if not new_rows.is_empty() else 0,
@@ -308,6 +314,9 @@ def mainline_recompute(request: Request):
         if not computed.is_empty():
             market_mainline.upsert_mainline_history(data_dir, computed)
             rows += computed.height
+    from app.services.shared_runtime import publish_data_update
+
+    publish_data_update(data_dir, ["mainline"])
     return {"ok": True, "rows": rows}
 
 
@@ -330,6 +339,7 @@ def regime_mainline(
 
         filter_cfg = preferences.get_mainline_filter_config()
     except Exception:
+        logger.exception("regime dimension configuration read failed")
         filter_cfg = {"min_members": 4, "max_members": 600, "blacklist": []}
     df = load_mainline_history(_data_dir(request), kind)
     if df.is_empty():

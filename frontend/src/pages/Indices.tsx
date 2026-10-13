@@ -1,10 +1,9 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Activity, Loader2, Lock, RefreshCw } from 'lucide-react'
+import { useQuery } from '@tanstack/react-query'
+import { Activity, RefreshCw } from 'lucide-react'
 import { api, type IndexInstrument, type KlineRow, type MinuteKlineRow } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
-import { useCapabilities } from '@/lib/useSharedQueries'
 import { EChartsCandlestick, type OHLC } from '@/components/EChartsCandlestick'
 import { EChartsIntraday } from '@/components/EChartsIntraday'
 
@@ -62,17 +61,12 @@ const PINNED_INDEXES = [
 ]
 
 export function Indices() {
-  const qc = useQueryClient()
   const [searchParams, setSearchParams] = useSearchParams()
   const symbolParam = searchParams.get('symbol') ?? ''
   const [selected, setSelected] = useState<string>(symbolParam)
   const [range, setRange] = useState(defaultRange)
   const [selectedDate, setSelectedDate] = useState<string | null>(null)
   const [linkedPrice, setLinkedPrice] = useState<number | null>(null)
-
-  // 分时数据依赖分钟K批量数据 (kline.minute.batch)
-  const caps = useCapabilities()
-  const hasMinuteCap = !!caps.data?.capabilities?.['kline.minute.batch']
 
   // 指数标的固定核心四只 (产品契约, 不再提供全指数搜索/浏览)
   const topRows: IndexInstrument[] = PINNED_INDEXES.map(p => ({
@@ -100,21 +94,13 @@ export function Indices() {
     queryKey: QK.indexDaily(selectedSymbol, range.start, range.end),
     queryFn: () => api.indexDaily(selectedSymbol, 180, range),
     enabled: !!selectedSymbol,
-    placeholderData: (prev) => prev,
+    placeholderData: (prev) => prev?.symbol === selectedSymbol ? prev : undefined,
   })
 
   const minute = useQuery({
     queryKey: QK.indexMinute(selectedSymbol, selectedDate ?? ''),
     queryFn: () => api.indexMinute(selectedSymbol, selectedDate ?? undefined),
-    enabled: !!selectedSymbol && !!selectedDate && hasMinuteCap,
-  })
-
-  const syncDaily = useMutation({
-    mutationFn: () => api.syncIndexDaily(365),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: QK.indexQuotes })
-      qc.invalidateQueries({ queryKey: ['index-daily'] })
-    },
+    enabled: !!selectedSymbol && !!selectedDate,
   })
 
   const quoteBySymbol = useMemo(() => {
@@ -177,17 +163,17 @@ export function Indices() {
         <div>
           <h1 className="text-lg font-semibold text-foreground">指数</h1>
           <p className="mt-1 text-xs text-muted">
-            指数使用独立 kline_index_* parquet，不进入股票选股和策略链路。
+            查看后台已采集的指数日线与分时数据。
           </p>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <button
-            onClick={() => syncDaily.mutate()}
-            disabled={syncDaily.isPending}
-            className="inline-flex items-center gap-1.5 rounded-btn bg-accent px-3 py-1.5 text-xs font-medium text-white hover:bg-accent/90 disabled:opacity-50"
+            type="button"
+            onClick={() => { void quotes.refetch(); void daily.refetch(); if (selectedDate) void minute.refetch() }}
+            disabled={quotes.isFetching || daily.isFetching || minute.isFetching}
+            className="inline-flex items-center gap-1.5 rounded-btn border border-border bg-elevated px-3 py-1.5 text-xs text-secondary hover:text-foreground disabled:opacity-50"
           >
-            {syncDaily.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
-            同步指数日K
+            <RefreshCw className={`h-3.5 w-3.5 ${quotes.isFetching || daily.isFetching || minute.isFetching ? 'animate-spin' : ''}`} />刷新
           </button>
         </div>
       </div>
@@ -237,7 +223,7 @@ export function Indices() {
           {daily.isError && <div className="py-4 text-sm text-danger">指数日K加载失败</div>}
           {!daily.isLoading && !daily.isError && chartRows.length === 0 && (
             <div className="rounded-card bg-elevated p-6 text-center text-sm text-muted">
-              暂无日K数据。可以先同步指数日K，或选择其他指数。
+              后台尚未采集该指数的日K数据。
             </div>
           )}
           {chartRows.length > 0 && (
@@ -260,33 +246,23 @@ export function Indices() {
                 />
               </div>
               <div className="min-w-0 flex-1 border-l border-border pl-3" style={{ height: 620 }}>
-                {!hasMinuteCap ? (
-                  <div className="flex h-full flex-col items-center justify-center gap-2 text-center">
-                    <Lock className="h-5 w-5 text-muted" />
-                    <div className="text-xs text-secondary">指数分时数据不可用</div>
-                    <div className="text-[10px] text-muted">分钟K(批量)数据不可用</div>
+                {minute.isLoading && <div className="py-2 text-xs text-muted">分时加载中…</div>}
+                {!minute.isLoading && minuteRows.length === 0 && (
+                  <div className="flex h-full items-center justify-center text-xs text-muted">
+                    暂无分时数据
                   </div>
-                ) : (
-                  <>
-                    {minute.isLoading && <div className="py-2 text-xs text-muted">分时加载中…</div>}
-                    {!minute.isLoading && minuteRows.length === 0 && (
-                      <div className="flex h-full items-center justify-center text-xs text-muted">
-                        暂无分时数据
-                      </div>
-                    )}
-                    {minuteRows.length > 0 && (
-                      <EChartsIntraday
-                        key={`${selectedSymbol}:${selectedDate}`}
-                        data={minuteRows}
-                        height={620}
-                        prevClose={prevClose}
-                        date={selectedDate ?? undefined}
-                        showLimitLines={false}
-                        showAvgLine={false}
-                        onPriceHover={setLinkedPrice}
-                      />
-                    )}
-                  </>
+                )}
+                {minuteRows.length > 0 && (
+                  <EChartsIntraday
+                    key={`${selectedSymbol}:${selectedDate}`}
+                    data={minuteRows}
+                    height={620}
+                    prevClose={prevClose}
+                    date={selectedDate ?? undefined}
+                    showLimitLines={false}
+                    showAvgLine={false}
+                    onPriceHover={setLinkedPrice}
+                  />
                 )}
               </div>
             </div>

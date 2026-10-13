@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import threading
+import time
 from dataclasses import asdict
 from datetime import date, timedelta
 from typing import Literal
@@ -46,7 +48,7 @@ def _get_engine(request: Request):
 
 def _resolve_start(req: BaseModel, end: date, default_days: int) -> date:
     """未传 start 使用默认区间；显式传 null/空值表示全部历史。"""
-    start = getattr(req, "start")
+    start = req.start
     if start is not None:
         return start
     if "start" in req.model_fields_set:
@@ -263,11 +265,11 @@ def _candidate_store():
     return CandidateStore(settings.data_dir)
 
 
-def _raise_candidate_error(exc: Exception) -> None:
+def _candidate_error(exc: Exception) -> HTTPException:
     from app.backtest.candidates import CandidateValidationError
 
     status_code = 400 if isinstance(exc, CandidateValidationError) else 500
-    raise HTTPException(status_code=status_code, detail=str(exc)) from exc
+    return HTTPException(status_code=status_code, detail=str(exc))
 
 
 @router.get("/candidates")
@@ -275,7 +277,7 @@ def candidates_list():
     try:
         return {"items": _candidate_store().list()}
     except Exception as exc:
-        _raise_candidate_error(exc)
+        raise _candidate_error(exc) from exc
 
 
 @router.post("/candidates")
@@ -291,7 +293,7 @@ def candidate_create(req: CandidateCreateRequest):
             status=req.status,
         )
     except Exception as exc:
-        _raise_candidate_error(exc)
+        raise _candidate_error(exc) from exc
 
 
 @router.patch("/candidates/{candidate_id}")
@@ -303,7 +305,7 @@ def candidate_update(candidate_id: str, req: CandidateUpdateRequest):
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="候选方案不存在") from exc
     except Exception as exc:
-        _raise_candidate_error(exc)
+        raise _candidate_error(exc) from exc
 
 
 @router.delete("/candidates/{candidate_id}")
@@ -314,7 +316,7 @@ def candidate_delete(candidate_id: str):
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="候选方案不存在") from exc
     except Exception as exc:
-        _raise_candidate_error(exc)
+        raise _candidate_error(exc) from exc
 
 
 # ================================================================
@@ -369,7 +371,7 @@ def _guard_minute_strategy_backtest(
             400,
             detail=(
                 f"本地分钟K{have}无法覆盖回测起始日 {start}。"
-                "请先用「扩展分钟K历史」拉取更多数据, 或缩小回测区间"
+                "请缩小回测区间, 或等待后台补齐本地分钟数据"
             ),
         )
 
@@ -418,13 +420,9 @@ def strategy_run(req: StrategyBacktestRequest, request: Request):
 
 # ── SSE 流式回测 (实时进度 + 可取消 + 支持重连) ───────────────────
 
-import time
-import hashlib
-
-
 class _BacktestJob:
     """单个回测任务的状态, 存模块级供重连使用。"""
-    __slots__ = ("key", "cancel_event", "progress", "result", "error", "done", "finish_ts")
+    __slots__ = ("cancel_event", "done", "error", "finish_ts", "key", "progress", "result")
 
     def __init__(self, key: str):
         self.key = key
@@ -575,19 +573,14 @@ async def strategy_stream(
             yield f"event: error\ndata: {json.dumps({'message': BACKTEST_SERVER_GUARD_MESSAGE}, ensure_ascii=False)}\n\n"
             return
 
-        # 分钟K精确回测: Pro+ 门控 + 数据范围检查
+        # 分钟K精确回测使用已采集的本地数据, 不依赖当前数据源的采集能力。
         if minute_fill:
-            capset = request.app.state.capabilities
-            from app.tickflow.capabilities import Cap
-            if not capset.has(Cap.KLINE_MINUTE_BATCH):
-                yield f"event: error\ndata: {json.dumps({'message': '分钟K精确回测需要 Pro+ 权限 (kline.minute.batch)'}, ensure_ascii=False)}\n\n"
-                return
             # 检查本地分钟K历史是否覆盖回测区间
             repo = request.app.state.repo
             earliest_minute = repo.earliest_minute_date() if hasattr(repo, "earliest_minute_date") else None
             if earliest_minute is not None and start_date < earliest_minute:
                 msg = (f"本地分钟K历史最早到 {earliest_minute}, 无法覆盖回测起始日 {start_date}。"
-                       f"请先用「扩展分钟K历史」功能拉取更多数据, 或缩小回测区间。")
+                       "请缩小回测区间, 或等待后台补齐本地分钟数据。")
                 yield f"event: error\ndata: {json.dumps({'message': msg}, ensure_ascii=False)}\n\n"
                 return
 
@@ -639,6 +632,7 @@ async def strategy_stream(
                 except HeavyJobCancelledError:
                     _finish_job(job, error="回测已取消")
                 except Exception as e:
+                    logger.exception("backtest job failed")
                     _finish_job(job, error=str(e))
 
             # 启动后台线程 (不阻塞事件循环)
@@ -945,6 +939,7 @@ async def optimize_stream(
                     except HeavyJobCancelledError:
                         _finish_job(job, error="优化已取消")
                     except Exception as e:
+                        logger.exception("backtest worker failed")
                         _finish_job(job, error=str(e))
 
                 threading.Thread(target=_run_opt, daemon=True).start()
@@ -1173,6 +1168,7 @@ async def walkforward_stream(
                     except HeavyJobCancelledError:
                         _finish_job(job, error="walk-forward 已取消")
                     except Exception as e:
+                        logger.exception("backtest worker failed")
                         _finish_job(job, error=str(e))
 
                 threading.Thread(target=_run_wf, daemon=True).start()

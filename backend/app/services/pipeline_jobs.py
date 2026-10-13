@@ -20,8 +20,10 @@ import os
 import threading
 import uuid
 from collections.abc import Callable
+from contextlib import suppress
 from datetime import UTC, datetime
 from pathlib import Path
+from time import time_ns
 from typing import Any, Literal, TypeVar
 
 logger = logging.getLogger(__name__)
@@ -43,6 +45,10 @@ LONG_JOB_TIMEOUT_S = 1800
 HARD_JOB_TIMEOUT_S = 12 * 3600
 # 向后兼容: 旧调用方引用 STALE_JOB_TIMEOUT_S
 STALE_JOB_TIMEOUT_S = DEFAULT_JOB_TIMEOUT_S
+
+
+class JobBusyError(RuntimeError):
+    """已有不同的数据任务占用唯一写入槽。"""
 
 
 class JobCancelledError(BaseException):
@@ -84,6 +90,12 @@ def is_cancelled(job_id: str) -> bool:
     return ev is not None and ev.is_set()
 
 
+def get_cancel_event(job_id: str) -> threading.Event | None:
+    """共享现有任务的取消信号，供尚未发出的请求感知 terminate。"""
+    with _CANCEL_FLAGS_LOCK:
+        return _CANCEL_FLAGS.get(job_id)
+
+
 def _register_cancel_flag(job_id: str) -> None:
     with _CANCEL_FLAGS_LOCK:
         if job_id not in _CANCEL_FLAGS:
@@ -102,15 +114,24 @@ def _default_store_dir() -> Path:
 _STORE_DIR = _default_store_dir()
 
 
+def _job_sort_key(job: dict[str, Any]) -> tuple[datetime, int]:
+    timestamp = job.get("started_at") or job.get("last_progress_at")
+    started = datetime.fromisoformat(timestamp) if timestamp else datetime.min
+    if started.tzinfo is None:
+        started = started.replace(tzinfo=UTC)
+    return started, job["created_at_ns"]
+
+
 class JobStore:
-    def __init__(self, max_jobs: int = 50, store_dir: Path = _STORE_DIR) -> None:
+    def __init__(self, max_jobs: int = 50, store_dir: Path = _STORE_DIR, *, recover: bool = True) -> None:
         self._max_jobs = max_jobs
         self._store_dir = store_dir
         self._active_jobs: dict[str, dict[str, Any]] = {}   # running/pending
         self._active_id: str | None = None
         self._lock = threading.Lock()
         self._store_dir.mkdir(parents=True, exist_ok=True)
-        self._reap_orphans()
+        if recover:
+            self.recover_interrupted()
 
     # ===== persistence =====
 
@@ -129,12 +150,10 @@ class JobStore:
                 encoding="utf-8",
             )
             os.replace(tmp, path)
-        except Exception:
-            logger.warning("failed to write job file %s", path)
-            try:
+        except (OSError, UnicodeError, TypeError, ValueError):
+            logger.warning("failed to write job file %s", path, exc_info=True)
+            with suppress(OSError):
                 tmp.unlink()
-            except OSError:
-                pass
 
     def _read_file(self, job_id: str) -> dict[str, Any] | None:
         """从磁盘读取单个 job 文件。"""
@@ -143,35 +162,39 @@ class JobStore:
             return None
         try:
             return json.loads(path.read_text("utf-8"))
-        except Exception:
-            logger.warning("failed to read job file %s", path)
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            logger.warning("failed to read job file %s", path, exc_info=True)
             return None
 
     def _delete_oldest(self) -> None:
         """删除最老的 job 文件,保持文件数量 < max_jobs。"""
         try:
             files = sorted(self._store_dir.glob("*.json"), key=lambda f: f.stat().st_mtime)
-        except Exception:
+        except OSError:
             return
         while len(files) >= self._max_jobs:
             oldest = files.pop(0)
             try:
                 oldest.unlink()
-            except Exception:
-                logger.warning("failed to delete old job file %s", oldest)
+            except OSError:
+                logger.warning("failed to delete old job file %s", oldest, exc_info=True)
 
     def _job_files_sorted(self) -> list[dict[str, Any]]:
-        """扫描磁盘上所有 job 文件,按 started_at 从新到旧排序。"""
+        """按开始/创建时间排序，同秒旧记录使用原文件时间，不改写旧文件。"""
         jobs: list[dict[str, Any]] = []
         for f in self._store_dir.glob("*.json"):
             try:
-                jobs.append(json.loads(f.read_text("utf-8")))
-            except Exception:
+                job = json.loads(f.read_text("utf-8"))
+                if "created_at_ns" not in job:
+                    job["created_at_ns"] = f.stat().st_mtime_ns
+                jobs.append(job)
+            except (OSError, UnicodeError, ValueError, TypeError, KeyError, AttributeError):
+                logger.debug("failed to inspect job file %s", f, exc_info=True)
                 continue
-        jobs.sort(key=lambda j: j.get("started_at") or "", reverse=True)
+        jobs.sort(key=_job_sort_key, reverse=True)
         return jobs
 
-    def _reap_orphans(self) -> None:
+    def recover_interrupted(self) -> None:
         """启动补录: 把上个进程遗留的 pending/running 记录标为中断。
 
         单例在进程启动时实例化,此时磁盘上的 pending/running 必然来自已死
@@ -183,7 +206,7 @@ class JobStore:
         for f in self._store_dir.glob("*.json"):
             try:
                 j = json.loads(f.read_text("utf-8"))
-            except Exception:
+            except (OSError, UnicodeError, json.JSONDecodeError):
                 continue
             orig_status = j.get("status")
             if not j.get("id") or orig_status not in ("pending", "running"):
@@ -191,9 +214,13 @@ class JobStore:
             j["status"] = "failed"
             j["error"] = "后端重启,任务中断(启动时补录)"
             try:
-                mtime = datetime.fromtimestamp(f.stat().st_mtime, tz=UTC)
+                stat = f.stat()
+                # 补录会更新mtime；先保留旧记录的同秒排序依据。
+                if "created_at_ns" not in j:
+                    j["created_at_ns"] = stat.st_mtime_ns
+                mtime = datetime.fromtimestamp(stat.st_mtime, tz=UTC)
                 end = mtime.strftime("%Y-%m-%dT%H:%M:%SZ")
-            except Exception:
+            except (OSError, OverflowError, ValueError):
                 end = datetime.utcnow().isoformat(timespec="seconds") + "Z"
             # mtime 早于 started_at(时钟回拨等)时夹住, 避免 duration 为负
             if j.get("started_at") and end < j["started_at"]:
@@ -214,6 +241,7 @@ class JobStore:
         timeout_s: int | None = None,
         *,
         long_running: bool = False,
+        request_key: str | None = None,
     ) -> tuple[str, bool]:
         """单飞创建任务。返回 (job_id, is_new)。
 
@@ -239,6 +267,8 @@ class JobStore:
             if self._active_id:
                 active = self._active_jobs.get(self._active_id)
                 if active and active.get("status") in ("pending", "running"):
+                    if request_key is not None and active.get('request_key') != request_key:
+                        raise JobBusyError('已有其他数据任务运行，请完成或取消后重试')
                     return self._active_id, False
 
             job_id = uuid.uuid4().hex[:10]
@@ -247,6 +277,8 @@ class JobStore:
             created_at = datetime.utcnow().isoformat(timespec="seconds") + "Z"
             job = {
                 "id": job_id,
+                "created_at_ns": time_ns(),
+                "request_key": request_key,
                 "status": "pending",
                 "stage": "init",
                 "progress": 0,
@@ -366,10 +398,10 @@ class JobStore:
         # 合并: 内存中的活跃 job + 磁盘文件
         all_jobs: list[dict[str, Any]] = list(self._active_jobs.values())
         all_jobs.extend(self._job_files_sorted())
-        # 按 started_at 从新到旧排序,去重(理论上不会有重复)
+        # 同秒按持久化创建时间排序；相同id的排序键一致，保留前面的内存快照。
         seen: set[str] = set()
         result: list[dict[str, Any]] = []
-        for j in sorted(all_jobs, key=lambda x: x.get("started_at") or "", reverse=True):
+        for j in sorted(all_jobs, key=_job_sort_key, reverse=True):
             jid = j["id"]
             if jid in seen:
                 continue
@@ -476,10 +508,8 @@ class JobStore:
             self._active_jobs.clear()
             self._active_id = None
             for f in self._store_dir.glob("*.json"):
-                try:
+                with suppress(OSError):
                     f.unlink()
-                except Exception:
-                    pass
         with _CANCEL_FLAGS_LOCK:
             _CANCEL_FLAGS.clear()
 
@@ -487,6 +517,7 @@ class JobStore:
 def _summary(j: dict[str, Any]) -> dict[str, Any]:
     return {
         "id": j["id"],
+        "request_key": j.get("request_key"),
         "status": j["status"],
         "stage": j["stage"],
         "progress": j["progress"],
@@ -511,7 +542,8 @@ def _duration_s(j: dict[str, Any]) -> float | None:
 
 
 # 进程内单例
-job_store = JobStore()
+# 导入路由不取得任务所有权；仅 collector 生命周期在持进程锁后恢复。
+job_store = JobStore(recover=False)
 
 _Result = TypeVar("_Result")
 
@@ -546,14 +578,14 @@ def run_with_capacity(job_id: str, fn: Callable[[], _Result]) -> _Result:
             return fn()
     except HeavyJobCancelledError as exc:
         raise JobCancelledError(job_id) from exc
-    except HeavyJobLimitTimeoutError:
+    except HeavyJobLimitTimeoutError as exc:
         # 排队超时: fn 尚未执行, 无数据写入; 直接标记失败并按「已终止」上报,
         # API 层的 except JobCancelledError 分支无需(也无法)再改写状态。
         job_store.fail(
             job_id,
             f"排队等待重任务执行槽超时({int(wait_s)}s): 槽位可能被长回测或未正常退出的"
             "残留任务占用, 请稍后重试; 若持续出现请重启后端")
-        raise JobCancelledError(job_id)
+        raise JobCancelledError(job_id) from exc
 
 
 # ================================================================

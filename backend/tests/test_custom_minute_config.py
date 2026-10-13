@@ -465,7 +465,7 @@ def test_save_data_source_validates_before_write(monkeypatch, tmp_path):
             name="fm_ok",
             datasets={"full_minute": DatasetConfigIn(**_minute_dataset())},
         )
-        save_data_source(ok)
+        save_data_source(ok, None)
         assert (tmp_path / "fm_ok.yaml").exists()
         assert loader.provider_has_dataset("fm_ok", "full_minute")
 
@@ -475,7 +475,7 @@ def test_save_data_source_validates_before_write(monkeypatch, tmp_path):
             datasets={"full_minute": DatasetConfigIn(**_minute_dataset(drop_targets=("volume",)))},
         )
         with pytest.raises(HTTPException) as ei:
-            save_data_source(bad)
+            save_data_source(bad, None)
         assert ei.value.status_code == 400
         assert "volume" in str(ei.value.detail)
         assert not (tmp_path / "fm_bad.yaml").exists()
@@ -484,3 +484,8 @@ def test_save_data_source_validates_before_write(monkeypatch, tmp_path):
         loader._PROVIDERS.update(saved_providers)
         loader._PLUGIN_STATUS.clear()
         loader._PLUGIN_STATUS.update(saved_status)
+
+
+@pytest.fixture(autouse=True)
+def isolate_source_runtime_refresh(monkeypatch):
+    monkeypatch.setattr("app.api.settings._refresh_data_source_runtime", lambda request: None)

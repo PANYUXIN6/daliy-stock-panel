@@ -1,7 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { useVirtualizer } from '@tanstack/react-virtual'
-import { Link } from 'react-router-dom'
 import {
   createChart,
   LineStyle,
@@ -383,9 +382,11 @@ function DimensionIntradaySection({ configId, field, value, date, kind }: {
       ) : data?.status === 'no_data' ? (
         <div className="mx-4 mb-2 mt-1 flex h-[96px] flex-col items-center justify-center gap-1 rounded-md border border-dashed border-border">
           <Database className="h-4 w-4 text-muted" />
-          <p className="text-[11px] text-muted">分钟数据未落盘, 暂无分时走势</p>
-          <p className="text-[10px] text-muted/70">需 TickFlow Pro+ 盘后分钟同步 / Expert 盘中增量, 或自定义分钟源</p>
-          <Link to="/data" className="text-[10px] text-accent hover:text-accent/80">前往数据页 →</Link>
+          <p className="text-[11px] text-muted">后台尚未采集分钟数据，暂无分时走势</p>
+          <button type="button" onClick={() => void query.refetch()} disabled={query.isFetching}
+            className="inline-flex items-center gap-1 text-[10px] text-secondary hover:text-foreground disabled:opacity-50">
+            <RefreshCw className={`h-3 w-3 ${query.isFetching ? 'animate-spin' : ''}`} />刷新
+          </button>
         </div>
       ) : !data || data.status === 'empty' || data.points.length < 2 ? (
         <div className="grid h-[44px] place-items-center text-[11px] text-muted">

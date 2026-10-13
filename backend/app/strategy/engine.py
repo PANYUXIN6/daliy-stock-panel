@@ -6,6 +6,7 @@
 """
 from __future__ import annotations
 
+import contextlib
 import importlib.util
 import logging
 import sys
@@ -75,10 +76,7 @@ def _normalize_param_defs(params: Any) -> list[dict]:
         for key, val in params.items():
             if not isinstance(key, str) or not key:
                 continue
-            if isinstance(val, dict):
-                item = {"id": key, **val}
-            else:
-                item = {"id": key, "default": val}
+            item = {"id": key, **val} if isinstance(val, dict) else {"id": key, "default": val}
             items.append(item)
         return [_normalize_param_item(item) for item in items]
 
@@ -288,8 +286,8 @@ class StrategyEngine:
                         continue
                     candidates[strategy_id] = s
                     candidate_paths[strategy_id] = f
-                except Exception as e:
-                    logger.warning("load strategy %s failed: %s", f.name, e)
+                except Exception as e:  # noqa: BLE001 - 策略文件可执行用户代码, 加载失败按文件隔离。
+                    logger.warning("load strategy %s failed: %s", f.name, e, exc_info=True)
                     errors.append({"file": str(f), "error": str(e)})
 
         # 第二阶段: 校验 composite 引用合法性。
@@ -424,10 +422,8 @@ class StrategyEngine:
                     sys.modules[spec.name] = previous_module
                 raise
             finally:
-                try:
+                with contextlib.suppress(ValueError):
                     sys.path.remove(inserted_path)
-                except ValueError:
-                    pass
 
         meta = dict(getattr(mod, "META", {}) or {})
         meta.setdefault("id", path.stem)
@@ -1673,9 +1669,9 @@ class StrategyEngine:
             return minute_df.join(evaluated, on=["symbol", "datetime"], how="left").with_columns(
                 [pl.col(name).fill_null(False).cast(pl.Boolean).alias(name) for name in exprs]
             )
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - 可选信号注入失败交由既有 required_features 校验处理。
             # 注入失败不阻断策略执行: 未注入列会由 required_features 校验兜底报错
-            logger.warning("intraday signal inject failed: %s", e)
+            logger.warning("intraday signal inject failed: %s", e, exc_info=True)
             return minute_df
 
     @staticmethod

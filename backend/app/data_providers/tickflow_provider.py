@@ -8,7 +8,11 @@ from datetime import datetime
 import polars as pl
 
 from app.data_providers.base import AssetType, ProviderCapabilities
-from app.data_providers.normalizer import normalize_adj_factors, normalize_daily, normalize_instruments
+from app.data_providers.normalizer import (
+    normalize_adj_factors,
+    normalize_daily,
+    normalize_instruments,
+)
 from app.tickflow.client import get_client
 
 logger = logging.getLogger(__name__)
@@ -45,7 +49,7 @@ class TickFlowProvider:
         symbols: list[str],
         start_time: datetime | None,
         end_time: datetime | None,
-        asset_type: AssetType,  # noqa: ARG002
+        asset_type: AssetType,
     ) -> pl.DataFrame:
         if not symbols:
             return pl.DataFrame()
@@ -58,11 +62,18 @@ class TickFlowProvider:
             "show_progress": False,
         }
         if start_time and end_time:
-            from app.services.kline_sync import _compact_klines_to_df, _datetime_to_ms, _timestamp_to_beijing_datetime
+            from app.services.kline_sync import (
+                _compact_klines_to_df,
+                _datetime_to_ms,
+                _timestamp_to_beijing_datetime,
+            )
             kwargs["start_time"] = _datetime_to_ms(start_time)
             kwargs["end_time"] = _datetime_to_ms(end_time)
         else:
-            from app.services.kline_sync import _compact_klines_to_df, _timestamp_to_beijing_datetime
+            from app.services.kline_sync import (
+                _compact_klines_to_df,
+                _timestamp_to_beijing_datetime,
+            )
         raw = tf.klines.batch(symbols, **kwargs)
         # False 直转: 列数组→polars (无 pandas 中转), 加北京墙钟 datetime 列
         # (normalize_daily 映射为 date); 保留 timestamp 原列 — normalize_daily
@@ -78,7 +89,7 @@ class TickFlowProvider:
         symbols: list[str],
         start_time: datetime | None,
         end_time: datetime | None,
-        asset_type: AssetType,  # noqa: ARG002
+        asset_type: AssetType,
     ) -> pl.DataFrame:
         if not symbols:
             return pl.DataFrame()
@@ -98,9 +109,9 @@ class TickFlowProvider:
         symbols: list[str],
         start_time: datetime | None,
         end_time: datetime | None,
-        asset_type: AssetType = "stock",  # noqa: ARG002
-        freq: str = "1m",  # noqa: ARG002
-        on_chunk_done: Callable[[int, int], None] | None = None,  # noqa: ARG002
+        asset_type: AssetType = "stock",
+        freq: str = "1m",
+        on_chunk_done: Callable[[int, int], None] | None = None,
     ) -> pl.DataFrame:
         # Existing minute sync remains in app.services.kline_sync for now.
         return pl.DataFrame()

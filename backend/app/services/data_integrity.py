@@ -18,6 +18,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import logging
 import threading
@@ -33,6 +34,9 @@ import polars as pl
 from app.market_time import CN_TZ
 
 logger = logging.getLogger(__name__)
+
+# asyncio 仅弱引用后台任务；保留修复任务直到 executor 执行结束。
+_REPAIR_TASKS: set[asyncio.Task[None]] = set()
 
 # 尾盘定版线: quote_ts 达到当日 15:00 即视为收盘后写入 (含 close_final 定版)
 CLOSE_CUTOFF = dt_time(15, 0)
@@ -161,8 +165,8 @@ def _partition_is_snapshot(day: date, part_dir: Path, quote_ts_max_ms: int | Non
             ).item()
             if has_activity:
                 return True
-        except Exception as e:
-            logger.debug("snapshot residue scan skipped %s: %s", path, e)
+        except (OSError, pl.exceptions.PolarsError) as e:
+            logger.debug("snapshot residue scan skipped %s: %s", path, e, exc_info=True)
             return True
 
     return suspicious_rows > 0 and authoritative_rows <= suspicious_rows
@@ -343,7 +347,6 @@ def launch_integrity_repair(app_state, start_date: date, reason: str) -> tuple[s
     调度自适应: 调用方在事件循环内 (API 端点) → executor 后台执行;
     无事件循环 (boot Timer 线程) → 独立 daemon 线程执行。
     """
-    import asyncio
     import threading
 
     repo = getattr(app_state, "repo", None)
@@ -397,7 +400,7 @@ def launch_integrity_repair(app_state, start_date: date, reason: str) -> tuple[s
                 job_store.succeed(job_id, result)
         except JobCancelledError:
             pass  # 已由 terminate() 标记失败
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             logger.exception("integrity repair failed: job_id=%s", job_id)
             job_store.fail(job_id, str(e))
         finally:
@@ -413,7 +416,9 @@ def launch_integrity_repair(app_state, start_date: date, reason: str) -> tuple[s
         async def task() -> None:
             await loop.run_in_executor(None, _execute)
 
-        asyncio.create_task(task())
+        repair_task = asyncio.create_task(task())
+        _REPAIR_TASKS.add(repair_task)
+        repair_task.add_done_callback(_REPAIR_TASKS.discard)
     except RuntimeError:
         threading.Thread(
             target=_execute, daemon=True, name=f"integrity-repair-{job_id[:8]}"

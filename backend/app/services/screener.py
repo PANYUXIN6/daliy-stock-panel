@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import time
+from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 from pathlib import Path
@@ -417,10 +418,8 @@ class ScreenerService:
             df_result = pl.DataFrame()
         finally:
             if con is not None:
-                try:
+                with suppress(Exception):
                     con.close()
-                except Exception:  # noqa: BLE001
-                    pass
 
         rows = df_result.to_dicts() if not df_result.is_empty() else []
         elapsed = (time.perf_counter() - t0) * 1000

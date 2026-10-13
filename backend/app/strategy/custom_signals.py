@@ -80,7 +80,8 @@ def _string_ext_fields() -> frozenset[str]:
         from app.factors.ext_factors import ext_string_fields
 
         return ext_string_fields()
-    except Exception:
+    except Exception:  # noqa: BLE001 - 可选扩展字段探测失败保留无扩展字段契约。
+        logger.debug("extension signal fields unavailable", exc_info=True)
         return frozenset()
 
 
@@ -147,8 +148,8 @@ def load_all(data_dir: Path) -> list[dict]:
     for f in sorted(d.glob("*.json")):
         try:
             out.append(json.loads(f.read_text(encoding="utf-8")))
-        except Exception as e:
-            logger.warning("custom signal load failed %s: %s", f.name, e)
+        except (OSError, UnicodeError, json.JSONDecodeError) as e:
+            logger.warning("custom signal load failed %s: %s", f.name, e, exc_info=True)
     return out
 
 
@@ -176,8 +177,8 @@ def _parse_days(c: dict, key: str, i: int) -> int:
     raw = c.get(key, 0)
     try:
         n = int(raw)
-    except (TypeError, ValueError):
-        raise ValueError(f"第 {i+1} 个条件: {key} 必须是整数: {raw!r}")
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"第 {i+1} 个条件: {key} 必须是整数: {raw!r}") from exc
     if n < 0 or n > MAX_DAYS:
         raise ValueError(f"第 {i+1} 个条件: {key} 必须在 0..{MAX_DAYS} 之间: {n}")
     return n
@@ -320,8 +321,8 @@ def build_expressions(signals: list[dict], allow_shift: bool = True) -> dict[str
             for p in parts[1:]:
                 combined = combined & p
             out[col_name] = combined
-        except Exception as e:
-            logger.warning("custom signal compile failed %s: %s", sig.get("id"), e)
+        except Exception as e:  # noqa: BLE001 - 单条用户信号编译失败不得中断其他信号。
+            logger.warning("custom signal compile failed %s: %s", sig.get("id"), e, exc_info=True)
     return out
 
 
@@ -369,7 +370,8 @@ def _expr_root_columns(expr: pl.Expr) -> set[str]:
         # Polars 的 meta.root_names() 返回表达式引用的根列名
         names = expr.meta.root_names()
         return set(names)
-    except Exception:
+    except Exception:  # noqa: BLE001 - 表达式依赖探测是尽力步骤, 失败保留空依赖。
+        logger.debug("signal expression roots unavailable", exc_info=True)
         return set()
 
 
@@ -480,8 +482,8 @@ def build_intraday_expressions(signals: list[dict]) -> dict[str, pl.Expr]:
             for p in parts[1:]:
                 combined = combined & p
             out[intraday_column_name(sig["id"])] = combined
-        except Exception as e:
-            logger.warning("intraday signal compile failed %s: %s", sig.get("id"), e)
+        except Exception as e:  # noqa: BLE001 - 单条盘中用户信号编译失败按定义隔离。
+            logger.warning("intraday signal compile failed %s: %s", sig.get("id"), e, exc_info=True)
     return out
 
 

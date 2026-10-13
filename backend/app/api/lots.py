@@ -31,7 +31,7 @@ def _resolve_asset_type(request: Request, symbol: str) -> str:
     repo = getattr(request.app.state, "repo", None)
     try:
         return repo.resolve_asset_type(symbol) if repo is not None else "stock"
-    except Exception:
+    except Exception:  # noqa: BLE001 -- 资产解析失败沿用现有默认值，warning已包含traceback
         # 回退为 stock 会让 etf 批次的止盈止损规则落入错误的监控轮, 必须留痕排查
         logging.getLogger(__name__).warning(
             "resolve_asset_type failed for %s, falling back to stock", symbol, exc_info=True

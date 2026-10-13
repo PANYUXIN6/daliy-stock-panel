@@ -8,7 +8,6 @@ AI 复盘摘要段构建。
 
 from __future__ import annotations
 
-import json
 from datetime import date
 from pathlib import Path
 
@@ -24,8 +23,9 @@ def _mk_days(data_dir: Path, *days: str) -> None:
 
 
 @pytest.fixture()
-def data_dir(tmp_path: Path) -> Path:
+def data_dir(tmp_path: Path, monkeypatch) -> Path:
     _mk_days(tmp_path, "2026-08-26", "2026-08-27", "2026-08-28")
+    monkeypatch.setattr(dt, "cn_today", lambda: date(2026, 8, 28))
     return tmp_path
 
 
@@ -85,13 +85,13 @@ def test_resolve_older_than_all_partitions_returns_target(data_dir):
 
 def test_source_unavailable_without_fuyao(data_dir, monkeypatch):
     monkeypatch.setattr(dt, "_provider", lambda: None)
-    out = dt.get_dragon_tiger(data_dir, None)
+    out = dt.sync_dragon_tiger(data_dir, None)
     assert out["state"] == "source_unavailable"
 
 
 def test_fetch_stores_cache_then_hits_cache(data_dir, monkeypatch):
     provider = _use_provider(monkeypatch, _FakeProvider())
-    out = dt.get_dragon_tiger(data_dir, None)  # 默认 → 最近分区 08-28
+    out = dt.sync_dragon_tiger(data_dir, None)  # 默认 → 最近分区 08-28
     assert out["state"] == "ok"
     assert out["trade_date"] == "2026-08-28"
     assert len(provider.calls) == 3  # 三榜一次取齐
@@ -99,45 +99,45 @@ def test_fetch_stores_cache_then_hits_cache(data_dir, monkeypatch):
     assert cache.exists()
 
     provider.calls.clear()
-    out2 = dt.get_dragon_tiger(data_dir, date(2026, 8, 30))  # 周日 → 08-28 → 命中缓存
+    out2 = dt.get_dragon_tiger(data_dir, date(2026, 8, 28))
     assert out2["state"] == "ok" and out2["trade_date"] == "2026-08-28"
     assert provider.calls == []  # 纯本地, 不打网络
 
 
 def test_explicit_history_date_uses_cache(data_dir, monkeypatch):
     provider = _use_provider(monkeypatch, _FakeProvider())
-    dt.get_dragon_tiger(data_dir, date(2026, 8, 27))
+    dt.sync_dragon_tiger(data_dir, date(2026, 8, 27))
     assert provider.calls[0] == ("all", "2026-08-27")
     provider.calls.clear()
     dt.get_dragon_tiger(data_dir, date(2026, 8, 27))
     assert provider.calls == []
 
 
-def test_unpublished_today_falls_back_to_prev(data_dir, monkeypatch):
-    # 08-28 拉取失败 (未发布/未就绪) → 回退 08-27, state=fallback_prev
-    provider = _use_provider(monkeypatch, _FakeProvider(fail_dates={"2026-08-28"}))
+def test_collection_failure_does_not_substitute_previous_day(data_dir, monkeypatch):
+    _use_provider(monkeypatch, _FakeProvider(fail_dates={"2026-08-28"}))
+    dt.sync_dragon_tiger(data_dir, date(2026, 8, 27))
+    with pytest.raises(FuyaoError):
+        dt.sync_dragon_tiger(data_dir, date(2026, 8, 28))
     out = dt.get_dragon_tiger(data_dir, date(2026, 8, 28))
-    assert out["state"] == "fallback_prev"
-    assert out["trade_date"] == "2026-08-27"
-    assert out["requested_date"] == "2026-08-28"
-    # 回退日缓存以 ok 状态落盘 (不污染直查)
-    cached = json.loads((data_dir / "dragon_tiger" / "date=2026-08-27.json").read_text(encoding="utf-8"))
-    assert cached["state"] == "ok"
+    assert out == {"state": "no_data", "requested_date": "2026-08-28"}
 
 
 def test_total_failure_returns_no_data(data_dir, monkeypatch):
-    provider = _use_provider(monkeypatch, _FakeProvider(fail_dates={"2026-08-28", "2026-08-27"}))
+    _use_provider(monkeypatch, _FakeProvider(fail_dates={"2026-08-28", "2026-08-27"}))
     out = dt.get_dragon_tiger(data_dir, date(2026, 8, 28))
     assert out["state"] == "no_data"
-    assert "2026-08-28" in out.get("message", "")
+    assert out["requested_date"] == "2026-08-28"
 
 
-def test_corrupt_cache_refetches(data_dir, monkeypatch):
+def test_corrupt_cache_requires_explicit_collection(data_dir, monkeypatch):
     provider = _use_provider(monkeypatch, _FakeProvider())
     cache = data_dir / "dragon_tiger" / "date=2026-08-28.json"
     cache.parent.mkdir(parents=True, exist_ok=True)
     cache.write_text("{broken json", encoding="utf-8")
     out = dt.get_dragon_tiger(data_dir, date(2026, 8, 28))
+    assert out["state"] == "no_data"
+    assert provider.calls == []
+    out = dt.sync_dragon_tiger(data_dir, date(2026, 8, 28))
     assert out["state"] == "ok"
     assert provider.calls  # 缓存损坏 → 重新拉取
 
@@ -146,6 +146,7 @@ def test_corrupt_cache_refetches(data_dir, monkeypatch):
 
 def test_build_recap_context_contains_summary(data_dir, monkeypatch):
     _use_provider(monkeypatch, _FakeProvider())
+    dt.sync_dragon_tiger(data_dir)
     ctx = dt.build_recap_context(data_dir)
     assert "净买入居前" in ctx and "贵州茅台" in ctx
     assert "机构净买居前" in ctx

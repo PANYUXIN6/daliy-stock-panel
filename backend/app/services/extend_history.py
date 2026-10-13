@@ -21,14 +21,13 @@ from collections.abc import Callable
 from datetime import date, datetime, timedelta
 
 from app.services import kline_sync
-from app.services.pipeline_jobs import job_store
 from app.tickflow.capabilities import Cap, CapabilitySet
 from app.tickflow.repository import KlineRepository
 
 logger = logging.getLogger(__name__)
 
 
-def _noop(stage: str, pct: int, msg: str, **kwargs) -> None:  # noqa: ARG001
+def _noop(stage: str, pct: int, msg: str, **kwargs) -> None:
     pass
 
 
@@ -45,13 +44,16 @@ def _resolve_universe(capset: CapabilitySet) -> list[str]:
             all_a = get_pool("CN_Equity_A", refresh=True)
             if all_a:
                 return sorted(all_a)
-        except Exception as e:
-            logger.warning("CN_Equity_A pool unavailable: %s", e)
+        except Exception as e:  # noqa: BLE001 — SDK 标的池失败沿用原有本地池路径，由 warning 留痕
+            logger.warning("CN_Equity_A pool unavailable: %s", e, exc_info=True)
 
-    from app.tickflow.pools import DEMO_SYMBOLS, get_pool as _get_pool
-    from app.config import settings
     from pathlib import Path
+
     import polars as pl
+
+    from app.config import settings
+    from app.tickflow.pools import DEMO_SYMBOLS
+    from app.tickflow.pools import get_pool as _get_pool
     base: set[str] = set(DEMO_SYMBOLS)
     base.update(_get_pool("watchlist"))
     d = Path(settings.data_dir)
@@ -60,8 +62,8 @@ def _resolve_universe(capset: CapabilitySet) -> list[str]:
         try:
             inst = pl.read_parquet(inst_path, columns=["symbol"])
             base.update(inst["symbol"].to_list())
-        except Exception as e:
-            logger.warning("instruments supplement failed: %s", e)
+        except (OSError, pl.exceptions.PolarsError) as e:
+            logger.warning("instruments supplement failed: %s", e, exc_info=True)
     return sorted(base)
 
 
@@ -83,8 +85,8 @@ def _refresh_single_view(repo: KlineRepository, name: str) -> None:
             f"CREATE OR REPLACE VIEW {name} AS "
             f"SELECT * FROM read_parquet('{path}', union_by_name=true)"
         )
-    except Exception as e:
-        logger.warning("refresh view %s failed: %s", name, e)
+    except Exception as e:  # noqa: BLE001 — 单个可选仓库视图刷新失败留痕，不覆盖历史同步结果
+        logger.warning("refresh view %s failed: %s", name, e, exc_info=True)
 
 
 def compute_offset(value: int, unit: str) -> timedelta:
@@ -194,7 +196,7 @@ def run_extend_history(
     logger.info("extend_history: full enriched rebuild start")
 
     from app.indicators.pipeline import run_pipeline
-    written_enriched = run_pipeline()
+    run_pipeline()
 
     enriched_dir = repo.store.data_dir / "kline_daily_enriched"
     enriched_days = len(list(enriched_dir.glob("date=*"))) if enriched_dir.exists() else 0

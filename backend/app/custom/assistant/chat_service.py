@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import logging
 import time
 import uuid
 from collections.abc import AsyncIterator
@@ -29,6 +30,8 @@ from app.services.ai_provider import (
     is_codex_cli_provider,
 )
 
+logger = logging.getLogger(__name__)
+
 # 单轮最多保留的用户/助手消息条数(约 8 轮对话), 更早历史截断以控 token。
 _MAX_HISTORY_MESSAGES = 16
 
@@ -44,7 +47,7 @@ def _round_checkpoint() -> int:
 
     try:
         return max(0, int(current_ai_round_checkpoint()))
-    except Exception:  # 配置异常时退回默认, 不因配置问题掐断对话
+    except (OSError, AttributeError, TypeError, ValueError, OverflowError):  # 配置异常时退回默认, 不因配置问题掐断对话
         return _TOOL_ROUND_CHECKPOINT
 
 _SETTINGS_HINT = "/settings?tab=ai"
@@ -328,6 +331,7 @@ async def chat_stream(
                         "content": json.dumps(result, ensure_ascii=False),
                     })
         except Exception as exc:  # 单轮失败收敛为 error 事件, 不打断流
+            logger.exception("assistant response failed")
             await queue.put(_classify_exception(exc))
         finally:
             await queue.put({"type": "done"})

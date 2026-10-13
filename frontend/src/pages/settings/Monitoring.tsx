@@ -537,7 +537,7 @@ export function SettingsMonitoringPanel({ highlight }: { highlight?: string } = 
             <>
               <p className="text-xs text-secondary mb-4">
                 通过五档盘口实时修正真假涨停/跌停。真封板显示封单量,假涨停(收盘价=涨停价但卖一有量)归入炸板。
-                盘中按设定间隔轮询,收盘后自动定版。
+                盘中按设定间隔轮询,收盘后在数据页手动更新最终盘口。
               </p>
               <ToggleRow
                 label="启用真假板修正"

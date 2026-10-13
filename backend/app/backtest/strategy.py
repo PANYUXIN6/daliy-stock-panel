@@ -460,8 +460,8 @@ def _filter_dependencies(strategy: StrategyDef, params: dict) -> tuple[set[str],
         if expr is None:
             return set(), True
         return set(expr.meta.root_names()), True
-    except Exception as exc:
-        logger.warning("strategy filter dependency resolution failed: %s", exc)
+    except Exception as exc:  # noqa: BLE001 - 自定义策略依赖探测失败保留声明特征契约。
+        logger.warning("strategy filter dependency resolution failed: %s", exc, exc_info=True)
         return set(strategy.required_features), bool(strategy.required_features)
 
 
@@ -1734,8 +1734,8 @@ class StrategyBacktestService:
                 factor_attribution = _factor_attribution_summary(
                     factor_snapshot["frame"], result.trades
                 )
-            except Exception as exc:
-                logger.warning("factor attribution failed: %s", exc)
+            except Exception as exc:  # noqa: BLE001 - 因子归因是附加分析, 失败不得丢弃已完成的回测结果。
+                logger.warning("factor attribution failed: %s", exc, exc_info=True)
 
         elapsed = (time.perf_counter() - t0) * 1000
 
@@ -2279,9 +2279,9 @@ class StrategyBacktestService:
                     )
                 )
                 return marked["_hit"].fill_null(False).cast(pl.Boolean)
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001 - 可替换历史过滤函数失败时保留既有过滤流程。
                 history_failed = True
-                logger.warning("strategy filter_history_fn failed: %s", e)
+                logger.warning("strategy filter_history_fn failed: %s", e, exc_info=True)
                 # 失败则回退到 filter_fn (若存在)
 
         # 策略 filter_fn: 候选层 (filter_history 不可用或失败时)
@@ -2292,8 +2292,8 @@ class StrategyBacktestService:
                     result = panel.select(expr.alias("_candidate_filter"))
                     if not result.is_empty():
                         return result["_candidate_filter"].fill_null(False).cast(pl.Boolean)
-            except Exception as e:
-                logger.warning("strategy filter_fn failed: %s", e)
+            except Exception as e:  # noqa: BLE001 - 自定义策略过滤失败按现有规则隔离并保留失败掩码。
+                logger.warning("strategy filter_fn failed: %s", e, exc_info=True)
                 return false_mask
 
         if history_failed:
@@ -2349,8 +2349,8 @@ class StrategyBacktestService:
     def _build_benchmark_curve(self, start: date, end: date) -> list[dict]:
         try:
             df = self.engine.repo.get_index_daily(BENCHMARK_SYMBOL, start, end, columns=["date", "close"])
-        except Exception as e:
-            logger.warning("load benchmark %s failed: %s", BENCHMARK_SYMBOL, e)
+        except Exception as e:  # noqa: BLE001 - 可选基准读取失败保留空基准曲线。
+            logger.warning("load benchmark %s failed: %s", BENCHMARK_SYMBOL, e, exc_info=True)
             return []
 
         if df.is_empty() or "close" not in df.columns:
@@ -2477,8 +2477,8 @@ class StrategyBacktestService:
         return {
             "symbol": t.symbol,
             "name": t.name,
-            "entry_date": str(t.entry_date) if isinstance(t.entry_date, date) else str(t.entry_date),
-            "exit_date": str(t.exit_date) if isinstance(t.exit_date, date) else str(t.exit_date),
+            "entry_date": str(t.entry_date),
+            "exit_date": str(t.exit_date),
             "entry_price": t.entry_price,
             "exit_price": t.exit_price,
             "pnl_pct": t.pnl_pct,

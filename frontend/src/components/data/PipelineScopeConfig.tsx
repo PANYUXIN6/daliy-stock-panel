@@ -35,7 +35,7 @@ export function PipelineScopeConfig() {
   return (
     <div className="space-y-2.5">
       <p className="text-xs text-secondary leading-relaxed">
-        勾选盘后管道每次自动拉取的数据类型。仅影响后续同步,已存储的历史数据不受影响。
+        勾选每次点击“立即同步”时拉取的数据类型。仅影响后续同步，已存储的历史数据不受影响。
       </p>
       <div className="space-y-1.5">
         {ITEMS.map((item) => {

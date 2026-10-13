@@ -8,6 +8,7 @@
 """
 from __future__ import annotations
 
+import logging
 import threading
 from datetime import date
 from pathlib import Path
@@ -37,6 +38,7 @@ def test_concurrent_upserts_do_not_lose_rows(tmp_path: Path) -> None:
             for _ in range(3):  # 每线程多轮写, 提高乐观重试路径命中
                 repo.merge_live_daily_asset("stock", _frame(symbols))
         except BaseException as exc:
+            logging.getLogger(__name__).exception("concurrent daily writer failed")
             errors.append(exc)
 
     threads = [threading.Thread(target=worker, args=(g,), daemon=True) for g in groups]

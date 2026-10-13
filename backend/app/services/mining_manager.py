@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import threading
 import time
 from collections.abc import Callable
@@ -21,6 +22,8 @@ from app.services.mining_jobs import (
     MiningRunValidationError,
     compute_run_signature,
 )
+
+logger = logging.getLogger(__name__)
 
 WorkerRunner = Callable[
     [dict[str, Any], Callable[[dict[str, Any]], None], threading.Event],
@@ -192,6 +195,7 @@ class MiningJobManager:
             if cancel_event.is_set():
                 self._finish_cancelled(run_id)
             else:
+                logger.exception("mining run failed: %s", run_id)
                 self._finish_failed(run_id, exc)
         finally:
             with self._lock:

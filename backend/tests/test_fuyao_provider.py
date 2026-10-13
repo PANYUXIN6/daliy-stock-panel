@@ -435,7 +435,7 @@ def test_save_plugin_key_invalid_key_not_persisted(monkeypatch):
     monkeypatch.setattr(
         settings_api.secrets_store, "save", lambda updates: saved.update(updates) or updates
     )
-    out = settings_api.save_plugin_key(settings_api.PluginKeyIn(plugin="fuyao", api_key="bad"))
+    out = settings_api.save_plugin_key(settings_api.PluginKeyIn(plugin="fuyao", api_key="bad"), None)
     assert out["ok"] is False and out["reason"] == "invalid"
     assert saved == {}  # 无效 Key 不落盘
 
@@ -457,7 +457,7 @@ def test_save_plugin_key_valid_persists_and_rescans(monkeypatch):
     monkeypatch.setattr(
         custom_sources, "list_plugins", lambda: [{"name": "fuyao", "available": True}]
     )
-    out = settings_api.save_plugin_key(settings_api.PluginKeyIn(plugin="fuyao", api_key="good-key"))
+    out = settings_api.save_plugin_key(settings_api.PluginKeyIn(plugin="fuyao", api_key="good-key"), None)
     assert out["ok"] is True
     assert saved == {"fuyao_api_key": "good-key"}  # 字段名与 provider.SECRETS_FIELD 一致
     assert out["plugin_available"] is True
@@ -475,7 +475,7 @@ def test_clear_plugin_key(monkeypatch):
     monkeypatch.setattr(
         custom_sources, "list_plugins", lambda: [{"name": "fuyao", "available": False}]
     )
-    out = settings_api.clear_plugin_key("fuyao")
+    out = settings_api.clear_plugin_key("fuyao", None)
     assert out["ok"] is True and out["plugin_available"] is False
     assert cleared == ["fuyao_api_key"]
 
@@ -1530,3 +1530,8 @@ def test_test_dataset_adj_factor_preview(monkeypatch):
     assert out["rows"] == 1
     assert out["preview"][0]["trade_date"] == "2026-06-12"
     assert out["preview"][0]["ex_factor"] == pytest.approx(32.8 / 32.12)
+
+
+@pytest.fixture(autouse=True)
+def isolate_source_runtime_refresh(monkeypatch):
+    monkeypatch.setattr("app.api.settings._refresh_data_source_runtime", lambda request: None)

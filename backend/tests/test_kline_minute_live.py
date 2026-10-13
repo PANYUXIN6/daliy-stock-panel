@@ -27,8 +27,8 @@ class _FakeRepo:
     def __init__(self) -> None:
         # /minute 读取 repo.store.data_dir 判断分钟基准标记 (无标记即旧行为)
         import tempfile
-        from types import SimpleNamespace
         from pathlib import Path
+        from types import SimpleNamespace
         self.store = SimpleNamespace(data_dir=Path(tempfile.mkdtemp()))
 
     def resolve_asset_type(self, symbol: str) -> str:
@@ -65,9 +65,7 @@ def _client() -> TestClient:
 def _patch_market(monkeypatch, *, in_session: bool) -> None:
     import app.api.kline as kline_api
 
-    monkeypatch.setattr(kline_api, "cn_now", lambda: _NOW)
     monkeypatch.setattr(kline_api, "cn_today", lambda: _TODAY)
-    monkeypatch.setattr(kline_api, "in_continuous_session", lambda: in_session)
     # 缺省日期路径会问交易日探针; 钉成交易日 (_NOW 是周三), 不打真实行情请求
     monkeypatch.setattr(kline_api.trading_day, "is_trading_day", lambda now=None: True)
 
@@ -76,17 +74,14 @@ def _patch_live_fetch(monkeypatch) -> None:
     import app.api.kline as kline_api
 
     def _fake_fetch(symbol, trade_date, asset_type="stock", *, capset, raw_basis=False):
-        return pl.DataFrame({
-            "datetime": [datetime(2026, 8, 26, 9, 59)],
-            "close": [11.11],
-        })
+        raise AssertionError("分钟读取不得调用数据源")
 
     monkeypatch.setattr(
         kline_api.kline_sync, "fetch_minute_single", _fake_fetch
     )
 
 
-def test_minute_live_param_bypasses_local_first_during_session(monkeypatch):
+def test_minute_live_param_reads_shared_local_during_session(monkeypatch):
     _patch_market(monkeypatch, in_session=True)
     _patch_live_fetch(monkeypatch)
 
@@ -96,8 +91,8 @@ def test_minute_live_param_bypasses_local_first_during_session(monkeypatch):
 
     assert resp.status_code == 200
     body = resp.json()
-    assert body["source"] == "live"
-    assert body["rows"][0]["close"] == 11.11
+    assert body["source"] == "local"
+    assert body["rows"][0]["close"] == 10.0
 
 
 def test_minute_without_live_keeps_local_first(monkeypatch):

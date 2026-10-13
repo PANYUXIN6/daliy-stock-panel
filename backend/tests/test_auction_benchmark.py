@@ -7,7 +7,6 @@ fuyao 未配置降级、目标日失败 fallback_prev、彻底失败 no_data、A
 
 from __future__ import annotations
 
-import json
 from datetime import date
 from pathlib import Path
 
@@ -32,12 +31,13 @@ def _write_kline(data_dir: Path, day: str, rows: list[tuple[str, float, float]])
 
 
 @pytest.fixture()
-def data_dir(tmp_path: Path) -> Path:
+def data_dir(tmp_path: Path, monkeypatch) -> Path:
     for d in ("2026-08-26", "2026-08-27", "2026-08-28"):
         (tmp_path / "kline_daily" / f"date={d}").mkdir(parents=True, exist_ok=True)
     _write_kline(tmp_path, "2026-08-26", [("600519.SH", 1690.0, 1700.0), ("000858.SZ", 130.0, 131.0)])
     _write_kline(tmp_path, "2026-08-27", [("600519.SH", 1717.0, 1734.0), ("000858.SZ", 132.0, 130.0)])
     _write_kline(tmp_path, "2026-08-28", [("600519.SH", 1734.0, 1768.68), ("000858.SZ", 129.0, 133.0)])
+    monkeypatch.setattr(ab, "cn_today", lambda: date(2026, 8, 28))
     return tmp_path
 
 
@@ -80,57 +80,58 @@ def test_resolve_rolls_back_non_trading_day(data_dir):
 
 def test_source_unavailable_without_fuyao(data_dir, monkeypatch):
     monkeypatch.setattr(ab, "_provider", lambda: None)
-    out = ab.get_auction_benchmark(data_dir, None)
+    out = ab.sync_auction_benchmark(data_dir, None)
     assert out["state"] == "source_unavailable"
 
 
 def test_fetch_stores_cache_then_hits_cache(data_dir, monkeypatch):
     provider = _use_provider(monkeypatch, _FakeProvider())
-    out = ab.get_auction_benchmark(data_dir, None)  # 默认 → 最近分区 08-28
+    out = ab.sync_auction_benchmark(data_dir, None)  # 默认 → 最近分区 08-28
     assert out["state"] == "ok" and out["trade_date"] == "2026-08-28"
     assert out["count"] == 2 and len(out["items"]) == 2
     assert provider.calls == ["2026-08-28"]
     assert (data_dir / "auction_benchmark" / "date=2026-08-28.json").exists()
 
     provider.calls.clear()
-    out2 = ab.get_auction_benchmark(data_dir, date(2026, 8, 30))  # 周日 → 08-28 → 命中缓存
+    out2 = ab.get_auction_benchmark(data_dir, date(2026, 8, 28))
     assert out2["state"] == "ok" and out2["trade_date"] == "2026-08-28"
     assert provider.calls == []
 
 
 def test_explicit_history_date_uses_cache(data_dir, monkeypatch):
     provider = _use_provider(monkeypatch, _FakeProvider())
-    ab.get_auction_benchmark(data_dir, date(2026, 8, 27))
+    ab.sync_auction_benchmark(data_dir, date(2026, 8, 27))
     assert provider.calls == ["2026-08-27"]
     provider.calls.clear()
     ab.get_auction_benchmark(data_dir, date(2026, 8, 27))
     assert provider.calls == []
 
 
-def test_failure_falls_back_to_prev(data_dir, monkeypatch):
-    provider = _use_provider(monkeypatch, _FakeProvider(fail_dates={"2026-08-28"}))
+def test_collection_failure_does_not_substitute_previous_day(data_dir, monkeypatch):
+    _use_provider(monkeypatch, _FakeProvider(fail_dates={"2026-08-28"}))
+    ab.sync_auction_benchmark(data_dir, date(2026, 8, 27))
+    with pytest.raises(FuyaoError):
+        ab.sync_auction_benchmark(data_dir, date(2026, 8, 28))
     out = ab.get_auction_benchmark(data_dir, date(2026, 8, 28))
-    assert out["state"] == "fallback_prev"
-    assert out["trade_date"] == "2026-08-27"
-    assert out["requested_date"] == "2026-08-28"
-    # 回退日缓存以 ok 落盘 (不污染直查)
-    cached = json.loads((data_dir / "auction_benchmark" / "date=2026-08-27.json").read_text(encoding="utf-8"))
-    assert cached["state"] == "ok"
+    assert out == {"state": "no_data", "requested_date": "2026-08-28"}
 
 
 def test_total_failure_returns_no_data(data_dir, monkeypatch):
     _use_provider(monkeypatch, _FakeProvider(fail_dates={"2026-08-28", "2026-08-27"}))
     out = ab.get_auction_benchmark(data_dir, date(2026, 8, 28))
     assert out["state"] == "no_data"
-    assert "2026-08-28" in out.get("message", "")
+    assert out["requested_date"] == "2026-08-28"
 
 
-def test_corrupt_cache_refetches(data_dir, monkeypatch):
+def test_corrupt_cache_requires_explicit_collection(data_dir, monkeypatch):
     provider = _use_provider(monkeypatch, _FakeProvider())
     cache = data_dir / "auction_benchmark" / "date=2026-08-28.json"
     cache.parent.mkdir(parents=True, exist_ok=True)
     cache.write_text("{broken json", encoding="utf-8")
     out = ab.get_auction_benchmark(data_dir, date(2026, 8, 28))
+    assert out["state"] == "no_data"
+    assert provider.calls == []
+    out = ab.sync_auction_benchmark(data_dir, date(2026, 8, 28))
     assert out["state"] == "ok"
     assert provider.calls  # 缓存损坏 → 重新拉取
 
@@ -140,6 +141,7 @@ def test_corrupt_cache_refetches(data_dir, monkeypatch):
 def test_enrich_math_with_local_kline(data_dir, monkeypatch):
     # 显式查 08-27: prev=08-26, next=08-28
     _use_provider(monkeypatch, _FakeProvider())
+    ab.sync_auction_benchmark(data_dir, date(2026, 8, 27))
     out = ab.get_auction_benchmark(data_dir, date(2026, 8, 27))
     by = {i["thscode"]: i for i in out["items"]}
     mt = by["600519.SH"]
@@ -157,7 +159,7 @@ def test_enrich_math_with_local_kline(data_dir, monkeypatch):
 def test_enrich_missing_kline_gives_none(data_dir, monkeypatch):
     # 最新分区 08-28 无次日 → d1_pct=None; kline 行存在则 oc/pct 正常
     _use_provider(monkeypatch, _FakeProvider())
-    out = ab.get_auction_benchmark(data_dir, None)
+    out = ab.sync_auction_benchmark(data_dir, None)
     for i in out["items"]:
         assert i["d1_pct"] is None
         assert i["day0_oc"] is not None
@@ -167,6 +169,7 @@ def test_enrich_missing_kline_gives_none(data_dir, monkeypatch):
 
 def test_build_recap_context_contains_summary(data_dir, monkeypatch):
     _use_provider(monkeypatch, _FakeProvider())
+    ab.sync_auction_benchmark(data_dir)
     ctx = ab.build_recap_context(data_dir)
     assert "盘前风向标名单" in ctx and "贵州茅台" in ctx
     assert "白酒" in ctx  # 概念标签

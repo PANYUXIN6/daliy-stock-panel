@@ -276,8 +276,8 @@ class StrategyOptimizer:
                         prepared=prepared,
                         result_policy=trial_policy,
                     )
-            except Exception as e:  # 隔离单组失败, 记录后继续, 不拖垮整批
-                logger.warning("参数组 %s 回测异常: %r", combo, e)
+            except Exception as e:  # noqa: BLE001 - 单组参数失败隔离并记录, 其余优化组合继续执行。
+                logger.warning("参数组 %s 回测异常: %r", combo, e, exc_info=True)
                 return {"params": combo, "error": repr(e), "objective_raw": None, "_sort": float("-inf")}
             if res.error:
                 return {"params": combo, "error": res.error, "objective_raw": None, "_sort": float("-inf")}

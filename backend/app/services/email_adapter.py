@@ -88,11 +88,12 @@ def send_email(
             # Delivery already succeeded; a failed QUIT must not retry and duplicate the email.
             try:
                 smtp.quit()
-            except Exception:
+            except (OSError, smtplib.SMTPException):
                 with suppress(Exception):
                     smtp.close()
             return True
-        except Exception as exc:  # SMTP/network errors must not escape
+        except Exception as exc:  # noqa: BLE001 — 通知通道故障由返回值报告，不得阻断告警持久化与 SSE
+            logger.debug("邮件推送尝试失败", exc_info=True)
             last_err = str(exc)
             if smtp is not None:
                 with suppress(Exception):

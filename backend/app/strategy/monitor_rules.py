@@ -18,7 +18,7 @@ import json
 import logging
 import math
 import re
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 from app.services.fs_utils import atomic_write_text
@@ -82,8 +82,8 @@ def load_all(data_dir: Path) -> list[dict]:
     for f in sorted(d.glob("*.json")):
         try:
             out.append(normalize(json.loads(f.read_text(encoding="utf-8"))))
-        except Exception as e:
-            logger.warning("monitor rule load failed %s: %s", f.name, e)
+        except Exception as e:  # noqa: BLE001 - 损坏的单条用户规则按文件隔离, 继续加载其余规则。
+            logger.warning("monitor rule load failed %s: %s", f.name, e, exc_info=True)
     return out
 
 
@@ -93,8 +93,8 @@ def load_one(data_dir: Path, rule_id: str) -> dict | None:
         return None
     try:
         return normalize(json.loads(p.read_text(encoding="utf-8")))
-    except Exception as e:
-        logger.warning("monitor rule load failed %s: %s", rule_id, e)
+    except Exception as e:  # noqa: BLE001 - 单条用户规则损坏保持读取失败返回 None 契约。
+        logger.warning("monitor rule load failed %s: %s", rule_id, e, exc_info=True)
         return None
 
 
@@ -405,7 +405,7 @@ def normalize(rule: dict) -> dict:
         r["webhook_channels"] = [
             c for c in r["webhook_channels"] if c in ("feishu", "wecom", "custom", "email")
         ]
-    r.setdefault("created_at", datetime.now(timezone.utc).isoformat())
+    r.setdefault("created_at", datetime.now(UTC).isoformat())
     return r
 
 

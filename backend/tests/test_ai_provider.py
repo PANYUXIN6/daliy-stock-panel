@@ -439,7 +439,6 @@ def test_save_ai_settings_persists_token_sizes(monkeypatch):
         req = settings_api.AiSettingsIn(
             provider="openai_compat",
             base_url="https://example.com/v1",
-            api_key="sk-test",
             model="gpt-x",
             max_output_tokens=5000,
             context_window=128000,
@@ -455,8 +454,9 @@ def test_save_ai_settings_persists_token_sizes(monkeypatch):
 
 
 def test_save_ai_settings_rejects_non_positive(monkeypatch):
-    from app.api import settings as settings_api
     from fastapi import HTTPException
+
+    from app.api import settings as settings_api
 
     req = settings_api.AiSettingsIn(provider="openai_compat", max_output_tokens=-1)
     with pytest.raises(HTTPException):

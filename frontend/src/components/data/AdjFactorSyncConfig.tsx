@@ -1,30 +1,35 @@
-import { useState } from 'react'
-import { useQueryClient } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Loader2, Download, Info } from 'lucide-react'
 import { api } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { MissingCapChip } from '@/lib/capability-labels'
+import { useCollectionSyncConfirmation } from '@/lib/useCollectionSyncConfirmation'
 
 // 除权因子独立同步面板 (数据画像卡齿轮弹窗, 模式与 MinuteSyncConfig 一致)。
 // hasCap: 路由矩阵判定除权因子能力可用 (生效源含插件/自定义源);
 // providerDisplay: 生效源展示名, 路由为 TickFlow 时为 null。
-export function AdjFactorSyncConfig({ hasCap, providerDisplay, onJobStart }: {
+export function AdjFactorSyncConfig({ hasCap, providerDisplay, onJobStart, disabled = false }: {
   hasCap: boolean
   providerDisplay: string | null
   onJobStart?: (jobId: string) => void
+  disabled?: boolean
 }) {
   const qc = useQueryClient()
-  const [starting, setStarting] = useState(false)
-
-  const handleSync = () => {
-    if (!hasCap || starting) return
-    setStarting(true)
-    api.pipelineAdjFactorRun().then((res) => {
+  const prefs = useQuery({ queryKey: QK.preferences, queryFn: api.preferences })
+  const confirmation = useCollectionSyncConfirmation(`${hasCap}:${prefs.data?.adj_factor_provider}`)
+  const sync = useMutation({
+    mutationFn: api.pipelineAdjFactorRun,
+    onSuccess: (res) => {
       qc.invalidateQueries({ queryKey: QK.pipelineJobs })
       qc.invalidateQueries({ queryKey: QK.dataStatus })
       // 通知主页面跟踪 job 进度 (顶部 ActiveJobCard 显示实时进度+日志)
       if (res.job_id && onJobStart) onJobStart(res.job_id)
-    }).finally(() => setStarting(false))
+    },
+  })
+  const starting = sync.isPending || confirmation.busy
+  const handleSync = () => {
+    if (!hasCap || disabled || starting) return
+    confirmation.run({ kind: 'adj_factor' }, () => sync.mutate())
   }
 
   return (
@@ -47,7 +52,7 @@ export function AdjFactorSyncConfig({ hasCap, providerDisplay, onJobStart }: {
         </div>
         <button
           onClick={handleSync}
-          disabled={!hasCap || starting}
+          disabled={!hasCap || disabled || starting}
           className="w-full inline-flex items-center justify-center gap-1.5 px-3 py-2 rounded-btn bg-accent/90 text-foreground text-xs font-medium hover:bg-accent disabled:opacity-40 transition-colors duration-150"
         >
           {starting ? (
@@ -56,6 +61,7 @@ export function AdjFactorSyncConfig({ hasCap, providerDisplay, onJobStart }: {
             <><Download className="h-3.5 w-3.5" /><span>全历史同步除权因子</span></>
           )}
         </button>
+        {(confirmation.error || sync.isError) && <p role="alert" className="text-xs text-danger">{confirmation.error || sync.error?.message}</p>}
         <div className="flex items-start gap-1.5 text-[10px] text-muted leading-relaxed">
           <Info className="h-3 w-3 shrink-0 mt-px" />
           <span>
@@ -71,6 +77,7 @@ export function AdjFactorSyncConfig({ hasCap, providerDisplay, onJobStart }: {
           </div>
         )}
       </div>
+      {confirmation.dialog}
     </div>
   )
 }

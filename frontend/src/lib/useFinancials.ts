@@ -3,6 +3,7 @@ import { api } from '@/lib/api'
 
 export const FINANCIAL_QK = {
   status: ['financials', 'status'],
+  executionStatus: ['financials', 'execution-status'],
   metrics: (symbol?: string) => ['financials', 'metrics', symbol],
   income: (symbol?: string) => ['financials', 'income', symbol],
   balanceSheet: (symbol?: string) => ['financials', 'balance-sheet', symbol],
@@ -15,7 +16,15 @@ export function useFinancialStatus() {
     queryKey: FINANCIAL_QK.status,
     queryFn: () => api.financialStatus(),
     staleTime: 60_000,
-    // 同步进行中时每 3s 轮询,及时反映表数变化与同步完成;空闲时不轮询。
+  })
+}
+
+export function useFinancialExecutionStatus() {
+  return useQuery({
+    queryKey: FINANCIAL_QK.executionStatus,
+    queryFn: () => api.financialExecutionStatus(),
+    staleTime: 60_000,
+    // 活动任务状态属于采集服务，离线不会影响本地画像查询。
     refetchInterval: (query) => (query.state.data?.syncing ? 3_000 : false),
   })
 }
@@ -75,10 +84,10 @@ export function useFinancialSync() {
     // 点击瞬间立即刷新 status: 让后端 is_syncing=True 马上反映到 UI,
     // 避免 mutation 阻塞(全量同步需数分钟)期间界面无变化。
     onMutate: () => {
-      qc.invalidateQueries({ queryKey: FINANCIAL_QK.status })
+      qc.invalidateQueries({ queryKey: FINANCIAL_QK.executionStatus })
     },
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: FINANCIAL_QK.status })
+      qc.invalidateQueries({ queryKey: FINANCIAL_QK.executionStatus })
       qc.invalidateQueries({ queryKey: ['financials'] })
     },
   })

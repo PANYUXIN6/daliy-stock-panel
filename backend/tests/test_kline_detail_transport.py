@@ -22,8 +22,6 @@ def _isolated_settings_and_clock(monkeypatch):
     monkeypatch.setattr("app.services.preferences.get_daily_batch_compress", lambda: True)
     monkeypatch.setattr("app.services.preferences.get_minute_batch_compress", lambda: True)
     monkeypatch.setattr(kline, "cn_today", lambda: _TRADE_DATE)
-    monkeypatch.setattr(kline, "cn_now", lambda: datetime(2026, 1, 15, 10, 30))
-    monkeypatch.setattr(kline, "in_continuous_session", lambda: True)
 
 
 def _minute_rows(count: int = 240) -> pl.DataFrame:
@@ -47,8 +45,8 @@ class _DetailRepo:
         self.minute = minute if minute is not None else _minute_rows()
         # /minute 读取 repo.store.data_dir 判断分钟基准标记 (无标记即旧行为)
         import tempfile
-        from types import SimpleNamespace
         from pathlib import Path
+        from types import SimpleNamespace
         self.store = SimpleNamespace(data_dir=Path(tempfile.mkdtemp()))
 
     def resolve_asset_type(self, symbol: str) -> str:
@@ -90,6 +88,9 @@ class _DetailRepo:
 
 
 class _IndexRepo:
+    def get_minute(self, *args, **kwargs):
+        return pl.DataFrame()
+
     def get_index_instruments(self) -> pl.DataFrame:
         return pl.DataFrame({"symbol": ["000001.SH"], "name": ["上证指数"]})
 
@@ -163,7 +164,7 @@ def test_free_tier_skips_tickflow_minute_fallback(monkeypatch, live):
     get_client.assert_not_called()
 
 
-def test_custom_minute_source_remains_available_without_tickflow_capability(monkeypatch):
+def test_custom_source_configuration_does_not_trigger_fetch_on_read(monkeypatch):
     provider = MagicMock()
     provider.get_minute.return_value = _minute_rows(1)
     monkeypatch.setattr("app.services.preferences.get_minute_data_provider", lambda: "custom")
@@ -180,8 +181,8 @@ def test_custom_minute_source_remains_available_without_tickflow_capability(monk
     )
 
     assert response.status_code == 200
-    assert response.json()["source"] == "live"
-    provider.get_minute.assert_called_once()
+    assert response.json()["source"] == "none"
+    provider.get_minute.assert_not_called()
     get_client.assert_not_called()
 
 
@@ -256,7 +257,7 @@ def test_uncompressed_payload_strips_nonfinite_floats() -> None:
 
 
 
-def test_pro_tier_keeps_tickflow_minute_fallback(monkeypatch):
+def test_pro_tier_also_keeps_reads_local(monkeypatch):
     capset = CapabilitySet({Cap.KLINE_MINUTE_BY_SYMBOL: CapabilityLimits()})
     tickflow = MagicMock()
     tickflow.klines.batch.side_effect = RuntimeError("upstream unavailable")
@@ -271,7 +272,7 @@ def test_pro_tier_keeps_tickflow_minute_fallback(monkeypatch):
 
     assert response.status_code == 200
     assert response.json()["source"] == "none"
-    get_client.assert_called_once()
+    get_client.assert_not_called()
 
 
 def test_free_tier_skips_tickflow_index_minute_fallback(monkeypatch):

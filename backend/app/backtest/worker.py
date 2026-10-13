@@ -260,7 +260,7 @@ def _worker_entry(task: dict[str, Any], event_queue, cancel_event) -> None:
         }
         _attach_worker_metrics(kind, result, metrics)
         event_queue.put({"type": "result", "payload": result})
-    except BaseException as exc:
+    except BaseException as exc:  # noqa: BLE001 - worker 边界通过事件队列报告所有退出异常及 traceback。
         with suppress(Exception):
             sampler.stop()
         event_queue.put({

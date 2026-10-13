@@ -3,11 +3,17 @@ from types import SimpleNamespace
 
 import polars as pl
 import pytest
-from fastapi import HTTPException
+from fastapi import FastAPI, HTTPException
+from fastapi.testclient import TestClient
 
+from app.api import screener as screener_api
 from app.api import strategy as strategy_api
+from app.services import shared_runtime, strategy_cache
+from app.services.collector_proxy import proxy_middleware
+from app.services.events import EventBus
 from app.strategy import config as strategy_config
 from app.strategy.engine import StrategyDataContext, StrategyDef, StrategyEngine
+from app.strategy.monitor import MonitorRuleEngine
 
 
 def _make_engine() -> tuple[StrategyEngine, StrategyDataContext]:
@@ -98,3 +104,67 @@ def test_save_config_rejects_invalid_scoring_direction(tmp_path):
             strategy_id="saved_params",
             overrides={"scoring_directions": {"rsi_14": "sideways"}},
         ), request)
+
+
+@pytest.mark.parametrize("operation", ["save", "patch", "reset"])
+def test_strategy_config_invalidates_only_its_results_and_monitor_state(tmp_path, operation):
+    engine, context = _make_engine()
+    monitor = MonitorRuleEngine()
+    targeted = "saved_params"
+    other = "unrelated"
+    old_result = {"as_of": "2026-07-15", "total": 3, "rows": [{"symbol": symbol} for symbol in ("A", "B", "C")]}
+    unrelated_result = {"as_of": "2026-07-15", "total": 1, "rows": [{"symbol": "Z"}]}
+    strategy_cache.write_cache(tmp_path, "2026-07-15", {targeted: old_result, other: unrelated_result})
+    monitor._latest_strategy_results = {targeted: old_result, other: unrelated_result}
+    monitor._building_strategy_results = {targeted: old_result, other: unrelated_result}
+    monitor._latest_strategy_result_ids = {targeted, other}
+    monitor._strategy_pools = {("rule-a", targeted, "stock"): {"A", "B", "C"}, ("rule-b", other, "stock"): {"Z"}}
+    monitor._strategy_signal_state = {("rule-a", targeted, "stock", "entry_signal"): ("2026-07-15", {"A"}), ("rule-b", other, "stock", "entry_signal"): ("2026-07-15", {"Z"})}
+    monitor._strategy_signal_seen = {("rule-a", targeted, "stock", "entry_signal", "A"): "2026-07-15", ("rule-b", other, "stock", "entry_signal", "Z"): "2026-07-15"}
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(
+        strategy_engine=engine,
+        monitor_engine=monitor,
+        repo=SimpleNamespace(store=SimpleNamespace(data_dir=tmp_path)),
+    )))
+    if operation == "reset":
+        strategy_config.save_override(tmp_path, targeted, {"params": {"min_value": 3}})
+        strategy_api.reset_config(targeted, request)
+    else:
+        action = strategy_api.save_config if operation == "save" else strategy_api.patch_config
+        action(strategy_api.SaveConfigRequest(strategy_id=targeted, overrides={"params": {"min_value": 3}}), request)
+
+    cached = strategy_cache.read_cache(tmp_path)
+    assert set(cached["results"]) == {other}
+    assert set(cached["today_ever_rows"]) == set(cached["today_ever_matched"]) == {other}
+    assert set(screener_api.get_cached_summary(request)["results"]) == {other}
+    assert set(monitor.latest_strategy_results()) == set(monitor._building_strategy_results) == {other}
+    assert monitor._latest_strategy_result_ids == {other}
+    assert set(monitor._strategy_pools) == {("rule-b", other, "stock")}
+    assert all(key[1] == other for key in monitor._strategy_signal_state)
+    assert all(key[1] == other for key in monitor._strategy_signal_seen)
+    result = engine.run(targeted, context, overrides=strategy_config.load_override(tmp_path, targeted))
+    assert [row["symbol"] for row in result.rows] == (["A", "B", "C"] if operation == "reset" else ["C"])
+
+
+def test_saved_strategy_config_publishes_existing_config_update(tmp_path, monkeypatch):
+    engine, _ = _make_engine()
+    app = FastAPI()
+    app.include_router(strategy_api.router)
+    app.middleware("http")(proxy_middleware)
+    app.state.service_role = "collector"
+    app.state.repo = SimpleNamespace(store=SimpleNamespace(data_dir=tmp_path))
+    app.state.strategy_engine = engine
+    app.state.monitor_engine = MonitorRuleEngine()
+    app.state.quote_service = SimpleNamespace(_repo=app.state.repo, status=lambda: {}, get_index_quotes=pl.DataFrame)
+    bus = EventBus()
+    monkeypatch.setattr(shared_runtime, "runtime_bus", bus)
+    subscription = bus.subscribe()
+    try:
+        with TestClient(app) as client:
+            response = client.patch("/api/strategies/config", json={"strategy_id": "saved_params", "overrides": {"params": {"min_value": 3}}})
+        assert response.status_code == 200
+        event = subscription.get_nowait()
+        assert event["type"] == "data_updated" and event["data"]["datasets"] == ["config"]
+        assert (tmp_path / "runtime" / "data_update.json").exists()
+    finally:
+        bus.unsubscribe(subscription)

@@ -159,7 +159,7 @@ class GenericHTTPProvider:
         symbols: list[str],
         start_time: datetime | None,
         end_time: datetime | None,
-        asset_type: str = "stock",  # noqa: ARG002
+        asset_type: str = "stock",
         on_chunk_done=None,
     ) -> pl.DataFrame:
         cfg = self._dataset("daily")
@@ -201,7 +201,7 @@ class GenericHTTPProvider:
         symbols: list[str],
         start_time: datetime | None,
         end_time: datetime | None,
-        asset_type: str = "stock",  # noqa: ARG002
+        asset_type: str = "stock",
         on_chunk_done=None,
     ) -> pl.DataFrame:
         cfg = self._dataset("adj_factor")
@@ -274,7 +274,7 @@ class GenericHTTPProvider:
     def get_intraday_batch(
         self,
         symbols: list[str],
-        count: int = 300,  # noqa: ARG002 — 与插件契约对齐, YAML 源按时间窗口取全天
+        count: int = 300,  # 与插件契约对齐, YAML 源按时间窗口取全天
         asset_type: AssetType = "stock",
     ) -> pl.DataFrame:
         """全量分钟修复轮: 按当日窗口批量拉取 full_minute 数据集 (chunked + rpm 限速)。
@@ -328,17 +328,21 @@ class GenericHTTPProvider:
         table: str,
         symbols: list[str],
         latest_only: bool = True,
+        on_chunk_done: Callable[[int, int], None] | None = None,
     ) -> pl.DataFrame:
         """拉取财务数据。table 包含四张财务报表及 shares 股本表。
 
         custom 源用一个 'financial' dataset 配置覆盖全部财务表; 请求时把 table 作为参数传给上游,
         上游根据 table 返回对应数据。字段由数据源决定, 这里只确保有 symbol 列。
+        on_chunk_done 在每批请求前和返回后报告已完成批数，空结果也推进进度。
         """
         cfg = self._dataset("financial")
         frames: list[pl.DataFrame] = []
         chunks = chunked(symbols, cfg.batch)
         for i, chunk in enumerate(chunks):
             sleep_between_batches(i, cfg.rpm)
+            if on_chunk_done:
+                on_chunk_done(i, len(chunks))
             # 把 table 注入到请求参数 (上游据此区分财务表)
             extra_params = {**cfg.params, "table": table}
             extra_body = {**cfg.body, "table": table}
@@ -352,6 +356,8 @@ class GenericHTTPProvider:
             df = self._mapped_frame(cfg, rows)
             if not df.is_empty():
                 frames.append(df)
+            if on_chunk_done:
+                on_chunk_done(i + 1, len(chunks))
         if not frames:
             return pl.DataFrame()
         return pl.concat(frames, how="diagonal_relaxed")

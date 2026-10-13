@@ -40,7 +40,7 @@ def test_bootstrap_recovers_compose_interpolated_password_from_raw_env(
         f"AUTH_PASSWORD={password}\nDATA_DIR={tmp_path}\n",
         encoding="utf-8",
     )
-    configured = Settings(_env_file=env_path)
+    configured = Settings(_env_file=env_path, data_dir=tmp_path)
     configured.auth_password = "pw-secret"  # 模拟 Compose 将未定义的 ${special} 插值为空串
     monkeypatch.setattr(app_config, "settings", configured)
 

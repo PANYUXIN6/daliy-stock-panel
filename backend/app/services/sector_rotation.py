@@ -116,7 +116,7 @@ def _prev_daily_close(data_dir: Path, target_date: str) -> pl.DataFrame | None:
         return None
     try:
         df = pl.read_parquet(daily / f"date={prevs[-1]}" / "part.parquet", columns=["symbol", "close"])
-    except Exception:
+    except (OSError, pl.exceptions.PolarsError):
         return None
     return (
         df.with_columns(_bare().alias("_bare"))
@@ -137,12 +137,12 @@ def _minute_pcts(minute_dir: Path, target: str) -> tuple[pl.DataFrame | None, st
     try:
         bars = pl.read_parquet(path, columns=["symbol", "datetime", "close", "amount"])
         has_amount = True
-    except Exception:
+    except (OSError, pl.exceptions.PolarsError):
         try:
             bars = pl.read_parquet(path, columns=["symbol", "datetime", "close"])
             has_amount = False
-        except Exception as exc:
-            logger.warning("sector_rotation read minute partition failed: %s", exc)
+        except (OSError, pl.exceptions.PolarsError) as exc:
+            logger.warning("sector_rotation read minute partition failed: %s", exc, exc_info=True)
             return None, "minute_schema", False
     # close <= 0 / 非有限的分钟行无效: 作基准时 pct 为 inf, 作分子时是 -100% 假跌幅
     bars = bars.drop_nulls(subset=["datetime", "close"]).filter(
@@ -186,7 +186,8 @@ def _load_sector_flow(data_dir: Path, flow_field: str) -> pl.DataFrame | None:
         return None
     try:
         config = ExtConfigStore(data_dir).get(config_id)
-    except Exception:
+    except (OSError, UnicodeError, ValueError, TypeError, KeyError, AttributeError):
+        logger.debug("sector_rotation 扩展配置读取失败", exc_info=True)
         return None
     if config is None:
         return None
@@ -202,7 +203,7 @@ def _load_sector_flow(data_dir: Path, flow_field: str) -> pl.DataFrame | None:
         return None
     try:
         df = pl.read_parquet(path)
-    except Exception:
+    except (OSError, pl.exceptions.PolarsError):
         return None
     if df.is_empty() or column not in df.columns:
         return None

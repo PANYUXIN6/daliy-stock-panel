@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import math
 import os
 import re
@@ -24,6 +25,8 @@ from app.backtest.mining import compute_candidate_signature, evaluate_candidate_
 from app.services.mining_jobs import SUCCESS_RUN_STATUSES, MiningRunStore
 from app.strategy.ai_generator import AIStrategyGenerator
 from app.strategy.engine import StrategyEngine
+
+logger = logging.getLogger(__name__)
 
 _MAX_ARTIFACT_BYTES = 8 * 1024 * 1024
 _MAX_ARTIFACT_ROWS = 32
@@ -727,6 +730,7 @@ class MiningCandidateService:
                 self._fsync_directory(path.parent)
             self.strategy_engine.reload()
         except Exception as exc:
+            logger.exception("策略发布回滚失败", exc_info=True)
             return exc
         return None
 
@@ -739,6 +743,7 @@ class MiningCandidateService:
                 self._fsync_directory(path.parent)
             self.strategy_engine.reload()
         except Exception as exc:
+            logger.exception("策略发布回滚失败", exc_info=True)
             return exc
         return None
 

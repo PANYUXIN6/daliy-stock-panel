@@ -6,9 +6,9 @@
 """
 from __future__ import annotations
 
+from collections.abc import Iterator
 from datetime import date
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 from fastapi import FastAPI
@@ -16,15 +16,26 @@ from fastapi.testclient import TestClient
 
 from app.api.ext_data import router
 from app.services.ext_data import ExtConfig, ExtField, PullConfig
+from app.services.quote_service import QuoteService
+from app.tickflow.capabilities import CapabilitySet
+from app.tickflow.repository import DataStore, KlineRepository
 
 
 @pytest.fixture
-def client(tmp_path: Path) -> TestClient:
+def client(tmp_path: Path) -> Iterator[TestClient]:
     app = FastAPI()
     app.include_router(router)
-    # db=None: _refresh_views 的 db.execute 全在 try/except 内, 裸 app 下安全跳过
-    app.state.repo = SimpleNamespace(store=SimpleNamespace(data_dir=tmp_path, db=None))
-    return TestClient(app)
+    repo = KlineRepository(DataStore(tmp_path))
+    app.state.repo = repo
+    app.state.capabilities = CapabilitySet()
+    app.state.quote_service = QuoteService()
+    app.state.quote_service.set_repo(repo)
+    app.state.quote_service.set_app_state(app.state)
+    try:
+        with TestClient(app) as test_client:
+            yield test_client
+    finally:
+        repo.db.close()
 
 
 def _create(client: TestClient, market_level: bool = False, cid: str = "regime_ts") -> None:

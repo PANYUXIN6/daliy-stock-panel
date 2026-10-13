@@ -33,9 +33,12 @@ import math
 import re
 import time
 from collections.abc import Callable, Iterator
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
+from threading import Event
+from typing import ClassVar
 
 import polars as pl
 import pyarrow.parquet as pq
@@ -43,7 +46,7 @@ import pyarrow.parquet as pq
 from app.data_providers.normalizer import DAILY_COLS, normalize_daily
 from app.indicators.pipeline import filter_halt_days
 from app.plugins.fuyao import client as fuyao_client
-from app.plugins.fuyao.client import FuyaoClient, FuyaoError
+from app.plugins.fuyao.client import FuyaoClient, FuyaoError, FuyaoRateLimitError
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +61,7 @@ _SH_MS = 28_800_000
 _HIST_MAX_SPAN_MS = 3650 * 86_400_000  # historical 单次窗口上限 10 年, 超出由本层分片
 _HIST_INTERVAL_S = 0.12  # 单标的请求节流(实测 200+ 连发未触发 4001 限频)
 _FINANCIAL_HISTORY_PERIODS = 8  # 财务首装全量历史: 最近 8 期季报(约 2 年)
+_FINANCIAL_WORKERS = 2
 _VALUATION_BATCH = 100  # 估值/价格快照端点单次上限 100 只
 # 项目财务表名 → 扶摇报表端点名
 _STATEMENT_ENDPOINTS = {
@@ -72,6 +76,30 @@ _RECENT_DUMP_DAYS = 12  # 窗口跨度 ≤ 此天数时优先走 10d dump(覆盖
 _PREV_CLOSE_BACKDAYS = 30  # 推导因子时向前找"除权日前收盘"的回看天数(容忍长期停牌)
 _DAILY_DUMP_BATCH_ROWS = 100_000
 _HIST_SYMBOL_BATCH = 50
+
+
+class _FinancialCancelEvent(Event):
+    """并发轮次可停止待发请求，但不能置位 JobStore 的用户取消信号。"""
+
+    def __init__(self, job_event: Event | None) -> None:
+        super().__init__()
+        self._job_event = job_event
+
+    def is_set(self) -> bool:
+        return super().is_set() or (self._job_event is not None and self._job_event.is_set())
+
+    def wait(self, timeout: float | None = None) -> bool:
+        if self._job_event is None:
+            return super().wait(timeout)
+        deadline = time.monotonic() + timeout if timeout is not None else None
+        while not self.is_set():
+            remaining = deadline - time.monotonic() if deadline is not None else .05
+            if remaining <= 0:
+                return self.is_set()
+            super().wait(min(.05, remaining))
+        return True
+
+
 _DAILY_DUMP_COLUMNS = [
     "thscode", "adjusted", "date_ms", "open_price", "high_price", "low_price",
     "close_price", "volume", "turnover",
@@ -380,7 +408,7 @@ class FuyaoProvider:
         for f in cached:
             try:
                 dmin, _ = _dump_date_range(f)
-            except Exception:  # 缓存损坏不致命, 换下一个/重拉
+            except (OSError, pl.exceptions.PolarsError):  # 缓存损坏不致命, 换下一个/重拉
                 continue
             if dmin is not None and start_d >= dmin:
                 return f
@@ -594,7 +622,7 @@ class FuyaoProvider:
         for candidate in sorted(_cache_dir().glob("daily_k__*.parquet"), reverse=True):
             try:
                 dmin, dmax = _dump_date_range(candidate)
-            except Exception:
+            except (OSError, pl.exceptions.PolarsError):
                 continue
             if dmin is not None and dmax is not None:
                 return candidate, dmin, dmax
@@ -858,9 +886,18 @@ class FuyaoProvider:
         return df.select("symbol", "ex_date", "dividend", "bonus", "allot", "allot_price")
 
     # ---- financial ----
+    def get_financial_universe(self) -> list[str]:
+        """当前 A 股代码清单；快照与财务使用相同 thscode，不改写历史代码。
+
+        此清单只用于请求范围核对，不保证每股每表都有报表。
+        财务端点的网络、数据源和限流异常仍由原取数路径报告。
+        """
+        rows, _ = self._get_client().snapshot_all()
+        return [row["thscode"] for row in rows if row.get("thscode")]
+
     # 字段映射: 扶摇原始字段 → 项目 canonical 列名(TickFlow 口径, 前端财务页与回测
     # FUNDAMENTAL_FACTORS 按此消费)。映射表之外的扶摇独有字段以原名透传为扩展列。
-    _INCOME_FIELD_MAP = {
+    _INCOME_FIELD_MAP: ClassVar[dict[str, str]] = {
         "operating_income": "revenue",
         "operating_costs": "operating_cost",
         "sales_fee": "selling_expense",
@@ -874,7 +911,7 @@ class FuyaoProvider:
         "parent_holder_net_profit": "net_income_attributable",
         "basic_eps": "basic_eps",
     }
-    _BALANCE_FIELD_MAP = {
+    _BALANCE_FIELD_MAP: ClassVar[dict[str, str]] = {
         "assets_total": "total_assets",
         "total_current_assets": "total_current_assets",
         "non_current_nets_total": "total_non_current_assets",
@@ -883,7 +920,7 @@ class FuyaoProvider:
         "total_debt": "total_liabilities",
         "holder_equity_total": "total_equity",
     }
-    _CASHFLOW_FIELD_MAP = {
+    _CASHFLOW_FIELD_MAP: ClassVar[dict[str, str]] = {
         "act_cash_flow_net": "net_operating_cash_flow",
         "invest_cash_flow_net": "net_investing_cash_flow",
         "financing_cash_flow_net": "net_financing_cash_flow",
@@ -892,7 +929,7 @@ class FuyaoProvider:
     }
     # 官方指标 index_id → canonical。归母净利同比近似 tickflow net_income_yoy;
     # 实测 index_id 与文档有出入(calculate_ 前缀等), 以实测为准。
-    _METRICS_FIELD_MAP = {
+    _METRICS_FIELD_MAP: ClassVar[dict[str, str]] = {
         "index_weighted_avg_roe": "roe",
         "total_assets_net_ratio": "roa",
         "sale_gross_margin": "gross_margin",
@@ -904,11 +941,63 @@ class FuyaoProvider:
         "inventory_turnover_ratio": "inventory_turnover",
     }
 
+    def _financial_rows(
+        self,
+        fetch: Callable[[str, Event], list[dict]],
+        symbols: list[str],
+        on_chunk_done: Callable[[int, int], None] | None = None,
+        *,
+        cancel_event: Event | None = None,
+    ) -> list[list[dict]]:
+        """只保留两个在途任务，协调线程检查取消后才补交，结果保持输入顺序。"""
+        rows: list[list[dict]] = [[] for _ in symbols]
+        cancel_event = _FinancialCancelEvent(cancel_event)
+        errors: list[tuple[str, FuyaoError]] = []
+        if on_chunk_done:
+            on_chunk_done(0, len(symbols))
+        with ThreadPoolExecutor(max_workers=_FINANCIAL_WORKERS,
+                                thread_name_prefix="fuyao-financial") as executor:
+            pending = {}
+            next_index = 0
+            completed = 0
+            try:
+                while next_index < len(symbols) or pending:
+                    while next_index < len(symbols) and len(pending) < _FINANCIAL_WORKERS:
+                        future = executor.submit(fetch, symbols[next_index], cancel_event)
+                        pending[future] = next_index
+                        next_index += 1
+                    done, _ = wait(pending, return_when=FIRST_COMPLETED)
+                    for future in sorted(done, key=pending.__getitem__):
+                        index = pending.pop(future)
+                        try:
+                            rows[index] = future.result()
+                        except FuyaoRateLimitError:
+                            raise
+                        except FuyaoError as e:
+                            logger.warning("扶摇财务 %s 失败: %s", symbols[index], e)
+                            errors.append((symbols[index], e))
+                        completed += 1
+                        if on_chunk_done:
+                            on_chunk_done(completed, len(symbols))
+            finally:
+                # 取消和异常均等待已在途请求收尾，再释放同步任务的执行槽。
+                cancel_event.set()
+                for future in pending:
+                    future.cancel()
+        if errors:
+            failed_symbols = "、".join(symbol for symbol, _error in errors)
+            raise FuyaoError(
+                f"扶摇财务 {len(errors)}/{len(symbols)} 只取数失败（{failed_symbols}）：{errors[0][1]}"
+            ) from errors[0][1]
+        return rows
+
     def get_financials(
         self,
         table: str,
         symbols: list[str],
         latest_only: bool = True,
+        on_chunk_done: Callable[[int, int], None] | None = None,
+        *, cancel_event: Event | None = None,
     ) -> pl.DataFrame:
         """拉取财务数据, 映射为 canonical 列(symbol/period_end/announce_date/指标)。
 
@@ -919,7 +1008,11 @@ class FuyaoProvider:
         - shares: 扶摇无股本接口, 恒返回空(已有存量靠合并写入保留)。
         """
         if table == "shares":
+            if on_chunk_done:
+                on_chunk_done(0, 1)
             logger.info("扶摇无股本接口, shares 表跳过 (已有数据保留)")
+            if on_chunk_done:
+                on_chunk_done(1, 1)
             return pl.DataFrame()
         if table in _STATEMENT_ENDPOINTS:
             field_map = {
@@ -927,9 +1020,10 @@ class FuyaoProvider:
                 "balance_sheet": self._BALANCE_FIELD_MAP,
                 "cash_flow": self._CASHFLOW_FIELD_MAP,
             }[table]
-            return self._financial_statements(table, field_map, symbols, latest_only)
+            return self._financial_statements(table, field_map, symbols, latest_only,
+                                              on_chunk_done, cancel_event)
         if table == "metrics":
-            return self._financial_metrics(symbols)
+            return self._financial_metrics(symbols, on_chunk_done, cancel_event)
         return pl.DataFrame()
 
     def _financial_statements(
@@ -938,18 +1032,15 @@ class FuyaoProvider:
         field_map: dict[str, str],
         symbols: list[str],
         latest_only: bool,
+        on_chunk_done: Callable[[int, int], None] | None = None,
+        cancel_event: Event | None = None,
     ) -> pl.DataFrame:
         client = self._get_client()
         limit = 1 if latest_only else _FINANCIAL_HISTORY_PERIODS
-        rows_out: list[dict] = []
-        for i, sym in enumerate(symbols):
-            if i:
-                time.sleep(_HIST_INTERVAL_S)
-            try:
-                rows = client.financial_statements(stmt, sym, limit=limit)
-            except FuyaoError as e:
-                logger.warning("扶摇财务 %s %s 失败: %s", stmt, sym, e)
-                continue
+        def fetch(sym: str, cancel_event: Event) -> list[dict]:
+            rows = client.financial_statements(stmt, sym, limit=limit,
+                                               cancel_event=cancel_event)
+            normalized = []
             for r in rows:
                 row: dict = {
                     "symbol": sym,
@@ -962,32 +1053,65 @@ class FuyaoProvider:
                 for src, value in r.items():
                     if src not in field_map and src not in row and isinstance(value, (int, float)):
                         row[src] = value
-                rows_out.append(row)
+                normalized.append(row)
+            return normalized
+
+        rows_out = [row for rows in self._financial_rows(fetch, symbols, on_chunk_done,
+                                                       cancel_event=cancel_event)
+                    for row in rows]
         # 稀疏列(如仅银行有值的 financial_expense)前 100 行可能全空, 默认采样会
         # 推断成 Null 列, 后续数值 append 失败 → 全量扫描推断
         return pl.DataFrame(rows_out, infer_schema_length=None) if rows_out else pl.DataFrame()
 
-    def _financial_metrics(self, symbols: list[str]) -> pl.DataFrame:
+    def _financial_metrics(
+        self,
+        symbols: list[str],
+        on_chunk_done: Callable[[int, int], None] | None = None,
+        cancel_event: Event | None = None,
+    ) -> pl.DataFrame:
         client = self._get_client()
+        total = 3 * len(symbols)
+
+        def progress(done: int) -> None:
+            if on_chunk_done:
+                on_chunk_done(done, total)
+
         # 指标接口按 report(yyyy-N) 单期查询 → 先用利润表 limit=1 反查每股最新披露期
         latest: dict[str, dict] = {}
-        for i, sym in enumerate(symbols):
-            if i:
-                time.sleep(_HIST_INTERVAL_S)
-            try:
-                rows = client.financial_statements("income", sym, limit=1)
-            except FuyaoError as e:
-                logger.warning("扶摇财务 income %s 失败: %s", sym, e)
-                continue
+        income_rows = self._financial_rows(
+            lambda sym, cancel_event: client.financial_statements(
+                "income", sym, limit=1, cancel_event=cancel_event,
+            ), symbols,
+            lambda done, _total: progress(done),
+            cancel_event=cancel_event,
+        )
+        for sym, rows in zip(symbols, income_rows, strict=True):
             if rows:
                 latest[sym] = rows[0]
         if not latest:
+            progress(total)
             return pl.DataFrame()
-        bps_by_sym = self._derive_bps(sorted(latest))
-        rows_out: list[dict] = []
-        for sym, r in latest.items():
+        bps_by_sym = self._derive_bps(
+            sorted(latest), lambda done, _total: progress(len(symbols) + done),
+            cancel_event=cancel_event,
+        )
+        progress(2 * len(symbols))
+
+        def fetch_indicators(sym: str, cancel_event: Event) -> list[dict]:
+            r = latest[sym]
             quarter = _report_quarter(r.get("fiscal_period"))
-            report = f"{r.get('fiscal_year')}-{quarter}" if quarter else None
+            if not quarter:
+                return []
+            return client.financial_indicators(sym, f"{r.get('fiscal_year')}-{quarter}",
+                                                cancel_event=cancel_event)
+
+        abilities_by_sym = self._financial_rows(
+            fetch_indicators, list(latest),
+            lambda done, _total: progress(2 * len(symbols) + done),
+            cancel_event=cancel_event,
+        )
+        rows_out: list[dict] = []
+        for (sym, r), abilities in zip(latest.items(), abilities_by_sym, strict=True):
             row: dict = {
                 "symbol": sym,
                 "period_end": _iso_of_ms(r.get("period_end_ms")),
@@ -995,22 +1119,17 @@ class FuyaoProvider:
                 "eps_basic": _to_float(r.get("basic_eps")),
                 "bps": bps_by_sym.get(sym),
             }
-            if report:
-                try:
-                    abilities = client.financial_indicators(sym, report)
-                except FuyaoError as e:
-                    logger.warning("扶摇指标 %s %s 失败: %s", sym, report, e)
-                    abilities = []
-                for ability in abilities:
-                    for ind in ability.get("indicators") or []:
-                        index_id = ind.get("index_id")
-                        if not index_id:
-                            continue
-                        value = _to_float(ind.get("value"))
-                        if value is not None:
-                            row[self._METRICS_FIELD_MAP.get(index_id, index_id)] = value
+            for ability in abilities:
+                for ind in ability.get("indicators") or []:
+                    index_id = ind.get("index_id")
+                    if not index_id:
+                        continue
+                    value = _to_float(ind.get("value"))
+                    if value is not None:
+                        row[self._METRICS_FIELD_MAP.get(index_id, index_id)] = value
             rows_out.append(row)
-        return pl.DataFrame(rows_out) if rows_out else pl.DataFrame()
+        progress(total)
+        return pl.DataFrame(rows_out, infer_schema_length=None) if rows_out else pl.DataFrame()
 
     def trading_days(self) -> set:
         """近一年交易日集合 (供交易日探针)。失败抛 FuyaoError, 由探针兜为未知。"""
@@ -1037,32 +1156,45 @@ class FuyaoProvider:
         """
         return self._get_client().short_term_benchmark(date)
 
-    def _derive_bps(self, symbols: list[str]) -> dict[str, float]:
+    def _derive_bps(
+        self,
+        symbols: list[str],
+        on_chunk_done: Callable[[int, int], None] | None = None,
+        *, cancel_event: Event | None = None,
+    ) -> dict[str, float]:
         """估值快照 pb_mrq 与行情快照最新价同源同刻 → bps = price / pb_mrq。
 
         与财报口径 bps 可能差几个百分点(上游权益基准不完全透明), 用于补齐
-        metrics.bps 使回测 pb_latest 因子可用。接口失败只影响 bps 列, 不致命。
+        metrics.bps 使回测 pb_latest 因子可用。成功响应缺字段时保留空值,
+        请求失败则整张指标表未完成, 不返回部分结果。
         """
         client = self._get_client()
         pb: dict[str, float] = {}
         price: dict[str, float] = {}
         for i in range(0, len(symbols), _VALUATION_BATCH):
-            if i:
-                time.sleep(_HIST_INTERVAL_S)
             batch = symbols[i : i + _VALUATION_BATCH]
             for fetch, store in (
                 (client.valuations_snapshot, pb),
                 (client.price_snapshot_batch, price),
             ):
-                time.sleep(_HIST_INTERVAL_S)
+                if on_chunk_done:
+                    on_chunk_done(i, len(symbols))
                 try:
-                    for r in fetch(batch):
+                    for r in fetch(batch, cancel_event=cancel_event):
                         value = _to_float(r.get("pb_mrq" if store is pb else "last_price"))
                         code = r.get("thscode")
                         if code and value is not None and value != 0:
                             store[code] = value
+                except FuyaoRateLimitError:
+                    raise
                 except FuyaoError as e:
                     logger.warning("扶摇 bps 推导快照失败(%d 只): %s", len(batch), e)
+                    endpoint = "估值" if store is pb else "行情"
+                    raise FuyaoError(
+                        f"扶摇 BPS {endpoint}快照取数失败（{len(batch)} 只：{'、'.join(batch)}）：{e}"
+                    ) from e
+            if on_chunk_done:
+                on_chunk_done(i + len(batch), len(symbols))
         return {
             sym: price[sym] / pb[sym]
             for sym in symbols
@@ -1126,8 +1258,8 @@ class FuyaoProvider:
                 )
                 for f in df.partition_by("symbol")
             }
-        except Exception as e:  # 缓存损坏等不致命: 回退逐标的接口
-            logger.warning("扶摇除权因子本地配价失败, 回退单标的接口: %s", e)
+        except (OSError, pl.exceptions.PolarsError) as e:  # 缓存损坏等不致命: 回退逐标的接口
+            logger.warning("扶摇除权因子本地配价失败, 回退单标的接口: %s", e, exc_info=True)
             return None
 
     @staticmethod

@@ -210,7 +210,8 @@ def test_pruned_interior_date_is_rebuilt_without_new_daily_or_factors(tmp_path, 
 
     monkeypatch.setattr(daily_pipeline, "run_pipeline", rebuild)
     repo = SimpleNamespace(store=SimpleNamespace(data_dir=tmp_path),
-                           latest_daily_date=lambda: date.fromisoformat(dates[-1]))
+                           latest_daily_date=lambda: date.fromisoformat(dates[-1]),
+                           refresh_cache=lambda: None, get_enriched_latest=lambda: (None, None))
     daily_pipeline.run_now(repo, CapabilitySet(set()))
     assert len(calls) == 1
     assert pl.read_parquet(enriched / f"date={dates[1]}" / "part.parquet")["symbol"].to_list() == ["a", "b"]

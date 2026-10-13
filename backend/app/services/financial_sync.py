@@ -6,15 +6,17 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
+import json
 import logging
 import threading
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
 
 import polars as pl
 
-from app.services.fs_utils import atomic_write_parquet
+from app.data_providers.base import ProviderRateLimitError
+from app.services.fs_utils import atomic_write_parquet, atomic_write_text
 from app.tickflow.capabilities import Cap, CapabilitySet
 
 logger = logging.getLogger(__name__)
@@ -31,16 +33,49 @@ FINANCIAL_TABLES = ("metrics", "income", "balance_sheet", "cash_flow", "shares")
 # ================================================================
 
 def _get_symbols(data_dir: Path) -> list[str]:
-    """从 instruments 表获取标的列表。"""
+    """读取本地股票池，并按供应商可选清单核对全市场财务请求范围。"""
     inst_path = data_dir / "instruments" / "instruments.parquet"
     if not inst_path.exists():
         return []
     try:
         df = pl.read_parquet(inst_path, columns=["symbol"])
-        return df["symbol"].to_list()
-    except Exception as e:
-        logger.warning("读取 instruments 失败: %s", e)
+        symbols = df["symbol"].to_list()
+    except (OSError, pl.exceptions.PolarsError) as e:
+        logger.warning("读取 instruments 失败: %s", e, exc_info=True)
         return []
+    if not symbols or not _financial_is_custom():
+        return symbols
+    from app.data_providers import custom as custom_sources
+    from app.services import preferences
+
+    provider_name = preferences.get_financial_provider()
+    provider = custom_sources.get_provider(provider_name)
+    universe_method = getattr(provider, "get_financial_universe", None)
+    if not callable(universe_method):
+        return symbols
+    # 供应商负责代码格式与覆盖范围；不能从名称、代码前缀推测退市状态。
+    universe = set(universe_method())
+    if not universe:
+        raise RuntimeError("财务数据源返回空股票范围，停止同步")
+    provider_only = sorted(universe - set(symbols))
+    # 全市场同步不能漏掉供应商已有、基础维表尚未收录的新代码。
+    selected = list(dict.fromkeys(symbol for symbol in symbols if symbol in universe)) + provider_only
+    report = {
+        "provider": provider_name,
+        "checked_at": datetime.now(UTC).isoformat(),
+        "local_symbols": len(symbols),
+        "provider_symbols": len(universe),
+        "requested_symbols": len(selected),
+        "excluded_symbols": sorted(set(symbols) - universe),
+        "provider_only_symbols": provider_only,
+    }
+    out = data_dir / "financials"
+    out.mkdir(parents=True, exist_ok=True)
+    atomic_write_text(out / "universe.json", json.dumps(report, ensure_ascii=False, indent=2))
+    logger.info("财务股票池 %s: 本地 %d，供应商 %d，请求 %d，源未覆盖 %d，维表缺少 %d",
+                provider_name, len(symbols), len(universe), len(selected),
+                len(report["excluded_symbols"]), len(report["provider_only_symbols"]))
+    return selected
 
 
 def _financial_is_custom() -> bool:
@@ -58,8 +93,12 @@ def _fetch_table(
     symbols: list[str],
     capset: CapabilitySet,
     latest_only: bool = True,
+    on_progress=None,
+    *, cancel_event: threading.Event | None = None,
 ) -> pl.DataFrame:
     """通过当前财务数据源拉取一张标准化财务表。"""
+    if on_progress:
+        on_progress(0, 1)
     is_custom = _financial_is_custom()
     if not is_custom and not capset.has(Cap.FINANCIAL):
         logger.info("sync_%s skipped: no FINANCIAL capability", table)
@@ -70,14 +109,37 @@ def _fetch_table(
 
     # 自定义数据源分流
     if is_custom:
-        from app.services import preferences
         from app.data_providers import custom as custom_sources
+        from app.services import preferences
+
         try:
             provider = custom_sources.get_provider(preferences.get_financial_provider())
-            df = provider.get_financials(table, symbols, latest_only=latest_only)
-        except Exception as e:  # noqa: BLE001
+            parameters = inspect.signature(provider.get_financials).parameters
+            cancel_kwargs = ({"cancel_event": cancel_event}
+                             if cancel_event is not None and "cancel_event" in parameters else {})
+            if "on_chunk_done" in parameters:
+                # 支持原生进度的源自行控频；旧插件仍按原有 100 股批次调用。
+                df = provider.get_financials(table, symbols, latest_only=latest_only,
+                                            on_chunk_done=on_progress, **cancel_kwargs)
+            else:
+                frames: list[pl.DataFrame] = []
+                total_batches = (len(symbols) + _BATCH_SIZE - 1) // _BATCH_SIZE
+                for i in range(0, len(symbols), _BATCH_SIZE):
+                    batch_num = i // _BATCH_SIZE + 1
+                    if on_progress:
+                        on_progress(batch_num - 1, total_batches)
+                    frame = provider.get_financials(table, symbols[i:i + _BATCH_SIZE],
+                                                   latest_only=latest_only, **cancel_kwargs)
+                    if not frame.is_empty() and "symbol" in frame.columns:
+                        frames.append(frame)
+                    if on_progress:
+                        on_progress(batch_num, total_batches)
+                df = pl.concat(frames, how="diagonal_relaxed") if frames else pl.DataFrame()
+        except ProviderRateLimitError:
+            raise
+        except Exception as e:
             logger.warning("sync_%s custom provider failed: %s", table, e)
-            return pl.DataFrame()
+            raise
         if df.is_empty() or "symbol" not in df.columns:
             return pl.DataFrame()
         return df
@@ -98,11 +160,14 @@ def _fetch_table(
         return pl.DataFrame()
 
     all_records: list[dict] = []
+    errors: list[Exception] = []
     total_batches = (len(symbols) + _BATCH_SIZE - 1) // _BATCH_SIZE
 
     for i in range(0, len(symbols), _BATCH_SIZE):
         chunk = symbols[i : i + _BATCH_SIZE]
         batch_num = i // _BATCH_SIZE + 1
+        if on_progress:
+            on_progress(batch_num - 1, total_batches)
         try:
             data = api_method(chunk, latest=latest_only)
             # data 格式: { "600519.SH": [record, ...], ... }
@@ -114,10 +179,15 @@ def _fetch_table(
                                 rec["symbol"] = sym
                                 all_records.append(rec)
             logger.debug("sync_%s batch %d/%d: %d records", table, batch_num, total_batches, len(data) if isinstance(data, dict) else 0)
-        except Exception as e:
-            logger.warning("sync_%s batch %d/%d failed: %s", table, batch_num, total_batches, e)
+        except Exception as e:  # noqa: BLE001 — SDK 单批错误汇总给后续失败判定，保留其他批次的成功结果
+            logger.warning("sync_%s batch %d/%d failed: %s", table, batch_num, total_batches, e, exc_info=True)
+            errors.append(e)
 
+    if on_progress:
+        on_progress(total_batches, total_batches)
     if not all_records:
+        if errors:
+            raise errors[0]
         return pl.DataFrame()
 
     df = pl.DataFrame(all_records)
@@ -135,6 +205,9 @@ def _write_table(table: str, df: pl.DataFrame, data_dir: Path) -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
     out_file = out_dir / "part.parquet"
     atomic_write_parquet(df, out_file)
+    from app.services.shared_runtime import publish_data_update
+
+    publish_data_update(data_dir, ["financials"])
 
     logger.info("sync_%s done: %d records written", table, len(df))
     return len(df)
@@ -146,11 +219,15 @@ def _sync_table(
     data_dir: Path,
     capset: CapabilitySet,
     latest_only: bool = True,
+    on_progress=None,
+    *, cancel_event: threading.Event | None = None,
 ) -> int:
     """同步单张财务表。返回写入的行数。"""
     return _write_table(
         table,
-        _fetch_table(table, symbols, capset, latest_only=latest_only),
+        _fetch_table(table, symbols, capset, latest_only=latest_only,
+                     **({"on_progress": on_progress} if on_progress else {}),
+                     **({"cancel_event": cancel_event} if cancel_event is not None else {})),
         data_dir,
     )
 
@@ -195,6 +272,8 @@ def _sync_history_table_for_symbols(
     symbols: list[str],
     data_dir: Path,
     capset: CapabilitySet,
+    on_progress=None,
+    *, cancel_event: threading.Event | None = None,
 ) -> int:
     """历史累积同步: 保留已有各期记录, 仅拉最新期 + 为新标的补全量历史。
 
@@ -202,18 +281,24 @@ def _sync_history_table_for_symbols(
     被冲掉, 财务因子将永远只有单期快照, 任何回测都是未来函数。
     """
     existing = get_financial_df(data_dir, table)
+    fetch_kwargs = {"on_progress": on_progress} if on_progress else {}
+    if cancel_event is not None:
+        fetch_kwargs["cancel_event"] = cancel_event
     if existing.is_empty() or not {"symbol", "period_end"} <= set(existing.columns):
-        return _sync_table(table, symbols, data_dir, capset, latest_only=False)
+        return _sync_table(table, symbols, data_dir, capset, latest_only=False, **fetch_kwargs)
 
     existing_symbols = set(existing["symbol"].drop_nulls().to_list())
     missing_symbols = [symbol for symbol in symbols if symbol not in existing_symbols]
     missing_history = (
-        _fetch_table(table, missing_symbols, capset, latest_only=False)
+        _fetch_table(table, missing_symbols, capset, latest_only=False, **fetch_kwargs)
         if missing_symbols
         else pl.DataFrame()
     )
     current_symbols = [symbol for symbol in symbols if symbol in existing_symbols]
-    latest = _fetch_table(table, current_symbols, capset, latest_only=True)
+    latest = _fetch_table(table, current_symbols, capset, latest_only=True, **fetch_kwargs)
+    # 历史行只用于合并，不能充当本次成功取数的证据或改写旧文件时间。
+    if missing_history.is_empty() and latest.is_empty():
+        return 0
     merged = _merge_report_history(existing, missing_history, latest)
     return _write_table(table, merged, data_dir)
 
@@ -281,7 +366,7 @@ def _refresh_financials_views(data_dir: Path) -> None:
         "financials_cash_flow": f"{d}/financials/cash_flow/*.parquet",
         "financials_shares": f"{d}/financials/shares/*.parquet",
     }
-    for name, path in views.items():
+    for name in views:
         out = data_dir / "financials" / name.replace("financials_", "") / "part.parquet"
         if not out.exists():
             continue
@@ -296,8 +381,8 @@ def get_financial_df(data_dir: Path, table: str) -> pl.DataFrame:
         return pl.DataFrame()
     try:
         return pl.read_parquet(path)
-    except Exception as e:
-        logger.warning("读取 financials/%s 失败: %s", table, e)
+    except (OSError, pl.exceptions.PolarsError) as e:
+        logger.warning("读取 financials/%s 失败: %s", table, e, exc_info=True)
         return pl.DataFrame()
 
 
@@ -345,7 +430,7 @@ class FinancialScheduler:
                     continue
                 parquet = data_dir / "financials" / table / "part.parquet"
                 if parquet.exists():
-                    mtime = datetime.fromtimestamp(parquet.stat().st_mtime, tz=timezone.utc).isoformat()
+                    mtime = datetime.fromtimestamp(parquet.stat().st_mtime, tz=UTC).isoformat()
                     restored[table] = mtime
                     preferences.set_financial_sync_time(table, mtime)
                     logger.info("FinancialScheduler backfilled last_sync for %s from parquet mtime", table)
@@ -370,7 +455,7 @@ class FinancialScheduler:
         持久化确保即使重启,前端 /status 仍返回真实的最后同步时间,
         不会错误地显示"尚未同步"。
         """
-        ts = datetime.now(timezone.utc).isoformat()
+        ts = datetime.now(UTC).isoformat()
         self._last_sync[table] = ts
         try:
             from app.services import preferences
@@ -414,10 +499,11 @@ class FinancialScheduler:
                 # 每周: 只同步 metrics
                 try:
                     rows = sync_metrics(self._data_dir, self._capset)
-                    self._record_sync("metrics")
+                    if rows > 0:
+                        self._record_sync("metrics")
                     logger.info("FinancialScheduler: metrics synced, %d rows", rows)
-                except Exception as e:
-                    logger.warning("FinancialScheduler: metrics sync failed: %s", e)
+                except Exception as e:  # noqa: BLE001 — 独立定时财务任务失败留痕，继续调度而不阻断采集服务
+                    logger.warning("FinancialScheduler: metrics sync failed: %s", e, exc_info=True)
 
                 # 等待下一次 (7天)
                 for _ in range(7 * 24 * 60):  # 每分钟检查一次 _running
@@ -428,12 +514,20 @@ class FinancialScheduler:
         except asyncio.CancelledError:
             pass
 
-    def _run_body(self, table: str | None) -> dict[str, int]:
+    def _run_body(self, table: str | None, on_progress=None,
+                  cancel_event: threading.Event | None = None) -> dict[str, int]:
         """同步逻辑本体(不加锁,假设调用方已持有 _is_syncing)。
 
         table=None 同步全部财务表;否则只同步指定表。
         每张表完成立即更新 last_sync,让前端轮询 /status 能看到进度递增。
         """
+        if table and on_progress:
+            rows = _sync_history_table_for_symbols(table, _get_symbols(self._data_dir), self._data_dir,
+                                                   self._capset, on_progress, cancel_event=cancel_event)
+            if rows > 0:
+                self._record_sync(table)
+            _refresh_financials_views(self._data_dir)
+            return {table: rows}
         if table:
             fn = {
                 "metrics": sync_metrics,
@@ -445,7 +539,8 @@ class FinancialScheduler:
             if not fn:
                 return {}
             rows = fn(self._data_dir, self._capset)
-            self._record_sync(table)
+            if rows > 0:
+                self._record_sync(table)
             return {table: rows}
         # 全部同步
         symbols = _get_symbols(self._data_dir)
@@ -454,11 +549,13 @@ class FinancialScheduler:
             result[t] = _sync_history_table_for_symbols(
                 t, symbols, self._data_dir, self._capset
             )
-            self._record_sync(t)
+            if result[t] > 0:
+                self._record_sync(t)
         _refresh_financials_views(self._data_dir)
         return result
 
-    def run_now(self, table: str | None = None) -> dict[str, int]:
+    def run_now(self, table: str | None = None, on_progress=None,
+                *, cancel_event: threading.Event | None = None) -> dict[str, int]:
         """同步执行一次同步(阻塞调用线程)。
 
         ⚠ 全量同步需数分钟,务必在后台线程调用,不要直接在 HTTP 请求线程里阻塞,
@@ -476,7 +573,8 @@ class FinancialScheduler:
                 return {"_skipped": 1}
             self._is_syncing = True
         try:
-            return self._run_body(table)
+            return (self._run_body(table, on_progress, cancel_event)
+                    if on_progress or cancel_event is not None else self._run_body(table))
         finally:
             with self._lock:
                 self._is_syncing = False
@@ -505,7 +603,7 @@ class FinancialScheduler:
         def _bg() -> None:
             try:
                 self._run_body(table)
-            except Exception as e:  # noqa: BLE001
+            except Exception as e:
                 logger.exception("background financial sync failed: %s", e)
             finally:
                 with self._lock:

@@ -16,14 +16,14 @@ def test_update_quote_interval_without_service_returns_defaults():
         QuoteIntervalIn(interval=6.0), request=_request_without_quote_service()
     )
 
-    assert result == {"interval": 6.0, "min_interval": 6.0, "max_interval": 60.0}
+    assert result == {"interval": 30.0, "min_interval": 30.0, "max_interval": 60.0}
 
 
-def test_update_quote_interval_without_service_keeps_requested_interval():
+def test_update_quote_interval_without_service_clamps_requested_interval():
     result = update_quote_interval(
         QuoteIntervalIn(interval=12.0), request=_request_without_quote_service()
     )
 
-    assert result["interval"] == 12.0
-    assert result["min_interval"] == 6.0
+    assert result["interval"] == 30.0
+    assert result["min_interval"] == 30.0
     assert result["max_interval"] == 60.0

@@ -10,9 +10,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.services.ext_data import PullConfig
 from app.services import ext_pull
-
+from app.services.ext_data import PullConfig
 
 # ── 模型: 默认值 / 序列化 / 非法值归一 ──────────────────────────────
 

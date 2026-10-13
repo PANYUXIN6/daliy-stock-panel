@@ -67,7 +67,7 @@ function MinuteProbePanel() {
         <h2 className="text-sm font-semibold text-foreground">分钟K数据探测</h2>
         <p className="mt-1 text-xs text-muted">
           逐日调用 <code className="px-1 rounded bg-elevated text-secondary">/api/kline/minute</code> 接口，
-          检测每只股票最近若干天的分钟K数据是否齐全。本地无数据时会自动走 TickFlow 实时拉取。
+          按自然日检查本地分钟K，周末和节假日无数据属正常；页面探测不触发采集。
         </p>
       </div>
 
@@ -83,7 +83,7 @@ function MinuteProbePanel() {
           />
         </div>
         <div className="flex flex-col gap-1">
-          <label className="text-xs text-muted">回溯天数</label>
+          <label className="text-xs text-muted">回溯自然日数</label>
           <input
             type="number"
             min={1}
@@ -113,7 +113,7 @@ function MinuteProbePanel() {
       {total > 0 && (
         <div className="grid grid-cols-3 gap-3">
           <div className="rounded-btn bg-elevated p-3">
-            <div className="text-xs text-muted">检测天数</div>
+            <div className="text-xs text-muted">检测自然日数</div>
             <div className="mt-1 text-lg font-semibold text-foreground">{total}</div>
           </div>
           <div className="rounded-btn bg-elevated p-3">

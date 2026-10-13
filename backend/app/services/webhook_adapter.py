@@ -412,7 +412,8 @@ def send_custom(
             if response.status_code < 500:
                 logger.warning("第三方 Webhook 推送失败(不重试): %s", last_err)
                 return False
-        except Exception as exc:  # Network failures are retryable and must not escape.
+        except Exception as exc:  # noqa: BLE001 — 第三方通知通道错误按既有重试结果上报，不中断告警主流程
+            logger.debug("第三方 Webhook 推送尝试失败", exc_info=True)
             last_err = str(exc)
         if attempt < max_attempts:
             time.sleep(min(2 ** (attempt - 1), 3))

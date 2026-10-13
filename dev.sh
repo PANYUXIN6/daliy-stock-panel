@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# tickflow-stock-panel — 一键启动前后端
+# tickflow-stock-panel — 一键启动网页、采集和前端
 #
 # 用法:
 #   ./dev.sh                          # 默认 backend:3018  frontend:3011
 #   BACKEND_PORT=8000 ./dev.sh        # 改后端端口
 #   FRONTEND_PORT=5173 ./dev.sh       # 改前端端口
 #
-# Ctrl-C 同时关闭两端。
+# Ctrl-C 同时关闭网页、采集和前端进程。
 
 set -euo pipefail
 
@@ -42,6 +42,7 @@ BACKEND_HOST="${HOST:-${ENV_HOST:-0.0.0.0}}"
 # Keep BACKEND_PORT as a backwards-compatible explicit override.
 BACKEND_PORT="${BACKEND_PORT:-${PORT:-${ENV_PORT:-3018}}}"
 FRONTEND_PORT="${FRONTEND_PORT:-3011}"
+COLLECTOR_PORT="${COLLECTOR_PORT:-3019}"
 UVICORN_ENV_ARGS=()
 if [[ -f "$ROOT/.env" ]]; then
   UVICORN_ENV_ARGS=(--env-file "$ROOT/.env")
@@ -119,6 +120,10 @@ free_port() {
 }
 free_port backend  "$BACKEND_PORT"
 free_port frontend "$FRONTEND_PORT"
+if lsof -nP -tiTCP:"$COLLECTOR_PORT" -sTCP:LISTEN >/dev/null 2>&1; then
+  err "采集端口 $COLLECTOR_PORT 已被占用；请先确认原采集任务，再手动停止旧服务。"
+  exit 1
+fi
 
 # ===== 3. 依赖安装 =====
 if [ ! -d "$BACKEND_DIR/.venv" ] || [ "${#BACKEND_EXTRA_ARGS[@]}" -gt 0 ]; then
@@ -140,22 +145,42 @@ if [ ! -d "$FRONTEND_DIR/node_modules" ]; then
 fi
 
 # ===== 4. 启动 + 日志前缀 =====
+# 每个后台服务拥有独立进程组；组内包含包装 shell、日志管道及服务子进程。
+# Bash 3.2 与 Linux Bash 均支持 monitor 模式，无需 setsid 等外部工具。
+set -m
 PIDS=()
 
 cleanup() {
+  trap - INT TERM EXIT
   echo
-  info "关闭服务..."
+  info "关闭网页、采集和前端服务..."
+  local pid attempt alive
   for pid in "${PIDS[@]:-}"; do
     if [ -n "$pid" ]; then
-      kill "$pid" 2>/dev/null || true
+      kill -TERM -- "-$pid" 2>/dev/null || true
     fi
   done
-  # 等子进程退出,避免孤儿
+  # 包装 shell 可能先退出，仍须等待同组 reload worker / Node 子进程。
+  for ((attempt=0; attempt<50; attempt++)); do
+    alive=0
+    for pid in "${PIDS[@]:-}"; do
+      if [ -n "$pid" ] && kill -0 -- "-$pid" 2>/dev/null; then
+        alive=1
+      fi
+    done
+    [ "$alive" -eq 0 ] && break
+    sleep 0.1
+  done
+  for pid in "${PIDS[@]:-}"; do
+    if [ -n "$pid" ]; then
+      kill -KILL -- "-$pid" 2>/dev/null || true
+    fi
+  done
   wait 2>/dev/null || true
   ok "已退出"
   exit 0
 }
-trap cleanup INT TERM
+trap cleanup INT TERM EXIT
 
 # 用 awk 加前缀(macOS sed 没有 -u line-buffered,改用 awk + fflush 兼容)
 prefix_awk() {
@@ -168,24 +193,38 @@ echo -e "${BLUE}│${NC}  ${GREEN}tickflow-stock-panel${NC}                     
 echo -e "${BLUE}│${NC}                                              ${BLUE}│${NC}"
 echo -e "${BLUE}│${NC}  backend   ${YELLOW}http://$DISPLAY_HOST:$BACKEND_PORT${NC}          ${BLUE}│${NC}"
 echo -e "${BLUE}│${NC}  frontend  ${YELLOW}http://$DISPLAY_HOST:$FRONTEND_PORT${NC}          ${BLUE}│${NC}"
+echo -e "${BLUE}│${NC}  collector ${YELLOW}127.0.0.1:$COLLECTOR_PORT${NC}                  ${BLUE}│${NC}"
 echo -e "${BLUE}│${NC}                                              ${BLUE}│${NC}"
-echo -e "${BLUE}│${NC}  Ctrl-C 同时关闭两端                          ${BLUE}│${NC}"
+echo -e "${BLUE}│${NC}  Ctrl-C 同时关闭网页、采集和前端                          ${BLUE}│${NC}"
 echo -e "${BLUE}╰──────────────────────────────────────────────╯${NC}"
 echo
 
 (
+  set +m
   cd "$BACKEND_DIR"
   # --no-sync: 跳过依赖解析, 直接用已安装的 .venv。
   # 比 --frozen 更彻底: 不校验 lockfile, 避免镜像源 403/网络抖动导致后端起不来。
   # python -m uvicorn: 强制用 venv 的解释器和 uvicorn 模块, 防止 PATH 里
   # 其他 Python(如 /usr/local/bin/uvicorn) 抢先, 导致用错误版本启动后端。
-  uv run --no-sync python -m uvicorn app.main:app ${UVICORN_ENV_ARGS[@]+"${UVICORN_ENV_ARGS[@]}"} --reload \
+  SERVICE_ROLE=web COLLECTOR_URL="http://127.0.0.1:$COLLECTOR_PORT" \
+    uv run --no-sync python -m uvicorn app.main:app ${UVICORN_ENV_ARGS[@]+"${UVICORN_ENV_ARGS[@]}"} --reload \
     --host "$BACKEND_HOST" --port "$BACKEND_PORT" 2>&1 \
     | prefix_awk "$(printf "${BLUE}[backend ]${NC} ")"
 ) &
 PIDS+=("$!")
 
 (
+  set +m
+  cd "$BACKEND_DIR"
+  # collector 不使用 reload；修改网页代码或重启网页不能中断采集任务。
+  SERVICE_ROLE=collector uv run --no-sync python -m uvicorn app.collector:app \
+    ${UVICORN_ENV_ARGS[@]+"${UVICORN_ENV_ARGS[@]}"} --host 127.0.0.1 --port "$COLLECTOR_PORT" 2>&1 \
+    | prefix_awk "[collector] "
+) &
+PIDS+=("$!")
+
+(
+  set +m
   cd "$FRONTEND_DIR"
   BACKEND_HOST="$BACKEND_HOST" BACKEND_PORT="$BACKEND_PORT" \
     pnpm dev --host "$BACKEND_HOST" --port "$FRONTEND_PORT" 2>&1 \
@@ -193,11 +232,13 @@ PIDS+=("$!")
 ) &
 PIDS+=("$!")
 
-# 等任一退出(bash 4.3+)或全部退出(老 bash)
-if wait -n 2>/dev/null; then
-  warn "其中一个进程退出,正在关闭另一个..."
-  cleanup
-else
-  # 老 bash 没有 wait -n,退化为 wait 全部
-  wait
-fi
+# Bash 3.2 没有 wait -n；检查三个包装进程，任一退出即清理其余进程组。
+while true; do
+  for pid in "${PIDS[@]}"; do
+    if ! kill -0 "$pid" 2>/dev/null; then
+      warn "一个服务退出，正在关闭其余服务..."
+      cleanup
+    fi
+  done
+  sleep 0.2
+done

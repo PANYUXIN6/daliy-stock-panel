@@ -111,11 +111,15 @@ export interface CapabilitiesResponse {
 
 // ===== Financials =====
 export interface FinancialStatus {
+  /** 本地是否已有可展示的财务数据；采集能力单独由能力矩阵判断。 */
   available: boolean
   tables: Record<string, { rows: number; symbols: number }>
+}
+
+export interface FinancialExecutionStatus {
+  active_job_id: string | null
   last_sync: Record<string, string>
-  /** 服务端是否正在同步(手动触发)——驱动"同步中"UI 并防重复点击 */
-  syncing?: boolean
+  syncing: boolean
 }
 
 export interface FinancialMetricRecord {
@@ -686,6 +690,13 @@ export interface MainlineResult {
 }
 
 // ===== 大盘复盘 =====
+export interface ReviewPublication {
+  as_of: string
+  published: boolean
+  published_at: string | null
+  overview: OverviewMarket | null
+}
+
 export interface AiReviewReport {
   id: string
   as_of: string
@@ -1817,6 +1828,7 @@ export interface EndpointManifest {
 
 export interface SettingsState {
   mode: 'none' | 'free' | 'api_key'
+  /** 兼容旧客户端的空字段；不包含密钥字符。 */
   tickflow_api_key_masked: string
   has_tickflow_key: boolean
   tier_label: string
@@ -1824,11 +1836,10 @@ export interface SettingsState {
   probe_log: string[]
   missing_caps: string[]
   extras_caps: string[]
-  // 首次使用引导
-  onboarding_completed: boolean
   // AI 配置
   ai_provider: string
   ai_base_url: string
+  /** 兼容旧客户端的空字段；不包含密钥字符。 */
   ai_api_key_masked: string
   has_ai_key: boolean
   ai_configured?: boolean
@@ -1842,19 +1853,6 @@ export interface SettingsState {
   ai_max_output_tokens?: number
   ai_context_window?: number
   ai_round_checkpoint?: number
-}
-
-/** 保存 TickFlow Key 的响应(先探后存) */
-export interface SaveTickflowKeyResult {
-  ok: boolean
-  /** ok=false 且 key 无效时的原因标识,前端据此提示「Key 无效」 */
-  reason?: 'invalid'
-  error?: string
-  mode?: 'none' | 'free' | 'api_key'
-  tier_label?: string
-  current_endpoint?: string
-  tickflow_api_key_masked?: string
-  capabilities_count?: number
 }
 
 export interface DataSourceItem {
@@ -1876,7 +1874,7 @@ export interface PluginDataSourceItem {
   install_hint: string     // 未装依赖时显示的安装命令
   homepage?: string        // 插件官网/申请地址 (manifest 可选声明)
   api_key_env?: string     // 声明后设置页提供 Key 输入框 (先探后存)
-  api_key_masked?: string  // 当前生效 Key 的脱敏串 (secrets.json 优先, .env 兜底; 与 TickFlow Key 同一展示契约)
+  api_key_masked?: string  // 当前生效 Key 的脱敏串 (secrets.json 优先, .env 兜底; 插件沿用脱敏展示，TickFlow / AI 仅返回配置状态)
 }
 
 /** 数据源路由偏好字段 (每个能力一个, 与后端能力注册表一一对应) */
@@ -2003,11 +2001,32 @@ export interface ApiTokenRecord {
   revoked: boolean
 }
 
+export type CollectionSyncRequest =
+  | { kind: 'pipeline' }
+  | { kind: 'adj_factor' }
+  | { kind: 'financial'; table: string }
+  | { kind: 'index_daily'; days: number }
+  | { kind: 'minute'; symbol: string; days: number }
+  | { kind: 'minute_batch'; days: number }
+  | { kind: 'classifications' }
+  | { kind: 'ext'; config_id: string }
+  | { kind: 'depth' }
+  | { kind: 'quotes' }
+
+export interface CollectionSyncCheck {
+  requires_confirmation: boolean
+  message: string | null
+  last_synced_at: string | null
+}
+
 export interface Preferences {
   realtime_quotes_enabled: boolean
+  ordinary_minute_enabled: boolean
   watchlist_groups_in_nav: boolean
   minute_sync_enabled: boolean
+  /** 批量分钟首次回溯的自然日数；已有数据时从最新时间增量更新 */
   minute_sync_days: number
+  /** 分段大小按交易日数量估算为自然日区间 */
   minute_sync_segment_days: number
   minute_refresh_enabled: boolean
   minute_refresh_interval: number
@@ -2203,32 +2222,14 @@ export const api = {
     }),
 
   settings: () => request<SettingsState>('/api/settings'),
-  saveTickflowKey: (api_key: string) =>
-    request<SaveTickflowKeyResult>('/api/settings/tickflow-key', {
-      method: 'POST',
-      body: JSON.stringify({ api_key }),
-    }),
-  clearTickflowKey: () =>
-    request<any>('/api/settings/tickflow-key', { method: 'DELETE' }),
-
-  /** 标记首次使用向导完成（持久化到后端 preferences） */
-  completeOnboarding: () =>
-    request<{ ok: boolean; onboarding_completed: boolean }>(
-      '/api/settings/onboarding/complete', { method: 'POST' },
-    ),
-
   /** 保存 AI 配置 */
-  saveAiSettings: (ai: { provider?: string; base_url?: string; api_key?: string; model?: string; reasoning_effort?: string; codex_command?: string; codex_reasoning_effort?: string; user_agent?: string; max_output_tokens?: number; context_window?: number; round_checkpoint?: number }) =>
+  saveAiSettings: (ai: { provider?: string; base_url?: string; model?: string; reasoning_effort?: string; codex_command?: string; codex_reasoning_effort?: string; user_agent?: string; max_output_tokens?: number; context_window?: number; round_checkpoint?: number }) =>
     request<{ ok: boolean; ai_provider?: string; ai_model?: string; ai_openai_model?: string; ai_reasoning_effort?: string; ai_codex_model?: string; ai_codex_command?: string; ai_codex_reasoning_effort?: string; ai_configured?: boolean; ai_max_output_tokens?: number; ai_context_window?: number; ai_round_checkpoint?: number }>('/api/settings/ai', {
       method: 'POST',
       body: JSON.stringify(ai),
     }),
 
-  /** 一键清空 AI 配置(保留自定义 UA) */
-  clearAiSettings: () =>
-    request<{ ok: boolean }>('/api/settings/ai', { method: 'DELETE' }),
-
-  /** 赞助商(RunningHub)模型列表(后端代理, 规避其网关按 Origin 过滤) */
+  /** RunningHub 模型列表(后端代理, 规避其网关按 Origin 过滤) */
   sponsorModels: () =>
     request<{ models: string[] }>('/api/settings/ai/sponsor-models'),
 
@@ -2249,6 +2250,10 @@ export const api = {
     }),
 
   preferences: () => request<Preferences>('/api/settings/preferences'),
+  updateOrdinaryMinute: (enabled: boolean) =>
+    request<{ ordinary_minute_enabled: boolean }>('/api/settings/preferences/ordinary-minute', {
+      method: 'PUT', body: JSON.stringify({ enabled }),
+    }),
   dataSources: () => request<DataSourcesResponse>('/api/settings/data-sources'),
   capabilityMatrix: () => request<CapabilityMatrix>('/api/settings/capability-matrix'),
   dataSource: (name: string) => request<CustomSourceConfig>(`/api/settings/data-sources/${encodeURIComponent(name)}`),
@@ -2429,7 +2434,7 @@ export const api = {
       '/api/settings/preferences/quote-interval',
       { method: 'PUT', body: JSON.stringify({ interval }) },
     ),
-  intradayRefresh: () => request<{ status: string }>('/api/intraday/refresh', { method: 'POST' }),
+  intradayRefresh: () => request<{ fetch_succeeded: boolean; last_fetch_ms: number | null }>('/api/intraday/refresh', { method: 'POST' }),
   indexQuotes: (symbols?: string[]) =>
     request<{ rows: IndexQuote[]; count: number }>(
       `/api/intraday/indices${symbols?.length ? `?symbols=${encodeURIComponent(symbols.join(','))}` : ''}`,
@@ -2645,6 +2650,7 @@ export const api = {
     }>(
       `/api/kline/minute?symbol=${encodeURIComponent(symbol)}${date ? `&date=${date}` : ''}${live ? '&live=1' : ''}`,
     ),
+  /** 最多返回最近 days 个已落库交易日的分时；只读本地 */
   klineMinuteRange: (symbol: string, days = 10) =>
     request<{
       symbol: string
@@ -2679,24 +2685,26 @@ export const api = {
       `/api/index/minute?symbol=${encodeURIComponent(symbol)}${date ? `&date=${date}` : ''}`,
     ),
   syncIndexInstruments: () =>
-    request<{ status: string; count: number }>('/api/index/sync_instruments', { method: 'POST' }),
+    request<{ job_id: string; reused: boolean }>('/api/index/sync_instruments', { method: 'POST' }),
   syncIndexDaily: (days = 365) =>
-    request<{ status: string; index_count: number; rows_written: number }>(
+    request<{ job_id: string; reused: boolean }>(
       `/api/index/sync_daily?days=${days}`,
       { method: 'POST' },
     ),
   syncSymbol: (symbol: string, days = 250) =>
-    request<{ symbol: string; rows_written: number }>(
+    request<{ job_id: string; reused: boolean; symbol?: string; status?: string }>(
       `/api/kline/sync?symbol=${encodeURIComponent(symbol)}&days=${days}`,
       { method: 'POST' },
     ),
+  /** 普通同步首次回溯 days 自然日、之后增量；extend 或 days>=365 向前扩展约 days 个交易日 */
   syncMinute: (days?: number, extend?: boolean) =>
     request<{ status: string; job_id: string }>('/api/kline/sync_minute', {
       method: 'POST',
       body: JSON.stringify({ ...(days ? { days } : {}), ...(extend ? { extend: true } : {}) }),
     }),
+  /** 单标的按本地交易日历选最近 days 个交易日；默认复用分钟同步偏好数值 */
   syncMinuteSingle: (symbol: string, days?: number) =>
-    request<{ status: string; symbol: string; rows: number }>('/api/kline/sync_minute_single', {
+    request<{ status: string; job_id: string; symbol?: string }>('/api/kline/sync_minute_single', {
       method: 'POST',
       body: JSON.stringify({ symbol, ...(days != null ? { days } : {}) }),
     }),
@@ -3193,6 +3201,8 @@ export const api = {
     ),
 
   dataStatus: () => request<DataStatus>('/api/data/status'),
+  collectionSyncCheck: (input: CollectionSyncRequest) =>
+    request<CollectionSyncCheck>('/api/data/sync-check', { method: 'POST', body: JSON.stringify(input) }),
   dataClear: () => request<{ deleted_files: number }>('/api/data/clear', { method: 'POST' }),
   refreshCache: () => request<{ ok: boolean }>('/api/data/refresh-cache', { method: 'POST' }),
   enrichedSchema: (table: string) => request<EnrichedField[]>(`/api/data/schema/${table}`),
@@ -3388,6 +3398,9 @@ export const api = {
     ),
 
   // 内置预设 (概念/行业) 手动获取数据: 走结构转换, 保证 schema 一致
+  extDataPresetsSync: () =>
+    request<{ job_id: string; reused: boolean }>('/api/ext-data/presets/sync', { method: 'POST' }),
+
   extDataPresetFetch: (id: string) =>
     request<{ status: string; rows: number }>(
       `/api/ext-data/presets/${id}/fetch`,
@@ -3420,6 +3433,9 @@ export const api = {
   financialStatus: () =>
     request<FinancialStatus>('/api/financials/status'),
 
+  financialExecutionStatus: () =>
+    request<FinancialExecutionStatus>('/api/financials/execution-status'),
+
   financialMetrics: (symbol?: string) =>
     request<{ data: FinancialMetricRecord[] }>(
       `/api/financials/metrics${symbol ? `?symbol=${encodeURIComponent(symbol)}` : ''}`,
@@ -3447,7 +3463,7 @@ export const api = {
 
   /** 触发财务数据同步(后台异步执行,接口立即返回 started 状态) */
   financialSync: (table: string) =>
-    request<{ status: string; synced: { started: boolean; reason?: string } }>(
+    request<{ status: string; job_id: string; synced: { started: boolean; reason?: string } }>(
       `/api/financials/sync/${table}`, { method: 'POST' },
     ),
 
@@ -3479,6 +3495,8 @@ export const api = {
    */
   async *financialAnalyzeStream(symbol: string, focus?: string): AsyncGenerator<{
     type: 'meta' | 'delta' | 'error' | 'done' | 'ping'
+    archived?: boolean
+    report_id?: string
     symbol?: string
     summary?: string
     periods?: number
@@ -3550,6 +3568,8 @@ export const api = {
    */
   async *stockAnalyzeStream(symbol: string, focus?: string): AsyncGenerator<{
     type: 'meta' | 'delta' | 'error' | 'done' | 'ping'
+    archived?: boolean
+    report_id?: string
     symbol?: string
     summary?: string
     levels?: Record<LevelType, PriceLevel[]>
@@ -3592,6 +3612,9 @@ export const api = {
   },
 
   // ===== 大盘复盘 =====
+  reviewPublication: (date?: string) =>
+    request<ReviewPublication>(`/api/market-recap/publication${date ? `?date=${encodeURIComponent(date)}` : ''}`),
+
   reviewReportsList: () =>
     request<{ reports: AiReviewReport[] }>('/api/market-recap/reports'),
 
@@ -3623,8 +3646,10 @@ export const api = {
    * AI 大盘复盘 — 流式调用(NDJSON,与个股/财务分析同协议)。
    * meta 里带 as_of / emotion_score / emotion_label / summary,供前端先渲染信号灯。
    */
-  async *reviewStream(asOf?: string, focus?: string): AsyncGenerator<{
+  async *reviewStream(asOf?: string, focus?: string, signal?: AbortSignal): AsyncGenerator<{
     type: 'meta' | 'delta' | 'error' | 'done' | 'ping'
+    archived?: boolean
+    report_id?: string
     as_of?: string
     emotion_score?: number
     emotion_label?: string
@@ -3634,6 +3659,7 @@ export const api = {
   }> {
     const res = await fetch('/api/market-recap/analyze', {
       method: 'POST',
+      signal,
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ as_of: asOf ?? null, focus: focus ?? '' }),
     })
@@ -3649,20 +3675,26 @@ export const api = {
     const reader = res.body.getReader()
     const decoder = new TextDecoder()
     let buf = ''
-    for (;;) {
-      const { done, value } = await reader.read()
-      if (done) break
-      buf += decoder.decode(value, { stream: true })
-      const lines = buf.split('\n')
-      buf = lines.pop() ?? ''
-      for (const line of lines) {
-        const s = line.trim()
-        if (!s) continue
-        try { yield JSON.parse(s) } catch { /* ignore */ }
+    try {
+      for (;;) {
+        const { done, value } = await reader.read()
+        if (done) break
+        buf += decoder.decode(value, { stream: true })
+        const lines = buf.split('\n')
+        buf = lines.pop() ?? ''
+        for (const line of lines) {
+          const s = line.trim()
+          if (!s) continue
+          try { yield JSON.parse(s) } catch { /* ignore */ }
+        }
       }
-    }
-    if (buf.trim()) {
-      try { yield JSON.parse(buf.trim()) } catch { /* ignore */ }
+      if (buf.trim()) {
+        try { yield JSON.parse(buf.trim()) } catch { /* ignore */ }
+      }
+    } finally {
+      // 包括显式取消及调用方提前退出；已中止的 fetch 可能令 cancel 拒绝，仍须解锁。
+      try { await reader.cancel() } catch { /* aborted response */ }
+      reader.releaseLock()
     }
   },
 
@@ -4064,6 +4096,7 @@ export const api = {
 // ===== Pipeline =====
 export interface PipelineJob {
   id: string
+  request_key?: string | null
   status: 'pending' | 'running' | 'succeeded' | 'failed'
   stage: string
   progress: number          // 0-100 整体进度

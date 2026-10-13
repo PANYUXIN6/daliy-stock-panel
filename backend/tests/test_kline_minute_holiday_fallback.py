@@ -41,9 +41,7 @@ def _session(day: date, symbol: str = SYMBOL) -> pl.DataFrame:
 @pytest.fixture
 def market(monkeypatch: pytest.MonkeyPatch):
     """北京时间钉在国庆当天上午 10:00; 返回设置探针结论的函数。"""
-    monkeypatch.setattr(kline_api, "cn_now", lambda: MORNING)
     monkeypatch.setattr(kline_api, "cn_today", lambda: HOLIDAY)
-    monkeypatch.setattr(kline_api, "in_continuous_session", lambda: True)
     monkeypatch.setattr(preferences, "get_minute_batch_compress", lambda: False)
     fetch = MagicMock(return_value=pl.DataFrame())
     monkeypatch.setattr(kline_api.kline_sync, "fetch_minute_single", fetch)
@@ -101,7 +99,7 @@ def test_minute_batch_trading_or_unknown_day_keeps_today(market, verdict) -> Non
 
     kline_api.get_minute_batch(request, {"symbols": [SYMBOL]})
 
-    assert request.app.state.repo.get_minute_batch.call_args.args[1] == HOLIDAY
+    assert request.app.state.repo.get_minute_batch.call_args.args[1] == (HOLIDAY if verdict is True else LAST_SESSION)
 
 
 def test_minute_batch_explicit_date_is_not_replaced(market) -> None:
@@ -121,8 +119,8 @@ class _FakeRepo:
     def __init__(self) -> None:
         # /minute 现读取 repo.store.data_dir 判断分钟基准标记 (未标记目录即旧行为)
         import tempfile
-        from types import SimpleNamespace
         from pathlib import Path
+        from types import SimpleNamespace
         self.store = SimpleNamespace(data_dir=Path(tempfile.mkdtemp()))
 
     def resolve_asset_type(self, symbol: str) -> str:
@@ -174,7 +172,7 @@ def test_minute_trading_or_unknown_day_keeps_today(market, verdict) -> None:
 
     body = _client().get("/api/kline/minute", params={"symbol": SYMBOL}).json()
 
-    assert body["date"] == "2026-10-01"
+    assert body["date"] == ("2026-10-01" if verdict is True else "2026-09-30")
 
 
 def test_minute_explicit_date_is_not_replaced(market) -> None:

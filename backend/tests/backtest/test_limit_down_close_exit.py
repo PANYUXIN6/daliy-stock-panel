@@ -20,10 +20,10 @@ from app.backtest.engine import BacktestEngine, MatcherConfig
 START = date(2024, 1, 1)
 
 
-def _day(i: int, o: float, h: float, l: float, c: float, *, ld: bool = False) -> dict:
+def _day(i: int, o: float, h: float, low: float, c: float, *, ld: bool = False) -> dict:
     return {
         "symbol": "A", "date": START + timedelta(days=i),
-        "open": o, "high": h, "low": l, "close": c,
+        "open": o, "high": h, "low": low, "close": c,
         "volume": 100_000,
         "signal_limit_up": False, "signal_limit_down": ld,
     }

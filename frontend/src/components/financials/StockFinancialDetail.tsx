@@ -240,7 +240,7 @@ export function StockFinancialDetail({ symbol, name }: Props) {
           </div>
         ) : rows.length === 0 ? (
           <div className="py-10 text-center text-xs text-muted">
-            暂无{TABS.find(t => t.key === tab)?.label}数据 — 可点击顶部「全部同步」拉取
+            暂无{TABS.find(t => t.key === tab)?.label}数据 — 后台尚未采集该项财务数据
           </div>
         ) : (
           <div className="space-y-5">

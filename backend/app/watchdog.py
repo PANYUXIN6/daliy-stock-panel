@@ -84,6 +84,7 @@ class HealthWatchdog:
                     self._consecutive_failures,
                     self._failure_threshold,
                     exc,
+                    exc_info=True,
                 )
                 if self._consecutive_failures >= self._failure_threshold:
                     logger.critical(

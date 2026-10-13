@@ -14,6 +14,7 @@ import threading
 import time
 import uuid
 from collections.abc import Callable
+from contextlib import suppress
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -138,8 +139,8 @@ def _instruments_symbol_index(data_dir) -> dict[str, list[str]] | None:
         return None
     try:
         symbols = pl.read_parquet(path, columns=["symbol"])["symbol"].drop_nulls().to_list()
-    except Exception as e:
-        logger.warning("instruments 维表读取失败, 裸符号无法补全后缀: %s", e)
+    except (OSError, pl.exceptions.PolarsError) as e:
+        logger.warning("instruments 维表读取失败, 裸符号无法补全后缀: %s", e, exc_info=True)
         return None
     index: dict[str, list[str]] = {}
     for s in symbols:
@@ -223,7 +224,7 @@ def sync_daily_batch(symbols: list[str],
         sleep_between_batches(i, rpm)
         try:
             if start_time and end_time:
-                raw = _sdk_call_with_deadline(lambda: tf.klines.batch(
+                raw = _sdk_call_with_deadline(lambda chunk=chunk: tf.klines.batch(
                     chunk, period="1d", adjust="none",
                     start_time=_datetime_to_ms(start_time),
                     end_time=_datetime_to_ms(end_time),
@@ -231,7 +232,7 @@ def sync_daily_batch(symbols: list[str],
                     as_dataframe=False, show_progress=False,
                 ))
             else:
-                raw = _sdk_call_with_deadline(lambda: tf.klines.batch(
+                raw = _sdk_call_with_deadline(lambda chunk=chunk: tf.klines.batch(
                     chunk, period="1d", count=count or 250, adjust="none",
                     as_dataframe=False, show_progress=False))
         except SDKCallTimeoutError as e:
@@ -448,15 +449,14 @@ def sync_daily_by_quotes(repo: KlineRepository) -> int:
     一个请求覆盖 ~5500 只股票,比 batch K-line 快几个数量级。
     返回写入的行数。
     """
-    from datetime import date as _date
 
     from app.tickflow.client import get_client
 
     tf = get_client()
     try:
         resp = tf.quotes.get_by_universes(universes=["CN_Equity_A"])
-    except Exception as e:
-        logger.warning("get_by_universes failed: %s", e)
+    except Exception as e:  # noqa: BLE001 — 快照接口失败返回本轮未写入状态，调用方继续报告同步结果
+        logger.warning("get_by_universes failed: %s", e, exc_info=True)
         return 0
 
     if not resp:
@@ -465,7 +465,6 @@ def sync_daily_by_quotes(repo: KlineRepository) -> int:
 
     records = []
     for q in resp:
-        ext = q.get("ext") or {}
         records.append({
             "symbol": q.get("symbol"),
             "open": q.get("open"),
@@ -678,7 +677,7 @@ def sync_adj_factor(symbols: list[str], repo: KlineRepository,
     for i, chunk in enumerate(chunks):
         sleep_between_batches(i, limit.rpm)
         try:
-            raw = _sdk_call_with_deadline(lambda: tf.klines.ex_factors(chunk, **sdk_kwargs))
+            raw = _sdk_call_with_deadline(lambda chunk=chunk: tf.klines.ex_factors(chunk, **sdk_kwargs))
             normalized = _normalize_adj_factor(raw)
             if not normalized.is_empty():
                 all_dfs.append(normalized)
@@ -905,7 +904,9 @@ def _datetime_to_ms(dt: datetime) -> int:
     return int(dt.timestamp() * 1000)
 
 
-def _write_minute_partition(df: pl.DataFrame, minute_dir) -> int:
+def _write_minute_partition(
+    df: pl.DataFrame, minute_dir, on_persist: Callable[[int], None] | None = None,
+) -> int:
     """按 _trade_date 分区落盘分钟 K (读旧→concat→unique→原子写)。返回写入行数。
 
     抽自原 sync_and_persist_minute 末尾的循环, 供流式落盘 (每段一次) 与一次性迁移共用。
@@ -937,6 +938,8 @@ def _write_minute_partition(df: pl.DataFrame, minute_dir) -> int:
         day_df = day_df.sort("symbol", "datetime")
         _atomic_write_parquet(day_df, out)
         written += day_df.height
+        if on_persist is not None:
+            on_persist(day_df.height)
     return written
 
 
@@ -1013,16 +1016,16 @@ def _try_custom_minute(
             symbols, start_time=start_time, end_time=end_time,
             asset_type=asset_type, freq=freq, on_chunk_done=wrapped_cb,
         )
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 — 第三方分钟 provider 任意异常沿用现有路由失败契约
         logger.warning("custom minute provider %s call failed, falling back to TickFlow: %s",
-                       provider_name, e)
+                       provider_name, e, exc_info=True)
         return (None, True)
     try:
         # 时区契约守卫: 插件/自定义源帧同样收口为北京墙钟 (CONTRIBUTING §3.3)
         df = _enforce_minute_beijing_wallclock(df, source=provider_name)
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 — 第三方分钟帧校验失败拒绝该帧，保持现有路由失败契约
         logger.warning("custom minute provider %s datetime 契约校验失败, falling back to TickFlow: %s",
-                       provider_name, e)
+                       provider_name, e, exc_info=True)
         return (None, True)
     return (df, False)
 
@@ -1083,12 +1086,12 @@ def sync_minute_batch(
     # TickFlow count 上限 10000 根/股, 1 天 240 根 → 单次最多约 41 个交易日。
     # 按 segment_trading_days 交易日分段 (交易日→自然日 ×7/5 换算, 含节假日余量)。
     seg_calendar_days = max(1, int(segment_trading_days * 7 / 5))
-    SEG_CHUNK = timedelta(days=seg_calendar_days)
+    seg_chunk = timedelta(days=seg_calendar_days)
     time_segments: list[tuple[datetime | None, datetime | None]] = []
     if start_time and end_time:
         seg_start = start_time
         while seg_start < end_time:
-            seg_end = min(seg_start + SEG_CHUNK, end_time)
+            seg_end = min(seg_start + seg_chunk, end_time)
             time_segments.append((seg_start, seg_end))
             seg_start = seg_end
     else:
@@ -1101,20 +1104,19 @@ def sync_minute_batch(
     # 段内累积: 每段拉完即 flush, 避免全量攒内存 (OOM 根因)
     seg_out: list[pl.DataFrame] = []
 
-    for seg_idx, (cur_start, cur_end) in enumerate(time_segments):
+    for cur_start, cur_end in time_segments:
         # 当前的日期段描述 (供进度展示)
         if cur_start and cur_end:
             seg_label = f"{cur_start.strftime('%m-%d')}~{cur_end.strftime('%m-%d')}"
         else:
             seg_label = "最新"
-        seg_total = len(time_segments)
         chunks = chunked(symbols, batch_size)
-        for i, chunk in enumerate(chunks):
+        for chunk in chunks:
             sleep_between_batches(step, rpm)
             step += 1
             try:
                 if cur_start and cur_end:
-                    raw = _sdk_call_with_deadline(lambda: tf.klines.batch(
+                    raw = _sdk_call_with_deadline(lambda chunk=chunk, cur_start=cur_start, cur_end=cur_end: tf.klines.batch(
                         chunk, period="1m",
                         start_time=_datetime_to_ms(cur_start),
                         end_time=_datetime_to_ms(cur_end),
@@ -1123,7 +1125,7 @@ def sync_minute_batch(
                         as_dataframe=False, show_progress=False,
                     ))
                 else:
-                    raw = _sdk_call_with_deadline(lambda: tf.klines.batch(
+                    raw = _sdk_call_with_deadline(lambda chunk=chunk: tf.klines.batch(
                         chunk, period="1m", count=count or 1200,
                         adjust="none" if raw_basis else "forward",
                         as_dataframe=False, show_progress=False))
@@ -1290,7 +1292,8 @@ def fetch_intraday_full_market_burst(
             )
             seg = _normalize_minute(_compact_klines_to_df(raw))
             return ([seg] if not seg.is_empty() else [], None)
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 — 分块错误作为返回值上交，由聚合层决定重试与失败统计
+            logger.debug("intraday burst 分块请求失败", exc_info=True)
             return ([], e)
 
     frames: list[pl.DataFrame] = []
@@ -1348,8 +1351,8 @@ def fetch_intraday_universe_increment(
     tf = get_client()
     try:
         raw = tf.klines.intraday_universe(universe, count=count, as_dataframe=False)
-    except Exception as e:
-        logger.warning("intraday universe fetch failed (%s): %s", universe, e)
+    except Exception as e:  # noqa: BLE001 — 增量接口失败返回无本轮数据，不污染已有分钟分区
+        logger.warning("intraday universe fetch failed (%s): %s", universe, e, exc_info=True)
         return (pl.DataFrame(), 0)
     seg = _compact_klines_to_df(raw)
     if seg.is_empty():
@@ -1493,8 +1496,8 @@ def fetch_minute_single(
             adjust="none" if raw_basis else "forward",
             as_dataframe=False, show_progress=False,
         )
-    except Exception as e:
-        logger.warning("fetch_minute_single(%s, %s) failed: %s", symbol, trade_date, e)
+    except Exception as e:  # noqa: BLE001 — 单股 SDK 读取错误按既有空结果契约报告，不影响其他标的
+        logger.warning("fetch_minute_single(%s, %s) failed: %s", symbol, trade_date, e, exc_info=True)
         return pl.DataFrame()
 
     return _normalize_minute(_compact_klines_to_df(raw, default_symbol=symbol))
@@ -1624,10 +1627,8 @@ def _migrate_symbol_to_date_partition(repo: KlineRepository) -> None:
             if f.is_file():
                 f.unlink()
         # 移除空目录
-        try:
+        with suppress(OSError):
             d.rmdir()
-        except OSError:
-            pass
 
     logger.info("minute-K migration done: %d rows migrated", combined.height)
 
@@ -1640,6 +1641,7 @@ def sync_and_persist_minute(
     on_chunk_done: Callable[[int, int, str], None] | None = None,
     extend_backward: bool = False,
     force_full_days: bool = False,
+    on_persist: Callable[[int], None] | None = None,
 ) -> int:
     """同步分钟 K 并存到 Parquet。返回写入行数。
 
@@ -1647,7 +1649,9 @@ def sync_and_persist_minute(
     前复权 (旧行为); 已迁移 → adjust='none' 原始价落盘, 复权读取时投影。
     使用 start_time / end_time 区间拉取, 确保所有标的覆盖同一时间段。
     on_chunk_done(current, total) 每个 chunk 完成后回调。
-    force_full_days=True 时强制回溯 days 自然日 (不增量补, 用于个股补齐历史)。
+    普通同步首次回溯 days 自然日，已有数据从最新时间增量更新。
+    extend_backward=True 或 force_full_days=True 的窗口按 days 个交易日估算，
+    使用自然日区间拉取，不保证精确交易日数量；单标的手动采集走 ordinary_minute。
     """
     minute_provider = preferences.get_minute_data_provider()
     # resolver 调用统一走 _resolve_minute_provider, 与 _try_custom_minute 共用异常边界。
@@ -1689,7 +1693,7 @@ def sync_and_persist_minute(
             end_time = now
     else:
         # 默认增量模式: 首次拉取回溯 N 天, 已有数据则从最新时间增量补到今天
-        # force_full_days=True: 强制回溯 days 自然日 (个股补齐历史, 不增量)
+        # force_full_days=True: 按交易日数估算回溯窗口，不走增量。
         last_dt = _latest_minute_datetime(repo)
         if force_full_days:
             # 按交易日换算自然日 (7/5 系数), 确保覆盖足够交易日
@@ -1718,7 +1722,7 @@ def sync_and_persist_minute(
         # 单股自动补齐可能与另一个补齐请求同时写同一日期分区。Windows 不允许
         # 替换仍被另一写入占用的临时文件,因此读-改-写必须复用仓库写锁。
         with repo._write_lock:
-            written_box[0] += _write_minute_partition(seg_df, minute_dir)
+            written_box[0] += _write_minute_partition(seg_df, minute_dir, on_persist=on_persist)
 
     segment_days = preferences.get_minute_sync_segment_days()
     sync_minute_batch(

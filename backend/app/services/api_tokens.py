@@ -52,8 +52,8 @@ def load_tokens(data_dir: Path) -> list[dict]:
     try:
         raw = json.loads(p.read_text(encoding="utf-8"))
         return raw.get("tokens", [])
-    except Exception as e:
-        logger.warning("api_tokens.json 解析失败 (视为无 Token): %s", e)
+    except (OSError, UnicodeError, ValueError, TypeError, KeyError, AttributeError) as e:
+        logger.warning("api_tokens.json 解析失败 (视为无 Token): %s", e, exc_info=True)
         return []
 
 
@@ -155,5 +155,5 @@ def _touch(data_dir: Path, record: dict, now: datetime) -> None:
                 if t["id"] == record["id"]:
                     t["last_used_at"] = record["last_used_at"]
             _save(data_dir, tokens)
-    except Exception as e:
-        logger.warning("api_tokens last_used_at 落盘失败 (忽略): %s", e)
+    except (OSError, UnicodeError, ValueError, TypeError, KeyError, AttributeError) as e:
+        logger.warning("api_tokens last_used_at 落盘失败 (忽略): %s", e, exc_info=True)

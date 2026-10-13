@@ -5,14 +5,13 @@ null); 历史交易日的 quote_ts 时刻 < 15:00 即盘中快照 → 坏。
 """
 from __future__ import annotations
 
-import time
-from datetime import date, datetime, time, timedelta, timezone
+from datetime import UTC, date, datetime, time, timedelta
 from types import SimpleNamespace
 
-import app.data_providers
 import polars as pl
 import pytest
 
+import app.data_providers
 from app.market_time import CN_TZ, cn_today
 from app.services import data_integrity as di
 from app.services.data_integrity import (
@@ -347,9 +346,9 @@ def test_branch4_start_without_stale_day_uses_latest():
 
 def test_timezone_conversion_is_cn():
     # quote_ts 是毫秒 Unix 时间戳, 必须按 UTC+8 折算 — 15:00 边界用例
-    ts = int(datetime(2026, 8, 21, 7, 0, tzinfo=timezone.utc).timestamp() * 1000)  # 北京 15:00
+    ts = int(datetime(2026, 8, 21, 7, 0, tzinfo=UTC).timestamp() * 1000)  # 北京 15:00
     assert _is_snapshot(FRIDAY, ts) is False
-    ts_morning = int(datetime(2026, 8, 21, 3, 58, tzinfo=timezone.utc).timestamp() * 1000)  # 北京 11:58
+    ts_morning = int(datetime(2026, 8, 21, 3, 58, tzinfo=UTC).timestamp() * 1000)  # 北京 11:58
     assert _is_snapshot(FRIDAY, ts_morning) is True
 
 
@@ -418,9 +417,7 @@ class _QuoteServiceStub:
         self.enabled = False
 
 
-def test_realtime_gate_blocks_on_snapshot_and_launches_repair(tmp_path, monkeypatch):
-    from fastapi import HTTPException
-
+def test_realtime_enable_does_not_implicitly_repair_snapshot(tmp_path, monkeypatch):
     from app.api import settings as settings_api
     from app.services import data_integrity
 
@@ -449,15 +446,11 @@ def test_realtime_gate_blocks_on_snapshot_and_launches_repair(tmp_path, monkeypa
     request = _gate_state(tmp_path, qs, repo=None)
     req = settings_api.RealtimeQuotesPrefs(realtime_quotes_enabled=True)
 
-    with pytest.raises(HTTPException) as exc_info:
-        settings_api.update_realtime_quotes(req, request)
+    result = settings_api.update_realtime_quotes(req, request)
 
-    assert exc_info.value.status_code == 409
-    assert "盘中快照" in exc_info.value.detail
-    assert "job-x" in exc_info.value.detail
-    # 修复任务以最早坏日为起点, 且实时行情未被开启
-    assert launched == [(snapshot_day, "realtime_gate")]
-    assert saved == {}
+    assert result["realtime_quotes_enabled"] is True
+    assert launched == []
+    assert saved == {"realtime_quotes_enabled": True}
 
 
 def test_realtime_gate_blocks_when_no_local_data(tmp_path, monkeypatch):

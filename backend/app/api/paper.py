@@ -62,7 +62,7 @@ def _resolve_asset_type(request: Request, symbol: str) -> str:
     repo = getattr(request.app.state, "repo", None)
     try:
         return repo.resolve_asset_type(symbol) if repo is not None else "stock"
-    except Exception:
+    except Exception:  # noqa: BLE001 -- 资产解析失败沿用现有默认值，warning已包含traceback
         logging.getLogger(__name__).warning(
             "resolve_asset_type failed for %s, falling back to stock", symbol, exc_info=True
         )
@@ -84,6 +84,7 @@ def _last_close(data_dir: Path, symbol: str, asset_type: str) -> float | None:
             .collect()
         )
     except Exception:
+        logger.exception("paper trading last close read failed: %s", symbol)
         return None
     if df.is_empty() or df["close"][0] is None:
         return None
@@ -146,8 +147,8 @@ def overview(request: Request, account: str = Query(paper.DEFAULT_ACCOUNT_ID)):
                 live = paper.overview(data_dir, snapshot, account_id=acc_id)
                 live["fees"] = ov["fees"]
                 return live
-        except Exception as e:
-            logger.warning("paper overview 实时估算失败, 降级日线口径: %s", e)
+        except Exception as e:  # noqa: BLE001 -- 实时估算是可选展示，失败保留日线结果
+            logger.warning("paper overview 实时估算失败, 降级日线口径: %s", e, exc_info=True)
     return ov
 
 

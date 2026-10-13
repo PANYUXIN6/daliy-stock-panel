@@ -56,8 +56,8 @@ def configure_backend_extensions(
             registry.register(registrar)
             for router in registrar.routers:
                 app.include_router(router)
-        except Exception as exc:
-            logger.warning("backend extension load failed %s: %s", module_name, exc)
+        except Exception as exc:  # noqa: BLE001 — 可选扩展任意加载失败需隔离
+            logger.warning("backend extension load failed %s: %s", module_name, exc, exc_info=True)
             errors.append(BackendExtensionLoadError(module_name, str(exc)))
 
     registry.freeze()
@@ -99,8 +99,8 @@ def start_backend_extensions(
             startup = getattr(module, "startup", None)
             if callable(startup):
                 startup(context)
-        except Exception as exc:
-            logger.warning("backend extension startup failed %s: %s", module_name, exc)
+        except Exception as exc:  # noqa: BLE001 — 第三方启动钩子失败不阻止主程序
+            logger.warning("backend extension startup failed %s: %s", module_name, exc, exc_info=True)
 
 
 def current_extension_context(*, data_dir, repository) -> ExtensionContext:

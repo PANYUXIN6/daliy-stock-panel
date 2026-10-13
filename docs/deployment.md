@@ -6,30 +6,20 @@
 
 ---
 
-## 方式 A:GHCR 现成镜像(免本地构建,多数用户推荐)
+## 方式 A：已有镜像
 
-GitHub Actions 每次推送都会自动构建多架构镜像(linux/amd64 · arm64)并发布到 GHCR,直接拉取运行,本地无需 Python / Node,也不用现场 build:
-
-```bash
-docker run -d --name tsp -p 3018:3018 -v ${PWD}/data:/app/data ghcr.io/shy3130/tick-stock-panel:latest
-# 打开 http://localhost:3018
-```
-
-- 需要配置时:从 `.env.example` 复制出 `.env`,命令里加 `--env-file .env`。
-- 镜像默认**不含** stock-sdk 插件(合规考虑),也不含 `legacy-cpu` / `backtest` extras —— 老 CPU(无 AVX2)或需要 vectorbt 回测时,请用方式 B 通过 `BACKEND_EXTRAS` 自构建。
-- 跑自己改过的代码:fork 后到仓库 Actions 页启用 workflow(fork 默认禁用),构建出的 `ghcr.io/<你的用户名>/tick-stock-panel` 用法相同。
-- 想要 compose 全套挂载(`.env` / `tiers.yaml` / 数据卷):参考根目录 `docker-compose.yml`,把 `build:` 段换成 `image: ghcr.io/shy3130/tick-stock-panel:latest`。
-
-更新到新版本:
+使用包含双服务入口 `app.collector:app` 的同一版本镜像运行网页与采集服务。复制根目录 `docker-compose.yml`，将共享 `x-service.build` 改为该版本的 `image`，再执行：
 
 ```bash
-docker pull ghcr.io/shy3130/tick-stock-panel:latest
-docker rm -f tsp
-# 重新执行上面的 docker run
+docker compose pull
+docker compose up -d
 ```
+
+不要只运行一个 `app.main:app` 容器：默认角色为网页，仅提供本地查询，显式同步需要采集服务。既有单容器部署应先停止旧容器，再启动双服务，保留原 `data/` 挂载。
+
+镜像默认不含 stock-sdk 插件或 `legacy-cpu` / `backtest` extras；需要这些能力时使用本地构建。
 
 ---
-
 
 ## 方式 B:Docker Compose(本地构建,全套挂载)
 
@@ -39,7 +29,7 @@ docker compose up --build
 # 打开 http://localhost:3018
 ```
 
-Docker 采用两阶段构建,前端 dist 拷进后端镜像,**单容器**运行,数据完全在自己手里。
+Docker 使用同一镜像启动 `web` 和唯一的 `collector`，共享 `./data:/app/data`。只有 `web` 映射宿主机端口；`collector` 仅在 Compose 网络内可达，外部反向代理也只能指向 `web`。两个服务均配置健康检查和 `restart: unless-stopped`。
 
 > ⚠️ **stock-sdk 插件默认不打包(合规考虑)**
 >
@@ -81,9 +71,9 @@ cp .env.example .env       # 按需填 TICKFLOW_API_KEY(留空 = None 模式)
 ./dev.sh                   # Windows: .\dev.ps1
 ```
 
-`dev.sh` 自动检查 / 下载依赖、释放端口、同时起前后端,Ctrl-C 一并关闭。默认:
+`dev.sh` / `dev.ps1` 同时启动网页、采集和前端开发服务器，Ctrl-C 一并关闭。采集服务不启用代码热重载，网页 reload 不会终止采集任务；采集端口已占用时会报错，不强杀现有采集进程。默认:
 
-- 后端 → <http://localhost:3018> · 前端 → <http://localhost:3011>
+- 网页后端 → <http://localhost:3018> · 前端 → <http://localhost:3011> · 采集 → `127.0.0.1:3019`
 - 自定义端口:`BACKEND_PORT=8000 FRONTEND_PORT=5173 ./dev.sh`
 
 ### 手动分别启动(不想用 dev.sh)
@@ -93,11 +83,64 @@ cp .env.example .env       # 按需填 TICKFLOW_API_KEY(留空 = None 模式)
 cd backend && uv sync --extra backtest   # 含回测依赖
 # 老 CPU: uv sync --extra legacy-cpu
 # 老 CPU + 回测: uv sync --extra legacy-cpu --extra backtest
-uv run uvicorn app.main:app --reload --port 3018
+# 第一个终端：唯一采集服务
+uv run uvicorn app.collector:app --host 127.0.0.1 --port 3019
+
+# 第二个终端，同一个 backend/ 和 DATA_DIR：网页服务
+uv run uvicorn app.main:app --host 127.0.0.1 --reload --port 3018
 
 # 前端
 cd frontend && pnpm install && pnpm dev   # http://localhost:3011
 ```
+
+---
+
+## 运行配置、健康与恢复
+
+交易日历复用已配置的 fuyao 插件，由 collector 启动、定时及数据源保存后同步到共享目录。日历未知或未覆盖当日时，实时与分钟采集保持未就绪；先在设置中配置 fuyao，再查看服务日志中的同步结果，不按周一至周五猜测交易日。
+
+- `SERVICE_ROLE`：默认 `web`；独立入口 `app.collector:app` 显式选择采集角色。
+- `COLLECTOR_URL`：网页内部请求地址，源码默认 `http://127.0.0.1:3019`；Compose 为 `http://collector:3018`。
+- `DATA_DIR`：两个服务必须使用同一目录。唯一采集进程通过原跨平台进程锁持有写入/任务执行权，第二个采集实例启动会失败。
+- `AI_MAX_CONCURRENT`：默认 2，所有 AI 执行入口共享并发上限，流结束、关闭和取消均释放槽位。
+
+`GET /health` 返回自身 `service_role`。网页还返回 `collector_connected` 和 `collector_last_event_at`，用于区分网页可用与采集连接就绪；采集暂不可用时仍可浏览已保存数据，执行请求返回明确的 503。
+
+```bash
+docker compose ps
+docker compose logs --tail 100 web collector
+docker compose restart web       # 不影响 collector 正在执行的任务
+```
+
+采集服务重启后，未完成任务会标记为中断，用户可显式重试；不会由网页启动自动补齐。行情与指数使用已保存快照，网页每个进程仅保持一条采集事件连接，连接恢复后重新加载本地快照和视图。
+
+## 桌面版
+
+桌面窗口连接网页服务。首次启动会在本机启动独立采集监护进程；窗口关闭后采集继续运行，重开窗口复用原进程。采集异常退出由监护进程自动重启。日志在 `data/runtime/collector-launch.log` 与后端日志中。
+
+需要彻底停止后台采集时，关闭窗口后运行：
+
+```bash
+# 源码模式（backend/ 目录）
+uv run python -m app.desktop --stop-collector
+# 打包版：对安装目录中的可执行文件传同一参数
+TSP --stop-collector
+```
+
+下次打开桌面程序会重新启动采集。不要同时运行桌面采集和另一个使用同一 `DATA_DIR` 的 collector。
+
+## 备份与恢复
+
+备份整个 `data/`（包括行情、用户配置、策略、报告和任务记录），同时保存 `.env` 与 `tiers.yaml`。为获得一致备份，先停止两个服务，拷贝到独立备份目录，再启动：
+
+```bash
+docker compose stop
+# 将 data/、.env、tiers.yaml 复制到你选择的备份位置
+# 确认备份完成后：
+docker compose up -d
+```
+
+恢复时停止两服务，用备份替换目标目录并确认挂载路径和文件权限，再启动同版本镜像。不要在 collector 写入时覆盖数据。备份包含密钥与个人数据，应保存在受控位置。
 
 ---
 
@@ -129,9 +172,9 @@ vectorbt → numba 体积较大,作为可选 extras(`uv sync --extra backtest`)�
 git pull
 ```
 
-> 用方式 A 镜像直跑(无本地仓库)的用户:`docker pull ghcr.io/shy3130/tick-stock-panel:latest` 后删除旧容器重跑;compose 换 `image:` 的用户执行 `docker compose pull && docker compose up -d`。
+> 镜像部署执行 `docker compose pull && docker compose up -d`；两个服务始终使用相同版本。
 
-**整个 `data/` 目录都不纳入 git** —— 行情 K线、财务、自选、回测、监控记录,乃至概念/行业扩展数据,全部是程序运行时生成/拉取的用户数据,`git pull` 物理上无法影响它们。新用户首次启动时,概念/行业两份扩展数据会自动从远程接口拉取,无需任何手动操作。
+**整个 `data/` 目录都不纳入 git** —— 行情 K线、财务、自选、回测、监控记录,乃至概念/行业扩展数据,全部是程序运行时生成/拉取的用户数据,`git pull` 物理上无法影响它们。新用户首次启动只创建概念/行业预设配置，分类数据由维护者在数据页手动同步。
 
 > ⚠️ **切勿使用以下命令"解决冲突"或"清理",它们会一次性删光 `data/` 下所有未被 git 跟踪的数据:**
 > - `git clean -fdx`(最危险,会删掉所有 `.gitignore` 忽略的文件)

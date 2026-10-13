@@ -10,7 +10,7 @@
   盘中轮询线程(交易时段, 独立 sleep, 不绑行情轮询):
     读 enriched 内存缓存(线程安全) → 涨跌停名单 → tf.depth.batch
     → 算 sealed → 更新内存缓存(不落盘) → sealed_ready=True
-  盘后定版 job(可配置时间, 默认15:02):
+  数据页手动触发盘后定版:
     最后拉一次 → 落盘 depth5 parquet(定版)
 
 三层防护节流("设过大设上限, 设过小设最小值"):
@@ -25,13 +25,12 @@ import math
 import os
 import threading
 import time
-from datetime import date, time as dt_time
-
-from app.market_time import cn_now, cn_today
-from pathlib import Path
+from datetime import date
+from datetime import time as dt_time
 
 import polars as pl
 
+from app.market_time import cn_now, cn_today
 from app.tickflow.capabilities import Cap
 from app.tickflow.rate_limits import (
     apply_safety_rpm,
@@ -99,20 +98,11 @@ class DepthService:
     # ================================================================
 
     def boot_check(self) -> None:
-        """启动补跑: 当天 depth5 文件不存在则 finalize 一次; 已存在则恢复内存缓存。"""
-        if not self._has_capability():
-            logger.info("depth sealed: 无 DEPTH5_BATCH 能力, 跳过启动补跑")
-            return
+        """启动仅恢复当日本地盘口缓存; 缺失定版由手动同步补齐。"""
         today = cn_today()
         if self._persisted_for_date(today):
             # parquet 已存在: 恢复内存缓存(避免重启后每次查询都读 parquet)
             self._restore_from_parquet(today)
-            return
-        logger.info("depth sealed: 启动补跑今天定版")
-        try:
-            self.finalize()
-        except Exception as e:  # noqa: BLE001
-            logger.warning("depth sealed 启动补跑失败: %s", e)
 
     def _restore_from_parquet(self, d: date) -> None:
         """从 parquet 恢复内存缓存(服务重启后)。"""
@@ -317,8 +307,8 @@ class DepthService:
                     logger.warning("depth provider %s 未声明 depth5, 跳过本轮", provider_name)
                     return {}
                 provider = custom_sources.get_provider(provider_name)
-            except Exception as e:
-                logger.warning("depth provider %s 解析失败, 跳过本轮: %s", provider_name, e)
+            except Exception as e:  # noqa: BLE001 — 可选盘口 provider 解析失败跳过本轮，不跨源取数
+                logger.warning("depth provider %s 解析失败, 跳过本轮: %s", provider_name, e, exc_info=True)
                 return {}
 
         fetch_depth = getattr(provider, "get_depth_batch", None)
@@ -655,7 +645,7 @@ class DepthService:
 
     @staticmethod
     def _is_continuous_trading() -> bool:
-        """A股连续竞价时段(北京时间): 9:30-11:30 / 13:00-15:00, 仅工作日。
+        """A股连续竞价时段(北京时间): 9:30-11:30 / 13:00-15:00, 仅本地日历确认的交易日。
 
         比 _is_trading_hours 严格: 排除午间休市前后(11:30-13:00)。
         depth sealed 轮询用此窗口而非宽窗口, 关键原因:
@@ -668,4 +658,5 @@ class DepthService:
         t = now.time()
         morning = dt_time(9, 30) <= t <= dt_time(11, 30)
         afternoon = dt_time(13, 0) <= t <= dt_time(15, 0)
-        return now.weekday() < 5 and (morning or afternoon)
+        from app.services import trading_day
+        return trading_day.is_trading_day(now) is True and (morning or afternoon)

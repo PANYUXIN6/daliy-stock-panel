@@ -85,24 +85,41 @@ def test_minute_range_does_not_read_stock_store_for_index():
     repo.get_minute_range.assert_not_called()
 
 
-def test_sync_minute_single_uses_requested_days(monkeypatch):
-    repo = MagicMock()
-    repo.resolve_asset_type.return_value = "stock"
-    capset = MagicMock()
-    sync = MagicMock(return_value=2400)
-    refresh = MagicMock()
-    monkeypatch.setattr(kline_api, "_minute_allowed", lambda _: True)
-    monkeypatch.setattr(kline_api.kline_sync, "sync_and_persist_minute", sync)
-    monkeypatch.setattr("app.jobs.daily_pipeline._refresh_single_view", refresh)
+async def test_sync_minute_single_uses_requested_days(monkeypatch, tmp_path):
+    from app.api import pipeline
+    from app.market_time import CN_TZ
+    from app.services import ordinary_minute, pipeline_jobs
+    from app.tickflow.repository import DataStore, KlineRepository
 
-    result = asyncio.run(kline_api.sync_minute_single(
-        _request(repo, capset),
-        {"symbol": "600000.SH", "days": 10},
-    ))
-
-    assert result["rows"] == 2400
-    sync.assert_called_once_with(["600000.SH"], repo, capset, days=10, force_full_days=True)
-    refresh.assert_called_once_with(repo, "kline_minute")
+    repo = KlineRepository(DataStore(tmp_path))
+    monkeypatch.setattr(repo, 'resolve_asset_type', lambda symbol: 'stock')
+    jobs = pipeline_jobs.JobStore(store_dir=tmp_path / 'jobs')
+    monkeypatch.setattr(pipeline_jobs, 'job_store', jobs)
+    monkeypatch.setattr(pipeline, 'job_store', jobs)
+    monkeypatch.setattr(pipeline_jobs, '_run_slot_owner', None)
+    monkeypatch.setattr(kline_api, '_minute_allowed', lambda _: True)
+    monkeypatch.setattr(ordinary_minute, 'cn_now', lambda: datetime(2026, 8, 10, 14, tzinfo=CN_TZ))
+    monkeypatch.setattr(ordinary_minute.trading_day, 'calendar_status', lambda root: {
+        'days': ['2026-08-06', '2026-08-07', '2026-08-10'],
+    })
+    collect = MagicMock(return_value=480)
+    monkeypatch.setattr(ordinary_minute, 'collect_minutes', collect)
+    try:
+        result = await kline_api.sync_minute_single(_request(repo), {'symbol': '600000.SH', 'days': 2})
+        assert result['status'] == 'started'
+        await asyncio.gather(*list(pipeline._tasks))
+        job = jobs.get(result['job_id'])
+        assert job['status'] == 'succeeded'
+        assert job['result'] == {
+            'symbol': '600000.SH', 'rows': 480,
+            'collection_context': {'provider': 'tickflow', 'asset_type': 'stock'},
+        }
+        args = collect.call_args.args
+        assert args[2] == {'stock': ['600000.SH']}
+        assert args[3] == datetime(2026, 8, 7, 9, 30, tzinfo=CN_TZ)
+        assert args[4] == datetime(2026, 8, 10, 14, tzinfo=CN_TZ)
+    finally:
+        repo.db.close()
 
 
 def test_sync_minute_single_rejects_invalid_days():

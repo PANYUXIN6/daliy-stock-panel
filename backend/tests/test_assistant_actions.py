@@ -308,7 +308,7 @@ def test_summarize_action_results() -> None:
     assert "拒绝" in denied
 
 
-# ── 数据完整性检查 + 数据补全 ─────────────────────────────────────
+# ── 数据完整性检查 + 只读采集进度 ─────────────────────────────────
 
 def _make_partitions(data_dir: Path, subdir: str, dates: list[str]) -> None:
     for d in dates:
@@ -404,92 +404,44 @@ def test_check_data_coverage_symbol_lagging(tmp_path: Path) -> None:
     assert any("600519.SH 本地日线缺失" in issue for issue in result["issues"])
 
 
-async def test_sync_data_pipeline_reuses_shared_trigger(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """sync_data 必须走数据页同一条触发路径(单飞语义由该路径保证)。"""
-    from app.api import kline as kline_module
-    from app.api import pipeline as pipeline_module
-
-    triggered: list[dict] = []
-
-    async def fake_pipeline(repo, capset, quote_service=None):
-        triggered.append({"kind": "pipeline"})
-        return {"job_id": "job_p1", "reused": False}
-
-    async def fake_minute(repo, capset, *, override_days=None, extend_flag=None):
-        triggered.append({"kind": "minute", "days": override_days, "extend": extend_flag})
-        return {"status": "started", "job_id": "job_m1"}
-
-    monkeypatch.setattr(pipeline_module, "trigger_pipeline_job", fake_pipeline)
-    monkeypatch.setattr(kline_module, "trigger_minute_sync", fake_minute)
-    ctx = assistant_tools.ToolContext.build(
-        data_dir=tmp_path, repo=object(), capabilities=object(),
-    )
-
-    payload = await assistant_tools._sync_data({"kind": "pipeline"}, ctx)
-    assert payload["started"] is True and payload["job_id"] == "job_p1"
-
-    payload = await assistant_tools._sync_data({"kind": "minute_extend", "days": 500}, ctx)
-    assert payload["job_id"] == "job_m1"
-    assert triggered[1]["days"] == 500 and triggered[1]["extend"] is True
-    # days 超上限被钳制
-    await assistant_tools._sync_data({"kind": "minute_extend", "days": 9999}, ctx)
-    assert triggered[2]["days"] == 1095
-
-
 class _StubFinScheduler:
     def __init__(self) -> None:
-        self.calls: list[str | None] = []
         self.is_syncing = True
         self.last_sync = {"metrics": "2026-09-26T10:00:00"}
 
-    def trigger(self, table: str | None = None) -> dict:
-        self.calls.append(table)
-        return {"started": 1}
 
+async def test_assistant_cannot_start_collection(monkeypatch, tmp_path):
+    """旧会话或模型发来的采集调用也只能得到未知工具错误。"""
+    from app.api import financials, kline, pipeline
+    from app.custom.assistant.prompt import build_system_prompt
 
-async def test_sync_data_financials_and_validation(tmp_path: Path) -> None:
-    fs = _StubFinScheduler()
-    ctx = assistant_tools.ToolContext.build(data_dir=tmp_path, financial_scheduler=fs)
+    async def forbidden(*args, **kwargs):
+        pytest.fail("普通助手不得启动数据采集")
 
-    payload = await assistant_tools._sync_data({"kind": "financials", "table": "metrics"}, ctx)
-    assert payload["started"] is True and payload["table"] == "metrics"
-    assert fs.calls == ["metrics"]
+    monkeypatch.setattr(pipeline, "trigger_pipeline_job", forbidden)
+    monkeypatch.setattr(kline, "trigger_minute_sync", forbidden)
+    monkeypatch.setattr(financials, "trigger_financial_sync", forbidden)
+    schemas = {schema["function"]["name"] for schema in assistant_tools.build_tool_schemas()}
+    assert "sync_data" not in schemas
+    assert {"get_stock_quote", "get_financials", "get_sync_status", "run_backtest", "create_signal_strategy"} <= schemas
+    assert "sync_data" not in assistant_actions.ACTION_TOOLS
+    assert "sync_data" not in build_system_prompt(None)
+    ctx = assistant_tools.ToolContext.build(data_dir=tmp_path)
+    for kind in ("pipeline", "financials", "minute_extend"):
+        result = await assistant_tools.execute_assistant_tool("sync_data", {"kind": kind}, ctx)
+        assert result == {"ok": False, "error": "未知工具: sync_data"}
 
-    bad = await assistant_tools.execute_assistant_tool("sync_data", {"kind": "nope"}, ctx)
-    assert bad["ok"] is False and "kind" in bad["error"]
-
-    bad_table = await assistant_tools.execute_assistant_tool(
-        "sync_data", {"kind": "financials", "table": "nope"}, ctx)
-    assert bad_table["ok"] is False and "table" in bad_table["error"]
-
-
-async def test_sync_data_gated_as_action(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """sync_data 属于动作工具: 拒绝后不得触发任何同步。"""
-    from app.api import pipeline as pipeline_module
-
-    async def fail_trigger(*args, **kwargs):
-        raise AssertionError("sync_data must not execute when denied")
-
-    monkeypatch.setattr(pipeline_module, "trigger_pipeline_job", fail_trigger)
-    assert "sync_data" in assistant_actions.ACTION_TOOLS
-
-    executed: list[str] = []
-
-    async def fake_execute(name, args, ctx):
-        executed.append(name)
-        return {"ok": True, "result": {"started": True}}
-
+    execute = assistant_tools.execute_assistant_tool
     events = await _run_chat(
         monkeypatch,
-        [{"id": "c1", "name": "sync_data", "arguments": '{"kind": "pipeline"}'}],
-        fake_execute,
-        lambda ev: assistant_actions.registry.resolve(ev["call_id"], False),
+        [{"id": "old", "name": "sync_data", "arguments": '{"kind": "pipeline"}'}],
+        execute,
+        lambda ev: pytest.fail("采集工具已经移除，不应出现确认卡"),
     )
-    assert executed == []
-    results = [e for e in events if e["type"] == "tool_result"]
-    assert results[0]["ok"] is False and "拒绝" in results[0]["summary"]
-    confirms = [e for e in events if e["type"] == "action_confirm"]
-    assert confirms[0]["label"] == "数据补全/同步"
+    results = [event for event in events if event["type"] == "tool_result"]
+    assert len(results) == 1 and results[0]["ok"] is False
+    assert "未知工具" in results[0]["summary"]
+    assert events[-1]["type"] == "done"
 
 
 def test_sync_status_and_summaries(tmp_path: Path) -> None:
@@ -502,8 +454,6 @@ def test_sync_status_and_summaries(tmp_path: Path) -> None:
         "check_data_coverage", {"ok": True, "result": {"issues": ["x"]}})
     assert "无缺口" in assistant_tools.summarize_tool_result(
         "check_data_coverage", {"ok": True, "result": {"issues": []}})
-    assert "已启动" in assistant_tools.summarize_tool_result(
-        "sync_data", {"ok": True, "result": {"kind": "pipeline", "job_id": "j1", "reused": False}})
 
 
 # ── 轮次检查点: 到达 _TOOL_ROUND_CHECKPOINT 时询问「继续/停止」 ─────

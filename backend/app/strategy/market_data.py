@@ -79,8 +79,8 @@ def get_index_daily(symbol, start=None, end=None, columns=None):
     e = _norm_date(end, cn_today())
     try:
         return _get_repo().get_index_daily(symbol, s, e, columns)
-    except Exception as exc:
-        logger.warning("market_data get_index_daily failed %s: %s", symbol, exc)
+    except Exception as exc:  # noqa: BLE001 - 用户策略行情入口保持读取失败返回空表契约。
+        logger.warning("market_data get_index_daily failed %s: %s", symbol, exc, exc_info=True)
         return pl.DataFrame()
 
 
@@ -93,8 +93,8 @@ def get_etf_daily(symbol, start=None, end=None, columns=None):
     e = _norm_date(end, cn_today())
     try:
         return _get_repo().get_etf_daily(symbol, s, e, columns)
-    except Exception as exc:
-        logger.warning("market_data get_etf_daily failed %s: %s", symbol, exc)
+    except Exception as exc:  # noqa: BLE001 - 用户策略 ETF 行情读取失败保持空表契约。
+        logger.warning("market_data get_etf_daily failed %s: %s", symbol, exc, exc_info=True)
         return pl.DataFrame()
 
 
@@ -113,8 +113,8 @@ def get_daily(symbol, start=None, end=None, columns=None):
         if asset_type == "etf":
             return repo.get_etf_daily(symbol, s, e, columns)
         return repo.get_daily(symbol, s, e, columns)
-    except Exception as exc:
-        logger.warning("market_data get_daily failed %s: %s", symbol, exc)
+    except Exception as exc:  # noqa: BLE001 - 按资产路由的用户策略行情入口保持失败空表契约。
+        logger.warning("market_data get_daily failed %s: %s", symbol, exc, exc_info=True)
         return pl.DataFrame()
 
 
@@ -122,8 +122,8 @@ def list_index_symbols() -> list[dict]:
     """列出已收录的指数符号(含名称)。无数据返回空列表。"""
     try:
         df = _get_repo().get_instruments_asset("index")
-    except Exception as exc:
-        logger.warning("market_data list_index_symbols failed: %s", exc)
+    except Exception as exc:  # noqa: BLE001 - 可选指数列表读取失败保留空列表契约。
+        logger.warning("market_data list_index_symbols failed: %s", exc, exc_info=True)
         return []
     if df.is_empty() or "symbol" not in df.columns:
         return []

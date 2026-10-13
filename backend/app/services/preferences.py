@@ -49,8 +49,8 @@ def load() -> dict:
         data = json.loads(p.read_text(encoding="utf-8"))
     except FileNotFoundError:
         return {}
-    except Exception as e:
-        logger.warning("preferences.json malformed: %s", e)
+    except (OSError, UnicodeError, json.JSONDecodeError) as e:
+        logger.warning("preferences.json malformed: %s", e, exc_info=True)
         return {}
     _cache = data
     _cache_sig = sig
@@ -86,7 +86,7 @@ def get_watchlist_groups_in_nav() -> bool:
 
 
 def get_realtime_quote_interval() -> float:
-    return load().get("realtime_quote_interval", 6.0)
+    return max(30.0, float(load().get("realtime_quote_interval", 30.0)))
 
 
 def set_realtime_quote_interval(interval: float) -> float:
@@ -103,6 +103,11 @@ def get_minute_sync_enabled() -> bool:
     return load().get("minute_sync_enabled", False)
 
 
+def get_ordinary_minute_enabled() -> bool:
+    """普通分时自动采集开关；缺少偏好时保持原有开启行为。"""
+    return bool(load().get("ordinary_minute_enabled", True))
+
+
 def get_minute_intraday_refresh() -> bool:
     """自选列表分时图是否跟随实时行情刷新。
 
@@ -116,7 +121,8 @@ def get_minute_intraday_refresh() -> bool:
     try:
         from app.services.quote_service import QuoteService
         return QuoteService.is_realtime_allowed()
-    except Exception:
+    except Exception:  # noqa: BLE001 — 能力检测异常保持 fail-closed，不授权实时执行
+        logger.debug("实时能力检测失败", exc_info=True)
         return False
 
 
@@ -404,7 +410,7 @@ def get_mainline_blacklist() -> list[str]:
     """
     v = load().get("mainline_blacklist", [])
     if isinstance(v, str):
-        v = [part for part in re.split(r"[,，、;；\s]+", v) if part]  # noqa: RUF001
+        v = [part for part in re.split(r"[,，、;；\s]+", v) if part]
     if not isinstance(v, list):
         return []
     return [str(x).strip() for x in v if str(x).strip()]
@@ -447,7 +453,7 @@ def set_mainline_filter_config(cfg: dict) -> dict:
     if "blacklist" in cfg and cfg["blacklist"] is not None:
         raw = cfg["blacklist"]
         if isinstance(raw, str):
-            raw = [part for part in re.split(r"[,，、;；\s]+", raw) if part]  # noqa: RUF001
+            raw = [part for part in re.split(r"[,，、;；\s]+", raw) if part]
         updates["mainline_blacklist"] = [str(x).strip() for x in (raw or []) if str(x).strip()]
     if updates:
         save(updates)
@@ -1079,19 +1085,6 @@ def set_screener_result_columns(columns: list[dict]) -> list[dict]:
     """保存策略结果列表列配置。"""
     save({"screener_result_columns": columns})
     return columns
-
-
-# ===== 首次使用引导 =====
-
-def get_onboarding_completed() -> bool:
-    """是否已完成首次使用向导。默认 False（新用户）。"""
-    return bool(load().get("onboarding_completed", False))
-
-
-def set_onboarding_completed(done: bool = True) -> bool:
-    """标记首次使用向导完成状态。"""
-    save({"onboarding_completed": bool(done)})
-    return bool(done)
 
 
 # ===== 财务数据同步时间(持久化,重启不丢失) =====

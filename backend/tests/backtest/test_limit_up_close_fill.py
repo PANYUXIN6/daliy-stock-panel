@@ -26,13 +26,13 @@ def _panel(limit_day_idx: int | None, one_price: bool) -> pl.DataFrame:
             prev_close = 10.0 + (i - 1) * 0.05
             limit = round(prev_close * 1.1, 2)
             if one_price:
-                o = h = l = c = limit
+                o = h = low = c = limit
             else:
-                o, l = px, px - 0.1
+                o, low = px, px - 0.1
                 h = c = limit
             rows.append({
                 "symbol": "A", "date": start + timedelta(days=i),
-                "open": o, "high": h, "low": l, "close": c,
+                "open": o, "high": h, "low": low, "close": c,
                 "volume": 100_000,
                 "signal_limit_up": True, "signal_limit_down": False,
             })

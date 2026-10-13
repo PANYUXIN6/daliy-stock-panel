@@ -7,9 +7,9 @@
 职责:
   1. 单实例锁 — 已运行则聚焦已有窗口并退出
   2. 选可用端口 — 从 settings.port 起, 被占则递增
-  3. 后台线程起 uvicorn (仅监听 127.0.0.1, 不暴露外网)
+  3. 独立采集进程 + 网页 uvicorn 线程 (仅监听 127.0.0.1)
   4. 主线程起 pywebview 窗口渲染前端
-  5. 窗口关闭 → 优雅停止 uvicorn → 进程退出
+  5. 窗口关闭只退出网页；采集服务继续，--stop-collector 显式停止
 
 不含: 业务逻辑、配置持久化、监控告警 (全在 app.main 里)。
 """
@@ -21,6 +21,7 @@ import sys
 import threading
 import time
 import traceback
+from contextlib import suppress
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -44,7 +45,7 @@ def _ensure_data_dir_writable() -> None:
         probe = data_root / ".write_probe"
         probe.write_text("ok", encoding="utf-8")
         probe.unlink(missing_ok=True)
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         logger.error("数据目录不可写, 桌面版无法运行: %s (%s)", data_root, e)
         raise
 
@@ -80,10 +81,8 @@ def _release_single_instance() -> None:
     from app.config import settings
 
     lock_path = settings.data_dir / ".desktop.lock"
-    try:
+    with suppress(Exception):
         lock_path.unlink(missing_ok=True)
-    except Exception:  # noqa: BLE001
-        pass
 
 
 def _guard_streams() -> None:
@@ -100,7 +99,6 @@ def _guard_streams() -> None:
     修法: console=False 下把 stdout/stderr 换成丢弃写入的空对象 (devnull),
     让 logging / reconfigure / 任何 print 都安全落地。console=True 不动 (有真控制台)。
     """
-    import os
 
     class _NullStream:
         """丢弃所有写入的空流 (替代 None 的 stdout/stderr)。"""
@@ -214,7 +212,8 @@ def _run_uvmicorn(port: int, ready_event: threading.Event) -> None:
         # 延迟 import app, 确保配置层已就绪 (frozen 检测在 config.py 导入时完成)
         # 放进 try: app.main 模块导入 (含 app.api.* 一长串 import) 若失败,
         # 异常必须落到 except 记录, 否则主线程只看到「后端超时」而查无 traceback。
-        from app.main import app
+        from app.main import create_app
+        app = create_app("web")
     except Exception:
         logger.exception("后端模块导入失败 (app.main 或其依赖)")
         ready_event.set()
@@ -251,18 +250,15 @@ def _wait_for_server(port: int, timeout: float = 60.0) -> bool:
 
     比 monkey-patch uvicorn 内部方法更健壮, 不依赖版本内部实现。
     """
-    import urllib.request
     import urllib.error
+    import urllib.request
 
     url = f"http://127.0.0.1:{port}/health"
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        try:
-            with urllib.request.urlopen(url, timeout=2) as r:
-                if r.status == 200:
-                    return True
-        except (urllib.error.URLError, ConnectionError, OSError):
-            pass
+        with suppress(urllib.error.URLError, ConnectionError, OSError), urllib.request.urlopen(url, timeout=2) as r:
+            if r.status == 200:
+                return True
         time.sleep(0.5)
     return False
 
@@ -271,7 +267,7 @@ def _open_window(url: str) -> None:
     """主线程: 用 pywebview 打开桌面窗口。"""
     import webview  # type: ignore[import-not-found]
 
-    window = webview.create_window(
+    webview.create_window(
         _APP_NAME,
         url,
         width=1440,
@@ -282,6 +278,122 @@ def _open_window(url: str) -> None:
     )
     # pywebview 会阻塞主线程直到窗口关闭
     webview.start(debug=False)
+
+
+def _collector_command(mode: str) -> list[str]:
+    """冻结包和源码使用相同的显式服务模式，不启动桌面窗口。"""
+    if getattr(sys, "frozen", False):
+        return [sys.executable, mode]
+    return [sys.executable, "-m", "app.desktop", mode]
+
+
+def _collector_port() -> int:
+    from urllib.parse import urlsplit
+
+    from app.config import settings
+
+    address = urlsplit(settings.collector_url)
+    if address.scheme != 'http' or address.hostname not in {'127.0.0.1', 'localhost'}:
+        raise ValueError('桌面采集服务地址必须为 http://127.0.0.1:<端口>')
+    return address.port or 80
+
+
+def _collector_healthy() -> bool:
+    import json
+    import urllib.error
+    import urllib.request
+
+    try:
+        with urllib.request.urlopen(f'http://127.0.0.1:{_collector_port()}/health', timeout=2) as response:
+            result = json.load(response)
+            if result.get('service_role') != 'collector':
+                raise RuntimeError('采集端口被其他服务占用，请检查 COLLECTOR_URL')
+            return True
+    except (urllib.error.URLError, ConnectionError, OSError):
+        return False
+
+
+def _collector_runtime() -> Path:
+    from app.config import settings
+    root = settings.data_dir / 'runtime'
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def _ensure_collector() -> None:
+    """复用已有采集服务；新服务由独立监护进程托管，不随网页退出。"""
+    import os
+    import subprocess
+
+    if _collector_healthy():
+        return
+    root = _collector_runtime()
+    pid_file = root / 'desktop_collector.pid'
+    try:
+        owner_alive = _pid_alive(int(pid_file.read_text()))
+    except (OSError, ValueError):
+        owner_alive = False
+    if not owner_alive:
+        (root / 'desktop_collector.stop').unlink(missing_ok=True)
+        environment = dict(os.environ, SERVICE_ROLE='collector', PYINSTALLER_RESET_ENVIRONMENT='1')
+        options = {'close_fds': True}
+        if sys.platform == 'win32':
+            options['creationflags'] = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+        else:
+            options['start_new_session'] = True
+        with (root / 'collector-launch.log').open('ab') as log:
+            subprocess.Popen(
+                _collector_command('--collector-supervisor'), env=environment,
+                stdin=subprocess.DEVNULL, stdout=log, stderr=log, **options,
+            )
+    deadline = time.monotonic() + 120
+    while time.monotonic() < deadline:
+        if _collector_healthy():
+            return
+        time.sleep(0.5)
+    raise RuntimeError('采集服务启动超时，请查看 runtime/collector-launch.log')
+
+
+def _supervise_collector() -> int:
+    """桌面专用监护：异常退出后重启，显式 stop 时停止而不重启。"""
+    import subprocess
+
+    root = _collector_runtime()
+    stop = root / 'desktop_collector.stop'
+    pid = root / 'desktop_collector.pid'
+    pid.write_text(str(_current_pid()))
+    child = None
+    try:
+        while not stop.exists():
+            child = subprocess.Popen(_collector_command('--collector-service'))
+            while child.poll() is None and not stop.exists():
+                time.sleep(0.5)
+            if stop.exists():
+                child.terminate()
+                try:
+                    child.wait(timeout=15)
+                except subprocess.TimeoutExpired:
+                    child.kill()
+                    child.wait()
+                break
+            if child.returncode == 0:
+                break
+            logger.error('采集服务异常退出 (%s)，3秒后重启', child.returncode)
+            time.sleep(3)
+        return 0
+    finally:
+        pid.unlink(missing_ok=True)
+        if child is not None and child.poll() is None:
+            child.terminate()
+
+
+def _run_collector_service() -> int:
+    import uvicorn
+
+    from app.collector import app
+
+    uvicorn.run(app, host='127.0.0.1', port=_collector_port(), access_log=False)
+    return 0
 
 
 def main() -> int:
@@ -299,15 +411,24 @@ def main() -> int:
 
     try:
         _ensure_data_dir_writable()
-    except Exception:
+    except OSError:
         # 数据目录不可写是致命错误, 无法继续
         return 1
+
+    if '--collector-service' in sys.argv:
+        return _run_collector_service()
+    if '--collector-supervisor' in sys.argv:
+        return _supervise_collector()
+    if '--stop-collector' in sys.argv:
+        (_collector_runtime() / 'desktop_collector.stop').touch()
+        return 0
 
     # 单实例: 已运行则退出
     if not _acquire_single_instance():
         return 0
 
     try:
+        _ensure_collector()
         port = _find_free_port(_BASE_PORT)
         logger.info("桌面版后端将监听 127.0.0.1:%d", port)
 

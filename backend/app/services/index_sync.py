@@ -6,8 +6,8 @@ quotes.get_by_universes 作为补充来源。日K统一走 klines.batch。
 """
 from __future__ import annotations
 
-import logging
 import gc
+import logging
 from collections.abc import Callable
 from datetime import datetime, timedelta
 
@@ -276,8 +276,8 @@ def etf_adj_factor_window_start(adj_path, history_start: datetime) -> datetime:
         return history_start
     try:
         max_date = pl.scan_parquet(adj_path).select(pl.col("trade_date").max()).collect().item()
-    except Exception as e:
-        logger.warning("读取 ETF 除权因子最新日期失败, 回退日K历史起点: %s", e)
+    except (OSError, pl.exceptions.PolarsError) as e:
+        logger.warning("读取 ETF 除权因子最新日期失败, 回退日K历史起点: %s", e, exc_info=True)
         return history_start
     if max_date is None:
         return history_start
@@ -302,8 +302,8 @@ def _load_local_etf_daily(repo: KlineRepository, symbols: list[str]) -> pl.DataF
             .filter(pl.col("symbol").is_in(symbols))
             .collect()
         )
-    except Exception as e:
-        logger.warning("读取本地 ETF 日K失败: %s", e)
+    except (OSError, pl.exceptions.PolarsError) as e:
+        logger.warning("读取本地 ETF 日K失败: %s", e, exc_info=True)
         return pl.DataFrame()
 
 

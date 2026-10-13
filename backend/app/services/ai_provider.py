@@ -17,8 +17,11 @@ from pathlib import Path
 from types import TracebackType
 from urllib.parse import urlsplit, urlunsplit
 
+import anyio
+
 from app import secrets_store
 from app.config import settings
+from app.services.ai_capacity import limited_ai
 
 OPENAI_COMPAT_PROVIDER = "openai_compat"
 OPENAI_PROVIDER = "openai"
@@ -474,6 +477,7 @@ async def _run_openai_once(
     return (message.content or "").strip()
 
 
+@limited_ai
 async def _run_openai_message_once(
     messages: Sequence[Message],
     *,
@@ -489,7 +493,7 @@ async def _run_openai_message_once(
     """
     ai_key = secrets_store.get_ai_key()
     if not ai_key:
-        raise RuntimeError("AI API Key 未配置, 请在设置页配置")
+        raise RuntimeError("AI API Key 未配置, 请在后端 .env 配置 AI_API_KEY 并重启服务")
 
     client = _openai_client(ai_key, timeout)
     model = current_ai_model()
@@ -516,6 +520,7 @@ async def _run_openai_message_once(
     return resp.choices[0].message
 
 
+@limited_ai
 async def _stream_openai(
     messages: Sequence[Message],
     *,
@@ -526,7 +531,7 @@ async def _stream_openai(
 ) -> AsyncIterator[str]:
     ai_key = secrets_store.get_ai_key()
     if not ai_key:
-        raise RuntimeError("AI API Key 未配置, 请在设置页配置")
+        raise RuntimeError("AI API Key 未配置, 请在后端 .env 配置 AI_API_KEY 并重启服务")
 
     client = _openai_client(ai_key, timeout)
     model = current_ai_model()
@@ -566,6 +571,9 @@ async def _stream_openai(
         if _is_openai_transport_error(exc):
             raise RuntimeError(_format_openai_error(exc)) from exc
         raise
+    finally:
+        with anyio.CancelScope(shield=True):
+            await stream.close()
 
 
 _LENGTH_FINISH_REASONS = {"length", "max_tokens", "max_output_tokens"}
@@ -763,11 +771,13 @@ def _format_openai_error(exc: Exception) -> str:
         return "AI 服务请求超时, 请稍后重试或检查 AI Base URL / 网络"
     if "Connection" in class_name:
         return "AI 服务连接失败, 请检查 AI Base URL / 网络"
+    if status == 401:
+        # 认证错误可能包含供应商回显的完整或部分密钥，不把详情交给网页。
+        return "AI 服务请求失败(401): API Key 无效或无权限, 请检查后端 AI_API_KEY 配置"
 
     detail = _openai_error_detail(exc)
     status_messages = {
         400: "请求参数无效, 请检查模型名称和上下文长度",
-        401: "API Key 无效或无权限, 请检查设置页配置",
         403: "AI 服务拒绝访问, 请检查账号权限或网关配置",
         404: "模型或接口地址不存在, 请检查 AI Base URL 和模型名称",
         408: "AI 服务请求超时, 请稍后重试",
@@ -802,7 +812,7 @@ def _openai_error_detail(exc: Exception) -> str:
         content_type = response.headers.get("content-type", "").lower()
         try:
             text = response.text
-        except Exception:
+        except Exception:  # noqa: BLE001 — 读取失败仍由调用方报告原异常，避免日志泄漏供应商回显的密钥
             text = ""
     if not text and isinstance(body, str):
         text = body
@@ -819,12 +829,16 @@ def _looks_like_html(text: str, content_type: str) -> bool:
 
 
 def _compact_error_text(text: str) -> str:
+    key = secrets_store.get_ai_key()
+    if key:
+        text = text.replace(key, "[已隐藏密钥]")
     text = _ANSI_RE.sub("", text)
     text = re.sub(r"<[^>]+>", " ", text)
     text = re.sub(r"\s+", " ", text).strip()
     return text[:500]
 
 
+@limited_ai
 async def _run_codex_cli(
     messages: Sequence[Message],
     *,
@@ -861,13 +875,16 @@ async def _run_codex_cli(
 
         env = _codex_process_env(codex_home_path)
 
-        returncode, stdout, stderr = await asyncio.to_thread(
-            _run_codex_process,
-            args,
-            prompt,
-            env,
-            timeout,
-        )
+        process_task = asyncio.create_task(asyncio.to_thread(
+            _run_codex_process, args, prompt, env, timeout,
+        ))
+        try:
+            returncode, stdout, stderr = await asyncio.shield(process_task)
+        except asyncio.CancelledError:
+            # 线程中的真实进程仍在执行，等它退出后才清理目录和释放并发槽。
+            with anyio.CancelScope(shield=True):
+                await asyncio.gather(process_task, return_exceptions=True)
+            raise
 
         out = _clean_process_text(stdout)
         err = _clean_process_text(stderr)
@@ -880,7 +897,8 @@ async def _run_codex_cli(
             raise RuntimeError("Codex CLI 未返回内容")
         return result
     finally:
-        await asyncio.to_thread(_remove_tree_best_effort, run_path)
+        with anyio.CancelScope(shield=True):
+            await asyncio.to_thread(_remove_tree_best_effort, run_path)
 
 
 def _run_codex_process(

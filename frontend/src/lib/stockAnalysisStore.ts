@@ -205,31 +205,15 @@ async function runStream(id: string, symbol: string, _name: string, focus: strin
           patchTask(id, { phase: 'error', error: chunk.message ?? '分析失败' })
           return
         case 'done':
-          patchTask(id, { phase: 'done' })
+          // collector 已归档；只恢复历史列表，不再次提交保存。
+          patchTask(id, { phase: 'done', savedReportId: chunk.report_id })
+          if (chunk.archived) await loadHistory()
           break
       }
     }
-    const final = activeTasks.find(t => t.id === id)
-    if (final && final.phase !== 'error') {
-      // 兜底:流正常结束但从未收到 delta(后端在生成内容前异常断流)→ 标记失败,避免卡死
-      if (!final.content) {
-        patchTask(id, { phase: 'error', error: '分析未返回内容(后端可能异常中断),请重试' })
-        return
-      }
-      try {
-        const res = await api.stockAnalysisReportSave({
-          symbol: final.symbol, name: final.name, focus: final.focus,
-          content: final.content, summary: final.meta?.summary ?? '',
-          close: final.meta?.close ?? null, levels: final.meta?.levels,
-        })
-        if (res.report) {
-          patchTask(id, { savedReportId: res.report.id })
-          history = [res.report, ...history.filter(r => r.id !== res.report.id)]
-          historyLoaded = true
-          rebuildSnap()
-          emit()
-        }
-      } catch { /* 持久化失败不影响展示 */ }
+    const final = activeTasks.find(task => task.id === id)
+    if (final && (final.phase === 'loading' || final.phase === 'streaming')) {
+      patchTask(id, { phase: 'error', error: '分析流已中断，未收到完成确认，请重试' })
     }
   } catch (e: any) {
     const msg = String(e?.message ?? '分析失败')

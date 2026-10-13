@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import threading
 from datetime import date
 from pathlib import Path
@@ -46,6 +47,7 @@ def test_create_and_atomic_summary_reads(tmp_path: Path) -> None:
                 value = store.read_summary("run_atomic")
                 assert isinstance(value.get("iteration"), int)
             except Exception as exc:
+                logging.getLogger(__name__).exception("mining summary reader failed")
                 failures.append(exc)
                 return
 
@@ -242,6 +244,7 @@ def test_concurrent_event_appends_have_unique_contiguous_ids(tmp_path: Path) -> 
             for index in range(30):
                 store.append_event("concurrent", "progress", {"worker": worker, "index": index})
         except Exception as exc:
+            logging.getLogger(__name__).exception("mining event writer failed")
             failures.append(exc)
 
     threads = [

@@ -88,7 +88,7 @@ def _load_saved(request: Request) -> list[AnalysisMenu]:
         try:
             raw = json.loads(p.read_text(encoding="utf-8"))
             items.append(AnalysisMenu(**raw))
-        except Exception:
+        except (OSError, ValueError, TypeError):
             continue
     return items
 

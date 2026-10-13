@@ -11,13 +11,15 @@
 """
 from __future__ import annotations
 
+import contextlib
 import datetime as _dt
 import logging
 import math
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import Any
 
 import polars as pl
 
@@ -197,8 +199,8 @@ class StrategyMonitorService:
         if self._alert_handler:
             try:
                 self._alert_handler(alert)
-            except Exception as e:
-                logger.warning("alert handler failed: %s", e)
+            except Exception as e:  # noqa: BLE001 - 外部告警处理器失败不得中断后续规则评估。
+                logger.warning("alert handler failed: %s", e, exc_info=True)
 
     @staticmethod
     def _check_signals(
@@ -314,10 +316,7 @@ def _build_condition_mask(df: pl.DataFrame, conditions: list[dict], logic: str) 
             return df.head(0)
     if not parts:
         return df.head(0)
-    if logic == "or":
-        mask = pl.any_horizontal(parts)
-    else:
-        mask = pl.all_horizontal(parts)
+    mask = pl.any_horizontal(parts) if logic == "or" else pl.all_horizontal(parts)
     return df.filter(mask)
 
 
@@ -354,9 +353,9 @@ class MonitorRuleEngine:
         # 历史窗口加载器: (target_date, lookback_days) → 多日 enriched DataFrame。
         # 用于声明 filter_history 的策略 (如反包), 实时监控时拼历史窗口 + 今日行情跑选股。
         # 为 None 时, filter_history 策略仍会被跳过 (保持旧行为, 不破坏无历史场景)。
-        self._history_loader: Callable[[_dt.date, int], "pl.DataFrame"] | None = None
+        self._history_loader: Callable[[_dt.date, int], pl.DataFrame] | None = None
         # ETF 版历史窗口加载器 (asset_type=etf 的规则用)。为 None 时 ETF filter_history 策略跳过。
-        self._history_loader_etf: Callable[[_dt.date, int], "pl.DataFrame"] | None = None
+        self._history_loader_etf: Callable[[_dt.date, int], pl.DataFrame] | None = None
         self._active_matrix_snapshots: dict[str, Any] = {}
         # 本轮 evaluate() 产出的策略选股结果: strategy_id → {rows, total, as_of}
         # 供策略页实时回显复用 (/api/screener/cached 端点直接读取, 避免重跑)。
@@ -397,8 +396,18 @@ class MonitorRuleEngine:
     def set_sector_monitor_service(self, service) -> None:
         self._sector_monitor_service = service
 
-    def invalidate_strategy_state(self) -> None:
-        """策略注册表变更后清除选股池、结果和矩阵快照。"""
+    def invalidate_strategy_state(self, strategy_id: str | None = None) -> None:
+        """清除参数已变更策略的派生状态；注册表变更仍清全部状态。"""
+        if strategy_id is not None:
+            self._strategy_pools = {key: value for key, value in list(self._strategy_pools.items()) if key[1] != strategy_id}
+            self._strategy_signal_state = {key: value for key, value in list(self._strategy_signal_state.items()) if key[1] != strategy_id}
+            self._strategy_signal_seen = {key: value for key, value in list(self._strategy_signal_seen.items()) if key[1] != strategy_id}
+            self._latest_strategy_results = {key: value for key, value in self._latest_strategy_results.items() if key != strategy_id}
+            self._building_strategy_results = {key: value for key, value in self._building_strategy_results.items() if key != strategy_id}
+            self._latest_strategy_result_ids.discard(strategy_id)
+            # 矩阵按资产批量准备，参数已变更时不能复用这一轮的共享快照。
+            self._active_matrix_snapshots.clear()
+            return
         self._strategy_pools.clear()
         self._strategy_signal_state.clear()
         self._strategy_signal_seen.clear()
@@ -641,7 +650,7 @@ class MonitorRuleEngine:
                     continue
                 try:
                     strategy = self._strategy_engine.get(sid)
-                except Exception:
+                except ValueError:
                     continue
                 if getattr(strategy, "execution_backend", "polars_expr") != "matrix_native":
                     continue
@@ -695,9 +704,9 @@ class MonitorRuleEngine:
                         overrides_map=overrides_map,
                     )
                 self._active_matrix_snapshots[asset_type] = snapshot
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001 - 单个资产矩阵准备失败仅撤销该资产本轮快照。
                 self._active_matrix_snapshots.pop(asset_type, None)
-                logger.warning("%s 矩阵策略实时缓存准备失败: %s", asset_type, e)
+                logger.warning("%s 矩阵策略实时缓存准备失败: %s", asset_type, e, exc_info=True)
 
         # list() 快照: 本方法跑在行情轮询线程, API 线程同时 add/remove 规则
         # 会触发 "dictionary changed size during iteration", 整轮告警丢失
@@ -710,8 +719,8 @@ class MonitorRuleEngine:
                 continue
             try:
                 events.extend(self._evaluate_rule(df, rule, now))
-            except Exception as e:
-                logger.warning("规则评估失败 %s: %s", rule_id, e)
+            except Exception as e:  # noqa: BLE001 - 单条规则失败不得中断后续规则评估。
+                logger.warning("规则评估失败 %s: %s", rule_id, e, exc_info=True)
 
         # 一次性提交本轮结果 (原子替换): /cached 读方要么拿到上一轮完整结果,
         # 要么拿到本轮完整结果, 不会读到空中间态。
@@ -1158,8 +1167,8 @@ class MonitorRuleEngine:
             if self._alert_handler:
                 try:
                     self._alert_handler(ev)
-                except Exception as e:
-                    logger.warning("alert handler failed: %s", e)
+                except Exception as e:  # noqa: BLE001 - 外部告警处理器失败不影响已生成监控事件。
+                    logger.warning("alert handler failed: %s", e, exc_info=True)
 
         return events
 
@@ -1209,7 +1218,7 @@ class MonitorRuleEngine:
         pool_key = (str(rule.get("id", sid)), sid, at)
         try:
             s = self._strategy_engine.get(sid)
-        except Exception:
+        except ValueError:
             return []
         if s is None:
             return []
@@ -1217,10 +1226,8 @@ class MonitorRuleEngine:
         # 运行策略选股: 复用当前 enriched DataFrame 跳过数据加载
         overrides = {}
         if self._data_dir:
-            try:
+            with contextlib.suppress(Exception):
                 overrides = _strategy_config.load_override(self._data_dir, sid)
-            except Exception:
-                pass
 
         # 声明 filter_history 的策略 (如反包) 需要多日历史窗口才能判定形态。
         # 旧实现因"实时监控不支持 history loader"直接跳过 → 反包等策略盘中永不触发。
@@ -1288,8 +1295,8 @@ class MonitorRuleEngine:
                         [hist_df, df], how="diagonal_relaxed"
                     ),
                 )
-            except Exception as e:
-                logger.warning("策略 %s 加载历史窗口失败, 跳过: %s", sid, e)
+            except Exception as e:  # noqa: BLE001 - 可替换历史加载器失败按单个策略隔离。
+                logger.warning("策略 %s 加载历史窗口失败, 跳过: %s", sid, e, exc_info=True)
                 return []
         try:
             result = self._strategy_engine.run(
@@ -1301,8 +1308,8 @@ class MonitorRuleEngine:
                 overrides=overrides,
                 params=dict(overrides.get("params") or {}),
             )
-        except Exception as e:
-            logger.warning("策略 %s 选股执行失败: %s", sid, e)
+        except Exception as e:  # noqa: BLE001 - 用户策略执行失败不得中断其余监控策略。
+            logger.warning("策略 %s 选股执行失败: %s", sid, e, exc_info=True)
             return []
 
         # 记录本轮完整选股结果 (供策略页实时回显: /cached 端点直接读取, 不落盘)。
@@ -1355,8 +1362,8 @@ class MonitorRuleEngine:
         try:
             for row in df.iter_rows(named=True):
                 row_map.setdefault(str(row.get("symbol", "")), row)
-        except Exception:
-            pass
+        except Exception:  # noqa: BLE001 - 可选告警明细补充失败保留已完成的策略结果。
+            logger.debug("strategy monitor row details unavailable", exc_info=True)
 
         entry_signal_hits = result.entry_signal_hits
         if score_filter_enabled:

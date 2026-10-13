@@ -74,7 +74,7 @@ class CapabilitySet:
         }
 
 
-class CapabilityDenied(Exception):
+class CapabilityDenied(Exception):  # noqa: N818 - API 与扩展调用方沿用此公开异常名。
     """请求的 capability 当前不可用。"""
 
     def __init__(self, cap: Cap, suggestion: str | None = None) -> None:

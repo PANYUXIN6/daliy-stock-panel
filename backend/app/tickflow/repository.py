@@ -12,12 +12,10 @@
 """
 from __future__ import annotations
 
-import json
 import logging
 import sys
 import threading
 import time
-import uuid
 from collections.abc import Callable
 from datetime import date
 from pathlib import Path
@@ -102,13 +100,14 @@ def _last_available_rows(df: pl.DataFrame, cutoff: date) -> pl.DataFrame:
 class DataStore:
     """唯一的存储入口 — 进程启动时创建。"""
 
-    def __init__(self, data_dir: Path | None = None) -> None:
+    def __init__(self, data_dir: Path | None = None, *, read_only: bool = False) -> None:
         self.data_dir = Path(data_dir or settings.data_dir)
         self.data_dir.mkdir(parents=True, exist_ok=True)
 
         # 一次性数据迁移: 旧桌面版把数据放在 exe 同级的兄弟目录 TickFlowStockPanel_Data/,
         # 新版改为 {app}/data/。老用户首次启动时自动把旧数据搬过来, 无感升级。
-        self._migrate_legacy_data_dir()
+        if not read_only:
+            self._migrate_legacy_data_dir()
 
         # 关键子目录(§7.2)
         for sub in (
@@ -119,6 +118,7 @@ class DataStore:
             "kline_etf_daily",
             "kline_etf_enriched",
             "kline_etf_minute",
+            "kline_index_minute",
             "kline_minute",
             "adj_factor",
             "adj_factor_etf",
@@ -221,6 +221,8 @@ class DataStore:
                 SELECT * FROM read_parquet('{d}/kline_etf_enriched/**/*.parquet', union_by_name=true)""",
             f"""CREATE OR REPLACE VIEW kline_etf_minute AS
                 SELECT * FROM read_parquet('{d}/kline_etf_minute/**/*.parquet', union_by_name=true)""",
+            f"""CREATE OR REPLACE VIEW kline_index_minute AS
+                SELECT * FROM read_parquet('{d}/kline_index_minute/**/*.parquet', union_by_name=true)""",
             f"""CREATE OR REPLACE VIEW kline_minute AS
                 SELECT * FROM read_parquet('{d}/kline_minute/**/*.parquet', union_by_name=true)""",
             f"""CREATE OR REPLACE VIEW adj_factor AS
@@ -255,7 +257,7 @@ class DataStore:
         for sql in statements:
             try:
                 self.db.execute(sql)
-            except Exception as e:  # noqa: BLE001
+            except Exception:  # noqa: BLE001
                 # 空数据目录(首次启动)或权限问题时 DuckDB 会抛 IOException;
                 # 跨版本/平台也可能抛 CatalogException 等。空目录缺视图不影响启动
                 # (后续同步写入数据后会重新刷新视图),这里一律降级为 debug 日志。
@@ -313,6 +315,13 @@ class DataStore:
                 SELECT symbol, datetime, open, high, low, close, volume, amount,
                        'etf' AS asset_type, 'tickflow' AS source
                 FROM kline_etf_minute
+            """)
+
+        if self._has_parquet("kline_index_minute"):
+            minute_parts.append("""
+                SELECT symbol, datetime, open, high, low, close, volume, amount,
+                       'index' AS asset_type, 'tickflow' AS source
+                FROM kline_index_minute
             """)
 
         if self._has_parquet("instruments"):
@@ -401,9 +410,27 @@ class KlineRepository:
         self._etf_enriched_glob = str(store.data_dir / "kline_etf_enriched" / "**" / "*.parquet")
         self._minute_glob = str(store.data_dir / "kline_minute" / "**" / "*.parquet")
         self._etf_minute_glob = str(store.data_dir / "kline_etf_minute" / "**" / "*.parquet")
+        self._index_minute_glob = str(store.data_dir / "kline_index_minute" / "**" / "*.parquet")
         self._inst_glob = str(store.data_dir / "instruments" / "**" / "*.parquet")
         self._index_inst_glob = str(store.data_dir / "instruments_index" / "**" / "*.parquet")
         self._etf_inst_glob = str(store.data_dir / "instruments_etf" / "**" / "*.parquet")
+
+    def install_shared_snapshot(self, frames: dict[str, pl.DataFrame], dates: dict) -> None:
+        """网页安装采集侧已计算的最新日和聚合，热路径不扫描历史或写数据。"""
+        with self._lock:
+            for name, frame in frames.items():
+                setattr(self, name, frame)
+            for name, value in dates.items():
+                setattr(self, name, date.fromisoformat(value) if value else None)
+            self._live_agg_check_date = cn_today()
+            if '_index_instruments_cache' in frames:
+                self._index_symbol_set_cache = None
+            if '_etf_instruments_cache' in frames:
+                self._etf_symbol_set_cache = None
+            if any(name in frames for name in (
+                '_instruments_cache', '_index_instruments_cache', '_etf_instruments_cache',
+            )):
+                self._name_map_cache = None
 
     def execute_all(self, sql: str, params: list | None = None) -> list[tuple]:
         """线程安全的 SELECT → fetchall。DuckDB 单 connection 非线程安全，所有读路径须走此方法。"""
@@ -492,7 +519,7 @@ class KlineRepository:
                 self._refresh_enriched()
                 logger.info("enriched warmup thread done (%.1fs)", time.perf_counter() - t0)
                 self._notify_refresh_done()
-            except Exception:  # noqa: BLE001
+            except Exception:
                 logger.exception("enriched warmup thread failed")
             finally:
                 with self._warmup_lock:
@@ -606,6 +633,7 @@ class KlineRepository:
             # 300 日历天 ≈ 210 交易日, 覆盖 filter_history 最大 lookback(90) + warmup(60)
             try:
                 from datetime import timedelta
+
                 from app.indicators.pipeline import compute_enriched_history_window
                 start_full = latest - timedelta(days=300)
                 read_cols = [c for c in ["symbol", "date", "open", "high", "low", "close",
@@ -763,6 +791,7 @@ class KlineRepository:
         优化: 优先使用 _enriched_history_cache (启动时已计算), 避免重复 compute_indicators。
         """
         from datetime import timedelta
+
         from app.indicators.pipeline import _ema_alpha
 
         started = time.perf_counter()
@@ -1051,6 +1080,7 @@ class KlineRepository:
                 return
 
             from datetime import timedelta
+
             from app.indicators.pipeline import compute_indicators, compute_signals
             start_full = latest - timedelta(days=300)
             read_cols = [c for c in ["symbol", "date", "open", "high", "low", "close",
@@ -1382,9 +1412,10 @@ class KlineRepository:
         """返回已缓存指数 symbol 集合 (memo, 随 instruments 缓存失效)。"""
         if self._index_symbol_set_cache is None:
             df = self.get_index_instruments()
-            if df.is_empty() or "symbol" not in df.columns:
-                return set()
-            self._index_symbol_set_cache = set(df["symbol"].cast(pl.Utf8).to_list())
+            from app.services.index_const import CORE_INDEX_SYMBOLS
+            self._index_symbol_set_cache = set(CORE_INDEX_SYMBOLS)
+            if not df.is_empty() and "symbol" in df.columns:
+                self._index_symbol_set_cache.update(df["symbol"].cast(pl.Utf8).to_list())
         return self._index_symbol_set_cache
 
     def get_etf_symbol_set(self) -> set[str]:
@@ -1462,13 +1493,15 @@ class KlineRepository:
             df = self._scan_daily_symbol(symbol, start, end, columns)
             if not df.is_empty() and all(c in df.columns for c in columns):
                 cached, cache_date = self.get_enriched_latest()
-                if cached is not None and not cached.is_empty() and cache_date:
-                    if start <= cache_date <= end:
-                        cached_part = self._filter_cached(cached, symbol, columns)
-                        if not cached_part.is_empty():
-                            df = df.filter(pl.col("date") != cache_date)
-                            common_cols = [c for c in df.columns if c in cached_part.columns]
-                            df = pl.concat([df.select(common_cols), cached_part.select(common_cols)])
+                if (
+                    cached is not None and not cached.is_empty() and cache_date
+                    and start <= cache_date <= end
+                ):
+                    cached_part = self._filter_cached(cached, symbol, columns)
+                    if not cached_part.is_empty():
+                        df = df.filter(pl.col("date") != cache_date)
+                        common_cols = [c for c in df.columns if c in cached_part.columns]
+                        df = pl.concat([df.select(common_cols), cached_part.select(common_cols)])
                 return df
 
         # 扩展范围用于指标预热 (MA60 需要 ~60 交易日 ≈ 120 日历日)
@@ -1497,13 +1530,15 @@ class KlineRepository:
 
         # 尝试用缓存数据覆盖最新日 (盘中更准确)
         cached, cache_date = self.get_enriched_latest()
-        if not df.is_empty() and cached is not None and not cached.is_empty() and cache_date:
-            if start <= cache_date <= end:
-                cached_part = self._filter_cached(cached, symbol, None)
-                if not cached_part.is_empty():
-                    df = df.filter(pl.col("date") != cache_date)
-                    common_cols = [c for c in df.columns if c in cached_part.columns]
-                    df = pl.concat([df.select(common_cols), cached_part.select(common_cols)])
+        if (
+            not df.is_empty() and cached is not None and not cached.is_empty() and cache_date
+            and start <= cache_date <= end
+        ):
+            cached_part = self._filter_cached(cached, symbol, None)
+            if not cached_part.is_empty():
+                df = df.filter(pl.col("date") != cache_date)
+                common_cols = [c for c in df.columns if c in cached_part.columns]
+                df = pl.concat([df.select(common_cols), cached_part.select(common_cols)])
 
         # 裁剪到请求范围
         if not df.is_empty():
@@ -1524,9 +1559,11 @@ class KlineRepository:
     ) -> pl.DataFrame:
         """批量日K查询。"""
         cached, cache_date = self.get_enriched_latest()
-        if cached is not None and not cached.is_empty() and cache_date:
-            if start >= cache_date:
-                return self._filter_cached_batch(cached, symbols, columns)
+        if (
+            cached is not None and not cached.is_empty() and cache_date
+            and start >= cache_date
+        ):
+            return self._filter_cached_batch(cached, symbols, columns)
 
         # 复用 300 天预计算 enriched 历史缓存 (与单股 get_daily 同源同判据):
         # 自选迷你蜡烛窗口 (days≤60) 完全落在缓存内, 免整树 glob 扫描;
@@ -1636,6 +1673,8 @@ class KlineRepository:
 
     def _minute_glob_for(self, asset_type: str) -> str:
         """按资产类型选择分钟K parquet glob。ETF 分钟数据独立存储于 kline_etf_minute。"""
+        if asset_type == "index":
+            return self._index_minute_glob
         return self._etf_minute_glob if asset_type == "etf" else self._minute_glob
 
     def _maybe_adjust_minute(self, df: pl.DataFrame, asset_type: str) -> pl.DataFrame:
@@ -1648,8 +1687,8 @@ class KlineRepository:
             return df
         try:
             return apply_minute_adjustment(df, self.store.data_dir, asset_type)
-        except Exception as e:
-            logger.warning("分钟复权投影失败, 按原始数据返回: %s", e)
+        except Exception as e:  # noqa: BLE001 - 分钟复权投影失败保持既有原始数据读取契约。
+            logger.warning("分钟复权投影失败, 按原始数据返回: %s", e, exc_info=True)
             return df
 
     def _minute_partition_path(self, asset_type: str, trade_date: date) -> str | None:
@@ -1761,7 +1800,7 @@ class KlineRepository:
         """
         if not symbols or not dates:
             return pl.DataFrame()
-        base = self._etf_minute_glob.rsplit("/", 2)[0] if asset_type == "etf" else self._minute_glob.rsplit("/", 2)[0]
+        base = self._minute_glob_for(asset_type).rsplit("/", 2)[0]
         # 收集存在的分区文件路径, 避免对不存在的文件 scan 报错
         parts: list[str] = []
         for d in dates:
@@ -1791,7 +1830,12 @@ class KlineRepository:
 
     def _compute_enriched_range(self, df: pl.DataFrame) -> pl.DataFrame:
         """对14列enriched数据即时计算完整指标+信号。输入应含足够预热行数。"""
-        from app.indicators.pipeline import compute_indicators, compute_signals, compute_limit_signals, filter_halt_days
+        from app.indicators.pipeline import (
+            compute_indicators,
+            compute_limit_signals,
+            compute_signals,
+            filter_halt_days,
+        )
         if df.is_empty() or df.height < 2:
             return df
         # 兜底过滤历史脏数据中的停牌日 (close 可能被填充为前收盘价)
@@ -1948,7 +1992,7 @@ class KlineRepository:
         # 注意: 必须走 execute_one (cursor+close)。直连 self.db.execute(...).fetchone()
         # 的未消费结果集会把首个分区 parquet 的句柄钉在共享连接上, Windows 下阻塞
         # 同步写入的 os.replace → 个股分时"补齐数据"500。
-        table = "kline_etf_minute" if asset_type == "etf" else "kline_minute"
+        table = {"stock": "kline_minute", "etf": "kline_etf_minute", "index": "kline_index_minute"}[asset_type]
         try:
             row = self.execute_one(
                 f"SELECT max(CAST(datetime AS DATE)) FROM {table} WHERE symbol = ?",
@@ -1960,11 +2004,12 @@ class KlineRepository:
             pass
         return None
 
-    def latest_minute_date_global(self) -> date | None:
+    def latest_minute_date_global(self, asset_type: str = "stock") -> date | None:
         """全市场最近分钟K日期 (不分 symbol)。用于非交易日回退到上一交易日。"""
+        table = {"stock": "kline_minute", "etf": "kline_etf_minute", "index": "kline_index_minute"}[asset_type]
         try:
             row = self.execute_one(
-                "SELECT max(CAST(datetime AS DATE)) FROM kline_minute",
+                f"SELECT max(CAST(datetime AS DATE)) FROM {table}",
             )
             if row and row[0]:
                 return row[0] if isinstance(row[0], date) else date.fromisoformat(str(row[0]))
@@ -1980,7 +2025,7 @@ class KlineRepository:
             if res and res[0]:
                 d = res[0]
                 return d if isinstance(d, date) else date.fromisoformat(str(d))
-        except Exception:
+        except (duckdb.Error, ValueError):
             return None
         return None
 
@@ -1993,7 +2038,7 @@ class KlineRepository:
             if res and res[0]:
                 d = res[0]
                 return d if isinstance(d, date) else date.fromisoformat(str(d))
-        except Exception:
+        except (duckdb.Error, ValueError):
             return None
         return None
 
@@ -2029,7 +2074,7 @@ class KlineRepository:
             if res and res[0]:
                 d = res[0]
                 return d if isinstance(d, date) else date.fromisoformat(str(d))
-        except Exception:
+        except (duckdb.Error, ValueError):
             return None
         return None
 
@@ -2072,7 +2117,7 @@ class KlineRepository:
                     [cutoff],
                 ).fetchall()
             return [r[0] for r in rows if r and r[0]]
-        except Exception:
+        except (duckdb.Error, TypeError, ValueError, OverflowError):
             return []
 
     def _latest_enriched_date_duckdb(self) -> date | None:
@@ -2221,6 +2266,7 @@ class KlineRepository:
             "kline_etf_daily": f"{d}/kline_etf_daily/**/*.parquet",
             "kline_etf_enriched": f"{d}/kline_etf_enriched/**/*.parquet",
             "kline_etf_minute": f"{d}/kline_etf_minute/**/*.parquet",
+            "kline_index_minute": f"{d}/kline_index_minute/**/*.parquet",
             "kline_minute": f"{d}/kline_minute/**/*.parquet",
             "adj_factor": f"{d}/adj_factor/**/*.parquet",
             "adj_factor_etf": f"{d}/adj_factor_etf/**/*.parquet",
@@ -2337,6 +2383,15 @@ class KlineRepository:
         else:
             publication.write_parquet(merged, out)
             publication.commit()
+
+    def get_live_daily_quote_timestamps(self, asset_type: str, day: date) -> dict[str, int]:
+        """只读指定当天原始分区的时间戳，供收盘确认避免覆盖较新快照。"""
+        table = {"stock": "kline_daily", "index": "kline_index_daily", "etf": "kline_etf_daily"}[asset_type]
+        path = self.store.data_dir / table / f"date={day.isoformat()}" / "part.parquet"
+        if not path.exists() or not {"symbol", "quote_ts"} <= set(pl.read_parquet_schema(path)):
+            return {}
+        frame = pl.read_parquet(path, columns=["symbol", "quote_ts"]).drop_nulls()
+        return dict(frame.iter_rows())
 
     def merge_live_daily_asset(self, asset_type: str, df: pl.DataFrame) -> None:
         """按 symbol 合并当天指定资产日K分区。用于少量自选实时，不覆盖全市场。"""

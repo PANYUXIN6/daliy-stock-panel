@@ -2,6 +2,7 @@
 
 import json
 import sys
+from contextlib import suppress
 from pathlib import Path
 
 # 版本号唯一权威 = frontend/package.json: 安装包 AppVersion (release.yml 读它传给
@@ -19,7 +20,7 @@ def _load_version() -> str:
         pkg = Path(__file__).resolve().parents[2] / "frontend" / "package.json"
     try:
         return json.loads(pkg.read_text(encoding="utf-8"))["version"]
-    except Exception:
+    except (OSError, ValueError, KeyError, TypeError):
         return _FALLBACK_VERSION
 
 
@@ -30,7 +31,5 @@ __version__ = _load_version()
 # 进程加载最早阶段强制 UTF-8,根治此类编码崩溃。
 for _stream in (sys.stdout, sys.stderr):
     if hasattr(_stream, "reconfigure"):
-        try:
+        with suppress(Exception):
             _stream.reconfigure(encoding="utf-8", errors="replace")
-        except Exception:  # noqa: BLE001
-            pass

@@ -2,7 +2,7 @@
 
 覆盖: 三大报表字段映射 (canonical 列名 + 扩展列透传 + ISO 日期口径)、
 latest_only 分档 (limit 1 vs 8)、metrics 组装 (eps_basic 顺带 / bps 估值反推 /
-指标 index_id 映射与未知 id 透传 / 单股指标失败不弃行)、shares 恒空、
+指标 index_id 映射与未知 id 透传 / 成功响应缺指标不弃行)、shares 恒空、
 报告期合并写入的逐列填空语义 (并集共存, 新行缺列不覆盖旧值)。
 """
 
@@ -11,7 +11,6 @@ from __future__ import annotations
 import polars as pl
 import pytest
 
-from app.plugins.fuyao import client as fc
 from app.plugins.fuyao import provider as fp
 from app.plugins.fuyao.provider import FuyaoProvider
 from app.services.financial_sync import _merge_report_history
@@ -36,20 +35,20 @@ class _FakeFinClient:
         self.stmt_calls: list[tuple] = []
         self.ind_calls: list[str] = []
 
-    def financial_statements(self, stmt, thscode, limit=1):
+    def financial_statements(self, stmt, thscode, limit=1, *, cancel_event=None):
         self.stmt_calls.append((stmt, thscode, limit))
         return [dict(r, thscode=thscode) for r in self.statements.get(stmt, [])]
 
-    def financial_indicators(self, thscode, report):
+    def financial_indicators(self, thscode, report, *, cancel_event=None):
         self.ind_calls.append(f"{thscode}@{report}")
         if self.indicator_error:
             raise self.indicator_error
         return self.indicators.get(report, [])
 
-    def valuations_snapshot(self, thscodes):
+    def valuations_snapshot(self, thscodes, *, cancel_event=None):
         return [r for r in self.valuations if r.get("thscode") in thscodes]
 
-    def price_snapshot_batch(self, thscodes):
+    def price_snapshot_batch(self, thscodes, *, cancel_event=None):
         return [r for r in self.prices if r.get("thscode") in thscodes]
 
 
@@ -144,7 +143,7 @@ class _PerSymbolIncomeClient(_FakeFinClient):
         super().__init__()
         self.rows_by_symbol = rows_by_symbol
 
-    def financial_statements(self, stmt, thscode, limit=1):
+    def financial_statements(self, stmt, thscode, limit=1, *, cancel_event=None):
         self.stmt_calls.append((stmt, thscode, limit))
         return [dict(self.rows_by_symbol[thscode], thscode=thscode)]
 
@@ -213,11 +212,10 @@ def test_metrics_assembly(monkeypatch):
     assert fake.ind_calls == ["600519.SH@2026-2"]  # report 由利润表最新期反推
 
 
-def test_metrics_indicator_failure_keeps_row(monkeypatch):
-    """指标端点单股失败 (如未披露期 code=5003) → 行仍写入 (eps/bps 保留)。"""
+def test_metrics_empty_indicators_keep_available_fields(monkeypatch):
+    """指标成功响应为空时保留 EPS/BPS, 不把正常缺字段视为请求失败。"""
     fake = _FakeFinClient(
         statements={"income": [_INCOME_ROW]},
-        indicator_error=fc.FuyaoError("code=5003"),
         valuations=[{"thscode": "600519.SH", "pb_mrq": 6.455055}],
         prices=[{"thscode": "600519.SH", "last_price": 1297.4}],
     )
@@ -226,6 +224,7 @@ def test_metrics_indicator_failure_keeps_row(monkeypatch):
     row = df.to_dicts()[0]
     assert row["symbol"] == "600519.SH"
     assert row["eps_basic"] == 35.57
+    assert row["bps"] == pytest.approx(1297.4 / 6.455055)
     assert "roe" not in df.columns
 
 

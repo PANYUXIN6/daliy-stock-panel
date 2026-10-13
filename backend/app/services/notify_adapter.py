@@ -114,7 +114,7 @@ def _notify_osascript(title: str, message: str) -> bool:
     script = (
         f'display notification "{safe_msg}" with title "{safe_title}"'
     )
-    result = subprocess.run(  # noqa: S603, S607
+    result = subprocess.run(
         ["osascript", "-e", script],
         capture_output=True,
         timeout=5,
@@ -128,7 +128,7 @@ def _notify_notify_send(title: str, message: str, icon: Path | None) -> bool:
     if icon and Path(icon).exists():
         args.extend(["--icon", str(icon)])
     args.append(message)
-    result = subprocess.run(  # noqa: S603
+    result = subprocess.run(
         args,
         capture_output=True,
         timeout=5,

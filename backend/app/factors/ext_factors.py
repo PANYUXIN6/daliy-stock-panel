@@ -226,8 +226,8 @@ def _timeseries_frame(root: Path, config, fields: list) -> pl.DataFrame:
                 continue
             try:
                 raw = pl.read_parquet(part)
-            except Exception as e:
-                logger.warning("扩展表 %s 分区 %s 读取失败, 跳过: %s", config.id, d.name, e)
+            except (OSError, pl.exceptions.PolarsError) as e:
+                logger.warning("扩展表 %s 分区 %s 读取失败, 跳过: %s", config.id, d.name, e, exc_info=True)
                 continue
             frag = _select_fields(raw, config, fields, with_date=d.name[5:])
             if not frag.is_empty():
@@ -260,8 +260,8 @@ def _snapshot_frame(root: Path, config, fields: list) -> pl.DataFrame:
             frame = frame.unique(subset=["symbol"], keep="last")
         _frame_cache[key] = (sig, frame)
         return frame
-    except Exception as e:
-        logger.warning("扩展表 %s 快照读取失败, 跳过: %s", config.id, e)
+    except Exception as e:  # noqa: BLE001 - 扩展快照加载失败不得中断内置因子计算。
+        logger.warning("扩展表 %s 快照读取失败, 跳过: %s", config.id, e, exc_info=True)
         return pl.DataFrame()
 
 
@@ -318,8 +318,8 @@ def attach_ext_columns(
                     if not new_cols:
                         continue
                     df = df.join(snap.select(["symbol", *new_cols]), on="symbol", how="left")
-            except Exception as e:
-                logger.warning("扩展表 %s 列注入失败, 跳过该表: %s", cfg.id, e)
+            except Exception as e:  # noqa: BLE001 - 单张扩展表注入失败不得影响其他扩展表。
+                logger.warning("扩展表 %s 列注入失败, 跳过该表: %s", cfg.id, e, exc_info=True)
     finally:
         if tmp_date:
             df = df.drop("_ext_date")
@@ -350,5 +350,5 @@ def invalidate_ext_caches(data_dir: Path | None = None, *, keep_strategy_cache: 
 
     try:
         strategy_cache.clear_cache(Path(data_dir) if data_dir else Path(_settings.data_dir))
-    except Exception as e:
-        logger.warning("扩展数据变更后策略缓存清理失败: %s", e)
+    except Exception as e:  # noqa: BLE001 - 扩展表缓存更新后的策略缓存清理独立隔离。
+        logger.warning("扩展数据变更后策略缓存清理失败: %s", e, exc_info=True)

@@ -1,11 +1,11 @@
-# tickflow-stock-panel - one-shot launcher for backend + frontend (Windows / PowerShell)
+# tickflow-stock-panel - one-shot launcher for web + collector + frontend (Windows / PowerShell)
 #
 # Usage:
 #   .\dev.ps1
 #   .\dev.ps1 -BackendPort 8000 -FrontendPort 5173
 #   $env:BACKEND_PORT='8000'; .\dev.ps1
 #
-# Ctrl-C closes both processes.
+# Ctrl-C closes web, collector, and frontend processes.
 #
 # If you see "running scripts is disabled":
 #   Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned
@@ -13,7 +13,8 @@
 [CmdletBinding()]
 param(
     [int]$BackendPort  = 0,
-    [int]$FrontendPort = 0
+    [int]$FrontendPort = 0,
+    [int]$CollectorPort = 3019
 )
 
 $ErrorActionPreference = 'Stop'
@@ -137,6 +138,10 @@ function Free-Port($name, $port) {
 
 Free-Port 'backend'  $BackendPort
 Free-Port 'frontend' $FrontendPort
+if (Get-NetTCPConnection -State Listen -LocalPort $CollectorPort -ErrorAction SilentlyContinue) {
+    Log-Err "collector port $CollectorPort is already in use; stop the previous collector explicitly"
+    exit 1
+}
 
 # ===== 3. Dependency install =====
 # Match Docker's whitespace-separated BACKEND_EXTRAS behavior so old CPUs can
@@ -180,8 +185,9 @@ Write-Host '|  tickflow-stock-panel                        |' -ForegroundColor B
 Write-Host '|                                              |' -ForegroundColor Blue
 Write-Host "|  backend   http://${DisplayHost}:$BackendPort"  -ForegroundColor Blue
 Write-Host "|  frontend  http://${DisplayHost}:$FrontendPort" -ForegroundColor Blue
+Write-Host "|  collector http://127.0.0.1:$CollectorPort" -ForegroundColor Blue
 Write-Host '|                                              |' -ForegroundColor Blue
-Write-Host '|  Ctrl-C closes both                          |' -ForegroundColor Blue
+Write-Host '|  Ctrl-C closes web, collector, and frontend   |' -ForegroundColor Blue
 Write-Host '+----------------------------------------------+' -ForegroundColor Blue
 Write-Host ''
 
@@ -190,9 +196,10 @@ Write-Host ''
 # child powershell.exe and taskkill /T the whole process tree on exit.
 $backendPidFile  = [System.IO.Path]::GetTempFileName()
 $frontendPidFile = [System.IO.Path]::GetTempFileName()
+$collectorPidFile = [System.IO.Path]::GetTempFileName()
 
 $backendJob = Start-Job -Name 'backend' -ScriptBlock {
-    param($pidFile, $dir, $envFile, $bindAddress, $port)
+    param($pidFile, $dir, $envFile, $bindAddress, $port, $collectorPort)
     # Start-Job 开的是全新 powershell.exe 子进程, 不继承主进程的 UTF-8 设置,
     # 默认用系统 ANSI (中文 Windows = GBK/cp936) 解码后端 UTF-8 输出 → 中文乱码。
     # 这里强制子进程用 UTF-8, 与 app/__init__.py 的 stdout/stderr 编码对齐。
@@ -200,10 +207,23 @@ $backendJob = Start-Job -Name 'backend' -ScriptBlock {
     $OutputEncoding           = New-Object System.Text.UTF8Encoding $false
     $PID | Out-File -FilePath $pidFile -Encoding ascii -Force
     $env:PYTHONUNBUFFERED = '1'
+    $env:SERVICE_ROLE = 'web'
+    $env:COLLECTOR_URL = "http://127.0.0.1:$collectorPort"
     Set-Location $dir
     $envArgs = if (Test-Path $envFile) { @('--env-file', $envFile) } else { @() }
     & .\.venv\Scripts\python.exe -m uvicorn app.main:app @envArgs --reload --host $bindAddress --port $port 2>&1
-} -ArgumentList $backendPidFile, $BackendDir, $EnvFile, $BindAddress, $BackendPort
+} -ArgumentList $backendPidFile, $BackendDir, $EnvFile, $BindAddress, $BackendPort, $CollectorPort
+
+$collectorJob = Start-Job -Name 'collector' -ScriptBlock {
+    param($pidFile, $dir, $envFile, $port)
+    [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false
+    $OutputEncoding = New-Object System.Text.UTF8Encoding $false
+    $PID | Out-File -FilePath $pidFile -Encoding ascii -Force
+    $env:SERVICE_ROLE = 'collector'
+    Set-Location $dir
+    $envArgs = if (Test-Path $envFile) { @('--env-file', $envFile) } else { @() }
+    & .\.venv\Scripts\python.exe -m uvicorn app.collector:app @envArgs --host 127.0.0.1 --port $port 2>&1
+} -ArgumentList $collectorPidFile, $BackendDir, $EnvFile, $CollectorPort
 
 $frontendJob = Start-Job -Name 'frontend' -ScriptBlock {
     param($pidFile, $dir, $bindAddress, $backendPort, $port)
@@ -230,6 +250,7 @@ function Read-JobPid($file) {
 }
 $backendChildPid  = Read-JobPid $backendPidFile
 $frontendChildPid = Read-JobPid $frontendPidFile
+$collectorChildPid = Read-JobPid $collectorPidFile
 
 # ===== 6. Cleanup =====
 $script:cleaning = $false
@@ -239,19 +260,19 @@ function Cleanup-All {
     Write-Host ''
     Log-Info 'shutting down...'
 
-    foreach ($p in @($backendChildPid, $frontendChildPid)) {
+    foreach ($p in @($backendChildPid, $frontendChildPid, $collectorChildPid)) {
         if ($p) {
             # /T kills the whole process tree (the job's powershell + uvicorn/vite)
             $null = & cmd /c "taskkill /F /T /PID $p 2>nul"
         }
     }
-    foreach ($j in @($backendJob, $frontendJob)) {
+    foreach ($j in @($backendJob, $frontendJob, $collectorJob)) {
         if ($j) {
             Stop-Job   $j -ErrorAction SilentlyContinue
             Remove-Job $j -Force -ErrorAction SilentlyContinue
         }
     }
-    foreach ($f in @($backendPidFile, $frontendPidFile)) {
+    foreach ($f in @($backendPidFile, $frontendPidFile, $collectorPidFile)) {
         Remove-Item $f -Force -ErrorAction SilentlyContinue
     }
     Log-Ok 'bye'
@@ -287,7 +308,10 @@ try {
             }
         }
 
-        if ($backendJob.State -ne 'Running' -or $frontendJob.State -ne 'Running') {
+        Receive-Job $collectorJob -ErrorAction SilentlyContinue | ForEach-Object {
+            Write-Host "[collector] $_"
+        }
+        if ($collectorJob.State -ne 'Running' -or $backendJob.State -ne 'Running'  -or $frontendJob.State -ne 'Running') {
             Log-Warn 'one of the processes exited; closing the other...'
             break
         }

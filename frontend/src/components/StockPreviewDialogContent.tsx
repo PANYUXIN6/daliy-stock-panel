@@ -379,6 +379,7 @@ export function StockPreviewDialogContent({ symbol, name, onClose, triggerInfo, 
                         </button>
                       ))}
                     </div>
+                    <span className="text-[10px] text-muted">已落库交易日</span>
                   </div>
                 )}
               </div>

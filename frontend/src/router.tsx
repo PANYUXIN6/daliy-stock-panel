@@ -1,7 +1,6 @@
 import { lazy, Suspense } from 'react'
 import { createBrowserRouter, Navigate, useSearchParams } from 'react-router-dom'
 import { Layout } from './components/Layout'
-import { useSettings } from './lib/useSharedQueries'
 import { Logo } from './components/Logo'
 import { ExtensionBoundary } from './extensions/ExtensionBoundary'
 import {
@@ -12,7 +11,7 @@ import {
 
 // 代码分割: 页面全部 lazy 加载, 避免首屏打包所有页面 (ECharts / lightweight-charts /
 // framer-motion 等重库) → 大幅减小首屏 bundle。命名导出用 .then 映射为 default。
-// Layout / Onboarding / Auth 为应用外壳与入口, 保持同步加载。
+// Layout 为应用外壳, 保持同步加载。
 const Watchlist = lazy(() => import('./pages/Watchlist').then(m => ({ default: m.Watchlist })))
 const Screener = lazy(() => import('./pages/Screener').then(m => ({ default: m.Screener })))
 const Backtest = lazy(() => import('./pages/Backtest').then(m => ({ default: m.Backtest })))
@@ -36,13 +35,11 @@ const Settings = lazy(() => import('./pages/Settings').then(m => ({ default: m.S
 const Regime = lazy(() => import('./pages/Regime').then(m => ({ default: m.Regime })))
 const AbnormalMoves = lazy(() => import('./pages/AbnormalMoves').then(m => ({ default: m.AbnormalMoves })))
 const Dev = lazy(() => import('./pages/Dev').then(m => ({ default: m.Dev })))
-// Onboarding 只在首次使用时进入, Auth 只在登录页用到 — 均改按需加载
-const Onboarding = lazy(() => import('./pages/Onboarding').then(m => ({ default: m.Onboarding })))
+// Auth 只在登录页用到, 按需加载。
 const Auth = lazy(() => import('./pages/Auth').then(m => ({ default: m.Auth })))
 
 const CORE_ROUTE_PATHS = new Set([
   '/',
-  '/onboarding',
   '/login',
   '/overview',
   '/analysis',
@@ -85,35 +82,7 @@ function MiningRedirect() {
   return <Navigate to={`/factors?tab=mining${search ? `&${search}` : ''}`} replace />
 }
 
-// 首次使用守卫 —— 未完成向导则重定向到 /onboarding
-// 只挂在根路由上;/onboarding 本身不被守卫,避免循环重定向。
-// settings 由 Layout 预取,守卫判定不产生额外请求。
-function OnboardingGuard({ children }: { children: React.ReactNode }) {
-  const settings = useSettings()
-
-  // 仅首次加载(本地无缓存)时显示占位。
-  // 后台重取 (isFetching) 时本地已有上一份缓存可用, 直接放行, 避免切页时整屏 logo 闪烁。
-  // 防误重定向已由 Onboarding/AI 等处 invalidate 前的 setQueryData 同步缓存兜底。
-  if (settings.isLoading) {
-    return (
-      <div className="min-h-full bg-base grid place-items-center">
-        <div className="flex flex-col items-center gap-3 text-muted">
-          <Logo size={28} className="text-foreground" />
-          <div className="text-xs">加载中…</div>
-        </div>
-      </div>
-    )
-  }
-
-  // 查询出错或字段缺失时不拦截 —— 宁可放行,也不把用户卡在空白页
-  if (settings.data && settings.data.onboarding_completed === false) {
-    return <Navigate to="/onboarding" replace />
-  }
-
-  return <>{children}</>
-}
-
-// 按需路由的加载占位 (与 OnboardingGuard 的加载态同风格)
+// 按需路由的加载占位。
 function RouteFallback() {
   return (
     <div className="min-h-full bg-base grid place-items-center">
@@ -124,14 +93,6 @@ function RouteFallback() {
 
 export const router = createBrowserRouter([
   {
-    path: '/onboarding',
-    element: (
-      <Suspense fallback={<RouteFallback />}>
-        <Onboarding />
-      </Suspense>
-    ),
-  },
-  {
     path: '/login',
     element: (
       <Suspense fallback={<RouteFallback />}>
@@ -141,11 +102,7 @@ export const router = createBrowserRouter([
   },
   {
     path: '/',
-    element: (
-      <OnboardingGuard>
-        <Layout />
-      </OnboardingGuard>
-    ),
+    element: <Layout />,
     children: [
       { index: true, element: <Dashboard /> },
       { path: 'overview', element: <Navigate to="/" replace /> },

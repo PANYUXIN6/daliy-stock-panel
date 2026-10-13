@@ -4,9 +4,10 @@ import { Check, Loader2, Activity, Layers } from 'lucide-react'
 import { api } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { toast } from '@/components/Toast'
+import { RegimeMaintenancePanel } from './RegimeMaintenancePanel'
 
 /**
- * 市场环境(regime) 计算设置 —— 控制盘后管道是否自动计算 + 全量回填分批参数。
+ * 市场环境(regime) 计算设置 —— 控制是否随全量同步计算 + 全量回填分批参数。
  *
  * regime 是本地聚合计算(非外部拉取): 首次/regime 表为空时需全量回填多日,
  * 内存与耗时较高。分批参数控制全量回填的内存峰值: 范围超过「每批天数」时
@@ -71,7 +72,7 @@ export function RegimeConfigCard() {
 
   return (
     <div className="space-y-3">
-      {/* 盘后自动计算开关 */}
+      {/* 全量同步时计算环境 */}
       <label className={`flex items-start gap-2.5 rounded-card border px-3 py-2.5 transition-colors cursor-pointer ${
         on ? 'border-accent/40 bg-accent/[0.05]' : 'border-border bg-base/30 hover:border-border/70'
       }`}>
@@ -90,10 +91,10 @@ export function RegimeConfigCard() {
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-1.5">
             <Activity className="h-3.5 w-3.5 text-accent" />
-            <span className="text-xs font-medium text-foreground">盘后自动计算</span>
+            <span className="text-xs font-medium text-foreground">随全量同步计算</span>
           </div>
           <div className="text-[10px] text-muted leading-snug mt-0.5">
-            默认关闭。开启后每次盘后管道自动增量计算环境状态; 首次或数据缺口较大时全量回填, 耗时与内存较高。
+            默认关闭。开启后，点击数据页“同步行情与基础数据”时一并增量计算环境状态；首次或数据缺口较大时全量回填，耗时与内存较高。
           </div>
         </div>
       </label>
@@ -170,6 +171,9 @@ export function RegimeConfigCard() {
           <Loader2 className="h-3 w-3 animate-spin" />保存中…
         </div>
       )}
+      <div className="pt-4 border-t border-border">
+        <RegimeMaintenancePanel />
+      </div>
     </div>
   )
 }

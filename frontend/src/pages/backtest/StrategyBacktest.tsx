@@ -24,7 +24,7 @@ import { cnSignal } from '@/lib/signals'
 import { useCustomSignalNames } from '@/lib/useCustomSignalNames'
 import { SignalPicker } from '@/components/screener/SignalPicker'
 import { startBacktest, stopBacktest, tryReconnect, useBacktestTask } from '@/lib/backtestTask'
-import { useDataStatus, useCapabilities } from '@/lib/useSharedQueries'
+import { useDataStatus } from '@/lib/useSharedQueries'
 import { EmptyState } from '@/components/EmptyState'
 import { WarmupBadge } from '@/components/WarmupBadge'
 import { DatePicker } from '@/components/DatePicker'
@@ -212,26 +212,10 @@ const ADVANCED_TABS: { id: AdvancedSettingsTab; label: string }[] = [
 ]
 const toSignalId = (sig: string) => (sig.startsWith('signal_') || sig.startsWith('csg_')) ? sig : `signal_${sig}`
 
-/** 环境数据缺口的一键补算入口: 补算区间后自动重跑回测 */
-function RegimeRecomputeButton({ from, to, pending, onClick }: {
-  from: string
-  to?: string
-  pending: boolean
-  onClick: () => void
-}) {
+function RegimeCoverageNotice({ from, to }: { from: string; to?: string }) {
   return (
-    <div className="mt-2 flex flex-wrap items-center gap-2">
-      <button
-        onClick={onClick}
-        disabled={pending}
-        className="inline-flex items-center gap-1.5 rounded-btn border border-accent/30 bg-accent/10 px-2.5 py-1 text-[11px] font-medium text-accent transition-colors hover:bg-accent/15 disabled:cursor-not-allowed disabled:opacity-50"
-      >
-        {pending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Zap className="h-3.5 w-3.5" />}
-        {pending ? '补算环境数据中…' : '补算环境数据并重跑'}
-      </button>
-      <span className="text-[10px] text-secondary">
-        将补算 {from} ~ {to || '今天'} 的市场环境数据，完成后自动重跑本次回测
-      </span>
+    <div className="mt-2 text-[11px] leading-5 text-secondary">
+      后台市场环境数据在 {from} ~ {to || '本次回测结束日'} 范围内覆盖不完整，数据维护完成后可重新运行回测。
     </div>
   )
 }
@@ -979,11 +963,8 @@ export function StrategyBacktest({ loadCandidate, onLoadConsumed }: {
   const [regimeStates, setRegimeStates] = useState<string[]>(saved?.regimeStates ?? [])
   const [regimeMinScore, setRegimeMinScore] = useState<number | ''>(saved?.regimeMinScore ?? '')
   const [settingsOpen, setSettingsOpen] = useState(false)
-  // 分钟K成交价细化: 不改变信号日或成交日, 依赖分钟K批量数据
-  const { data: caps } = useCapabilities()
-  const hasMinuteBatch = !!caps?.capabilities?.['kline.minute.batch']
+  // 分钟K成交价细化: 不改变信号日或成交日, 依赖本地分钟K数据
   const toggleMinuteFill = () => {
-    if (!hasMinuteBatch) return
     if (highGranularity) {
       if (exitFill === 'signal_next_minute') setExitFill('close_t')
     }
@@ -1239,26 +1220,17 @@ export function StrategyBacktest({ loadCandidate, onLoadConsumed }: {
     })
   }
 
-  // 环境数据缺口识别: fail-closed 报错文案中提取缺失首日, 供"一键补算并重跑"。
+  // 环境数据缺口识别: fail-closed 报错文案中提取缺失首日, 展示缺失范围。
   // 「数据为空」变体无日期, 用回测起点兜底; 预热区间不足的变体不在此处理(文案已自说明)。
   const regimeGapStart = useMemo(() => {
     const msg = backtestTask?.error ?? result?.error ?? ''
-    if (msg.includes('市场环境数据覆盖不完整') && msg.includes('请先补算')) {
+    if (msg.includes('市场环境数据覆盖不完整')) {
       const m = msg.match(/缺少前一交易日环境[：:\s]*(\d{4}-\d{2}-\d{2})/)
       return m?.[1] ?? start
     }
     if (msg.includes('市场环境数据为空')) return start
     return null
   }, [backtestTask?.error, result?.error, start])
-
-  const regimeRecompute = useMutation({
-    mutationFn: () => api.regimeRecompute(regimeGapStart ?? undefined, end || undefined),
-    onSuccess: data => {
-      toast(`环境数据补算完成 (新增 ${data.computed} 天)，自动重新回测`, 'success')
-      handleRun()
-    },
-    onError: e => toast(`环境数据补算失败 · ${String((e as Error)?.message || e)}`, 'error'),
-  })
 
   // 提取统计
   const s = result?.stats
@@ -1634,14 +1606,9 @@ export function StrategyBacktest({ loadCandidate, onLoadConsumed }: {
               <Gauge className={`h-3 w-3 ${highGranularity ? 'text-amber-400' : 'text-muted/50'}`} />
               <button
                 onClick={toggleMinuteFill}
-                disabled={!hasMinuteBatch}
-                title={!hasMinuteBatch
-                  ? '分钟K成交价：分钟K(批量)数据不可用'
-                  : '分钟K成交：细化成交价，并为兼容的卖出信号提供下一分钟成交。'
-                }
+                title="分钟K成交：使用本地分钟K细化成交价，并为兼容的卖出信号提供下一分钟成交。"
                 className={`group relative inline-flex h-3.5 w-6 items-center rounded-full shrink-0 transition-colors duration-200 ${
-                  !hasMinuteBatch ? 'bg-elevated opacity-50 cursor-not-allowed'
-                  : highGranularity ? 'bg-amber-500 cursor-pointer'
+                  highGranularity ? 'bg-amber-500 cursor-pointer'
                   : 'bg-elevated cursor-pointer'
                 }`}
               >
@@ -1650,9 +1617,6 @@ export function StrategyBacktest({ loadCandidate, onLoadConsumed }: {
                 }`} />
               </button>
               <span className={`text-[9px] font-medium ${highGranularity ? 'text-amber-400' : 'text-muted/50'}`}>分钟成交</span>
-              {!hasMinuteBatch && (
-                <span className="text-[8px] text-accent/70 font-medium bg-accent/10 px-1 py-px rounded">分钟K</span>
-              )}
             </div>
             )}
           </div>
@@ -1665,17 +1629,17 @@ export function StrategyBacktest({ loadCandidate, onLoadConsumed }: {
                 ：逐日回放分钟K，信号分钟收盘价买入；日线条件按 T-1 完成态评估。
                 {minuteDataStatus?.minute?.earliest_date
                   ? ` 本地分钟K ${minuteDataStatus.minute.earliest_date} ~ ${minuteDataStatus.minute.latest_date}（${minuteDataStatus.minute.trading_days} 个交易日），缺分区的日子自动跳过。`
-                  : ' 本地暂无分钟K数据，请先在数据页拉取。'}
+                  : ' 后台尚未采集该范围的分钟K数据。'}
                 {minuteStartMismatch && (
                   <span className="mt-0.5 block text-amber-400">
-                    当前开始日期 {start} 早于分钟数据起点 {minuteEarliest}，运行会被拒绝 — 请把开始日期调整到 {minuteEarliest} 之后，或先用「扩展分钟K历史」拉取。
+                    当前开始日期 {start} 早于分钟数据起点 {minuteEarliest}，运行会被拒绝 — 请把开始日期调整到 {minuteEarliest} 之后。
                   </span>
                 )}
               </div>
             </div>
           )}
           {/* 分钟K开启时的提示条 */}
-          {highGranularity && hasMinuteBatch && !isMinuteStrategy && (
+          {highGranularity && !isMinuteStrategy && (
             <div className="mb-2 flex items-start gap-1.5 rounded-btn border border-amber-400/30 bg-amber-400/5 px-2 py-1.5">
               <Zap className="h-3 w-3 text-amber-400 shrink-0 mt-px" />
               <div className="text-[10px] leading-snug text-amber-400/90">
@@ -1977,7 +1941,7 @@ export function StrategyBacktest({ loadCandidate, onLoadConsumed }: {
         {backtestDataUnavailable && (
           <div className="flex items-start gap-1.5 rounded-btn border border-danger/30 bg-danger/10 px-3 py-2 text-[11px] leading-4 text-danger">
             <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0" />
-            <span>缺少{backtestDataLabel}，请先在数据页面同步日K并完成指标计算。</span>
+            <span>后台尚未采集{backtestDataLabel}，数据维护完成后可开始回测。</span>
           </div>
         )}
 
@@ -2108,12 +2072,7 @@ export function StrategyBacktest({ loadCandidate, onLoadConsumed }: {
           <div className="text-sm text-danger bg-danger/10 border border-danger/30 rounded-btn px-3 py-2">
             {result.error}
             {regimeGapStart && (
-              <RegimeRecomputeButton
-                from={regimeGapStart}
-                to={end}
-                pending={regimeRecompute.isPending || isPending}
-                onClick={() => regimeRecompute.mutate()}
-              />
+              <RegimeCoverageNotice from={regimeGapStart} to={end} />
             )}
           </div>
         )}
@@ -2125,12 +2084,7 @@ export function StrategyBacktest({ loadCandidate, onLoadConsumed }: {
               <div className="mt-1 text-xs text-secondary">本次回测未生成新结果，下方仍展示上一次成功结果。</div>
             )}
             {regimeGapStart && (
-              <RegimeRecomputeButton
-                from={regimeGapStart}
-                to={end}
-                pending={regimeRecompute.isPending || isPending}
-                onClick={() => regimeRecompute.mutate()}
-              />
+              <RegimeCoverageNotice from={regimeGapStart} to={end} />
             )}
           </div>
         )}

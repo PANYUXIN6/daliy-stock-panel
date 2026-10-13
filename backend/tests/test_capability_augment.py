@@ -146,6 +146,7 @@ def test_update_data_providers_refreshes_capability_snapshot(monkeypatch):
     sentinel = CapabilitySet()
     monkeypatch.setattr(settings_api, "detect_capabilities", lambda: sentinel)
 
+    monkeypatch.setattr("app.services.trading_day.sync_calendar", lambda *args: {"updated": True})
     mock_request = MagicMock()
     settings_api.update_data_providers(
         MagicMock(model_dump=lambda exclude_none: {"daily_data_provider": "mock_src"}),

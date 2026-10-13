@@ -9,7 +9,7 @@
   - _enriched_cache 是唯一的盘中数据源 (OHLCV + 全套技术指标)
   - _live_agg_cache 是递推状态 (只加载一次, 盘中不变)
 
-数据流 (每轮 ~15s):
+数据流 (默认每轮 30s):
   1. API 拉取 → raw_records (临时变量)
   2. raw_records → 写 kline_daily (不复权原始价格)
   3. raw_records → 更新 _enriched_cache 的 OHLCV
@@ -29,7 +29,9 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
-from datetime import date, datetime, time as dt_time
+from datetime import date, datetime
+from datetime import time as dt_time
+from typing import ClassVar
 
 import polars as pl
 
@@ -51,9 +53,8 @@ SOURCE_LABELS = {
 # final 定版确认容差: 快照时间戳允许早于边界 5s 内 (供应商时间戳精度不一)
 _FINAL_CONFIRM_SLACK_MS = 5_000
 
-# final 定版边界与重试窗口终点 (北京时间)。收盘窗口终点 15:30, 恰与盘后管道
-# 启动同时: 管道运行期间轮询本就被暂停, 此后未确认的定版不再写盘, 当日分区
-# 由管道按官方日线值级校正 —— 避免定版重试与权威重建互相覆盖。
+# final 定版边界与重试窗口终点 (北京时间)。收盘窗口在 15:30 结束,
+# 未确认的快照不写盘; 当日分区等待用户在数据页手动同步官方日线校正。
 _FINAL_BOUNDARY = {"morning_final": dt_time(11, 30), "close_final": dt_time(15, 0)}
 _FINAL_DEADLINE = {"morning_final": dt_time(12, 10), "close_final": dt_time(15, 30)}
 
@@ -207,15 +208,15 @@ class QuoteService:
     """全局实时行情服务 — 单例。"""
 
     # 档位 → 最小轮询间隔 (秒) — TickFlow 档位限速保护, 仅实时源为 tickflow 时适用
-    TIER_MIN_INTERVAL = {
-        "expert": 1.0,
-        "pro": 3.0,
-        "starter": 6.0,
-        "free": 6.0,
+    TIER_MIN_INTERVAL: ClassVar[dict[str, float]] = {
+        "expert": 30.0,
+        "pro": 30.0,
+        "starter": 30.0,
+        "free": 30.0,
     }
-    # 插件/自定义源: 不受 TickFlow 档位保护约束, 通用下限 1s (默认间隔仍为 DEFAULT_INTERVAL)
-    CUSTOM_PROVIDER_MIN_INTERVAL = 1.0
-    DEFAULT_INTERVAL = 6.0
+    # 插件/自定义源与内置源统一采用 30s 最小间隔。
+    CUSTOM_PROVIDER_MIN_INTERVAL = 30.0
+    DEFAULT_INTERVAL = 30.0
     MAX_INTERVAL = 60.0
 
     def __init__(self) -> None:
@@ -309,7 +310,7 @@ class QuoteService:
         logger.info("行情服务已停止")
 
     def enable(self) -> bool:
-        """开启自动行情 (不立即启动线程，等下一个交易时段)。
+        """开启自动行情线程, 按交易日历和时段决定是否取数。
 
         none 档无实时行情权限,拒绝开启并返回 False;
         free 档开启自选股实时,starter+ 开启全市场实时。返回值表示是否真正开启。
@@ -386,6 +387,8 @@ class QuoteService:
             return
         if preferences.get_realtime_quotes_enabled():
             self.start()
+        else:
+            logger.info("实时行情未启动:采集开关已关闭")
 
     def set_repo(self, repo) -> None:
         """注入 KlineRepository, 用于实时落盘。"""
@@ -436,6 +439,8 @@ class QuoteService:
         from app.api.overview import invalidate_overview_cache
 
         invalidate_overview_cache()
+        from app.services.shared_runtime import publish_quotes
+        publish_quotes(self)
         for sub in self._snapshot_subscribers():
             sub.notify_quote()
 
@@ -567,9 +572,14 @@ class QuoteService:
         mode = self.realtime_mode()
         phase = self._market_phase()
         final_key = self._final_sync_key(phase)
+        if final_key is None and cn_now().time() >= _FINAL_BOUNDARY["close_final"]:
+            final_key = self._final_sync_key("close_final")
         final_done = bool(final_key and final_key in self._final_sync_done)
         final_failed = self._final_sync_failed.get(final_key) if final_key else None
+        from app.services import trading_day
+        calendar_ready = trading_day.is_trading_day() is not None
         return {
+            "calendar_ready": calendar_ready,
             "enabled": self._enabled,
             "running": self._running,
             "paused": self._paused,
@@ -596,12 +606,15 @@ class QuoteService:
         重新写回当日分区, 覆盖盘后管道按官方日线重建的结果。
         """
         phase = self._market_phase()
+        # 自动确认窗口结束后仍允许手动采集, 但不能绕过收盘快照校验。
+        if cn_now().time() >= _FINAL_BOUNDARY["close_final"]:
+            phase = "close_final"
         is_final = phase in {"morning_final", "close_final"}
-        self._fetch_quotes(
+        updated = self._fetch_quotes(
             final=is_final,
             final_boundary_ms=self._final_boundary_ms(phase) if is_final else None,
         )
-        return self.status()
+        return {**self.status(), "fetch_succeeded": updated}
 
     # ================================================================
     # 后台轮询
@@ -614,32 +627,31 @@ class QuoteService:
                 # 线程继续存活 + 分片 sleep, resume() 后即时恢复, 无需重启线程。
                 if not self._paused:
                     phase = self._market_phase()
-                    if self._should_fetch_for_phase(phase):
+                    final_phase = phase
+                    if phase == "closed" and self._past_final_deadline("close_final"):
+                        final_phase = "close_final"
+                    key = self._final_sync_key(final_phase)
+                    label = "午休" if final_phase == "morning_final" else "收盘"
+                    if key and self._past_final_deadline(final_phase):
+                        # 窗口结束只收尾已尝试的失败状态, 不再向供应商请求行情。
+                        if key in self._final_sync_failed and key not in self._final_sync_done:
+                            self._final_sync_done.add(key)
+                            logger.warning(
+                                "%s 定版窗口结束仍未取得边界后快照 (%s), 停止轮询; "
+                                "等待在数据页手动同步官方日线校正",
+                                label, "拉取失败" if self._final_sync_failed[key] == "fetch_failed" else "快照未确认",
+                            )
+                    elif self._should_fetch_for_phase(phase):
                         is_final = phase in {"morning_final", "close_final"}
                         ok = self._fetch_quotes(
                             final=is_final,
                             final_boundary_ms=self._final_boundary_ms(phase),
                         )
                         if is_final:
-                            key = self._final_sync_key(phase)
-                            label = "午休" if phase == "morning_final" else "收盘"
                             if key and ok and self._last_final_confirmed:
                                 self._final_sync_done.add(key)
                                 self._final_sync_failed.pop(key, None)
                                 logger.info("%s 最终行情同步完成 (快照时间戳已达边界), 进入休盘态", label)
-                            elif key and self._past_final_deadline(phase):
-                                # 重试窗口结束仍未取得边界后快照: 接受现状停止轮询。
-                                # 实测有实时源收盘后长期返回竞价前旧价 (快照时间戳可信但价格不更新),
-                                # 此时盲目落盘只会固化旧价 —— 交由 15:30 盘后管道按官方日线校正。
-                                self._final_sync_done.add(key)
-                                self._final_sync_failed[key] = (
-                                    "fetch_failed" if not ok else "unconfirmed_snapshot"
-                                )
-                                logger.warning(
-                                    "%s 定版窗口结束仍未取得边界后快照 (%s), 停止轮询; "
-                                    "当日分区由盘后管道按官方日线值级校正",
-                                    label, "拉取失败" if not ok else "快照未确认",
-                                )
                             elif key:
                                 self._final_sync_failed[key] = (
                                     "fetch_failed" if not ok else "unconfirmed_snapshot"
@@ -677,6 +689,9 @@ class QuoteService:
         """
         self._cleanup_day_scoped_state()
         with self._fetch_lock:
+            # 手动刷新也可能已在锁前排队, 取得锁后仍须尊重后台数据任务的暂停态。
+            if self._paused:
+                return False
             before = self._fetched_at
             if final:
                 logger.info("最终行情同步开始")
@@ -842,11 +857,9 @@ class QuoteService:
     ) -> tuple[pl.DataFrame, pl.DataFrame | None] | None:
         """把全市场 records 写盘并增量计算 enriched。
 
-        final_boundary_ms (final 定版边界) 传入时, 快照最大时间戳未达边界的本轮
-        只更新展示缓存, 不写 daily/enriched、不评估监控 —— 防止收盘后数据源仍
-        返回竞价前旧价时把陈旧收盘价固化到当日分区。
+        final 定版逐标的检查时间戳；只合并已达边界的记录，未确认标的保留
+        原分区和缓存。整批仍有当日未确认标的时，自动定版继续等待。
         """
-        from app.services import preferences
         all_index_symbols = set(self._repo.get_index_symbol_set()) if self._repo else set()
         core_index_symbols = set(CORE_INDEX_SYMBOLS)
         all_index_symbols.update(core_index_symbols)
@@ -860,15 +873,29 @@ class QuoteService:
             logger.warning("行情数据为空")
             return
 
-        # ---- final 定版确认: 快照最大时间戳达到边界 (含容差) 才允许落盘 ----
-        confirmed_final: bool | None = None
+        # 停牌股的旧日快照不属于本次定版；同日陈旧或缺时间戳的记录不能
+        # 借另一只股票/指数的较新时间戳通过，也不能覆盖原分区的有效收盘。
         if final_boundary_ms is not None:
-            ts_vals = [t for t in (r.get("timestamp") for r in records) if t]
-            max_ts = max(ts_vals) if ts_vals else None
-            confirmed_final = bool(
-                max_ts is not None and max_ts >= final_boundary_ms - _FINAL_CONFIRM_SLACK_MS
+            day_start_ms = int(
+                datetime.combine(cn_today(), dt_time(0, 0), tzinfo=CN_TZ).timestamp() * 1000
             )
-            self._last_final_confirmed = confirmed_final
+            current_records = [
+                r for r in records
+                if r.get("timestamp") is None or r["timestamp"] >= day_start_ms
+            ]
+            saved_timestamps = {}
+            if self._repo:
+                for asset_type in ("stock", "etf", "index"):
+                    saved_timestamps.update(self._repo.get_live_daily_quote_timestamps(asset_type, cn_today()))
+            records = [
+                r for r in current_records
+                if r.get("timestamp") is not None
+                and final_boundary_ms - _FINAL_CONFIRM_SLACK_MS <= r["timestamp"] < day_start_ms + 86_400_000
+                and r["timestamp"] >= saved_timestamps.get(r.get("symbol"), 0)
+            ]
+            self._last_final_confirmed = bool(current_records) and len(records) == len(current_records)
+            if not self._last_final_confirmed:
+                logger.info("final 快照仅 %d/%d 只达到定版边界，保留其他标的原值", len(records), len(current_records))
 
         index_records = [r for r in records if r.get("symbol") in all_index_symbols]
         etf_records = [r for r in records if r.get("symbol") in all_etf_symbols]
@@ -888,21 +915,20 @@ class QuoteService:
             self._symbol_count = len(stock_records)
             self._etf_symbol_count = len(etf_records)
             if replace_index_cache:
-                self._index_symbol_count = len(index_records)
-                self._index_quotes_cache = self._build_index_quotes(index_records)
+                index_quotes = self._build_index_quotes(index_records)
+                if final_boundary_ms is not None and self._index_quotes_cache is not None and not self._index_quotes_cache.is_empty():
+                    index_quotes = pl.concat(
+                        [self._index_quotes_cache, index_quotes], how="diagonal_relaxed",
+                    ).unique(subset=["symbol"], keep="last")
+                self._index_quotes_cache = index_quotes
+                self._index_symbol_count = index_quotes.height
             else:
                 logger.info("指数本轮获取失败,沿用上轮缓存: %d 只", self._index_symbol_count)
 
         _persist_last_fetch(fetched_at)
         logger.info("行情刷新: %d 只股票, %d 只ETF, %d 只指数, 耗时 %.0fms", len(stock_records), len(etf_records), len(index_records), fetch_ms)
 
-        if confirmed_final is False:
-            # 边界前的陈旧快照: 展示缓存已更新, 落盘与监控评估留待边界后快照。
-            # 轮询线程会在定版窗口内持续重试, 窗口结束由 _poll_loop 放弃并告警。
-            logger.info(
-                "final 快照未达定版边界 (max quote_ts=%s, 边界=%s), 本轮跳过落盘",
-                max_ts, final_boundary_ms,
-            )
+        if not records:
             self._broadcast_quote_updated()
             return
 
@@ -913,14 +939,20 @@ class QuoteService:
         daily_df = self._build_daily(stock_records)
         if not daily_df.is_empty() and self._repo:
             try:
-                self._repo.flush_live_daily(daily_df)
+                if final_boundary_ms is not None:
+                    self._repo.merge_live_daily_asset("stock", daily_df)
+                else:
+                    self._repo.flush_live_daily(daily_df)
             except Exception as e:  # noqa: BLE001
                 logger.warning("日K写盘失败: %s", e)
 
         etf_daily_df = self._build_daily(etf_records)
         if not etf_daily_df.is_empty() and self._repo:
             try:
-                self._repo.flush_live_daily_asset("etf", etf_daily_df)
+                if final_boundary_ms is not None:
+                    self._repo.merge_live_daily_asset("etf", etf_daily_df)
+                else:
+                    self._repo.flush_live_daily_asset("etf", etf_daily_df)
             except Exception as e:  # noqa: BLE001
                 logger.warning("ETF 日K写盘失败: %s", e)
 
@@ -930,9 +962,9 @@ class QuoteService:
 
         # ---- 增量计算 enriched + 写盘 + 更新缓存 ----
         if not daily_df.is_empty() and self._repo:
-            self._flush_live_enriched(daily_df, quote_extra, asset_type="stock")
+            self._flush_live_enriched(daily_df, quote_extra, asset_type="stock", merge=final_boundary_ms is not None)
         if not etf_daily_df.is_empty() and self._repo:
-            self._flush_live_enriched(etf_daily_df, etf_quote_extra, asset_type="etf")
+            self._flush_live_enriched(etf_daily_df, etf_quote_extra, asset_type="etf", merge=final_boundary_ms is not None)
         # ---- 指数: 核心四只每轮已显式拉取, 与股票/ETF 同口径 merge 写盘 ----
         # 不能再门控 has_asset_rules("index"): 默认配置无指数监控规则, 否则
         # 盘中 kline_index_enriched 停在上一交易日, 读侧守卫直接跳过不注入。
@@ -1095,23 +1127,15 @@ class QuoteService:
     def _market_phase() -> str:
         """A股行情轮询阶段(北京时间)。
 
-        final 阶段用于午休/收盘定版: 需要至少成功拉取一版边界后的行情, 才算进入休盘。
+        收盘定版窗口为 15:00-15:30, 取得边界后快照即停止自动采集。
         """
         now = cn_now()
-        if now.weekday() >= 5:
-            return "closed"
         t = now.time()
-        if dt_time(9, 15) <= t < dt_time(9, 30):
-            return "preopen"
         if dt_time(9, 30) <= t < dt_time(11, 30):
             return "morning"
-        if dt_time(11, 30) <= t < dt_time(12, 55):
-            return "morning_final"
-        if dt_time(12, 55) <= t < dt_time(13, 0):
-            return "pre_afternoon"
         if dt_time(13, 0) <= t < dt_time(15, 0):
             return "afternoon"
-        if t >= dt_time(15, 0):
+        if dt_time(15, 0) <= t < _FINAL_DEADLINE["close_final"]:
             return "close_final"
         return "closed"
 
@@ -1138,20 +1162,15 @@ class QuoteService:
         return dl is not None and cn_now().time() >= dl
 
     def _holiday_gate(self) -> bool:
-        """交易日探针门控: 确定休市 → False (停止轮询, 含 final 定版)。
-
-        探针未知 (None, 未配置 fuyao 且 tickflow 不可用/开盘缓冲窗内) → True,
-        维持周几近似现状行为。探针是纯读, 不落盘; 休市结论带 TTL 定期复探,
-        误判自愈。首次判定变化打一条日志, 避免每拍刷屏。
-        """
+        """本地日历未就绪或休市时停止轮询。"""
         from app.services import trading_day
 
-        holiday = trading_day.is_trading_day() is False
-        if holiday != self._holiday_active:
-            self._holiday_active = holiday
-            if holiday:
-                logger.info("交易日探针判定休市, 行情轮询暂停 (30 分钟复探)")
-        return not holiday
+        unavailable = trading_day.is_trading_day() is not True
+        if unavailable != self._holiday_active:
+            self._holiday_active = unavailable
+            if unavailable:
+                logger.info("本地交易日历未就绪或确认休市，行情轮询暂停")
+        return not unavailable
 
     def _should_poll_for_phase(self, phase: str) -> bool:
         """是否处于会主动拉行情的阶段。final 阶段成功后即停止。
@@ -1160,7 +1179,7 @@ class QuoteService:
         """
         if not self._holiday_gate():
             return False
-        if phase in {"preopen", "morning", "pre_afternoon", "afternoon"}:
+        if phase in {"morning", "afternoon"}:
             return True
         key = self._final_sync_key(phase)
         return bool(key and key not in self._final_sync_done)
@@ -1169,22 +1188,23 @@ class QuoteService:
         return self._should_poll_for_phase(phase)
 
     def _is_trading_hours(self) -> bool:
-        """行情轮询窗口(兼容旧调用): 包含盘前预热和未完成的午休/收盘定版。"""
+        """连续交易窗口及尚未完成的收盘定版。"""
         return self._should_poll_for_phase(self._market_phase())
 
     @staticmethod
     def _is_continuous_trading() -> bool:
-        """A股连续竞价时段(北京时间): 9:30-11:30 / 13:00-15:00, 仅工作日。
+        """A股连续竞价时段(北京时间): 9:30-11:30 / 13:00-15:00, 仅本地日历确认的交易日。
 
         比 _is_trading_hours 严格: 排除 9:15-9:30 集合竞价(指示价, 非成交价)、
         午间与 15:00 后收盘缓冲。监控评估只在此窗口进行, 不对竞价/收盘后的陈旧价告警。
-        (节假日由 _evaluate_monitors 里的「快照日期=当日」新鲜度判据兜底, 无需交易日历。)
+        本地日历未知或休市时不评估。
         """
         now = cn_now()
         t = now.time()
         morning = dt_time(9, 30) <= t <= dt_time(11, 30)
         afternoon = dt_time(13, 0) <= t <= dt_time(15, 0)
-        return now.weekday() < 5 and (morning or afternoon)
+        from app.services import trading_day
+        return trading_day.is_trading_day(now) is True and (morning or afternoon)
 
     @staticmethod
     def _save_enabled(enabled: bool) -> None:
@@ -1390,8 +1410,8 @@ class QuoteService:
                             logger.warning("模拟盘成交留痕失败: %s", e)
                         self._maybe_send_system_notifications(paper_events)
                         self._maybe_send_paper_webhook(paper_events)
-                except Exception as e:
-                    logger.warning("模拟盘钩子失败 (不影响监控): %s", e)
+                except Exception as e:  # noqa: BLE001 — 可选模拟盘钩子隔离任意策略异常，不中断实时监控
+                    logger.warning("模拟盘钩子失败 (不影响监控): %s", e, exc_info=True)
 
         except Exception as e:  # noqa: BLE001
             logger.warning("监控评估失败: %s", e)
@@ -1423,11 +1443,12 @@ class QuoteService:
                     if not isinstance(message, str):
                         raise TypeError("notification formatter must return str")
                     formatted["message"] = message
-                except Exception as exc:
+                except Exception as exc:  # noqa: BLE001 — 二开格式化器失败隔离自身，保留原事件并处理其余格式化器
                     logger.warning(
                         "notification formatter failed %s: %s",
                         registered.implementation_id,
                         exc,
+                        exc_info=True,
                     )
             formatted_events.append(formatted)
         return formatted_events
@@ -1483,30 +1504,8 @@ class QuoteService:
             return self._intraday_signal_evaluator.inject(enriched, [])
         self._intraday_signal_bucket[asset_type] = bucket
 
-        from app.services.kline_sync import (
-            fetch_intraday_monitor_batch,
-            intraday_monitor_support,
-        )
-
-        capset = getattr(self._app_state, "capabilities", None)
-
-        # 全量分钟健康时股票读本地分区 (服务按间隔持续落盘, 与 API 同一列契约),
-        # 免去每分钟 bucket 一次的全量 API 拉取; ETF 不在服务 universe 内,
-        # 本地读空/异常回落原 API 路径 (含能力与上限检查)
-        minute_df = pl.DataFrame()
-        if asset_type == "stock":
-            svc = getattr(self._app_state, "minute_refresh", None) if self._app_state else None
-            if svc is not None and svc.is_healthy() and self._repo is not None:
-                try:
-                    minute_df = self._repo.get_minute_batch(sorted(symbols), cn_today())
-                except Exception as e:  # 本地读异常回落 API
-                    logger.warning("分时信号本地读失败, 回退 API 路径: %s", e)
-                    minute_df = pl.DataFrame()
-        if minute_df.is_empty():
-            support = intraday_monitor_support(capset)
-            if not support["available"] or len(symbols) > int(support["max_symbols"]):
-                return self._intraday_signal_evaluator.inject(enriched, [])
-            minute_df = fetch_intraday_monitor_batch(sorted(symbols), capset, now=now)
+        # 普通分钟服务与全量分钟服务负责落盘；监控复用同一份结果。
+        minute_df = self._repo.get_minute_batch(sorted(symbols), cn_today(), asset_type=asset_type)
         prev_close: dict[str, float] = {}
         available_cols = set(enriched.columns)
         for row in enriched.filter(pl.col("symbol").is_in(sorted(symbols))).iter_rows(named=True):
@@ -1536,8 +1535,8 @@ class QuoteService:
             from app.strategy import custom_signals
 
             return custom_signals.load_intraday_all(self._repo.store.data_dir)
-        except Exception as e:
-            logger.warning("load intraday signal defs failed: %s", e)
+        except Exception as e:  # noqa: BLE001 — 可选自定义信号定义加载失败返回空集合，不中断行情线程
+            logger.warning("load intraday signal defs failed: %s", e, exc_info=True)
             return []
 
     @staticmethod
@@ -1783,8 +1782,7 @@ class QuoteService:
         - 批量策略事件 (symbol="") 聚合为一条通知, 避免刷屏
         """
         try:
-            from app.services import preferences
-            from app.services import notify_adapter
+            from app.services import notify_adapter, preferences
 
             if not preferences.get_system_notify_enabled():
                 return
@@ -1799,10 +1797,7 @@ class QuoteService:
                 message = ev.get("message") or ""
 
                 # 正文: 优先用现成 message, 拼上 symbol/name 让用户一眼定位
-                if symbol:
-                    body = f"{symbol} {name} {message}".strip()
-                else:
-                    body = message or name
+                body = f"{symbol} {name} {message}".strip() if symbol else message or name
                 # 补上触发时的现价/涨跌幅 (日期提醒无行情, 自然为空)
                 body = _body_with_quote(body, ev)
 
@@ -1847,7 +1842,7 @@ class QuoteService:
 
             if use_incremental:
                 from app.indicators.pipeline import compute_enriched_today
-                from app.market_time import trading_minutes_elapsed_from_ts, trading_minutes_elapsed
+                from app.market_time import trading_minutes_elapsed, trading_minutes_elapsed_from_ts
                 instruments = self._repo.get_instruments()
                 # 将 API 直接提供的补充字段 JOIN 到 daily_df
                 today_ohlcv = daily_df
@@ -1875,6 +1870,7 @@ class QuoteService:
             # ---- 全量回退路径 ----
             if not use_incremental:
                 from datetime import timedelta
+
                 from app.indicators.pipeline import compute_enriched
                 from app.tickflow.repository import _live_agg_window_start
 
@@ -1910,8 +1906,8 @@ class QuoteService:
                 if factor_path and factor_path.exists():
                     try:
                         factors = pl.read_parquet(factor_path)
-                    except Exception:
-                        pass
+                    except (OSError, pl.exceptions.PolarsError):
+                        logger.debug("实时 enriched 除权因子读取失败", exc_info=True)
                 instruments = self._repo.get_instruments() if asset_type == "stock" else None
 
                 enriched_full = compute_enriched(
@@ -1939,7 +1935,8 @@ class QuoteService:
                 from app.indicators.pipeline import attach_deviation_columns_today
                 try:
                     index_quotes = self.get_index_quotes()
-                except Exception:
+                except Exception:  # noqa: BLE001 — 可选指数偏离输入读取失败按缺失处理，保留其他 enriched 列
+                    logger.debug("实时 enriched 指数行情读取失败", exc_info=True)
                     index_quotes = None
                 enriched_today = attach_deviation_columns_today(
                     enriched_today, self._repo.store.data_dir, index_quotes

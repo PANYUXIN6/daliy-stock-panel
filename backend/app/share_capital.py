@@ -4,10 +4,13 @@
 """
 from __future__ import annotations
 
+import logging
 from datetime import date
 from pathlib import Path
 
 import polars as pl
+
+logger = logging.getLogger(__name__)
 
 
 def load_share_history(data_dir: Path) -> pl.DataFrame:
@@ -21,6 +24,7 @@ def load_share_history(data_dir: Path) -> pl.DataFrame:
             return pl.DataFrame()
         return shares
     except Exception:
+        logger.exception("historical shares read failed")
         return pl.DataFrame()
 
 

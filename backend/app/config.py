@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 import sys
 from pathlib import Path
+from typing import Literal
 
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -104,6 +105,11 @@ class Settings(BaseSettings):
     ai_context_window: int = 128000
     # AI 助手工具轮次检查点: 连续 N 轮工具调用未完成时弹「继续/停止」卡; 0=不检查。
     ai_round_checkpoint: int = 100
+
+    # 两服务共享目录；只有 collector 拥有采集、配置写入和任务执行。
+    service_role: Literal["web", "collector"] = "web"
+    collector_url: str = "http://127.0.0.1:3019"
+    ai_max_concurrent: int = Field(default=2, ge=1)
 
     # Server
     host: str = "0.0.0.0"

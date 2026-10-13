@@ -163,8 +163,10 @@ def test_run_regime_batch_excludes_st(tmp_path, monkeypatch):
     monkeypatch.setattr(regime_builder, "_load_index_pct", lambda *a, **k: {})
 
     class _FakeRepo:
-        class store:
+        class _Store:
             data_dir = tmp_path
+
+        store = _Store
 
         def get_enriched_range(self, start, end):
             return _enriched_df()
@@ -350,8 +352,9 @@ def test_detect_stale_dates_by_mtime(tmp_path):
     os.utime(enriched_dir / "date=2026-01-02" / "part.parquet", (future, future))
 
     class _FakeRepo:
-        class store:
+        class _Store:
             data_dir = tmp_path
+        store = _Store
     stale = regime_builder.detect_stale_dates(tmp_path, _FakeRepo())
     assert date(2026, 1, 2) in stale
     assert date(2026, 1, 1) not in stale  # 1/1 没更新
@@ -371,8 +374,9 @@ def test_compute_incremental_missing_dates(tmp_path):
         (d / "part.parquet").write_bytes(b"x")
 
     class _FakeRepo:
-        class store:
+        class _Store:
             data_dir = tmp_path
+        store = _Store
         def get_enriched_range(self, *a, **k): return None  # 无缓存, 不实际算
 
     # compute_regime_incremental 会识别 1/2 缺口, 但 run_regime_batch 因无数据返回空

@@ -15,7 +15,12 @@
 from __future__ import annotations
 
 import json
+import os
+from datetime import datetime
+from pathlib import Path
+from types import SimpleNamespace
 
+from app.services import pipeline_jobs
 from app.services.pipeline_jobs import JobStore
 
 
@@ -123,3 +128,66 @@ def test_terminal_write_replaces_running_snapshot(tmp_path):
     disk = _read_disk(d, jid)
     assert disk["status"] == "failed"
     assert disk["error"] == "boom"
+
+
+def _same_second_clock(monkeypatch):
+    class SameSecond(datetime):
+        @classmethod
+        def utcnow(cls):
+            return cls(2026, 10, 9, 7, 10)
+
+    monkeypatch.setattr(pipeline_jobs, "datetime", SameSecond)
+    ticks = iter([1791529800100000000, 1791529800200000000])
+    monkeypatch.setattr(pipeline_jobs, "time_ns", lambda: next(ticks), raising=False)
+    identifiers = iter(["0000000001", "0000000002"])
+    monkeypatch.setattr(pipeline_jobs.uuid, "uuid4", lambda: SimpleNamespace(hex=next(identifiers)))
+
+
+def test_same_second_pending_is_first_and_memory_snapshot_is_preserved(tmp_path, monkeypatch):
+    _same_second_clock(monkeypatch)
+    store = JobStore(store_dir=tmp_path / "jobs")
+    old, _ = store.create(timeout_s=60)
+    store.start(old)
+    store.succeed(old, {})
+    pending, _ = store.create(timeout_s=60)
+    store.progress(pending, "init", 25, "排队中")
+
+    recent = store.list_recent()
+    assert [job["id"] for job in recent] == [pending, old]
+    assert recent[0]["progress"] == 25  # 内存优先，不能被进度为0的磁盘快照覆盖。
+    assert store.get(old)["created_at_ns"] < store.get(pending)["created_at_ns"]
+    reader = JobStore(store_dir=store._store_dir, recover=False)
+    assert reader.list_recent(limit=1)[0]["id"] == pending
+
+
+def test_legacy_recovery_keeps_original_same_second_order(tmp_path, monkeypatch):
+    _same_second_clock(monkeypatch)
+    directory = tmp_path / "jobs"
+    store = JobStore(store_dir=directory)
+    old, _ = store.create(timeout_s=60)
+    store.start(old)
+    store.fail(old, "old")
+    new, _ = store.create(timeout_s=60)
+    store.start(new)
+    store.succeed(new, {"income": 1})
+    original_mtimes = []
+    for index, jid in enumerate([old, new]):
+        path = directory / f"{jid}.json"
+        data = json.loads(path.read_text())
+        data.pop("created_at_ns", None)
+        if jid == old:
+            data.update(status="running", finished_at=None, duration_s=None, error=None)
+        path.write_text(json.dumps(data))
+        stamp = 1791529800100000000 + index * 100000000
+        os.utime(path, ns=(stamp, stamp))
+        original_mtimes.append(path.stat().st_mtime_ns)
+    original_glob = Path.glob
+    monkeypatch.setattr(Path, "glob", lambda self, pattern: (
+        iter(sorted(original_glob(self, pattern))) if self == directory else original_glob(self, pattern)
+    ))
+
+    revived = JobStore(store_dir=directory)
+    assert revived.list_recent(limit=1)[0]["id"] == new
+    assert revived.get(old)["status"] == "failed"
+    assert revived.get(old)["created_at_ns"] == original_mtimes[0]
+    assert JobStore(store_dir=directory).list_recent(limit=1)[0]["id"] == new

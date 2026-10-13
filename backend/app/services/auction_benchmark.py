@@ -10,19 +10,15 @@ fuyao 未配置时返回 source_unavailable 状态, 前端降级提示。
 - 次日无显著优势 (+0.08%), 定位为「当日观察名单」而非隔夜轮动信号
 
 缓存策略 (与 dragon_tiger 同模式):
-- 历史名单不可变 → 按日落 JSON 缓存 (data/auction_benchmark/date=YYYY-MM-DD.json),
-  缓存命中不触发插件注册表加载
+- 后台采集按日落 JSON 缓存 (data/auction_benchmark/date=YYYY-MM-DD.json)，包含当日结果
+- 查询只读缓存，不触发插件注册表加载或供应商请求
 - 收益 enrich (当日oc/全天/次日) 不落缓存 — 次日数据晚到, 读取时现算
-- 当日名单不缓存 (竞价阶段名单可能变动, 以现拉为准)
-- 显式日期失败 → 回退上一交易日一次 (state=fallback_prev)
-
-日期解析: 接口对显式非交易日报 code=1002, 本层用本地 kline_daily 分区日期
-把目标日回退到「≤目标日的最近交易日」, 规避报错。
+- 当日名单由后台刷新；目标日尚未采集时返回 no_data
+- 未指定日期时使用北京时间当日，显式日期保持原值。
 """
 
 from __future__ import annotations
 
-import contextlib
 import json
 import logging
 import re
@@ -117,7 +113,7 @@ def _read_kline_closes(data_dir: Path, d: date_cls) -> dict[str, float]:
         if not files:
             return {}
         df = pl.concat([pl.read_parquet(f, columns=["symbol", "close"]) for f in files])
-        return dict(zip(df["symbol"].to_list(), df["close"].to_list()))
+        return dict(zip(df["symbol"].to_list(), df["close"].to_list(), strict=True))
     except (OSError, pl.exceptions.PolarsError):
         return {}
 
@@ -133,7 +129,11 @@ def _enrich(data_dir: Path, trade_date: date_cls, items: list[dict]) -> list[dic
         files = sorted(root.glob("*.parquet"))
         if files:
             df = pl.concat([pl.read_parquet(f, columns=["symbol", "open", "close"]) for f in files])
-            day0 = dict(zip(df["symbol"].to_list(), zip(df["open"].to_list(), df["close"].to_list())))
+            day0 = dict(zip(
+                df["symbol"].to_list(),
+                zip(df["open"].to_list(), df["close"].to_list(), strict=True),
+                strict=True,
+            ))
     except (OSError, pl.exceptions.PolarsError):
         day0 = {}
 
@@ -180,62 +180,30 @@ def _base_payload(data_dir: Path, trade_date: date_cls, data: dict) -> dict:
 
 
 def get_auction_benchmark(data_dir: Path, target: date_cls | None = None) -> dict:
-    """取短线风向标名单 (含当日/次日真实收益)。返回给前端的统一容器。
+    """只读后台榜单，收益使用本地日线计算。"""
+    day = target or cn_today()
+    cached = _load_cache(_cache_path(data_dir, day))
+    if cached is None:
+        return {"state": "no_data", "requested_date": day.isoformat()}
+    if cached.get("state") == "source_unavailable":
+        return cached
+    return _respond(data_dir, day, cached, cached.get("state") or "ok")
 
-    state: ok (正常) | fallback_prev (目标日拉取失败, 已回退上一期)
-          | source_unavailable (未配置 fuyao) | no_data (拉取失败)
-    """
-    days = _local_trading_days(data_dir)
-    if target is None:
-        target = max(days) if days else None
-    trade_date = resolve_trade_date(data_dir, target)
-    today = cn_today()
 
-    # 历史日缓存优先 (纯本地, 不触发插件注册表加载)
-    if trade_date is not None and trade_date < today:
-        cached = _load_cache(_cache_path(data_dir, trade_date))
-        if cached is not None:
-            return _respond(data_dir, trade_date, cached, cached.get("state") or "ok")
+def sync_auction_benchmark(data_dir: Path, target: date_cls | None = None) -> dict:
+    """collector 更新当日竞价名单；读取端不隐式拉取或补齐。"""
+    from app.services.shared_runtime import publish_data_update
 
+    day = target or cn_today()
     provider = _provider()
     if provider is None:
-        return {"state": "source_unavailable"}
-
-    from app.plugins.fuyao.client import FuyaoError
-
-    explicit = trade_date.isoformat() if trade_date is not None else None
-    try:
-        data = provider.short_term_benchmark(explicit)
-        try:
-            actual = date_cls.fromisoformat(str(data.get("date")))
-        except ValueError:
-            actual = trade_date
-        base = _base_payload(data_dir, actual, data)
-        # 历史日不可变 → 落缓存; 当日不缓存 (竞价阶段名单可能变动)
-        if actual is not None and actual < today:
-            with contextlib.suppress(OSError):
-                _store_cache(_cache_path(data_dir, actual), base)
-        return _respond(data_dir, actual, base, "ok")
-    except FuyaoError as e:
-        # 显式日期失败 (非交易日/边界日) → 回退上一交易日一次
-        if trade_date is not None:
-            prev = _prev_trading_day(data_dir, trade_date)
-            if prev is not None:
-                try:
-                    cached_prev = _load_cache(_cache_path(data_dir, prev))
-                    if cached_prev is not None:
-                        return _respond(data_dir, prev, cached_prev, "fallback_prev",
-                                        requested=explicit)
-                    data_prev = provider.short_term_benchmark(prev.isoformat())
-                    base = _base_payload(data_dir, prev, data_prev)
-                    with contextlib.suppress(OSError):
-                        _store_cache(_cache_path(data_dir, prev), base)
-                    return _respond(data_dir, prev, base, "fallback_prev",
-                                    requested=explicit)
-                except FuyaoError:
-                    pass
-        logger.warning("短线风向标拉取失败: %s", e)
-        return {"state": "no_data", "message": str(e)}
+        payload = {"state": "source_unavailable", "requested_date": day.isoformat()}
+    else:
+        data = provider.short_term_benchmark(day.isoformat())
+        payload = _base_payload(data_dir, day, data)
+    _store_cache(_cache_path(data_dir, day), payload)
+    publish_data_update(data_dir, ["auction_benchmark"])
+    return get_auction_benchmark(data_dir, day)
 
 
 def _respond(

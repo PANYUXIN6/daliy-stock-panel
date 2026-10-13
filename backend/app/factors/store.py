@@ -40,8 +40,8 @@ def load_all(data_dir: Path) -> list[dict]:
     for file in sorted(_dir(data_dir).glob("*.json")):
         try:
             out.append(json.loads(file.read_text(encoding="utf-8")))
-        except Exception as exc:
-            logger.warning("custom factor load failed %s: %s", file.name, exc)
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            logger.warning("custom factor load failed %s: %s", file.name, exc, exc_info=True)
     return out
 
 
@@ -183,8 +183,8 @@ def load_into_registry(data_dir: Path) -> list[str]:
                     deferred.append(definition)
                 else:
                     logger.warning("custom factor 注册失败 %s: %s", definition.get("id"), exc)
-            except Exception as exc:
-                logger.warning("custom factor 注册失败 %s: %s", definition.get("id"), exc)
+            except Exception as exc:  # noqa: BLE001 - 单个自定义因子注册失败不影响其余定义。
+                logger.warning("custom factor 注册失败 %s: %s", definition.get("id"), exc, exc_info=True)
         if not deferred:
             break
         pending = deferred

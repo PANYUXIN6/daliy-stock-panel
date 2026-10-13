@@ -73,8 +73,8 @@ def read_cache(data_dir: Path) -> dict | None:
         return _read_cache_unlocked(data_dir)
 
 
-def clear_cache(data_dir: Path) -> None:
-    """删除策略结果缓存；策略代码 reload 后避免继续展示旧公式结果。"""
+def clear_cache(data_dir: Path, strategy_id: str | None = None) -> None:
+    """清除失效结果；参数更新只清对应策略，注册表重载仍清整份缓存。"""
     import traceback
 
     # 运维可见性: 策略页依赖本缓存秒加载, 被清空即整页回退到全量重算。
@@ -86,8 +86,19 @@ def clear_cache(data_dir: Path) -> None:
     logger.warning("策略缓存被清除, 调用链: %s", chain)
     path = _cache_path(data_dir)
     with _file_lock:
-        path.unlink(missing_ok=True)
-        path.with_name(path.name + ".tmp").unlink(missing_ok=True)
+        if strategy_id is None:
+            path.unlink(missing_ok=True)
+            path.with_name(path.name + ".tmp").unlink(missing_ok=True)
+        else:
+            cached = _read_cache_unlocked(data_dir)
+            if cached is None:
+                return
+            for key in ("results", "today_ever_matched", "today_ever_rows"):
+                cached.get(key, {}).pop(strategy_id, None)
+            cached["updated_at"] = int(time.time() * 1000)
+            temporary = path.with_name(path.name + ".tmp")
+            temporary.write_text(json.dumps(cached, ensure_ascii=False, default=_json_default), encoding="utf-8")
+            os.replace(temporary, path)
 
 
 def _read_cache_unlocked(data_dir: Path) -> dict | None:
@@ -147,10 +158,7 @@ def _write_cache_locked(
     old_as_of = old.get("as_of") if old else None
     old_ever_rows: dict[str, dict[str, dict]] = old.get("today_ever_rows", {}) if old else {}
 
-    if old_as_of == as_of:
-        merged_results = {**(old.get("results") or {}), **results}
-    else:
-        merged_results = results
+    merged_results = {**(old.get("results") or {}), **results} if old_as_of == as_of else results
 
     # 当前命中的行数据 → symbol 映射
     current_row_maps: dict[str, dict[str, dict]] = {}

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -204,6 +205,7 @@ def test_api_jobs_wait_before_computing(
         db=SimpleNamespace(execute=lambda *args: None),
         refresh_cache=lambda: None,
         get_index_symbol_set=lambda: set(),
+        earliest_daily_date=lambda: None,
     )
     app.state.capabilities = SimpleNamespace(has=lambda _: True)
     assert limiter.acquire("normal", timeout=0)
@@ -231,7 +233,7 @@ def test_api_jobs_wait_before_computing(
 
 
 @pytest.mark.parametrize("fail", [False, True])
-def test_manual_pipeline_holds_capacity_through_refresh_off_event_loop(capacity, monkeypatch, fail):
+def test_manual_pipeline_holds_capacity_through_refresh_off_event_loop(capacity, monkeypatch, fail, tmp_path):
     from app.api import pipeline
 
     store, limiter = capacity
@@ -251,7 +253,7 @@ def test_manual_pipeline_holds_capacity_through_refresh_off_event_loop(capacity,
     monkeypatch.setattr(pipeline.daily_pipeline, "run_now", compute)
     app = FastAPI()
     app.include_router(pipeline.router)
-    app.state.repo = SimpleNamespace(refresh_cache=refresh)
+    app.state.repo = SimpleNamespace(refresh_cache=refresh, store=SimpleNamespace(data_dir=tmp_path))
     app.state.capabilities = object()
     with TestClient(app) as client:
         try:
@@ -268,8 +270,46 @@ def test_manual_pipeline_holds_capacity_through_refresh_off_event_loop(capacity,
     assert limiter.in_use == 0
 
 
+@pytest.mark.parametrize("request_key,fail,expected", [("pipeline", False, True), ("pipeline", True, False), ("adj_factor", False, False)])
+def test_weekly_mining_follows_only_successful_manual_pipeline(capacity, monkeypatch, tmp_path, request_key, fail, expected):
+    from app.api import pipeline
+
+    store, limiter = capacity
+    monkeypatch.setattr(pipeline, "job_store", store)
+    refreshed = threading.Event()
+    mined = threading.Event()
+    main_thread = threading.get_ident()
+    job_ids = []
+
+    def compute():
+        if fail:
+            raise ValueError("partial pipeline failure")
+        return {"rows": 3}
+
+    def mine():
+        assert refreshed.is_set()
+        assert store.get(job_ids[0])["status"] == "succeeded"
+        assert pipeline_jobs._run_slot_owner is None
+        assert limiter.in_use == 0
+        assert threading.get_ident() != main_thread
+        mined.set()
+
+    monkeypatch.setattr(pipeline.daily_pipeline, "run_weekly_mining_after_sync", mine, raising=False)
+    repo = SimpleNamespace(refresh_cache=refreshed.set, store=SimpleNamespace(data_dir=tmp_path), earliest_daily_date=lambda: None)
+
+    async def run():
+        response = await pipeline._submit_job(repo, None, lambda progress: compute, request_key=request_key)
+        job_ids.append(response["job_id"])
+        await asyncio.gather(*pipeline._tasks)
+
+    asyncio.run(run())
+    assert mined.is_set() is expected
+    assert store.get(job_ids[0])["status"] == ("failed" if fail else "succeeded")
+
+
 @pytest.mark.parametrize("entry", ["scheduled", "integrity"])
 def test_background_pipeline_entries_share_capacity(capacity, monkeypatch, entry):
+    monkeypatch.setattr("app.services.trading_day.is_trading_day", lambda *args, **kwargs: True)
     from app.jobs import daily_pipeline
     from app.services import data_integrity, repair_daily
 

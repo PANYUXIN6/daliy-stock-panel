@@ -39,7 +39,7 @@ async def with_heartbeat(
             async for item in events:
                 queue.put_nowait(("item", item))
             queue.put_nowait(("eof", None))
-        except Exception as e:  # 由消费端原样重抛
+        except Exception as e:  # noqa: BLE001 — 通过队列由消费端原样重抛，不在生产端重复记录
             queue.put_nowait(("error", e))
 
     pump_task = asyncio.create_task(pump())

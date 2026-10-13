@@ -10,7 +10,7 @@ import { api, friendlyStreamError } from './api'
  * 3. "活跃任务"上限 MAX_ACTIVE=3:同时进行的任务最多 3 个,超出拒绝新建。
  *    (历史报告名额 MAX_REPORTS=20 在后端裁剪,与活跃任务名额分离)
  * 4. 同 symbol 已有活跃任务 → 直接聚焦那个,不新建第 2 个。
- * 5. 任务完成(收到 done 或 content 非空且流结束)→ 自动存后端 + 移入历史 + 弹窗可恢复为"历史模式"。
+ * 5. 任务完成(收到 done)→ 自动存后端 + 移入历史 + 弹窗可恢复为"历史模式"。
  */
 
 export type Phase = 'loading' | 'streaming' | 'done' | 'error'
@@ -229,36 +229,15 @@ async function runStream(id: string, symbol: string, focus: string) {
           patchTask(id, { phase: 'error', error: chunk.message ?? '分析失败' })
           return
         case 'done':
-          // 标记完成,稍后持久化(content 可能还在最后几个 delta 里,以 done 时为准)
-          patchTask(id, { phase: 'done' })
+          // collector 已归档；只恢复历史列表，不再次提交保存。
+          patchTask(id, { phase: 'done', savedReportId: chunk.report_id })
+          if (chunk.archived) await loadHistory()
           break
       }
     }
-    // 流正常结束 → 持久化报告
-    const final = activeTasks.find(t => t.id === id)
-    if (final && final.phase !== 'error' && final.content) {
-      try {
-        const res = await api.financialReportSave({
-          symbol: final.symbol,
-          name: final.name,
-          focus: final.focus,
-          content: final.content,
-          periods: final.meta?.periods,
-          summary: final.meta?.summary ?? '',
-        })
-        if (res.report) {
-          patchTask(id, { savedReportId: res.report.id })
-          // 加到历史列表头部
-          history = [res.report, ...history.filter(r => r.id !== res.report.id)]
-          historyLoaded = true
-          rebuildSnap()
-          emit()
-          // 任务完成:不自动弹出对话框,只在胶囊显示"已完成"态,用户想看再点。
-          // (若对话框正打开看此任务,内容已实时更新;最小化/在别处则胶囊亮起完成态)
-        }
-      } catch {
-        // 持久化失败不影响前端已展示的内容
-      }
+    const final = activeTasks.find(task => task.id === id)
+    if (final && (final.phase === 'loading' || final.phase === 'streaming')) {
+      patchTask(id, { phase: 'error', error: '分析流已中断，未收到完成确认，请重试' })
     }
   } catch (e: any) {
     const msg = String(e?.message ?? '分析失败')

@@ -1,17 +1,4 @@
-"""个股分时 /minute 与自选分时 /minute-batch 在午休 11:31-12:00 的期望根数。
-
-两个端点按北京时刻估算当日「应有」的分钟K根数, 本地根数够了就直接用本地,
-不够才去数据源实时拉取。上午分支写成了 `h < 12 or (h == 12 and m == 0)`,
-于是 11:31-12:00 仍按 `(h - 9) * 60 + m - 30` 继续增长 (121..150), 而上午
-只有 120 根 (09:31-11:30)。本地完整的上午数据在这段时间被判为「不完整」:
-
-- /minute: 走 fetch_minute_single 实时拉取; 拉空时响应 rows=[]、source="none",
-  前端 minuteRefetchInterval 见 source="none" 即停止轮询, 分时图空白到重新打开。
-- /minute-batch: 被归为「尾部落后」, 每轮对所有自选标的发起增量补拉; 补拉为空时
-  该标的不出现在响应里。
-
-午休应与 market_time.trading_minutes_elapsed_from_dt 同口径: 保持上午累计 120。
-"""
+"""午休与连续竞价时段均返回已经发布的本地分钟数据，不补拉。"""
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta
@@ -23,7 +10,6 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from app.api import kline as kline_api
-from app.market_time import CN_TZ
 from app.services import preferences, trading_day
 from app.tickflow.capabilities import Cap, CapabilityLimits, CapabilitySet
 
@@ -45,8 +31,7 @@ def _morning(symbol: str = SYMBOL, bars: int = 120) -> pl.DataFrame:
 def clock(monkeypatch: pytest.MonkeyPatch):
     """钉住交易日与探针, 数据源补拉一律返回空; 返回 (设置北京时刻的函数, 单股拉取 mock, 批量拉取 mock)。"""
     monkeypatch.setattr(kline_api, "cn_today", lambda: TODAY)
-    monkeypatch.setattr(kline_api, "in_continuous_session", lambda: False)
-    monkeypatch.setattr(trading_day, "is_trading_day", lambda now=None: True)
+    monkeypatch.setattr(trading_day, "is_trading_day", lambda now=None, **kwargs: True)
     monkeypatch.setattr(preferences, "get_minute_batch_compress", lambda: False)
     fetch = MagicMock(return_value=pl.DataFrame())
     monkeypatch.setattr(kline_api.kline_sync, "fetch_minute_single", fetch)
@@ -54,8 +39,7 @@ def clock(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(kline_api.kline_sync, "sync_minute_batch", sync)
 
     def set_time(hour: int, minute: int) -> None:
-        now = datetime(TODAY.year, TODAY.month, TODAY.day, hour, minute, tzinfo=CN_TZ)
-        monkeypatch.setattr(kline_api, "cn_now", lambda: now)
+        pass  # 读取不再依赖盘中时刻。
 
     return set_time, fetch, sync
 
@@ -72,8 +56,8 @@ class _FakeRepo:
         self._bars = bars
         # /minute 与 /minute-batch 读取 repo.store.data_dir 判断分钟基准标记
         import tempfile
-        from types import SimpleNamespace
         from pathlib import Path
+        from types import SimpleNamespace
         self.store = SimpleNamespace(data_dir=Path(tempfile.mkdtemp()))
 
     def resolve_asset_type(self, symbol: str) -> str:
@@ -123,14 +107,15 @@ def test_minute_trading_session_expected_unchanged(clock, hour, minute, bars) ->
     fetch.assert_not_called()
 
 
-def test_minute_lunch_break_still_pulls_when_morning_incomplete(clock) -> None:
-    """午休时本地上午明显不全 (只有 60 根) 仍走实时拉取。"""
+def test_minute_lunch_break_preserves_incomplete_morning(clock) -> None:
+    """午休时本地只有 60 根，仍返回已有数据。"""
     set_time, fetch, _ = clock
     set_time(11, 45)
 
-    _client(60).get("/api/kline/minute", params={"symbol": SYMBOL})
+    body = _client(60).get("/api/kline/minute", params={"symbol": SYMBOL}).json()
 
-    fetch.assert_called_once()
+    assert len(body["rows"]) == 60
+    fetch.assert_not_called()
 
 
 # ---------- /minute-batch (自选列表分时小图) ----------
@@ -174,10 +159,11 @@ def test_minute_batch_trading_session_expected_unchanged(clock, hour, minute, ba
     sync.assert_not_called()
 
 
-def test_minute_batch_lunch_break_still_pulls_when_morning_incomplete(clock) -> None:
+def test_minute_batch_lunch_break_preserves_incomplete_morning(clock) -> None:
     set_time, _, sync = clock
     set_time(11, 45)
 
-    kline_api.get_minute_batch(_batch_request(60), {"symbols": [SYMBOL]})
+    body = kline_api.get_minute_batch(_batch_request(60), {"symbols": [SYMBOL]})
 
-    sync.assert_called_once()
+    assert len(body["data"][SYMBOL]) == 60
+    sync.assert_not_called()

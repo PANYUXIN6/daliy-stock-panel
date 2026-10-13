@@ -4,6 +4,7 @@ from __future__ import annotations
 from datetime import date, timedelta
 
 import polars as pl
+import pytest
 
 from app.indicators.pipeline import (
     attach_deviation_columns,
@@ -21,6 +22,8 @@ from app.services.abnormal_moves import (
     is_st_name,
     rule_for,
 )
+from app.strategy import monitor_rules
+from app.strategy.monitor import MonitorRuleEngine
 
 
 def _write_index_daily(tmp_path, rows: list[tuple[str, date, float]]) -> None:
@@ -373,12 +376,6 @@ def test_build_overview_negative_side_stricter_threshold() -> None:
 
 
 # ── 监控规则接入 (type=abnormal) ────────────────────────
-
-import pytest
-
-from app.strategy import monitor_rules
-from app.strategy.monitor import MonitorRuleEngine
-
 
 def _ab_rule(**overrides) -> dict:
     rule = {

@@ -19,6 +19,7 @@
 
 from __future__ import annotations
 
+import logging
 import threading
 import time
 from dataclasses import dataclass
@@ -29,6 +30,8 @@ import polars as pl
 from app.indicators.pipeline import BENCH_KEYS, DEVIATION_WINDOWS, bench_rt_pct_for
 from app.market_time import cn_today
 from app.services import trading_day
+
+logger = logging.getLogger(__name__)
 
 
 def _is_closed_session() -> bool:
@@ -160,7 +163,8 @@ def _bench_rt_pct(quote_service: Any) -> float:
     """
     try:
         df = quote_service.get_index_quotes()
-    except Exception:
+    except Exception:  # noqa: BLE001 — 可选指数快照不可用时沿用零基准，不中断个股异动计算
+        logger.debug("异动基准指数行情读取失败", exc_info=True)
         return 0.0
     if df is None or df.is_empty():
         return 0.0
@@ -197,7 +201,8 @@ def build_overview(
     if quote_service is not None:
         try:
             index_quotes = quote_service.get_index_quotes()
-        except Exception:
+        except Exception:  # noqa: BLE001 — 可选指数快照失败按缺失处理，保留历史偏离计算
+            logger.debug("异动偏离指数行情读取失败", exc_info=True)
             index_quotes = None
         for k in BENCH_KEYS:
             bench_by_key[k] = bench_rt_pct_for(index_quotes, k)

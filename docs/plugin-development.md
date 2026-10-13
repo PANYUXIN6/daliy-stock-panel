@@ -175,8 +175,23 @@ class MyProvider:
     def get_depth_batch(self, symbols: list[str]) -> dict[str, dict]:
         """(声明 depth5 时实现)五档盘口, 返回以 symbol 为键的标准盘口字典。"""
 
-    def get_financials(self, table, symbols, latest_only=False) -> pl.DataFrame:
-        """财务数据(声明 financial 数据集时实现, table 见 financial_sync 调用)。"""
+    def get_financial_universe(self) -> list[str]:
+        """(可选)当前财务请求可用的股票代码范围，返回 canonical symbol。
+        全市场同步使用此范围（包括本地维表尚未收录的代码），并在 financials/universe.json 保存核对时间、
+        源名称、数量及双向差异。未实现时仍使用本地完整维表；异常或空清单停止同步。
+        清单不保证每股每期都有财务数据，后续取数异常不能因此忽略。
+        只影响财务请求范围，不修改本地基础维表或删除已有历史报表。
+        """
+
+    def get_financials(self, table, symbols, latest_only=False,
+                       on_chunk_done=None, *, cancel_event=None) -> pl.DataFrame:
+        """财务数据；可选原生进度回调为 (done, total)，由协调线程调用。
+
+        显式声明 on_chunk_done 的源自行分批/并行与控频；旧签名继续由服务按
+        100 股调用。回调抛出的取消必须向上传播，未完成表不得返回部分结果。
+        显式声明 cancel_event 的源会收到任务取消信号，应传入限流等待及请求
+        阶段；并发轮次内部停止信号应独立于任务取消信号，避免将取数失败标记为取消。
+        """
 
     def get_instruments(self, asset_type="stock") -> list[dict]:
         """(可选)标的维表: 返回 tickflow Instrument 形状的行, 供 instrument_sync 复用 flatten"""
@@ -250,6 +265,7 @@ provider 不应自行切换或回退到其他数据源。
 | `get_depth_batch` | 单批异常由服务隔离并保留其他批次; 不跨数据源回退 |
 | `get_minute` | 抛异常时调用方自动回退 TickFlow 重试 |
 | `get_daily` / `get_adj_factors` / `get_financials` | 异常由上层同步流程捕获记录; 无数据返回空 DataFrame |
+| 财务上游限流 | `data_providers.base.ProviderRateLimitError` 向任务传播，保留当前表原文件；不按成功空结果处理 |
 | `iter_daily` | 可选; 每批必须符合 `get_daily` 契约。流正常结束后才提交 staging; 未捕获异常会丢弃 staging。provider 内已定义的单标的软失败语义保持不变 |
 
 `iter_daily` 用于避免大范围日K同步在 provider 内累积完整 DataFrame。实现该方法后,

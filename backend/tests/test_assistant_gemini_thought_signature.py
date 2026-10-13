@@ -38,6 +38,9 @@ class _FakeStream:
     def __init__(self, chunks: list[ChatCompletionChunk]) -> None:
         self._chunks = list(chunks)
 
+    async def close(self) -> None:
+        pass
+
     def __aiter__(self) -> _FakeStream:
         return self
 

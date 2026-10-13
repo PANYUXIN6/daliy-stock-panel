@@ -7,12 +7,14 @@ import { QK } from '@/lib/queryKeys'
 import { SettingsModal } from '@/components/data/SettingsModal'
 import { ExtDataPullPanel } from './ExtDataPullPanel'
 import { ExtDataApiPanel } from './ExtDataApiPanel'
+import { useCollectionSyncConfirmation } from '@/lib/useCollectionSyncConfirmation'
 
-export function ExtDataStatCard({ config, onDelete, deleting, onEdit }: {
+export function ExtDataStatCard({ config, onDelete, deleting, onEdit, disabled = false }: {
   config: ExtDataConfig
   onDelete: () => void
   deleting: boolean
   onEdit?: () => void
+  disabled?: boolean
 }) {
   const qc = useQueryClient()
   const fileRef = useRef<HTMLInputElement>(null)
@@ -26,6 +28,19 @@ export function ExtDataStatCard({ config, onDelete, deleting, onEdit }: {
   const [fieldsExpanded, setFieldsExpanded] = useState(false)
   const fieldsRef = useRef<HTMLDivElement>(null)
   const [fieldsOverflow, setFieldsOverflow] = useState(false)
+  const isClassificationPreset = config.id === 'ext_gn_ths' || config.id === 'ext_hy_ths'
+  const confirmation = useCollectionSyncConfirmation(`${config.id}:${settingsOpen}`)
+  const description = isClassificationPreset
+    ? `${config.id === 'ext_gn_ths' ? '概念' : '行业'}分类 · 在数据页获取并由后台保存，业务分析读取本地数据。`
+    : config.description || `扩展数据 · ${config.mode === 'snapshot' ? '与标的 JOIN' : '与日K JOIN'}`
+  const fetchPreset = useMutation({
+    mutationFn: () => api.extDataPresetFetch(config.id),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: QK.extData })
+      void qc.invalidateQueries({ queryKey: QK.extDataRows(config.id).slice(0, 2) })
+      void qc.invalidateQueries({ queryKey: QK.dataStatus })
+    },
+  })
 
   useEffect(() => {
     const el = fieldsRef.current
@@ -85,6 +100,7 @@ export function ExtDataStatCard({ config, onDelete, deleting, onEdit }: {
           </span>
           <button
             onClick={() => setSettingsOpen(v => !v)}
+            aria-label={`配置${config.label}`}
             className="p-0.5 rounded hover:bg-elevated transition-colors text-secondary"
           >
             <Settings className="h-3.5 w-3.5" />
@@ -93,7 +109,7 @@ export function ExtDataStatCard({ config, onDelete, deleting, onEdit }: {
       </div>
 
       <div className="px-4 pb-1.5 text-[10px] text-muted/70 leading-relaxed line-clamp-2">
-        {config.description || `扩展数据 · ${config.mode === 'snapshot' ? '与标的 JOIN' : '与日K JOIN'}`}
+        {description}
       </div>
 
       <div className="flex-1 min-h-[81px] px-4 pb-2">
@@ -169,6 +185,21 @@ export function ExtDataStatCard({ config, onDelete, deleting, onEdit }: {
                 <Tag className="h-3 w-3" />
                 修复代码格式
               </button>
+
+              {isClassificationPreset && (
+                <details className="space-y-2">
+                  <summary className="cursor-pointer text-xs text-secondary">单项维护</summary>
+                  <button type="button" onClick={() => confirmation.run({ kind: 'ext', config_id: config.id }, () => fetchPreset.mutate())} disabled={disabled || fetchPreset.isPending || confirmation.busy}
+                    className="w-full inline-flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-btn bg-accent/90 text-white text-xs font-medium disabled:opacity-40">
+                    {fetchPreset.isPending ? <Loader2 className="h-3 w-3 animate-spin" /> : <RefreshCw className="h-3 w-3" />}
+                    {fetchPreset.isPending ? '获取中…' : `获取${config.id === 'ext_gn_ths' ? '概念' : '行业'}数据`}
+                  </button>
+                  <p className="text-[11px] text-muted">只更新当前分类；通常使用数据页“同步板块分类”统一更新概念与行业。</p>
+                  {fetchPreset.isSuccess && <p role="status" className="text-xs text-accent">采集完成 · {fetchPreset.data.rows} 行</p>}
+                  {fetchPreset.isError && <p role="alert" className="text-xs text-danger">{fetchPreset.error.message}</p>}
+                  {confirmation.error && <p role="alert" className="text-xs text-danger">{confirmation.error}</p>}
+                </details>
+              )}
 
               <div className="flex gap-1 rounded-lg bg-elevated/60 p-0.5">
                 <button
@@ -310,6 +341,7 @@ export function ExtDataStatCard({ config, onDelete, deleting, onEdit }: {
           </div>
         )}
       </AnimatePresence>
+      {confirmation.dialog}
     </div>
   )
 }

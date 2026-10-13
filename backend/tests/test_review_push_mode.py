@@ -92,6 +92,8 @@ def _patch_scheduled_review(monkeypatch, pushed: list, archived: list):
     async def _fake_stream(*a, **k):
         return "正文", {"as_of": "2026-07-18", "emotion_label": "中性"}
 
+    monkeypatch.setattr("app.services.trading_day.is_trading_day", lambda: True)
+    monkeypatch.setattr("app.services.shared_runtime.publish_data_update", lambda *args: None)
     monkeypatch.setattr("app.secrets_store.get_ai_key", lambda: "sk-test")
     monkeypatch.setattr(daily_pipeline, "_stream_review_with_retry", _fake_stream)
     monkeypatch.setattr(
@@ -113,7 +115,8 @@ def test_scheduled_review_manual_archives_without_push(monkeypatch):
     _patch_scheduled_review(monkeypatch, pushed, archived)
     preferences.set_review_push_mode("manual")
 
-    asyncio.run(daily_pipeline._run_scheduled_review(None))
+    from types import SimpleNamespace
+    asyncio.run(daily_pipeline._run_scheduled_review(SimpleNamespace(store=SimpleNamespace(data_dir=None))))
 
     # manual 模式: 归档发生, 但不外发
     assert len(archived) == 1
@@ -128,7 +131,8 @@ def test_scheduled_review_auto_pushes(monkeypatch):
     _patch_scheduled_review(monkeypatch, pushed, archived)
     preferences.set_review_push_mode("auto")
 
-    asyncio.run(daily_pipeline._run_scheduled_review(None))
+    from types import SimpleNamespace
+    asyncio.run(daily_pipeline._run_scheduled_review(SimpleNamespace(store=SimpleNamespace(data_dir=None))))
 
     # auto 模式: 归档并外发
     assert len(archived) == 1

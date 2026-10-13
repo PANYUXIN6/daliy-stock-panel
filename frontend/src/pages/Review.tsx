@@ -3,7 +3,7 @@
  *
  * 设计定位:极简专注型。不复刻 Dashboard 的看板(KPI/雷达/板块排名),
  * 仅保留一行「市场摘要条」作为报告上下文参照;AI 报告 + 历史归档是页面主体。
- *  - 摘要数据:GET /api/overview/market
+ *  - 摘要数据:GET /api/market-recap/publication
  *  - 报告流式:POST /api/market-recap/analyze
  */
 import { useCallback, useEffect, useRef, useState } from 'react'
@@ -12,7 +12,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
   BookOpenCheck, RefreshCw, Sparkles, Trash2, History, ChevronRight, AlertTriangle,
-  Database, Wand2, Copy, Download, Clock, X, Check, Trophy, ChevronDown, ChevronUp,
+  Wand2, Copy, Download, Clock, X, Check, Trophy, ChevronDown, ChevronUp,
 } from 'lucide-react'
 
 import { api, type OverviewMarket, type AiReviewReport, type DragonTigerStockItem } from '@/lib/api'
@@ -67,20 +67,27 @@ function fmtArchivedAt(iso: string): string {
 
 export function Review() {
   const qc = useQueryClient()
-  // 复盘日期:当前固定取最新交易日(后续如需日期选择可改回 useState)
-  const asOf: string | undefined = undefined
+  const [today, setToday] = useState(() => new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Shanghai' }).format(new Date()))
+  useEffect(() => {
+    const nextMidnight = Date.parse(`${today}T00:00:00+08:00`) + 86_400_000
+    const timer = setTimeout(() => {
+      setToday(new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Shanghai' }).format(new Date()))
+    }, Math.max(0, nextMidnight - Date.now()))
+    return () => clearTimeout(timer)
+  }, [today])
+  const asOf = today
   const [focus, setFocus] = useState('')
   // 生成状态走全局 store:切走页面流不中断,回来可恢复
   const { phase, content, error, meta } = useReviewState()
   const [viewing, setViewing] = useState<AiReviewReport | null>(null)  // 查看历史报告
   const reportEndRef = useRef<HTMLDivElement>(null)
 
-  // 看板数据(与总览页同源)
-  const marketQuery = useQuery<OverviewMarket>({
-    queryKey: QK.overviewMarket(asOf),
-    queryFn: () => api.overviewMarket(asOf),
+  const publicationDate = viewing?.as_of ?? today
+  // 市场摘要与所查看的报告日期一致，不借用其他日期的快照。
+  const publication = useQuery({
+    queryKey: QK.reviewPublication(publicationDate),
+    queryFn: () => api.reviewPublication(publicationDate),
     staleTime: 5_000,
-    placeholderData: (prev) => prev,
   })
 
   // 历史报告
@@ -173,29 +180,18 @@ export function Review() {
     }
   }, [phase, viewing])
 
-  // 自动归档(生成完成后台静默保存)—— 通过回调注入 store,避免 store 直接依赖 qc/marketQuery
-  const onGenerationDone = useCallback(async (fullContent: string, doneMeta: { as_of?: string; summary?: string; emotion_score?: number; emotion_label?: string } | null) => {
-    const reportAsOf = doneMeta?.as_of ?? marketQuery.data?.as_of ?? asOf ?? new Date().toISOString().slice(0, 10)
-    try {
-      await api.reviewReportSave({
-        as_of: reportAsOf,
-        focus,
-        content: fullContent,
-        summary: doneMeta?.summary,
-        emotion_score: doneMeta?.emotion_score ?? null,
-        emotion_label: doneMeta?.emotion_label ?? '',
-      })
-      qc.invalidateQueries({ queryKey: QK.reviewReports })
-    } catch { /* 静默 */ }
-  }, [focus, asOf, marketQuery.data, qc])
+  // 报告由 collector 归档，页面仅刷新历史列表。
+  const onGenerationDone = useCallback(async () => {
+    await qc.invalidateQueries({ queryKey: QK.reviewReports })
+  }, [qc])
 
   // 主流程:生成复盘(委托给全局 store,流在后台独立运行)
   const generate = useCallback(() => {
     if (isReviewGenerating()) return
     setViewing(null)
     resetReview()
-    startReviewGeneration(asOf, focus, (full, doneMeta) => {
-      onGenerationDone(full, doneMeta).catch(() => { /* 静默 */ })
+    startReviewGeneration(asOf, focus, () => {
+      onGenerationDone().catch(() => { /* 静默 */ })
     })
   }, [asOf, focus, onGenerationDone])
 
@@ -232,11 +228,11 @@ export function Review() {
   }, [])
 
   const isGenerating = phase === 'loading' || phase === 'streaming'
-  const displayDate = viewing?.as_of ?? meta?.as_of ?? marketQuery.data?.as_of ?? asOf ?? '最新'
+  const displayDate = publicationDate
   // 龙虎榜跟随复盘目标日 (历史复盘联动当期榜单); 非 ISO 日期(如"最新")取最近一期
   const dtDate = /^\d{4}-\d{2}-\d{2}$/.test(displayDate ?? '') ? displayDate : undefined
   const [previewSymbol, setPreviewSymbol] = useState<string | null>(null)
-  const data = marketQuery.data
+  const data = publication.data?.published ? publication.data.overview : null
   // 主区域显示的内容:viewing(查看历史)优先于 store 的生成 content,
   // 这样点历史报告不会覆盖后台生成中的流。
   const displayContent = viewing?.content ?? content
@@ -250,12 +246,12 @@ export function Review() {
         right={
           <div className="flex items-center gap-1">
             <button
-              onClick={() => { marketQuery.refetch() }}
-              disabled={marketQuery.isFetching}
+              onClick={() => { publication.refetch() }}
+              disabled={publication.isFetching}
               className="inline-flex items-center gap-1 rounded-btn border border-border bg-elevated px-2 py-1 text-[11px] text-secondary transition-colors hover:text-foreground disabled:opacity-50"
               title="刷新市场数据"
             >
-              <RefreshCw className={cn('h-3 w-3', marketQuery.isFetching && 'animate-spin')} />刷新
+              <RefreshCw className={cn('h-3 w-3', publication.isFetching && 'animate-spin')} />刷新
             </button>
             <button
               onClick={openSchedule}
@@ -292,39 +288,16 @@ export function Review() {
       <div className="min-h-full bg-[radial-gradient(circle_at_15%_-5%,rgba(59,130,246,0.10),transparent_30%),radial-gradient(circle_at_85%_5%,rgba(139,92,246,0.08),transparent_30%)] px-4 py-4 sm:px-6">
         <div className="mx-auto max-w-[1280px] space-y-3">
 
-          {marketQuery.isLoading && !data ? (
-            <div className="flex h-40 items-center justify-center">
-              <div className="flex items-center gap-2 text-sm text-muted">
-                <RefreshCw className="h-4 w-4 animate-spin" /> 加载市场数据…
-              </div>
-            </div>
-          ) : !data || !data.as_of ? (
-            <div className="flex flex-col items-center justify-center gap-4 rounded-card border border-border bg-surface/80 px-6 py-16">
-              <div className="relative">
-                <div className="grid h-14 w-14 place-items-center rounded-2xl bg-gradient-to-br from-accent/20 to-purple-500/15 border border-accent/30">
-                  <Database className="h-6 w-6 text-accent" strokeWidth={1.8} />
-                </div>
-              </div>
-              <div className="text-center">
-                <div className="text-sm font-medium text-foreground">暂无市场数据</div>
-                <p className="mt-1 text-xs text-muted">复盘需要日 K 与指数,请先前往「数据」页同步</p>
-              </div>
-              <Link
-                to="/data"
-                className="inline-flex items-center gap-1.5 rounded-btn bg-accent px-4 py-2 text-xs font-medium text-white shadow-sm transition-all hover:bg-accent/90 hover:shadow"
-              >
-                <Database className="h-3.5 w-3.5" />前往数据页同步
-                <ChevronRight className="h-3.5 w-3.5" />
-              </Link>
-            </div>
+          {publication.isLoading && !data ? (
+            <div className="flex h-24 items-center justify-center text-sm text-muted">加载复盘状态…</div>
+          ) : publication.isError ? (
+            <div className="rounded-card border border-border bg-surface p-6 text-sm text-danger">复盘状态加载失败，请重试</div>
+          ) : !data ? (
+            <div className="rounded-card border border-border bg-surface p-6 text-center text-sm text-muted">{publicationDate === today ? '当日复盘尚未更新' : '该日复盘尚未更新'}</div>
           ) : (
-            <>
-              {/* ===== 市场摘要条(轻量上下文,非重复看板)===== */}
-              <MarketSummaryBar data={data} />
-
-
-              {/* ===== 龙虎榜 (fuyao 专有, 资金动向上下文; 复盘日联动) ===== */}
-              <DragonTigerCard date={dtDate} onOpenStock={setPreviewSymbol} />
+            <MarketSummaryBar data={data} />
+          )}
+          {(viewing || data) && <DragonTigerCard date={dtDate} onOpenStock={setPreviewSymbol} />}
 
               {/* ===== 关注点输入 ===== */}
               <div className="flex items-center gap-2 rounded-card border border-border bg-surface/80 px-3.5 py-2.5 transition-colors focus-within:border-accent/40">
@@ -349,6 +322,7 @@ export function Review() {
                   error={error}
                   isGenerating={isGenerating}
                   viewing={viewing}
+                  reportDate={viewing?.as_of ?? meta?.as_of}
                   onCopy={copyContent}
                   onDownload={downloadContent}
                   onRegenerate={generate}
@@ -364,8 +338,6 @@ export function Review() {
                   onDelete={(id) => deleteMut.mutate(id)}
                 />
               </div>
-            </>
-          )}
         </div>
       </div>
 
@@ -712,13 +684,14 @@ function MarketSummaryBar({ data }: { data: OverviewMarket }) {
 // 报告面板(流式 + 错误 + 历史/完成态)
 // ================================================================
 function ReportPanel({
-  phase, content, error, isGenerating, viewing, onCopy, onDownload, onRegenerate, reportEndRef,
+  phase, content, error, isGenerating, viewing, reportDate, onCopy, onDownload, onRegenerate, reportEndRef,
 }: {
   phase: ReviewPhase
   content: string
   error: string
   isGenerating: boolean
   viewing: AiReviewReport | null
+  reportDate?: string
   onCopy: () => void
   onDownload: () => void
   onRegenerate: () => void
@@ -800,7 +773,8 @@ function ReportPanel({
         <div className="flex items-center gap-1.5">
           {isGenerating ? <RefreshCw className="h-3.5 w-3.5 animate-spin text-accent" /> : <BookOpenCheck className="h-3.5 w-3.5 text-accent" />}
           <span className="text-xs font-medium text-foreground">
-            {showViewingTag ? `历史复盘 · ${viewing!.as_of}` : isGenerating ? 'AI 正在复盘…' : '复盘报告'}
+            {showViewingTag ? '历史复盘' : isGenerating ? 'AI 正在复盘…' : '复盘报告'}
+            {reportDate && ` · ${reportDate}`}
           </span>
         </div>
         {showActions && (
@@ -1245,7 +1219,7 @@ function DragonTigerCard({ date, onOpenStock }: {
   const [expanded, setExpanded] = useState(false)
   const [tab, setTab] = useState<_DtTabKey>('all')
   const q = useQuery({
-    queryKey: ['dragon-tiger', date ?? 'latest'],
+    queryKey: QK.dragonTiger(date),
     queryFn: () => api.dragonTiger(date),
     staleTime: 5 * 60_000,
     retry: 1,

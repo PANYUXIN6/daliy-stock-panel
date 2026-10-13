@@ -34,6 +34,12 @@ class AnalyzeRequest(BaseModel):
     focus: str = ""           # 可选:用户追加的复盘关注点
 
 
+@router.get("/publication")
+def publication(request: Request, date: date_cls | None = None):
+    from app.services.review_publication import get_publication
+    return get_publication(request.app.state.repo.store.data_dir, date)
+
+
 @router.get("/dragon-tiger")
 def get_dragon_tiger(
     request: Request,
@@ -47,8 +53,8 @@ def get_dragon_tiger(
     if date:
         try:
             target = date_cls.fromisoformat(date)
-        except ValueError:
-            raise HTTPException(400, f"date 格式应为 YYYY-MM-DD, 收到: {date}")
+        except ValueError as exc:
+            raise HTTPException(400, f"date 格式应为 YYYY-MM-DD, 收到: {date}") from exc
     return dragon_tiger.get_dragon_tiger(
         request.app.state.repo.store.data_dir, target
     )
@@ -67,8 +73,8 @@ def get_auction_benchmark(
     if date:
         try:
             target = date_cls.fromisoformat(date)
-        except ValueError:
-            raise HTTPException(400, f"date 格式应为 YYYY-MM-DD, 收到: {date}")
+        except ValueError as exc:
+            raise HTTPException(400, f"date 格式应为 YYYY-MM-DD, 收到: {date}") from exc
     return auction_benchmark.get_auction_benchmark(
         request.app.state.repo.store.data_dir, target
     )
@@ -97,13 +103,23 @@ async def analyze_market(request: Request, req: AnalyzeRequest):
     if req.as_of:
         try:
             as_of = date_cls.fromisoformat(req.as_of)
-        except ValueError:
-            raise HTTPException(400, f"as_of 格式应为 YYYY-MM-DD,收到: {req.as_of}")
+        except ValueError as exc:
+            raise HTTPException(400, f"as_of 格式应为 YYYY-MM-DD,收到: {req.as_of}") from exc
+
+    from app.services.analysis_archive import archive_analysis
+
+    def archive(report):
+        saved = market_recap_reports.save_report(report)
+        if preferences.get_review_push_mode() == "auto":
+            from app.jobs.daily_pipeline import _maybe_push_review
+            _maybe_push_review(report["content"], report)
+        return saved
 
     async def stream_gen():
-        async for chunk in with_heartbeat(
+        async for chunk in with_heartbeat(archive_analysis(
             recap_market_stream(repo, quote_service, depth_service, as_of, req.focus),
-        ):
+            archive, repo.store.data_dir, "review", {"focus": req.focus},
+        )):
             yield chunk + "\n"
 
     return StreamingResponse(

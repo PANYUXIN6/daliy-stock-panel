@@ -169,8 +169,8 @@ export function AutoMiningDialog({
             <div className="rounded-btn border border-danger/40 bg-danger/5 px-3 py-2 text-[11px] leading-relaxed text-danger">
               当前区间 {bars} 个交易日，不够「{PROFILE_LABELS[profile]}」档（需 {availability[profile]!.required_bars} 日）。
               {availability.exploratory?.eligible
-                ? '可改选「探索」档，或在数据页补充更早的历史行情后重试。'
-                : '请在数据页补充更多历史行情后重试。'}
+                ? '可改选「探索」档，或等待后台补充历史行情后重试。'
+                : '后台历史行情尚未完整覆盖该验证范围，数据维护完成后可重试。'}
             </div>
           )}
           <p className="text-[10px] leading-relaxed text-muted">

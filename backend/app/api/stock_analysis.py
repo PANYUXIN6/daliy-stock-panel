@@ -166,8 +166,13 @@ async def analyze_stock(request: Request, req: AnalyzeRequest):
     repo = request.app.state.repo
     data_dir = repo.store.data_dir
 
+    from app.services.analysis_archive import archive_analysis
+
     async def stream_gen():
-        async for chunk in with_heartbeat(analyze_stock_stream(repo, data_dir, req.symbol, req.focus)):
+        async for chunk in with_heartbeat(archive_analysis(
+            analyze_stock_stream(repo, data_dir, req.symbol, req.focus),
+            stock_reports.save_report, data_dir, "analysis", {"symbol": req.symbol, "focus": req.focus},
+        )):
             yield chunk + "\n"
 
     return StreamingResponse(

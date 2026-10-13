@@ -205,7 +205,7 @@ def _injection_env(monkeypatch, *, healthy, local_df, asset_type="stock", symbol
     symbols = symbols or {"600519.SH"}
     service = qs.QuoteService()
     service._repo = SimpleNamespace(
-        get_minute_batch=lambda syms, d: local_df,
+        get_minute_batch=lambda syms, d, *, asset_type: local_df,
     )
     engine = SimpleNamespace(
         intraday_signal_symbols=lambda at: set(symbols) if at == asset_type else set(),
@@ -217,7 +217,6 @@ def _injection_env(monkeypatch, *, healthy, local_df, asset_type="stock", symbol
     api_calls: list[list[str]] = []
     monkeypatch.setattr(
         qsm, "_noop", qsm.__dict__.get("_noop", None), raising=False)  # 占位无操作
-    from app.services.kline_sync import intraday_monitor_support
     monkeypatch.setattr(
         "app.services.quote_service.logger", qsm.logger, raising=False)
     # 打桩 API 拉取路径 (健康时不应被调)
@@ -253,18 +252,20 @@ def test_intraday_signals_read_local_when_healthy(monkeypatch):
     assert captured and captured[0].height == 1  # evaluator 拿到本地数据
 
 
-def test_intraday_signals_fall_back_to_api_when_unhealthy(monkeypatch):
-    """不健康 (服务关/挂) 时回落原 API 拉取路径。"""
+def test_intraday_signals_empty_local_never_pulls_provider(monkeypatch):
+    """服务未就绪时仍读取本地空结果，不额外拉取。"""
     service, engine, api_calls, captured = _injection_env(monkeypatch, healthy=False, local_df=pl.DataFrame())
     enriched = pl.DataFrame({"symbol": ["600519.SH"], "close": [100.5]})
     service._inject_intraday_signals(enriched, engine, asset_type="stock")
-    assert api_calls == [["600519.SH"]]  # 走了 API
+    assert api_calls == []
+    assert captured[0].is_empty()
 
 
-def test_intraday_signals_etf_never_reads_local(monkeypatch):
-    """ETF 不在全量分钟 universe: 即使健康也走 API 路径。"""
+def test_intraday_signals_etf_reads_local(monkeypatch):
+    """ETF 读取普通分钟服务落盘结果。"""
     service, engine, api_calls, captured = _injection_env(
         monkeypatch, healthy=True, local_df=pl.DataFrame(), asset_type="etf", symbols={"510300.SH"})
     enriched = pl.DataFrame({"symbol": ["510300.SH"], "close": [4.0]})
     service._inject_intraday_signals(enriched, engine, asset_type="etf")
-    assert api_calls == [["510300.SH"]]
+    assert api_calls == []
+    assert captured[0].is_empty()

@@ -37,6 +37,9 @@ const FOCUSABLE = [
   '[tabindex]:not([tabindex="-1"])',
 ].join(',')
 
+// 嵌套确认框只由最上层处理键盘，避免 Escape 同时关闭父对话框。
+const modalStack: HTMLDivElement[] = []
+
 export function Modal({
   onClose,
   children,
@@ -61,6 +64,8 @@ export function Modal({
   useEffect(() => {
     // 记住打开前的焦点, 关闭时还原
     const prevActive = document.activeElement as HTMLElement | null
+    const panel = panelRef.current
+    if (panel) modalStack.push(panel)
 
     // 初始聚焦
     const focusFirst = () => {
@@ -77,6 +82,7 @@ export function Modal({
     const raf = requestAnimationFrame(focusFirst)
 
     const onKeyDown = (e: KeyboardEvent) => {
+      if (modalStack[modalStack.length - 1] !== panelRef.current) return
       if (e.key === 'Escape') {
         e.stopPropagation()
         onCloseRef.current()
@@ -112,6 +118,7 @@ export function Modal({
     return () => {
       cancelAnimationFrame(raf)
       document.removeEventListener('keydown', onKeyDown, true)
+      if (panel) modalStack.splice(modalStack.indexOf(panel), 1)
       // 还原焦点
       prevActive?.focus?.()
     }

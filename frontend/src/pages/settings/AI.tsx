@@ -1,8 +1,8 @@
 import { useState, useEffect, useRef, createContext, useContext, type ReactNode } from 'react'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import {
-  Save, Loader2, Check, Wifi, WifiOff, Eye, EyeOff, Shield,
-  Shuffle, Plug, Zap, Settings2, ExternalLink, Trash2,
+  Save, Loader2, Check, Wifi, WifiOff, Shield,
+  Shuffle, Plug, Zap, Settings2, ExternalLink,
   Terminal, ChevronDown,
 } from 'lucide-react'
 import { useSettings } from '@/lib/useSharedQueries'
@@ -58,11 +58,11 @@ const codexModelLabel = (model?: string, effort?: string) => {
   return effortLabel ? `${modelLabel} · ${effortLabel}` : modelLabel
 }
 
-type AiPreset = { label: string; provider?: string; url: string; model: string; codexCommand?: string; website: string; websiteLabel: string; description: ReactNode; custom?: boolean; sponsor?: boolean }
+type AiPreset = { label: string; provider?: string; url: string; model: string; codexCommand?: string; website: string; websiteLabel: string; description: ReactNode; custom?: boolean; modelList?: boolean }
 
 const PRESETS: AiPreset[] = [
-  { label: '自定义', url: '', model: '', website: '', websiteLabel: '', description: '不自动填充任何配置，完全手动填写 API 地址、模型和密钥。', custom: true },
-  { label: 'RunningHub', url: 'https://llm.runninghub.ai/v1', model: 'openai/gpt-6-astra-saver', website: 'https://www.runninghub.ai/zh-cn/call-api/llm/models?source=github&inviteCode=edt5wh7c', websiteLabel: 'www.runninghub.ai · 赞助', sponsor: true, description: <>本项目赞助商 · OpenAI 兼容中转，单一接口直连 400+ 主流大模型，<span className="font-medium text-amber-600 dark:text-amber-400">Claude、ChatGPT、Gemini</span> 等国际模型直连稳定不掉线，<span className="font-medium text-amber-600 dark:text-amber-400">最高优惠 80%</span>，<span className="font-medium text-amber-600 dark:text-amber-400">邀请链接注册赠送 1000 RH 积分</span>。通过下方链接注册即为项目提供赞助支持。</> },
+  { label: '自定义', url: '', model: '', website: '', websiteLabel: '', description: '不自动填充任何配置，手动填写 API 地址和模型，密钥由后端配置。', custom: true },
+  { label: 'RunningHub', url: 'https://llm.runninghub.ai/v1', model: 'openai/gpt-6-astra-saver', website: 'https://www.runninghub.ai/zh-cn/call-api/llm/models', websiteLabel: 'www.runninghub.ai', modelList: true, description: 'RunningHub OpenAI 兼容接口，支持从模型列表选择模型。' },
   { label: 'OpenAI', provider: OPENAI_PROVIDER, url: 'https://api.openai.com/v1', model: DEFAULT_OPENAI_MODEL, website: 'https://platform.openai.com/', websiteLabel: 'platform.openai.com', description: 'OpenAI 官方接口，可单独配置模型支持的推理强度。' },
   { label: 'DeepSeek', url: 'https://api.deepseek.com', model: 'deepseek-v4-pro', website: 'https://www.deepseek.com/', websiteLabel: 'deepseek.com', description: 'DeepSeek 官方 OpenAI 兼容接口。' },
   { label: '通义千问', url: 'https://dashscope.aliyuncs.com/compatible-mode/v1', model: 'qwen-3.6plus', website: 'https://tongyi.aliyun.com/', websiteLabel: 'tongyi.aliyun.com', description: '阿里云 DashScope 兼容模式接口。' },
@@ -84,7 +84,6 @@ export function SettingsAIPanel({ highlight }: { highlight?: string } = {}) {
 
   const [provider, setProvider] = useState(OPENAI_COMPAT_PROVIDER)
   const [baseUrl, setBaseUrl] = useState('')
-  const [apiKey, setApiKey] = useState('')
   const [model, setModel] = useState('')
   const [reasoningEffort, setReasoningEffort] = useState(DEFAULT_REASONING_EFFORT)
   const [codexModel, setCodexModel] = useState('')
@@ -95,10 +94,8 @@ export function SettingsAIPanel({ highlight }: { highlight?: string } = {}) {
   const [maxOutputTokens, setMaxOutputTokens] = useState('')
   const [contextWindow, setContextWindow] = useState('')
   const [roundCheckpoint, setRoundCheckpoint] = useState('')
-  const [showKey, setShowKey] = useState(false)
   const [saved, setSaved] = useState(false)
-  const [confirmClear, setConfirmClear] = useState(false)
-  // 赞助商预设的模型列表下拉（/models 接口 + 关键词过滤）
+  // RunningHub 预设的模型列表下拉（/models 接口 + 关键词过滤）
   const [modelsOpen, setModelsOpen] = useState(false)
   const [modelsLoading, setModelsLoading] = useState(false)
   const [modelsError, setModelsError] = useState('')
@@ -180,7 +177,6 @@ export function SettingsAIPanel({ highlight }: { highlight?: string } = {}) {
   const payload = () => ({
     provider,
     base_url: baseUrl,
-    api_key: apiKey || undefined,
     model: isCodexProvider ? codexModel : model,
     ...(isOpenAIProvider ? { reasoning_effort: reasoningEffort } : {}),
     codex_command: isCodexProvider ? CODEX_COMMAND : codexCommand,
@@ -195,7 +191,6 @@ export function SettingsAIPanel({ highlight }: { highlight?: string } = {}) {
     mutationFn: () => api.saveAiSettings(payload()),
     onSuccess: (result) => {
       setSaved(true)
-      setApiKey('')
       qc.setQueryData<SettingsState>(QK.settings, prev => prev ? {
         ...prev,
         ai_provider: result.ai_provider ?? provider,
@@ -206,58 +201,13 @@ export function SettingsAIPanel({ highlight }: { highlight?: string } = {}) {
         ai_codex_model: result.ai_codex_model ?? codexModel,
         ai_codex_command: result.ai_codex_command ?? (isCodexProvider ? CODEX_COMMAND : codexCommand),
         ai_codex_reasoning_effort: result.ai_codex_reasoning_effort ?? (isCodexProvider ? codexReasoningEffort : ''),
-        ai_configured: result.ai_configured ?? (isCodexProvider ? true : (apiKey ? true : prev.ai_configured)),
+        ai_configured: result.ai_configured ?? prev.ai_configured,
         ai_max_output_tokens: result.ai_max_output_tokens ?? toPositiveInt(maxOutputTokens),
         ai_context_window: result.ai_context_window ?? toPositiveInt(contextWindow),
         ai_round_checkpoint: result.ai_round_checkpoint ?? toIntAllowZero(roundCheckpoint),
-        ...(apiKey ? {
-          has_ai_key: true,
-          ai_api_key_masked: `${apiKey.slice(0, 4)}......${apiKey.slice(-4)}`,
-        } : {}),
       } : prev)
       qc.invalidateQueries({ queryKey: QK.settings })
       setTimeout(() => setSaved(false), 2000)
-    },
-  })
-
-  const clear = useMutation({
-    mutationFn: () => api.clearAiSettings(),
-    onSuccess: () => {
-      setConfirmClear(false)
-      setProvider(OPENAI_COMPAT_PROVIDER)
-      setSelectedPresetLabel(PRESETS[0].label)
-      setBaseUrl('')
-      setApiKey('')
-      setModel('')
-      setReasoningEffort(DEFAULT_REASONING_EFFORT)
-      setCodexModel('')
-      setCodexReasoningEffort('')
-      setCodexCommand(CODEX_COMMAND)
-      directDrafts.current = {
-        custom: { baseUrl: '', model: '' },
-        openai: { baseUrl: 'https://api.openai.com/v1', model: DEFAULT_OPENAI_MODEL },
-      }
-      setMaxOutputTokens('16384')
-      setContextWindow('128000')
-      setRoundCheckpoint('100')
-      setTestResult(null)
-      qc.setQueryData<SettingsState>(QK.settings, prev => prev ? {
-        ...prev,
-        ai_provider: OPENAI_COMPAT_PROVIDER,
-        ai_base_url: '',
-        ai_model: '',
-        ai_openai_model: '',
-        ai_reasoning_effort: DEFAULT_REASONING_EFFORT,
-        ai_codex_model: '',
-        ai_codex_command: CODEX_COMMAND,
-        ai_codex_reasoning_effort: '',
-        ai_max_output_tokens: 16384,
-        ai_context_window: 128000,
-        has_ai_key: false,
-        ai_configured: false,
-        ai_api_key_masked: '',
-      } : prev)
-      qc.invalidateQueries({ queryKey: QK.settings })
     },
   })
 
@@ -310,7 +260,7 @@ export function SettingsAIPanel({ highlight }: { highlight?: string } = {}) {
     if (isOpenAIProvider) directDrafts.current.openai.model = value
   }
 
-  // 赞助商预设: 经后端代理拉取 /models 全量模型列表供下拉选择
+  // RunningHub 预设: 经后端代理拉取 /models 全量模型列表供下拉选择
   // (浏览器直连会被 RunningHub 网关按 Origin 过滤, 只返回国产模型)
   const fetchModelOptions = async () => {
     setModelsLoading(true)
@@ -378,8 +328,8 @@ export function SettingsAIPanel({ highlight }: { highlight?: string } = {}) {
               {configured
                 ? (savedCodexProvider
                   ? `${s?.ai_codex_command ?? CODEX_COMMAND} · ${codexModelLabel(s?.ai_model, s?.ai_codex_reasoning_effort)}`
-                  : `${s?.ai_model} · ${s?.ai_api_key_masked}`)
-                : (isCodexProvider ? '使用本机 codex exec, 此处无需填写 API Key。' : '配置 API Key 后即可使用 AI 功能。')}
+                  : `${s?.ai_model} · 后端密钥已配置`)
+                : (isCodexProvider ? '使用本机 codex exec, 此处无需填写 API Key。' : '在后端 .env 配置 AI_API_KEY 后即可使用 AI 功能。')}
             </div>
           </div>
         </div>
@@ -398,7 +348,6 @@ export function SettingsAIPanel({ highlight }: { highlight?: string } = {}) {
               className={`rounded-lg border px-3 py-2 text-left transition-all ${selectedPreset?.label === p.label ? 'border-accent/40 bg-accent/10 text-accent' : 'border-border bg-base text-secondary hover:border-accent/30'}`}>
               <div className="flex items-center gap-1.5 text-xs font-medium">
                 <span>{p.label}</span>
-                {p.sponsor && <span className="rounded-full border border-amber-500/40 bg-amber-400/15 px-1.5 py-px text-[9px] font-semibold leading-none text-amber-600 dark:border-amber-400/40 dark:text-amber-400">优惠</span>}
                 {p.provider === CODEX_PROVIDER && <Terminal className="h-3 w-3" />}
               </div>
             </button>
@@ -411,7 +360,7 @@ export function SettingsAIPanel({ highlight }: { highlight?: string } = {}) {
             </div>
             {selectedPreset.website && (
               <a href={selectedPreset.website} target="_blank" rel="noreferrer"
-                className={`mt-1 inline-flex items-center gap-1 transition-colors ${selectedPreset.sponsor ? 'font-medium text-amber-600 hover:text-amber-700 dark:text-amber-400 dark:hover:text-amber-300' : 'text-muted hover:text-accent'}`}>
+                className="mt-1 inline-flex items-center gap-1 text-muted transition-colors hover:text-accent">
                 {selectedPreset.websiteLabel}
                 <ExternalLink className="h-3 w-3" />
               </a>
@@ -466,14 +415,14 @@ export function SettingsAIPanel({ highlight }: { highlight?: string } = {}) {
                 </Field>
                 <Field label="模型">
                   <div ref={modelBoxRef} className="relative">
-                    <input type="text" value={model} onChange={e => handleModelChange(e.target.value)} placeholder="gpt-5.6-sol" className={`${INPUT_CLS} ${selectedPreset?.sponsor ? 'pr-9' : ''}`} />
-                    {selectedPreset?.sponsor && (
+                    <input type="text" value={model} onChange={e => handleModelChange(e.target.value)} placeholder="gpt-5.6-sol" className={`${INPUT_CLS} ${selectedPreset?.modelList ? 'pr-9' : ''}`} />
+                    {selectedPreset?.modelList && (
                       <button type="button" onClick={fetchModelOptions} aria-label="获取模型列表"
                         className="absolute right-1.5 top-1/2 flex h-6 w-7 -translate-y-1/2 items-center justify-center rounded-md border border-border/40 bg-base text-muted transition-colors hover:border-accent/40 hover:text-accent">
                         {modelsLoading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ChevronDown className="h-3.5 w-3.5" />}
                       </button>
                     )}
-                    {selectedPreset?.sponsor && modelsOpen && (
+                    {selectedPreset?.modelList && modelsOpen && (
                       <div className="absolute z-20 mt-1 w-full rounded-lg border border-border/40 bg-base shadow-lg">
                         <div className="border-b border-border/30 p-2">
                           <input type="text" value={modelFilter} onChange={e => setModelFilter(e.target.value)}
@@ -515,18 +464,9 @@ export function SettingsAIPanel({ highlight }: { highlight?: string } = {}) {
                 </div>
               )}
 
-              <Field label="API Key">
-                <div className="flex gap-2">
-                  <div className="flex-1 relative">
-                    <input type={showKey ? 'text' : 'password'} value={apiKey} onChange={e => setApiKey(e.target.value)} placeholder={configured ? `${s?.ai_api_key_masked} · 留空不修改` : 'sk-...'} className={`${INPUT_CLS} pr-9`} />
-                    <button onClick={() => setShowKey(v => !v)} className="absolute right-2 top-1/2 -translate-y-1/2 text-muted/40 hover:text-muted" tabIndex={-1} aria-label={showKey ? '隐藏' : '显示'}>
-                      {showKey ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
-                    </button>
-                  </div>
-                  <button onClick={handleTest} disabled={testing || !apiKey} className="h-9 px-3 rounded-lg border border-border/50 text-xs text-secondary hover:text-accent hover:border-accent/30 disabled:opacity-40 transition-all flex items-center gap-1.5 shrink-0">
-                    {testing ? <Loader2 className="h-3 w-3 animate-spin" /> : <Wifi className="h-3 w-3" />}
-                    测试
-                  </button>
+              <Field label="API Key" hint="密钥仅由后端管理，修改后端 .env 中的 AI_API_KEY 并重启服务后生效。">
+                <div className="text-xs text-secondary" role="status">
+                  {s?.has_ai_key ? '后端已配置' : '后端未配置'}
                 </div>
               </Field>
 
@@ -571,7 +511,7 @@ export function SettingsAIPanel({ highlight }: { highlight?: string } = {}) {
         <div className="text-[11px] text-amber-400/70 leading-relaxed">
           {isCodexProvider
             ? 'Codex CLI 模式会复用本机已登录的 Codex 账户, 个股、财务、复盘等分析上下文会发送给 OpenAI/Codex。保存即表示确认仅在本机或可信内网使用。'
-            : 'API Key 仅保存在本机项目文件中, 不会上传到任何服务器。请妥善保管。'}
+            : 'API Key 仅由后端读取并用于请求配置的 AI 服务，网页不会获得密钥内容。'}
         </div>
       </div>
 
@@ -580,33 +520,8 @@ export function SettingsAIPanel({ highlight }: { highlight?: string } = {}) {
           {save.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : saved ? <Check className="h-4 w-4" /> : <Save className="h-4 w-4" />}
           {save.isPending ? '保存中...' : saved ? '已保存' : '保存配置'}
         </button>
-        {configured && (
-          <button onClick={() => setConfirmClear(true)} disabled={clear.isPending} className="h-10 px-4 rounded-xl bg-elevated text-secondary hover:text-danger text-sm flex items-center justify-center gap-1.5 hover:bg-elevated/80 disabled:opacity-50 transition-all shrink-0" title="Clear AI provider configuration">
-            <Trash2 className="h-4 w-4" />
-            清空
-          </button>
-        )}
       </div>
 
-      {confirmClear && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center">
-          <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={() => setConfirmClear(false)} />
-          <div className="relative w-[90vw] max-w-[380px] rounded-card border border-border bg-base shadow-2xl p-6">
-            <h3 className="text-sm font-medium text-foreground mb-2">清空 AI 配置</h3>
-            <p className="text-xs text-secondary mb-5 leading-relaxed">
-              这会清空已保存的 provider、API Key、API 地址、模型和 Codex CLI 命令。之后可以重新配置。
-            </p>
-            <div className="flex items-center justify-end gap-2">
-              <button onClick={() => setConfirmClear(false)} className="px-3 py-1.5 rounded-btn bg-elevated text-secondary hover:bg-elevated/80 text-sm transition-colors">
-                取消
-              </button>
-              <button onClick={() => clear.mutate()} disabled={clear.isPending} className="px-3 py-1.5 rounded-btn bg-danger/15 text-danger hover:bg-danger/25 text-sm font-medium transition-colors disabled:opacity-50">
-                {clear.isPending ? '清空中...' : '确认'}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
     </div>
     </HighlightContext.Provider>
   )

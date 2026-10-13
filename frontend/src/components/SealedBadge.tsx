@@ -1,11 +1,8 @@
 import { useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { useNavigate } from 'react-router-dom'
-import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { motion, AnimatePresence } from 'framer-motion'
 import { HelpCircle } from 'lucide-react'
-import { api } from '@/lib/api'
-import { toast } from '@/components/Toast'
 
 /** 单方向(涨停/跌停)的修正明细块 */
 function SealedDirBlock({ title, color, counts, rawTotal }: {
@@ -42,7 +39,7 @@ function SealedDirBlock({ title, color, counts, rawTotal }: {
 }
 
 /** 修正/降级 标识 + 问号弹窗(连板梯队/看板共用) */
-export function SealedBadge({ degraded, hasDepth, isHistorical, sealedReady, sealedCountsUp, sealedCountsDown, rawUp, rawDown, invalidateKeys = ['limit-ladder'] }: {
+export function SealedBadge({ degraded, hasDepth, isHistorical, sealedReady, sealedCountsUp, sealedCountsDown, rawUp, rawDown }: {
   degraded: boolean
   hasDepth: boolean
   isHistorical: boolean
@@ -51,28 +48,17 @@ export function SealedBadge({ degraded, hasDepth, isHistorical, sealedReady, sea
   sealedCountsDown?: { real: number; fake: number; pending: number }
   rawUp?: number
   rawDown?: number
-  /** 修正后要刷新的 queryKey 前缀(默认连板梯队) */
-  invalidateKeys?: string[]
 }) {
   const [showHint, setShowHint] = useState(false)
   const [hintPos, setHintPos] = useState<{ left: number; top: number } | null>(null)
   const btnRef = useRef<HTMLButtonElement>(null)
   const navigate = useNavigate()
-  const qc = useQueryClient()
-  const runFix = useMutation({
-    mutationFn: () => api.runLimitLadderFix(),
-    onSuccess: (data) => {
-      toast(data.msg, data.ok ? 'success' : 'error')
-      if (data.ok) invalidateKeys.forEach(k => qc.invalidateQueries({ queryKey: [k] }))
-    },
-    onError: () => toast('修正请求失败', 'error'),
-  })
 
   // 组装原因文案(仅降级时用)
   const reasons: string[] = []
   if (!hasDepth) reasons.push('五档盘口数据不可用,涨停判定基于收盘价,可能含假涨停')
   if (isHistorical) reasons.push('历史日期的盘口快照不可获取,无法判定真假板')
-  if (hasDepth && !isHistorical && !sealedReady) reasons.push('盘中 sealed 数据尚未就绪,收盘后自动恢复')
+  if (hasDepth && !isHistorical && !sealedReady) reasons.push('盘口数据尚未就绪，可在数据页手动更新')
 
   const label = degraded ? '降级' : '修正'
 
@@ -126,7 +112,7 @@ export function SealedBadge({ degraded, hasDepth, isHistorical, sealedReady, sea
                       </div>
                     ))}
                     <div className="mt-1.5 pt-1.5 border-t border-border text-muted">
-                      真假板判定依赖五档盘口实时快照(卖一/买一量)。配置提供五档盘口的数据源后,当天数据在收盘后自动恢复。
+                      真假板判定依赖五档盘口实时快照(卖一/买一量)。配置提供五档盘口的数据源后，可在数据页手动更新当天盘口。
                     </div>
                   </>
                 ) : (
@@ -135,18 +121,17 @@ export function SealedBadge({ degraded, hasDepth, isHistorical, sealedReady, sea
                     <SealedDirBlock title="涨停" color="bull" counts={sealedCountsUp} rawTotal={rawUp} />
                     <SealedDirBlock title="跌停" color="bear" counts={sealedCountsDown} rawTotal={rawDown} />
                     <div className="mt-1.5 pt-1.5 border-t border-border text-muted">
-                      真封板显示封单量,假涨停/假跌停已归入炸板/翘板视图。{sealedReady && '数据为盘中快照,收盘后自动定版。'}
+                      真封板显示封单量,假涨停/假跌停已归入炸板/翘板视图。{sealedReady && '收盘后可在数据页手动更新最终盘口。'}
                     </div>
                   </>
                 )}
                 <div className="mt-2 flex gap-1.5">
                   {hasDepth && !isHistorical && (
                     <button
-                      onClick={() => { runFix.mutate(); setShowHint(false) }}
-                      disabled={runFix.isPending}
-                      className="flex-1 px-2 py-1.5 rounded text-[11px] bg-accent/15 text-accent hover:bg-accent/25 transition-colors text-center disabled:opacity-50"
+                      onClick={() => { setShowHint(false); navigate('/data') }}
+                      className="flex-1 px-2 py-1.5 rounded text-[11px] bg-accent/15 text-accent hover:bg-accent/25 transition-colors text-center"
                     >
-                      {runFix.isPending ? '修正中…' : '立即修正'}
+                      前往数据页
                     </button>
                   )}
                   <button

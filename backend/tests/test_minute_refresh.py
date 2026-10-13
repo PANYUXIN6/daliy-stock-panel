@@ -48,8 +48,13 @@ class _FakeAppState:
 class _FakeRepo:
     def __init__(self, symbols: list[str]):
         from pathlib import Path
+        from threading import RLock
+        self._write_lock = RLock()
         self._inst = pl.DataFrame({"symbol": symbols})
         self.store = type("S", (), {"data_dir": Path(".")})()
+
+    def _refresh_single_view(self, *args):
+        pass
 
     def get_instruments(self) -> pl.DataFrame:
         return self._inst
@@ -86,13 +91,14 @@ def _svc(tmp_path, monkeypatch, *, enabled=True, capability=True, in_hours=True,
             "app.services.kline_sync._resolve_full_minute_provider",
             lambda name: (custom, False, None),
         )
-    svc = MinuteRefreshService(_FakeRepo(["600000.SH"]))
+    repo = _FakeRepo(["600000.SH"])
+    repo.store.data_dir = tmp_path
+    svc = MinuteRefreshService(repo)
     svc.set_app_state(_FakeAppState(capability))
     monkeypatch.setattr(minute_refresh, "_in_continuous_session", lambda now=None: in_hours)
-    # 交易日探针默认未知 (None → 放行): 隔离真实网络探测, holiday 分支在
-    # test_trading_day.py 单独覆盖
+    # 模拟本地日历已确认交易日；未知/节假日在 test_trading_day.py 覆盖。
     from app.services import trading_day
-    monkeypatch.setattr(trading_day, "is_trading_day", lambda now=None: None)
+    monkeypatch.setattr(trading_day, "is_trading_day", lambda now=None, **kwargs: True)
     return svc
 
 
@@ -102,7 +108,7 @@ def test_gate_disabled(tmp_path, monkeypatch):
 
 def test_gate_full_minute_custom_provider_runs(tmp_path, monkeypatch):
     """全量分钟路由到自定义源: 不再让位 — 能力口径统一 (capset 增广后放行)。"""
-    class _P:  # noqa: D401 — fake provider
+    class _P:
         def get_intraday_batch(self, symbols, count=300, asset_type="stock"):
             return pl.DataFrame()
     svc = _svc(tmp_path, monkeypatch, full_minute_provider="myfm", custom=_P())

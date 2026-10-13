@@ -47,8 +47,8 @@ data/**
 !data/.gitkeep
 # data/ 下所有内容(含 ext_data 概念/行业)均不入库:
 #   - 用户运行时数据 (K线/财务/自选/回测等) 本就不该进 git
-#   - 概念/行业改为「首次启动自动从远程接口拉取」(见 app/services/ext_presets.py)
-#     作者更新数据只需改接口 JSON, 用户下次拉取自动同步, 无需发版、无需碰 git。
+#   - 概念/行业由数据页显式同步, 结果属于用户运行时数据
+#     预设配置由 app/services/ext_presets.py 创建, 同步结果无需发版、无需碰 git。
 # 这样 git pull 物理上无法影响用户本地 data, 杜绝「更新后数据丢失」。
 
 # ===== Secrets =====

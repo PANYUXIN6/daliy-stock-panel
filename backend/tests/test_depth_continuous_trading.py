@@ -14,9 +14,18 @@ from __future__ import annotations
 from datetime import datetime
 from unittest.mock import patch
 
+import pytest
+
 from app.market_time import CN_TZ
 from app.services import depth_service
 from app.services.depth_service import DepthService
+
+
+@pytest.fixture(autouse=True)
+def confirmed_calendar(monkeypatch):
+    # This module isolates session boundaries; persisted calendar gates are tested separately.
+    monkeypatch.setattr("app.services.trading_day.is_trading_day", lambda now=None:
+                        (now or depth_service.cn_now()).weekday() < 5)
 
 
 def _cn_now_at(hour: int, minute: int, weekday: int = 0):
@@ -125,7 +134,8 @@ def test_window_matches_quote_service():
             for minute in (0, 30):
                 fn = _cn_now_at(hour, minute, weekday)
                 with patch.object(depth_service, "cn_now", fn), \
-                        patch.object(quote_service, "cn_now", fn):
+                        patch.object(quote_service, "cn_now", fn), \
+                        patch("app.services.trading_day.is_trading_day", lambda *args, fn=fn, **kwargs: fn().weekday() < 5):
                     assert DepthService._is_continuous_trading() == QuoteService._is_continuous_trading(), (
                         f"窗口不一致 @ weekday={weekday} {hour:02d}:{minute:02d}"
                     )

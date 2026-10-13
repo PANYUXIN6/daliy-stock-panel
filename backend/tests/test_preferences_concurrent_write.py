@@ -100,5 +100,5 @@ def test_interval_setter_keeps_existing_keys(prefs_path):
 
 def test_interval_setter_returns_value_and_refreshes_cache(prefs_path):
     """返回值与缓存失效行为保持不变。"""
-    assert preferences.set_realtime_quote_interval(12.5) == 12.5
-    assert preferences.get_realtime_quote_interval() == 12.5
+    assert preferences.set_realtime_quote_interval(30) == 30
+    assert preferences.get_realtime_quote_interval() == 30

@@ -11,8 +11,12 @@ import polars as pl
 import pytest
 
 from app.market_time import CN_TZ
+from app.services.user_context import user_data_dir
 from app.strategy import paper
 from app.tickflow.repository import DataStore, KlineRepository
+
+pytestmark = pytest.mark.usefixtures("private_owner")
+
 
 SYM = "600519.SH"
 
@@ -613,9 +617,9 @@ def test_account_id_validation_blocks_traversal(tmp_path):
 
 def test_legacy_single_account_layout_migrates(tmp_path, monkeypatch):
     """旧版 data/paper/* 单账户布局首次访问自动迁移到 accounts/default/。"""
-    monkeypatch.setattr(paper, "_MIGRATION_DONE", False)
-    legacy = tmp_path / "paper"
-    legacy.mkdir()
+    monkeypatch.setattr(paper, "_MIGRATED_ROOTS", set())
+    legacy = user_data_dir(tmp_path) / "paper"
+    legacy.mkdir(parents=True)
     (legacy / "account.json").write_text(
         __import__("json").dumps({
             "id": "default", "initial_cash": 800000.0, "cash": 750000.0,
@@ -630,8 +634,8 @@ def test_legacy_single_account_layout_migrates(tmp_path, monkeypatch):
     acc = paper.get_account(tmp_path)
     assert acc is not None and acc["cash"] == 750000.0
     # 物理迁移到位
-    assert (tmp_path / "paper" / "accounts" / "default" / "account.json").exists()
-    assert (tmp_path / "paper" / "accounts" / "default" / "orders" / "order_x.json").exists()
+    assert (user_data_dir(tmp_path) / "paper" / "accounts" / "default" / "account.json").exists()
+    assert (user_data_dir(tmp_path) / "paper" / "accounts" / "default" / "orders" / "order_x.json").exists()
     assert not (legacy / "account.json").exists()
     # 幂等: 重复访问不报错
     assert paper.get_account(tmp_path)["cash"] == 750000.0

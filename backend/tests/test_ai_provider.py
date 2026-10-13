@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import subprocess
 import tomllib
 from types import SimpleNamespace
 
@@ -308,17 +309,12 @@ def test_ai_settings_keep_provider_models_separate(monkeypatch):
     monkeypatch.setattr(settings, "ai_codex_reasoning_effort", "")
     monkeypatch.setattr(settings, "ai_user_agent", "")
 
-    settings_api.save_ai_settings(
-        settings_api.AiSettingsIn(
-            provider="codex_cli",
-            model="gpt-5.6-sol",
-            codex_command="codex",
-            codex_reasoning_effort="high",
-        )
-    )
-
+    from fastapi import HTTPException
+    with pytest.raises(HTTPException) as exc:
+        settings_api.save_ai_settings(settings_api.AiSettingsIn(provider="codex_cli", model="gpt-5.6-sol"))
+    assert exc.value.status_code == 403
     assert stored["ai_model"] == "custom-api-model"
-    assert stored["ai_codex_model"] == "gpt-5.6-sol"
+    assert "ai_codex_model" not in stored
 
     settings_api.save_ai_settings(
         settings_api.AiSettingsIn(
@@ -331,7 +327,7 @@ def test_ai_settings_keep_provider_models_separate(monkeypatch):
 
     assert stored["ai_model"] == "openai-model"
     assert stored["ai_reasoning_effort"] == "vendor-high"
-    assert stored["ai_codex_model"] == "gpt-5.6-sol"
+    assert "ai_codex_model" not in stored
 
     settings_api.save_ai_settings(
         settings_api.AiSettingsIn(
@@ -343,7 +339,7 @@ def test_ai_settings_keep_provider_models_separate(monkeypatch):
 
     assert stored["ai_model"] == "new-custom-model"
     assert stored["ai_reasoning_effort"] == "vendor-high"
-    assert stored["ai_codex_model"] == "gpt-5.6-sol"
+    assert "ai_codex_model" not in stored
 # ── 输出上限 / 上下文窗口配置 ─────────────────────────────────
 
 
@@ -644,77 +640,18 @@ def test_codex_config_preserves_remote_provider_without_docker_rewrite(monkeypat
     assert provider["requires_openai_auth"] is True
 
 
-# ---- Codex CLI 可用性检测 (实跑 --version, 不再仅 which) ----
+# Local CLI support is disabled, including old direct-call entry points.
 
 
-class _FakeCompleted:
-    def __init__(self, returncode: int):
-        self.returncode = returncode
-        self.stdout = b""
-        self.stderr = b""
-
-
-def test_codex_cli_available_runs_version_check(monkeypatch):
-    """实跑 --version: 能发现 npm 壳存在但原生二进制跑不起来的情况。"""
-    calls: list[list[str]] = []
-
-    def fake_run(args, **kwargs):
-        calls.append(list(args))
-        return _FakeCompleted(0)
-
-    monkeypatch.setattr(ai_provider, "_codex_base_command", lambda: ["codex"])
-    monkeypatch.setattr(ai_provider.subprocess, "run", fake_run)
-    assert ai_provider.codex_cli_available() is True
-    assert calls == [["codex", "--version"]]
-
-
-def test_codex_cli_available_false_when_version_fails(monkeypatch):
-    import subprocess
-
-    monkeypatch.setattr(ai_provider, "_codex_base_command", lambda: ["codex"])
-    monkeypatch.setattr(
-        ai_provider.subprocess, "run", lambda a, **k: _FakeCompleted(1)
-    )
-    assert ai_provider.codex_cli_available() is False
-    # 壳报 "Codex CLI not available" 这类非零退出同样判定不可用
-    monkeypatch.setattr(
-        ai_provider.subprocess,
-        "run",
-        lambda a, **k: (_ for _ in ()).throw(subprocess.TimeoutExpired("codex", 1)),
-    )
-    assert ai_provider.codex_cli_available() is False
-
-
-def test_codex_cli_available_false_when_command_missing(monkeypatch):
-    def raise_not_found():
-        raise RuntimeError("未找到 Codex CLI 命令: codex")
-
-    monkeypatch.setattr(ai_provider, "_codex_base_command", raise_not_found)
+def test_codex_cli_status_never_launches_process(monkeypatch):
+    monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: pytest.fail("CLI launched"))
     assert ai_provider.codex_cli_available() is False
 
 
 @pytest.mark.asyncio
-async def test_codex_exec_args_exclude_ephemeral(monkeypatch):
-    """exec 参数不含 --ephemeral: 老版本 codex(如 0.58)无此参数, 传了直接报错。"""
-    captured: dict = {}
-
-    def fake_run_process(args, prompt, env, timeout):
-        captured["args"] = list(args)
-        return 0, b"ok", b""
-
-    monkeypatch.setattr(ai_provider, "_codex_base_command", lambda: ["codex"])
-    monkeypatch.setattr(ai_provider, "_prepare_codex_home", lambda p: None)
-    monkeypatch.setattr(ai_provider, "_codex_process_env", lambda p: {})
-    monkeypatch.setattr(ai_provider, "_run_codex_process", fake_run_process)
-    monkeypatch.setattr(ai_provider, "_read_output_file", lambda p: "ok")
-    monkeypatch.setattr(ai_provider, "_remove_tree_best_effort", lambda p: None)
-    monkeypatch.setattr(ai_provider, "current_ai_model", lambda: "gpt-5.6-sol")
-
-    out = await ai_provider._run_codex_cli(
-        [{"role": "user", "content": "hi"}], max_tokens=None, timeout=1.0,
-    )
-    assert out == "ok"
-    args = captured["args"]
-    assert "--ephemeral" not in args
-    assert "exec" in args and "--skip-git-repo-check" in args
-    assert args[args.index("--model") + 1] == "gpt-5.6-sol"
+async def test_codex_direct_execution_is_disabled(monkeypatch):
+    monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: pytest.fail("CLI launched"))
+    with pytest.raises(RuntimeError, match="停用"):
+        await ai_provider._run_codex_cli([{"role": "user", "content": "hi"}], max_tokens=None, timeout=1.0)
+    with pytest.raises(RuntimeError, match="停用"):
+        ai_provider._run_codex_process([], "prompt", {}, 1.0)

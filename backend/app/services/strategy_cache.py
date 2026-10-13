@@ -22,6 +22,8 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
+from app.services.private_storage import private_path
+
 
 def _json_default(obj: Any) -> Any:
     """处理 date/datetime 等 JSON 不认识的类型。"""
@@ -43,7 +45,7 @@ _file_lock = threading.Lock()
 
 
 def _cache_path(data_dir: Path) -> Path:
-    return data_dir / "user_data" / _CACHE_FILENAME
+    return private_path(data_dir, "user_data", _CACHE_FILENAME)
 
 
 def _enriched_parquet_path(data_dir: Path, as_of: str) -> Path:
@@ -71,6 +73,22 @@ def read_cache(data_dir: Path) -> dict | None:
     """
     with _file_lock:
         return _read_cache_unlocked(data_dir)
+
+
+def clear_all_user_caches(data_dir: Path) -> None:
+    """Shared configuration changes invalidate every persisted user's result."""
+    from app.services.auth import get_store
+    from app.services.user_context import UserContext, user_scope
+    auth = get_store(data_dir)
+    offset = 0
+    while True:
+        page = auth.list_users(limit=500, offset=offset)
+        for row in page['users']:
+            with user_scope(UserContext(row['id'], row['role'], data_dir)):
+                clear_cache(data_dir)
+        offset += len(page['users'])
+        if offset >= page['total'] or not page['users']:
+            break
 
 
 def clear_cache(data_dir: Path, strategy_id: str | None = None) -> None:

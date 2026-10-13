@@ -13,6 +13,7 @@ from types import SimpleNamespace
 from typing import ClassVar
 
 import polars as pl
+import pytest
 
 from app.indicators.pipeline import BENCHMARK_INDEX_SYMBOLS
 from app.services import quote_service as qs
@@ -42,6 +43,8 @@ class _ProviderNoIndices:
     def get_realtime(self) -> list[dict]:
         return [{"symbol": "600519.SH", "last_price": 1480.0}]
 
+
+pytestmark = pytest.mark.usefixtures("private_owner")
 
 def _stock_rec(symbol: str = "600519.SH") -> dict:
     return {"symbol": symbol, "last_price": 1480.0, "prev_close": 1455.0, "volume": 12345}
@@ -100,7 +103,7 @@ def test_custom_provider_monitor_indices_join_fetch(monkeypatch):
             "r3": {"enabled": True, "asset_type": "stock", "scope": "symbols", "symbols": ["600519.SH"]},
         }
 
-    service._app_state = SimpleNamespace(monitor_engine=_Engine())
+    service._app_state = SimpleNamespace(user_runtimes=SimpleNamespace(active=lambda: [SimpleNamespace(monitor_engine=_Engine())]))
     service._fetch_full_market_quotes()
 
     assert provider.index_calls == [sorted(set(CORE_INDEX_SYMBOLS) | BENCHMARK_INDEX_SYMBOLS | {"000300.SH"})]
@@ -233,8 +236,8 @@ def _injection_env(monkeypatch, *, healthy, local_df, asset_type="stock", symbol
         inject=lambda enriched, signals: enriched,
     )
     captured: list = []
-    service._intraday_signal_evaluator = evaluator
-    service._intraday_signal_bucket = {}
+    from app.services.user_context import current_user
+    service._intraday_signal_states = {current_user().id: (evaluator, {})}
     return service, engine, api_calls, captured
 
 

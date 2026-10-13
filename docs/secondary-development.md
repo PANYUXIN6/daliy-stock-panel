@@ -15,7 +15,7 @@
 
 当前已可用的主要扩展能力：
 
-- 自定义、AI 和叠加策略目录：`data/strategies/`。
+- 维护者管理受信任策略源码；个人叠加策略和历史个人策略存档位于 `data/users/<user_id>/strategies/`。网页只支持允许的声明式策略操作，禁止保存或执行用户 Python 代码。
 - 数据源 Provider 与 `plugin.yaml` 机制：详见 [`plugin-development.md`](plugin-development.md)。
 - 扩展数据与声明式分析页面：适合不需要自定义 React 交互的页面。
 - 前端源码扩展注册：`frontend/src/custom/<namespace>/extension.tsx`，支持静态页面、导航和已开放插槽。
@@ -31,6 +31,12 @@
 - 配置 schema 迁移注册表。
 
 AI 在开始任务前必须通过代码搜索确认能力是否已经实现。找不到定义和测试时，应把示例视为设计规范，不得虚构导入路径或调用结果。
+
+### 多用户扩展边界
+
+新增个人数据入口必须复用当前 `UserContext` 和 `private_storage`，不得从请求参数决定 owner，也不得临时替换共享 `app.state`。后台线程、队列和 worker 要显式携带归属；共享行情仓库可复用，个人规则、结果、告警和报告必须进入用户目录。敏感延迟操作执行前重新验证会话与权限。管理员也不能冒用其他用户读取个人文件。
+
+扩展路由同时经过 web 与 collector 的认证和权限边界。前端扩展沿用认证、账号缓存隔离和请求封装，不能另设 Bearer Token 或事件票据旁路。本地 Codex CLI 与网页 Python 生成／编辑／执行入口已停用；受信任服务端源码扩展仍由维护者部署。
 
 ## 2. 二次开发分级
 

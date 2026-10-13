@@ -1,3 +1,4 @@
+import { accountStorage } from '@/lib/sessionRuntime'
 /**
  * 集中管理所有 localStorage 持久化。
  *
@@ -9,16 +10,16 @@ function kv<T>(key: string) {
   return {
     get(fallback: T): T {
       try {
-        const raw = localStorage.getItem(key)
+        const raw = accountStorage.getItem(key)
         if (raw !== null) return JSON.parse(raw) as T
       } catch { /* ignore */ }
       return fallback
     },
     set(val: T) {
-      try { localStorage.setItem(key, JSON.stringify(val)) } catch { /* ignore */ }
+      try { accountStorage.setItem(key, JSON.stringify(val)) } catch { /* ignore */ }
     },
     remove() {
-      try { localStorage.removeItem(key) } catch { /* ignore */ }
+      try { accountStorage.removeItem(key) } catch { /* ignore */ }
     },
   }
 }

@@ -1,4 +1,5 @@
 """分钟成交研究只依赖本地数据覆盖, 不依赖当前供应商采集能力。"""
+
 from datetime import date
 from types import SimpleNamespace
 
@@ -9,6 +10,8 @@ from fastapi.testclient import TestClient
 from app.api import backtest as api
 from app.backtest import worker
 from app.tickflow.capabilities import CapabilitySet
+
+pytestmark = pytest.mark.usefixtures("authenticated_actor")
 
 
 @pytest.mark.parametrize("earliest", [date(2026, 10, 8), date(2026, 10, 9)])
@@ -27,6 +30,7 @@ def test_minute_fill_research_uses_local_coverage_without_collection_capability(
     monkeypatch.setattr(worker, "run_worker_task", run_local_worker)
     app = FastAPI()
     app.include_router(api.router)
+    app.state.user_runtimes = SimpleNamespace(get=lambda user: SimpleNamespace(strategy_engine=None))
     app.state.capabilities = CapabilitySet()
     app.state.repo = SimpleNamespace(earliest_minute_date=lambda: earliest)
     response = TestClient(app).get("/api/backtest/strategy/stream", params={

@@ -8,8 +8,12 @@ import pytest
 from fastapi import HTTPException
 
 from app.api import lots as lots_api
+from app.services.user_context import user_data_dir
 from app.strategy import lots as lots_domain
 from app.strategy import monitor_rules
+
+pytestmark = pytest.mark.usefixtures("private_owner")
+
 
 
 def _lot(**overrides):
@@ -48,7 +52,7 @@ def _make_request(tmp_path: Path, engine: _EngineStub):
 
 
 def _lot_path(tmp_path: Path, lot_id: str) -> Path:
-    return tmp_path / "user_data" / "lots" / f"{lot_id}.json"
+    return user_data_dir(tmp_path) / "user_data" / "lots" / f"{lot_id}.json"
 
 
 def _patch_channels(monkeypatch) -> None:
@@ -125,7 +129,7 @@ def test_sync_lot_validates_rules_before_write(tmp_path, monkeypatch):
     # 批次文件、规则文件、引擎重载 都不该发生 (避免半成品)
     assert not _lot_path(tmp_path, "lot_test1").exists()
     assert reloaded == []
-    rules_dir = tmp_path / "user_data" / "monitor_rules"
+    rules_dir = user_data_dir(tmp_path) / "user_data" / "monitor_rules"
     assert not rules_dir.exists() or list(rules_dir.glob("*.json")) == []
 
 

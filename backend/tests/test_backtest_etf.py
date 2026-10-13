@@ -1,13 +1,17 @@
+
 import time
 import types
 from datetime import date
 
 import polars as pl
+import pytest
 
 from app.backtest.engine import BacktestEngine, PanelCache
 from app.backtest.factor import FactorConfig
 from app.backtest.strategy import StrategyBacktestConfig
 from app.services.backtest import BacktestConfig
+
+pytestmark = pytest.mark.usefixtures("authenticated_actor")
 
 
 def test_configs_default_to_stock():

@@ -600,7 +600,7 @@ class DepthService:
             "message": msg,
         }
         try:
-            qs.push_alerts([alert])
+            qs.push_system_alerts([alert])
         except Exception as e:  # noqa: BLE001
             logger.debug("depth 接管通知推送失败: %s", e)
 

@@ -137,13 +137,8 @@ def _fetch_pool(pool_id: PoolId) -> list[str]:
 
 def _load_watchlist() -> list[str]:
     """读取用户自选(由 watchlist service 维护)。"""
-    path = settings.data_dir / "user_data" / "watchlist.parquet"
-    if not path.exists():
-        return []
-    df = pl.read_parquet(path)
-    if df.is_empty() or "symbol" not in df.columns:
-        return []
-    return df["symbol"].to_list()
+    from app.services import watchlist
+    return [row['symbol'] for row in watchlist.list_symbols()]
 
 
 # 兜底:Free 用户/无 API 时给一个小型可用集合,让 UI 不至于空白

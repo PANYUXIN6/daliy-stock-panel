@@ -17,6 +17,8 @@ from app.custom.assistant import chat_service, streaming
 from app.custom.assistant import tools as assistant_tools
 from app.services import ai_provider
 
+pytestmark = pytest.mark.usefixtures("authenticated_actor")
+
 SIGNATURE = {"google": {"thought_signature": "c2lnLWE="}}
 
 

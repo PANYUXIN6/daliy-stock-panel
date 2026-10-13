@@ -24,6 +24,7 @@
 """
 from __future__ import annotations
 
+import json
 import logging
 import threading
 import time
@@ -38,6 +39,8 @@ import polars as pl
 from app.market_time import CN_TZ, cn_now, cn_today
 from app.parquet import scan_daily_parquet
 from app.polars_guard import guarded_collect
+from app.services.external_notifications import allowed as external_notifications_allowed
+from app.services.external_notifications import submit as submit_notification
 from app.services.index_const import CORE_INDEX_SYMBOLS
 from app.strategy.intraday_signals import IntradaySignalEvaluator
 from app.strategy.monitor import format_alert_quote
@@ -243,7 +246,7 @@ class QuoteService:
         self._app_state = None                   # 延迟注入 (FastAPI app.state)
         # 异动边缘规则上次评估时间戳 (秒)。异动快照历史部分有 60s 缓存,
         # 但每次构建仍有全市场循环, 轮询线程里限频到 30s 一次。
-        self._abnormal_last_eval = 0.0
+        self._abnormal_last_eval: dict[str, float] = {}
 
         # 拉取元信息 (给 SSE / status 用)
         self._fetch_time: float = 0.0       # perf_counter (用于计算 quote_age_ms)
@@ -259,8 +262,7 @@ class QuoteService:
         self._index_symbol_count: int = 0
         self._etf_symbol_count: int = 0
         self._index_quotes_cache: pl.DataFrame | None = None
-        self._intraday_signal_evaluator = IntradaySignalEvaluator()
-        self._intraday_signal_bucket: dict[str, str] = {}
+        self._intraday_signal_states: dict[str, tuple[IntradaySignalEvaluator, dict[str, str]]] = {}
         # 午休/收盘最终同步状态: 到边界后必须成功拉取一版行情, 再进入休盘态。
         self._final_sync_done: set[tuple[date, str]] = set()
         self._final_sync_failed: dict[tuple[date, str], str] = {}
@@ -418,6 +420,9 @@ class QuoteService:
     def subscribe(self) -> QuoteSubscriber:
         """注册一个 SSE 订阅者 (连接建立时调用)。"""
         sub = QuoteSubscriber()
+        from app.services.user_context import current_user
+        owner = current_user(required=False)
+        sub.owner_id = owner.id if owner else None
         with self._lock:
             self._subscribers.add(sub)
         return sub
@@ -446,8 +451,13 @@ class QuoteService:
 
     def notify_strategy_results_updated(self) -> None:
         """策略监控完成实时结果更新后调用，仅刷新策略页结果缓存。"""
+        from app.services.shared_runtime import runtime_bus
+        from app.services.user_context import current_user
+        owner = current_user()
+        runtime_bus.publish('strategy_results_updated', {'owner_id': owner.id}, '*')
         for sub in self._snapshot_subscribers():
-            sub.notify_strategy_results()
+            if getattr(sub, 'owner_id', None) == owner.id:
+                sub.notify_strategy_results()
 
     def notify_depth_updated(self) -> None:
         """五档盘口修正完成后调用: 通知 SSE 推送 depth_updated, 触发连板梯队刷新。
@@ -458,15 +468,32 @@ class QuoteService:
             sub.notify_depth()
 
     def _broadcast_alerts(self, alerts: list[dict]) -> None:
+        from app.services.shared_runtime import runtime_bus
+        from app.services.user_context import current_user
+        owner = current_user()
+        runtime_bus.publish('strategy_alert', {'alerts': alerts, 'owner_id': owner.id}, '*')
         for sub in self._snapshot_subscribers():
-            sub.push_alerts(alerts)
+            if getattr(sub, 'owner_id', None) == owner.id:
+                sub.push_alerts(alerts)
 
     def push_alerts(self, alerts: list[dict]) -> None:
         self._broadcast_alerts(alerts)
 
+    def push_system_alerts(self, alerts: list[dict]) -> None:
+        from app.services.user_context import user_scope
+        registry = getattr(self._app_state, 'user_runtimes', None)
+        if registry is not None:
+            for runtime in registry.active():
+                if runtime.user.role == 'admin':
+                    with user_scope(runtime.user):
+                        self.push_alerts(alerts)
+
     def clear_pending_alerts(self) -> None:
+        from app.services.user_context import current_user
+        owner = current_user()
         for sub in self._snapshot_subscribers():
-            sub.clear_alerts()
+            if getattr(sub, 'owner_id', None) == owner.id:
+                sub.clear_alerts()
 
     def push_review_event(self, event_json: str) -> None:
         """广播一条复盘进度事件(JSON 字符串), 唤醒所有 SSE generator。
@@ -474,8 +501,15 @@ class QuoteService:
         事件格式与 recap_market_stream 的产出一致(meta/delta/error/done),
         前端 reviewStore 直接消费。背压在订阅者队列内做 (丢弃最旧)。
         """
+        from app.services.shared_runtime import runtime_bus
+        from app.services.user_context import current_user
+        owner = current_user()
+        payload = json.loads(event_json)
+        payload['owner_id'] = owner.id
+        runtime_bus.publish('review_progress', payload, '*')
         for sub in self._snapshot_subscribers():
-            sub.push_review(event_json)
+            if getattr(sub, 'owner_id', None) == owner.id:
+                sub.push_review(event_json)
 
     # ================================================================
     # 档位感知间隔限制
@@ -992,11 +1026,12 @@ class QuoteService:
 
     def _collect_monitor_index_symbols(self) -> set[str]:
         """启用中的指数监控规则标的 (asset_type=index & scope=symbols)。"""
-        engine = getattr(self._app_state, "monitor_engine", None) if self._app_state else None
-        if not engine:
+        registry = getattr(self._app_state, "user_runtimes", None) if self._app_state else None
+        if registry is None:
             return set()
         out: set[str] = set()
-        for _r in list(engine.rules.values()):
+        rules = [r for runtime in registry.active() for r in runtime.monitor_engine.rules.values()]
+        for _r in rules:
             if _r.get("enabled", True) and _r.get("asset_type") == "index" and _r.get("scope") == "symbols":
                 out.update(s for s in _r.get("symbols", []) if s)
         return out
@@ -1216,6 +1251,15 @@ class QuoteService:
     # ================================================================
 
     def _evaluate_monitors(self, daily_df: pl.DataFrame, quote_extra: pl.DataFrame | None) -> None:
+        from app.services.user_context import user_scope
+        registry = getattr(self._app_state, "user_runtimes", None)
+        if registry is None:
+            return
+        for runtime in registry.active():
+            with user_scope(runtime.user):
+                self._evaluate_user_monitors(daily_df, quote_extra, runtime)
+
+    def _evaluate_user_monitors(self, daily_df: pl.DataFrame, quote_extra: pl.DataFrame | None, runtime) -> None:
         """行情更新后评估统一监控规则引擎,并刷新策略结果缓存。"""
         try:
             # 仅在「交易日 + 连续竞价时段」评估监控 —— 避开集合竞价指示价、盘前/收盘后
@@ -1238,7 +1282,7 @@ class QuoteService:
 
             # 通用监控规则评估 (统一引擎: signal/price/market/strategy)
             if self._app_state:
-                engine = getattr(self._app_state, "monitor_engine", None)
+                engine = runtime.monitor_engine
                 if engine and engine.rule_count > 0:
                     # 预构建 symbol → name 映射 (enriched 已 drop name 列, 引擎触发时回填用)。
                     # 股票 + ETF + 指数三表合并走 _monitor_name_map -> repo.get_name_map()
@@ -1270,8 +1314,8 @@ class QuoteService:
                     # 30s 限频 —— 快照历史部分 60s 缓存, 无需跟行情轮询同频重算。
                     if engine.has_rule_type("abnormal") and self._repo is not None:
                         _now_ts = time.time()
-                        if _now_ts - self._abnormal_last_eval >= 30.0:
-                            self._abnormal_last_eval = _now_ts
+                        if _now_ts - self._abnormal_last_eval.get(runtime.user.id, 0.0) >= 30.0:
+                            self._abnormal_last_eval[runtime.user.id] = _now_ts
                             try:
                                 from app.services import abnormal_moves
                                 _overview = abnormal_moves.build_overview(
@@ -1498,11 +1542,14 @@ class QuoteService:
         if not symbols:
             return enriched
 
+        from app.services.user_context import current_user
+        owner = current_user()
+        evaluator, buckets = self._intraday_signal_states.setdefault(owner.id, (IntradaySignalEvaluator(), {}))
         now = cn_now()
         bucket = now.strftime("%Y%m%d%H%M")
-        if self._intraday_signal_bucket.get(asset_type) == bucket:
-            return self._intraday_signal_evaluator.inject(enriched, [])
-        self._intraday_signal_bucket[asset_type] = bucket
+        if buckets.get(asset_type) == bucket:
+            return evaluator.inject(enriched, [])
+        buckets[asset_type] = bucket
 
         # 普通分钟服务与全量分钟服务负责落盘；监控复用同一份结果。
         minute_df = self._repo.get_minute_batch(sorted(symbols), cn_today(), asset_type=asset_type)
@@ -1519,7 +1566,7 @@ class QuoteService:
             if symbol and reference is not None:
                 prev_close[symbol] = float(reference)
 
-        signals = self._intraday_signal_evaluator.evaluate(
+        signals = evaluator.evaluate(
             minute_df,
             symbols=symbols,
             prev_close=prev_close,
@@ -1527,7 +1574,7 @@ class QuoteService:
             now=now,
             signals=self._load_intraday_signal_defs(),
         )
-        return self._intraday_signal_evaluator.inject(enriched, signals)
+        return evaluator.inject(enriched, signals)
 
     def _load_intraday_signal_defs(self) -> list[dict]:
         """加载自定义盘中信号定义(带指纹缓存); 失败时退化为仅内置 4 信号。"""
@@ -1668,6 +1715,8 @@ class QuoteService:
         注意: 用 rule_events (含 rule_id) 而非重建后的 all_alerts,
         以便反查引擎规则判断是否启用推送。
         """
+        if not external_notifications_allowed():
+            return
         try:
             from app import secrets_store
             from app.services import email_adapter, preferences, webhook_adapter
@@ -1706,13 +1755,13 @@ class QuoteService:
                 # 应用内 alerts.jsonl 记录与 SSE 已在前面完成, 不依赖 webhook 成败,
                 # 失败由 webhook_adapter 记 WARNING(可见)。
                 if feishu_url and "feishu" in channels:
-                    _WEBHOOK_EXECUTOR.submit(webhook_adapter.send_feishu, feishu_url, title, body, feishu_secret)
+                    submit_notification(_WEBHOOK_EXECUTOR, webhook_adapter.send_feishu, feishu_url, title, body, feishu_secret)
                     enqueued += 1
                 if wecom_url and "wecom" in channels:
-                    _WEBHOOK_EXECUTOR.submit(webhook_adapter.send_wecom, wecom_url, title, body)
+                    submit_notification(_WEBHOOK_EXECUTOR, webhook_adapter.send_wecom, wecom_url, title, body)
                     enqueued += 1
                 if custom_url and "custom" in channels:
-                    _WEBHOOK_EXECUTOR.submit(
+                    submit_notification(_WEBHOOK_EXECUTOR,
                         webhook_adapter.send_custom,
                         custom_url,
                         title,
@@ -1723,7 +1772,7 @@ class QuoteService:
                     )
                     enqueued += 1
                 if email_adapter.is_configured(email_config) and "email" in channels:
-                    _WEBHOOK_EXECUTOR.submit(
+                    submit_notification(_WEBHOOK_EXECUTOR,
                         email_adapter.send_email,
                         email_config,
                         email_password,
@@ -1742,6 +1791,8 @@ class QuoteService:
         与监控规则的按规则勾选不同: 成交事件无规则载体, 渠道地址已配置即投递。
         模拟盘成交低频 (手动 + cooldown 规则), 刷屏风险低。
         """
+        if not external_notifications_allowed():
+            return
         try:
             from app import secrets_store
             from app.services import preferences, webhook_adapter
@@ -1758,14 +1809,14 @@ class QuoteService:
             for ev in events:
                 body = f"{ev.get('symbol', '')} {ev.get('message', '')}".strip()
                 if feishu_url:
-                    _WEBHOOK_EXECUTOR.submit(
+                    submit_notification(_WEBHOOK_EXECUTOR,
                         webhook_adapter.send_feishu, feishu_url, "模拟盘成交", body, feishu_secret)
                     enqueued += 1
                 if wecom_url:
-                    _WEBHOOK_EXECUTOR.submit(webhook_adapter.send_wecom, wecom_url, "模拟盘成交", body)
+                    submit_notification(_WEBHOOK_EXECUTOR, webhook_adapter.send_wecom, wecom_url, "模拟盘成交", body)
                     enqueued += 1
                 if custom_url:
-                    _WEBHOOK_EXECUTOR.submit(
+                    submit_notification(_WEBHOOK_EXECUTOR,
                         webhook_adapter.send_custom, custom_url, "模拟盘成交", body, "paper_fill", ev, custom_secret)
                     enqueued += 1
             if enqueued:
@@ -1781,6 +1832,8 @@ class QuoteService:
         - 去重: 复用 MonitorRuleEngine 的 cooldown, 此处不重复去重
         - 批量策略事件 (symbol="") 聚合为一条通知, 避免刷屏
         """
+        if not external_notifications_allowed():
+            return
         try:
             from app.services import notify_adapter, preferences
 

@@ -12,6 +12,7 @@ import logging
 from pathlib import Path
 
 from app.services.fs_utils import atomic_write_text
+from app.services.private_storage import identifier, private_path
 
 logger = logging.getLogger(__name__)
 
@@ -29,7 +30,7 @@ def _invalidate_override_cache(path: Path) -> None:
 
 
 def _overrides_dir(data_dir: Path) -> Path:
-    d = data_dir / "user_data" / "strategy_overrides"
+    d = private_path(data_dir, "user_data", "strategy_overrides")
     d.mkdir(parents=True, exist_ok=True)
     return d
 
@@ -37,8 +38,8 @@ def _overrides_dir(data_dir: Path) -> Path:
 def _path(data_dir: Path, strategy_id: str, *, ensure_dir: bool = True) -> Path:
     # ensure_dir=False 供热路径读取: mkdir 系统调用在 Windows 上 ~0.07ms,
     # 读缓存命中时跳过它 (目录由写路径保证存在)。
-    d = _overrides_dir(data_dir) if ensure_dir else data_dir / "user_data" / "strategy_overrides"
-    return d / f"{strategy_id}.json"
+    d = _overrides_dir(data_dir) if ensure_dir else private_path(data_dir, "user_data", "strategy_overrides")
+    return d / f"{identifier(strategy_id)}.json"
 
 
 def load_override(data_dir: Path, strategy_id: str) -> dict:

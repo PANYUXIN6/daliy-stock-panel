@@ -1,195 +1,48 @@
-/**
- * 访问认证页 — 复用同一组件处理「首次设密码」和「登录」两种状态。
- *
- * 根据后端 /api/auth/status 的 configured 字段决定显示:
- *   - configured=false → 显示「设置访问密码」(首次)
- *   - configured=true  → 显示「登录」
- *
- * 安全:
- *   - 设密码接口后端限本机/内网; 公网用户设密码会被 403 拒绝, 页面据此提示。
- *   - 登录失败由后端限流(5次锁5分钟), 429 时前端显示等待提示。
- */
-import { useEffect, useState, type FormEvent } from 'react'
-import { useNavigate } from 'react-router-dom'
-import { useMutation } from '@tanstack/react-query'
-import { motion } from 'framer-motion'
-import { Eye, EyeOff, Loader2, Lock, ShieldCheck, ShieldAlert, Sparkles } from 'lucide-react'
-import { api } from '@/lib/api'
+import { useState, type FormEvent } from 'react'
+import { api, type AuthStatus } from '@/lib/api'
+import { Modal } from '@/components/Modal'
 import { Logo } from '@/components/Logo'
-import { cn } from '@/lib/cn'
+import { announceSessionChange } from '@/lib/sessionRuntime'
 
-export function Auth() {
-  const navigate = useNavigate()
+export function Auth({ status, error, retry, onAuthenticated }: {
+  status: AuthStatus | null; error: string; retry: () => void; onAuthenticated: (status: AuthStatus) => void
+}) {
+  const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
-  const [confirmPassword, setConfirmPassword] = useState('')  // 仅设密码时用
-  const [showPwd, setShowPwd] = useState(false)
+  const [newPassword, setNewPassword] = useState('')
+  const [confirm, setConfirm] = useState('')
   const [localError, setLocalError] = useState('')
-
-  // 取认证状态(是否已设密码)
-  const [status, setStatus] = useState<{ configured: boolean } | null>(null)
-  useEffect(() => {
-    api.authStatus().then(s => {
-      setStatus(s)
-      // 已登录的话直接进面板(避免登录页死循环)
-      if (s.authenticated) navigate('/', { replace: true })
-    }).catch(() => setStatus({ configured: false }))
-  }, [navigate])
-
-  const isSetup = !status?.configured  // configured=false → 设密码模式
-
-  // 登录 / 设密码 共用一个 mutation(按 isSetup 调不同接口)
-  const submitMut = useMutation({
-    mutationFn: async () => {
-      if (isSetup) {
-        return api.authSetup(password)
-      }
-      return api.authLogin(password)
-    },
-    onSuccess: () => {
-      // 成功: 跳回原页面(或首页)
-      const redirect = new URLSearchParams(window.location.search).get('redirect') || '/'
-      navigate(redirect, { replace: true })
-    },
-    onError: (err: any) => {
-      const msg = err?.message || (isSetup ? '设置失败' : '登录失败')
-      // 设密码/登录失败必须显示: 401(密码错)/403(公网设密码被拒)/429(限流) 都要提示
-      setLocalError(msg)
-    },
-  })
-
-  const handleSubmit = (e: FormEvent) => {
-    e.preventDefault()
+  const [pending, setPending] = useState(false)
+  const change = status?.authenticated && status.user?.must_change_password
+  async function submit(event: FormEvent) {
+    event.preventDefault()
     setLocalError('')
-    if (isSetup) {
-      if (password.length < 6) { setLocalError('密码至少 6 位'); return }
-      if (password !== confirmPassword) { setLocalError('两次密码不一致'); return }
-    }
-    submitMut.mutate()
+    if (change && newPassword !== confirm) { setLocalError('两次新密码不一致'); return }
+    setPending(true)
+    try {
+      const next = change ? await api.authChangePassword(password, newPassword) : await api.authLogin(username.trim(), password)
+      setPassword(''); setNewPassword(''); setConfirm('')
+      announceSessionChange()
+      onAuthenticated(next)
+    } catch (err) { setLocalError(err instanceof Error ? err.message : '请求失败，请重试') }
+    finally { setPending(false) }
   }
-
-  if (!status) {
-    return (
-      <div className="flex min-h-screen items-center justify-center bg-base">
-        <Loader2 className="h-6 w-6 animate-spin text-muted" />
-      </div>
-    )
-  }
-
-  return (
-    <div className="relative flex min-h-screen items-center justify-center overflow-hidden bg-base px-4">
-      {/* 背景辉光 */}
-      <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_30%_20%,rgba(139,92,246,0.15),transparent_40%),radial-gradient(circle_at_70%_80%,rgba(59,130,246,0.12),transparent_40%)]" />
-
-      <motion.div
-        initial={{ opacity: 0, y: 16 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ duration: 0.4, ease: [0.16, 1, 0.3, 1] }}
-        className="relative w-full max-w-sm"
-      >
-        {/* Logo */}
-        <div className="mb-6 flex flex-col items-center gap-2">
-          <Logo className="h-10 w-10" />
-          <h1 className="text-lg font-semibold text-foreground">Tick Stock Panel</h1>
-        </div>
-
-        <div className="rounded-card border border-border bg-surface/90 p-6 shadow-2xl backdrop-blur">
-          {/* 标题区: 图标 + 文案随模式切换 */}
-          <div className="mb-5 flex items-center gap-2.5">
-            <div className={cn(
-              'grid h-9 w-9 place-items-center rounded-lg',
-              isSetup ? 'bg-accent/15 text-accent' : 'bg-purple-500/15 text-purple-400',
-            )}>
-              {isSetup ? <ShieldCheck className="h-5 w-5" /> : <Lock className="h-5 w-5" />}
-            </div>
-            <div>
-              <div className="text-sm font-medium text-foreground">
-                {isSetup ? '设置访问密码' : '登录访问'}
-              </div>
-              <div className="text-[11px] text-muted">
-                {isSetup ? '首次使用, 请为面板设置访问密码' : '请输入访问密码以继续'}
-              </div>
-            </div>
-          </div>
-
-          <form onSubmit={handleSubmit} className="space-y-3">
-            {/* 密码输入 */}
-            <div className="relative">
-              <input
-                type={showPwd ? 'text' : 'password'}
-                value={password}
-                onChange={e => setPassword(e.target.value)}
-                placeholder="访问密码"
-                autoFocus
-                className="h-10 w-full rounded-btn border border-border bg-base px-3 pr-9 text-sm text-foreground outline-none transition-colors focus:border-accent/50"
-              />
-              <button
-                type="button"
-                onClick={() => setShowPwd(s => !s)}
-                className="absolute right-2 top-1/2 -translate-y-1/2 p-1 text-muted hover:text-foreground"
-                tabIndex={-1}
-              >
-                {showPwd ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
-              </button>
-            </div>
-
-            {/* 确认密码(仅设密码模式) */}
-            {isSetup && (
-              <input
-                type={showPwd ? 'text' : 'password'}
-                value={confirmPassword}
-                onChange={e => setConfirmPassword(e.target.value)}
-                placeholder="再次输入密码"
-                className="h-10 w-full rounded-btn border border-border bg-base px-3 text-sm text-foreground outline-none transition-colors focus:border-accent/50"
-              />
-            )}
-
-            {/* 错误提示 */}
-            {(localError || submitMut.error) && (
-              <div className="flex items-start gap-1.5 rounded-btn bg-danger/10 px-3 py-2 text-[11px] text-danger">
-                <ShieldAlert className="mt-px h-3.5 w-3.5 shrink-0" />
-                <span>{localError}</span>
-              </div>
-            )}
-
-            <button
-              type="submit"
-              disabled={submitMut.isPending || !password}
-              className="inline-flex h-10 w-full items-center justify-center gap-1.5 rounded-btn bg-accent text-sm font-medium text-white transition-colors hover:bg-accent/90 disabled:opacity-50"
-            >
-              {submitMut.isPending ? (
-                <><Loader2 className="h-4 w-4 animate-spin" />处理中…</>
-              ) : (
-                <>{isSetup ? '设置并进入' : '登录'}</>
-              )}
-            </button>
-          </form>
-
-          {/* 提示: 设密码模式告知本机限制 */}
-          {isSetup && (
-            <div className="mt-3 space-y-1.5 text-[10px] leading-relaxed text-muted/70">
-              <p>
-                出于安全考虑, 首次设置密码需在服务器本机或内网访问时操作。公网环境下仅可登录。
-              </p>
-              <p>
-                详细配置说明见{' '}
-                <a
-                  href="https://github.com/shy3130/tickflow-stock-panel/blob/main/docs/deploy-password.md"
-                  target="_blank"
-                  rel="noreferrer"
-                  className="text-accent underline-offset-2 hover:underline"
-                >
-                  访问密码部署文档
-                </a>
-              </p>
-            </div>
-          )}
-        </div>
-
-        <div className="mt-4 flex items-center justify-center gap-1.5 text-[10px] text-muted/60">
-          <Sparkles className="h-3 w-3" />
-          自托管量化工作台 · 数据完全掌握在自己手里
-        </div>
-      </motion.div>
-    </div>
-  )
+  const inputClass = 'mt-1 h-10 w-full rounded-btn border border-border bg-base px-3 text-sm text-foreground focus:outline-none focus:border-accent'
+  return <div className="min-h-screen bg-base">
+    <Modal onClose={() => {}} closeOnBackdrop={false} labelledBy="auth-title" overlayClassName="fixed inset-0 z-[9999] flex items-center justify-center bg-base p-4" panelClassName="w-full max-w-sm max-h-[90dvh] overflow-y-auto rounded-card border border-border bg-surface p-6 shadow-xl">
+      <Logo size={32} className="mb-4 text-accent" />
+      <h1 id="auth-title" className="text-lg font-semibold text-foreground">{change ? '设置个人密码' : '登录 Tick Stock Panel'}</h1>
+      {!status ? <div className="mt-4 text-sm text-secondary">{error || '正在验证身份…'}{error && <button className="ml-2 text-accent" onClick={retry}>重试</button>}</div>
+        : !status.configured ? <p className="mt-4 text-sm leading-6 text-secondary">服务器尚未初始化管理员账号，请联系部署管理员配置初始用户名与密码后重启服务。</p>
+        : <form onSubmit={submit} className="mt-4 space-y-4">
+          <p className="text-xs leading-5 text-muted">{change ? `${status.user?.username}，当前为临时密码。请先更改密码，再进入工作台。` : '使用管理员分配的账号登录。会话保持 7 天，同一账号的新登录会使旧会话失效。'}</p>
+          {!change && <label className="block text-xs text-secondary">用户名<input aria-label="用户名" autoComplete="username" required value={username} onChange={e => setUsername(e.target.value)} className={inputClass} /></label>}
+          <label className="block text-xs text-secondary">{change ? '当前临时密码' : '密码'}<input aria-label={change ? '当前临时密码' : '密码'} type="password" autoComplete="current-password" required value={password} onChange={e => setPassword(e.target.value)} className={inputClass} /></label>
+          {change && <><label className="block text-xs text-secondary">新密码<input aria-label="新密码" type="password" autoComplete="new-password" required minLength={8} value={newPassword} onChange={e => setNewPassword(e.target.value)} className={inputClass} /></label><label className="block text-xs text-secondary">确认新密码<input aria-label="确认新密码" type="password" autoComplete="new-password" required value={confirm} onChange={e => setConfirm(e.target.value)} className={inputClass} /></label></>}
+          {localError && <p role="alert" className="text-xs text-danger">{localError}</p>}
+          <button disabled={pending} className="h-10 w-full rounded-btn bg-accent text-sm font-medium text-white disabled:opacity-50">{pending ? '处理中…' : change ? '更改密码并继续' : '登录'}</button>
+          {change && <button type="button" className="w-full text-xs text-muted" onClick={async () => { await api.authLogout(); announceSessionChange(); window.location.reload() }}>退出当前账号</button>}
+        </form>}
+    </Modal>
+  </div>
 }

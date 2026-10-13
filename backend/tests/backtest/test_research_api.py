@@ -8,6 +8,9 @@ from fastapi import HTTPException
 
 from app.api import backtest as api
 from app.backtest.factor import FACTOR_COLUMNS
+from app.services.user_context import user_data_dir
+
+pytestmark = pytest.mark.usefixtures("private_owner")
 
 
 def test_factor_batch_api_rejects_unknown_factor():
@@ -50,7 +53,7 @@ def test_candidate_api_create_list_and_update(monkeypatch, tmp_path):
 
 def test_candidate_api_returns_clear_error_for_corrupt_file(monkeypatch, tmp_path):
     monkeypatch.setattr(api.settings, "data_dir", tmp_path)
-    path = tmp_path / "user_data" / "research_candidates.json"
+    path = user_data_dir(tmp_path) / "user_data" / "research_candidates.json"
     path.parent.mkdir(parents=True)
     path.write_text("not-json", encoding="utf-8")
 

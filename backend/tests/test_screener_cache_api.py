@@ -2,8 +2,11 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
+
 from app.api import screener as screener_api
 
+pytestmark = pytest.mark.usefixtures("private_owner")
 
 class _MonitorEngine:
     def __init__(self, results=None):
@@ -16,6 +19,7 @@ class _MonitorEngine:
 def _request(tmp_path, monitor_results=None):
     repo = SimpleNamespace(store=SimpleNamespace(data_dir=tmp_path))
     state = SimpleNamespace(repo=repo, monitor_engine=_MonitorEngine(monitor_results))
+    state.user_runtimes = SimpleNamespace(get=lambda owner: state)
     return SimpleNamespace(app=SimpleNamespace(state=state))
 
 

@@ -14,6 +14,9 @@ from fastapi.testclient import TestClient
 
 from app.api.paper import router
 
+pytestmark = pytest.mark.usefixtures("private_owner")
+
+
 
 @pytest.fixture
 def client(tmp_path: Path) -> TestClient:

@@ -1,3 +1,4 @@
+import { accountStorage, sessionFetch, sessionEventSource } from '@/lib/sessionRuntime'
 import { useSyncExternalStore } from 'react'
 
 /** Walk-forward 任务管理 (SSE + job_key 回吐 + 重连)。镜像 optimizerTask。 */
@@ -104,7 +105,7 @@ function connectSSE(url: string): void {
     eventSource = null
   }
 
-  const es = new EventSource(url)
+  const es = sessionEventSource(url)
   eventSource = es
 
   es.addEventListener('job', (e: MessageEvent) => {
@@ -113,15 +114,15 @@ function connectSSE(url: string): void {
       const key = JSON.parse(e.data)?.key
       if (key) {
         currentJobKey = key
-        localStorage.setItem(JOB_KEY_KEY, key)
+        accountStorage.setItem(JOB_KEY_KEY, key)
         // 竞态: stop 在拿到 key 前被点过 -> 补发 cancel 真正停后端任务, 再收尾关闭。
         if (cancelRequested) {
           postCancel(key)
           es.close()
           eventSource = null
           currentJobKey = null
-          localStorage.removeItem(RECONNECT_KEY)
-          localStorage.removeItem(JOB_KEY_KEY)
+          accountStorage.removeItem(RECONNECT_KEY)
+          accountStorage.removeItem(JOB_KEY_KEY)
         }
       }
     } catch { /* ignore */ }
@@ -150,8 +151,8 @@ function connectSSE(url: string): void {
     es.close()
     eventSource = null
     currentJobKey = null
-    localStorage.removeItem(RECONNECT_KEY)
-    localStorage.removeItem(JOB_KEY_KEY)
+    accountStorage.removeItem(RECONNECT_KEY)
+    accountStorage.removeItem(JOB_KEY_KEY)
   })
 
   es.addEventListener('error', (e: MessageEvent) => {
@@ -168,8 +169,8 @@ function connectSSE(url: string): void {
       es.close()
       eventSource = null
       currentJobKey = null
-      localStorage.removeItem(RECONNECT_KEY)
-      localStorage.removeItem(JOB_KEY_KEY)
+      accountStorage.removeItem(RECONNECT_KEY)
+      accountStorage.removeItem(JOB_KEY_KEY)
       return
     }
     // 无 data: 连接异常断开。EventSource 自动重连, 设上限避免网络长断时无限 pending。
@@ -179,8 +180,8 @@ function connectSSE(url: string): void {
         es.close()
         eventSource = null
         // 清 localStorage: 否则刷新页面 tryReconnect 会重连到这个已放弃的任务。
-        localStorage.removeItem(RECONNECT_KEY)
-        localStorage.removeItem(JOB_KEY_KEY)
+        accountStorage.removeItem(RECONNECT_KEY)
+        accountStorage.removeItem(JOB_KEY_KEY)
         current = { ...current, isPending: false, error: '连接中断, 重连多次失败' }
         emit()
       }
@@ -190,7 +191,7 @@ function connectSSE(url: string): void {
 
 /** 调后端 cancel (按回吐的 job_key)。 */
 function postCancel(jobKey: string): void {
-  fetch('/api/backtest/walkforward/cancel', {
+  sessionFetch('/api/backtest/walkforward/cancel', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ job_key: jobKey }),
@@ -225,20 +226,20 @@ export function startWalkForward(params: StartWalkForwardParams): void {
     mode: params.mode,
   })
 
-  localStorage.setItem(RECONNECT_KEY, qs)
+  accountStorage.setItem(RECONNECT_KEY, qs)
   connectSSE(`/api/backtest/walkforward/stream?${qs}`)
 }
 
 export function stopWalkForward(): void {
   // 竞态: job_key 未到手时保持 SSE 打开, 等 job 事件补发 cancel (关 SSE 不停后端 daemon 线程)。
   cancelRequested = true
-  const jobKey = currentJobKey ?? localStorage.getItem(JOB_KEY_KEY)
+  const jobKey = currentJobKey ?? accountStorage.getItem(JOB_KEY_KEY)
   if (jobKey) {
     postCancel(jobKey)
     if (eventSource) { eventSource.close(); eventSource = null }
     currentJobKey = null
-    localStorage.removeItem(RECONNECT_KEY)
-    localStorage.removeItem(JOB_KEY_KEY)
+    accountStorage.removeItem(RECONNECT_KEY)
+    accountStorage.removeItem(JOB_KEY_KEY)
   } else if (eventSource) {
     const es = eventSource
     // job_key 始终没到手(job 事件未达): 5 秒后放弃并清 localStorage, 避免刷新重连到未取消任务。
@@ -246,8 +247,8 @@ export function stopWalkForward(): void {
     setTimeout(() => {
       if (es === eventSource) {
         es.close(); eventSource = null
-        localStorage.removeItem(RECONNECT_KEY)
-        localStorage.removeItem(JOB_KEY_KEY)
+        accountStorage.removeItem(RECONNECT_KEY)
+        accountStorage.removeItem(JOB_KEY_KEY)
       }
     }, 5000)
   }
@@ -263,7 +264,7 @@ export function clearWalkForward(): void {
 }
 
 export function tryReconnectWalkForward(): boolean {
-  const qs = localStorage.getItem(RECONNECT_KEY)
+  const qs = accountStorage.getItem(RECONNECT_KEY)
   if (!qs) return false
   const id = ++taskSeq
   current = { id, isPending: true, result: null, progress: null, error: null }

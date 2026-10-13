@@ -358,7 +358,8 @@ def update_custom_factor(factor_id: str, req: CustomFactorUpdateRequest, request
 def _find_references(data_dir, factor_id: str) -> list[str]:
     """扫描策略与复合因子定义中的引用 (删除前 fail-closed 检查)。"""
     references: list[str] = []
-    strategies_dir = data_dir / "strategies"
+    from app.services.private_storage import private_path
+    strategies_dir = private_path(data_dir, "strategies")
     if strategies_dir.is_dir():
         for file in strategies_dir.glob("*.json"):
             try:

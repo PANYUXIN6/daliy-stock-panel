@@ -8,6 +8,8 @@
 // ===== Query Key 工厂 =====
 
 export const QK = {
+  users: (search = '', offset = 0) => ['users', search, offset] as const,
+  loginEvents: (userId = '', offset = 0) => ['login-events', userId, offset] as const,
   // 全局 / 共享 (Layout 预取)
   capabilities:   ['capabilities'] as const,
   settings:       ['settings'] as const,

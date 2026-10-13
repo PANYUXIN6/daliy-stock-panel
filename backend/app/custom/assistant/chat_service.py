@@ -201,6 +201,8 @@ async def chat_stream(
     sentinel: object = object()
 
     async def execute(name: str, args: dict[str, Any]) -> dict[str, Any]:
+        from app.services.auth import require_current_session
+        require_current_session()
         call_id = assistant_actions.new_call_id()
         await queue.put({
             "type": "tool_call",
@@ -240,6 +242,7 @@ async def chat_stream(
                     "elapsed_ms": int((time.monotonic() - started) * 1000),
                 })
                 return result
+        require_current_session()
         result = await assistant_tools.execute_assistant_tool(name, args, tool_ctx)
         elapsed_ms = int((time.monotonic() - started) * 1000)
         event = {
@@ -259,7 +262,9 @@ async def chat_stream(
         return result
 
     async def run() -> None:
+        from app.services.auth import require_current_session
         try:
+            require_current_session()
             _guard_input_budget(req_messages)
             text_seen = False
             tool_rounds = 0
@@ -268,6 +273,7 @@ async def chat_stream(
                 round_text: list[str] = []
                 tool_calls: list[dict[str, Any]] = []
                 async for event in stream_openai_round(req_messages, schemas, temperature=0.3, timeout=240.0):
+                    require_current_session()
                     if event["type"] == "text":
                         round_text.append(event["delta"])
                         await queue.put({"type": "delta", "content": event["delta"]})

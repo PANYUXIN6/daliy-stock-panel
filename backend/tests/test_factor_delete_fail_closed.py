@@ -15,14 +15,17 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from app.api.factors import router
+from app.services.user_context import user_data_dir
 
 FACTOR_ID = "uf_orphan_delete_guard"
 
 
+pytestmark = pytest.mark.usefixtures("private_owner")
+
 @pytest.fixture()
 def env(tmp_path):
     """磁盘上有一个未注册的自定义因子, 且被一个策略引用。"""
-    factor_dir = tmp_path / "user_data" / "custom_factors"
+    factor_dir = user_data_dir(tmp_path) / "user_data" / "custom_factors"
     factor_dir.mkdir(parents=True)
     factor_path = factor_dir / f"{FACTOR_ID}.json"
     factor_path.write_text(
@@ -36,7 +39,7 @@ def env(tmp_path):
         }, ensure_ascii=False),
         encoding="utf-8",
     )
-    strategies_dir = tmp_path / "strategies"
+    strategies_dir = user_data_dir(tmp_path) / "strategies"
     strategies_dir.mkdir(parents=True)
     (strategies_dir / "s1.json").write_text(
         json.dumps({"id": "s1", "factors": [FACTOR_ID]}, ensure_ascii=False),

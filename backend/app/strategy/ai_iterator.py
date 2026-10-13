@@ -159,6 +159,9 @@ class AIStrategyIterator:
         草稿强制 research_only=True (复用 #255 的发布闸): 不进公开列表、不可运行,
         只有人点 publish 才上线, 守住「回测验证与上线由人拍板」的纪律。
         """
+        from app.services.user_context import current_user
+        if current_user(required=False) is not None:
+            raise PermissionError("网页不支持保存或执行 AI 生成的 Python 策略")
         out_dir = Path(data_dir) / "strategies" / "ai"
         out_dir.mkdir(parents=True, exist_ok=True)
         path = out_dir / f"{draft_id}.py"

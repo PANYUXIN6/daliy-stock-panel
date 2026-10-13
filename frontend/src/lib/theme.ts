@@ -1,3 +1,4 @@
+import { accountStorage } from '@/lib/sessionRuntime'
 // 主题管理 — 暗色(默认) / 亮色切换
 //
 // 机制:
@@ -15,14 +16,14 @@ export type Theme = 'dark' | 'light'
 
 export function getTheme(): Theme {
   try {
-    return localStorage.getItem(KEY) === 'light' ? 'light' : 'dark'
+    return accountStorage.getItem(KEY) === 'light' ? 'light' : 'dark'
   } catch {
     return 'dark'
   }
 }
 
 export function setTheme(theme: Theme) {
-  try { localStorage.setItem(KEY, theme) } catch { /* ignore */ }
+  try { accountStorage.setItem(KEY, theme) } catch { /* ignore */ }
   document.documentElement.classList.toggle('dark', theme === 'dark')
   window.dispatchEvent(new CustomEvent(EVENT, { detail: theme }))
 }

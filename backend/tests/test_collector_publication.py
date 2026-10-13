@@ -39,9 +39,9 @@ def test_publication_is_shared_saved_snapshot(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_analysis_saved_before_archived_done(tmp_path, monkeypatch):
+async def test_analysis_saved_before_archived_done(tmp_path, monkeypatch, authenticated_actor):
     from app.services import shared_runtime
-    monkeypatch.setattr(shared_runtime, "publish_data_update", lambda *args: None)
+    monkeypatch.setattr(shared_runtime, "publish_data_update", lambda *args, **kwargs: None)
     records = []
     async def stream():
         for event in [{"type": "meta", "as_of": "2026-10-09"}, {"type": "delta", "content": "复盘正文"}, {"type": "done"}]:

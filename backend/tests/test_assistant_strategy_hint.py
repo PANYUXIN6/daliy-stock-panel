@@ -6,8 +6,12 @@
 """
 from __future__ import annotations
 
+import pytest
+
 from app.custom.assistant import tools as assistant_tools
 from app.services import tool_catalog
+
+pytestmark = pytest.mark.usefixtures("authenticated_actor")
 
 
 class _StubEngine:

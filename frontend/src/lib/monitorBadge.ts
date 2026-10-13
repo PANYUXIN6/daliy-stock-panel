@@ -1,3 +1,4 @@
+import { accountStorage } from '@/lib/sessionRuntime'
 import { useSyncExternalStore } from 'react'
 
 /**
@@ -19,7 +20,7 @@ const listeners = new Set<() => void>()
 
 function readSeen(): number {
   try {
-    const v = localStorage.getItem(STORAGE_KEY)
+    const v = accountStorage.getItem(STORAGE_KEY)
     if (v === null) return -1  // 从未设置过 → 未初始化
     return parseInt(v, 10) || 0
   } catch {
@@ -28,7 +29,7 @@ function readSeen(): number {
 }
 
 function writeSeen(v: number) {
-  try { localStorage.setItem(STORAGE_KEY, String(v)) } catch { /* ignore */ }
+  try { accountStorage.setItem(STORAGE_KEY, String(v)) } catch { /* ignore */ }
 }
 
 function syncSeen() {

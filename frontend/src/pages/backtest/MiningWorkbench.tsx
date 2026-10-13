@@ -1,3 +1,5 @@
+import { useCurrentUser } from "../../lib/auth"
+import { accountStorage } from '@/lib/sessionRuntime'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useSearchParams } from 'react-router-dom'
@@ -103,7 +105,7 @@ const DEFAULT_DRAFT: MiningDraft = {
 
 function loadDraft(): MiningDraft {
   try {
-    const value = JSON.parse(localStorage.getItem(DRAFT_KEY) || '')
+    const value = JSON.parse(accountStorage.getItem(DRAFT_KEY) || '')
     if (!value || typeof value !== 'object') return DEFAULT_DRAFT
     return { ...DEFAULT_DRAFT, ...value }
   } catch {
@@ -329,6 +331,7 @@ function FactorTable({ result }: { result: MiningResult }) {
 }
 
 export function MiningWorkbench() {
+  const isAdmin = useCurrentUser()?.role === "admin"
   const queryClient = useQueryClient()
   const [searchParams, setSearchParams] = useSearchParams()
   const initializedFactors = useRef(false)
@@ -384,7 +387,7 @@ export function MiningWorkbench() {
   const configQuery = useQuery({ queryKey: QK.miningConfig, queryFn: api.miningConfig })
 
   useEffect(() => {
-    localStorage.setItem(DRAFT_KEY, JSON.stringify(draft))
+    accountStorage.setItem(DRAFT_KEY, JSON.stringify(draft))
   }, [draft])
 
   useEffect(() => {
@@ -723,7 +726,7 @@ export function MiningWorkbench() {
             </div>
           </section>
 
-          {scheduleDraft && <section className="border-t border-border pt-3"><div className="mb-2 text-[10px] font-semibold text-secondary">周度自动挖掘</div><label className="mb-2 flex items-center gap-1.5 text-[9px] text-secondary"><input type="checkbox" className="h-3 w-3 accent-accent" checked={scheduleDraft.mining_schedule_enabled} onChange={event => setScheduleDraft({ ...scheduleDraft, mining_schedule_enabled: event.target.checked })} />启用（默认关闭，不自动发布）</label><div className="grid grid-cols-2 gap-2"><label><span className={LABEL}>工作日</span><select className={INPUT} value={scheduleDraft.mining_schedule_weekday} onChange={event => setScheduleDraft({ ...scheduleDraft, mining_schedule_weekday: Number(event.target.value) })}>{['周一', '周二', '周三', '周四', '周五'].map((label, index) => <option key={label} value={index}>{label}</option>)}</select></label><label><span className={LABEL}>档位</span><select className={INPUT} value={scheduleDraft.mining_budget_profile} onChange={event => setScheduleDraft({ ...scheduleDraft, mining_budget_profile: event.target.value as 'balanced' | 'strict' })}><option value="balanced">均衡</option><option value="strict">严格</option></select></label></div><button type="button" disabled={saveSchedule.isPending} onClick={() => saveSchedule.mutate(scheduleDraft)} className="mt-2 inline-flex h-7 w-full items-center justify-center gap-1 rounded-btn border border-border text-[10px] text-secondary hover:border-accent/40 hover:text-accent disabled:opacity-50"><Save className="h-3 w-3" />保存自动配置</button></section>}
+          {isAdmin && scheduleDraft && <section className="border-t border-border pt-3"><div className="mb-2 text-[10px] font-semibold text-secondary">周度自动挖掘</div><label className="mb-2 flex items-center gap-1.5 text-[9px] text-secondary"><input type="checkbox" className="h-3 w-3 accent-accent" checked={scheduleDraft.mining_schedule_enabled} onChange={event => setScheduleDraft({ ...scheduleDraft, mining_schedule_enabled: event.target.checked })} />启用（默认关闭，不自动发布）</label><div className="grid grid-cols-2 gap-2"><label><span className={LABEL}>工作日</span><select className={INPUT} value={scheduleDraft.mining_schedule_weekday} onChange={event => setScheduleDraft({ ...scheduleDraft, mining_schedule_weekday: Number(event.target.value) })}>{['周一', '周二', '周三', '周四', '周五'].map((label, index) => <option key={label} value={index}>{label}</option>)}</select></label><label><span className={LABEL}>档位</span><select className={INPUT} value={scheduleDraft.mining_budget_profile} onChange={event => setScheduleDraft({ ...scheduleDraft, mining_budget_profile: event.target.value as 'balanced' | 'strict' })}><option value="balanced">均衡</option><option value="strict">严格</option></select></label></div><button type="button" disabled={saveSchedule.isPending} onClick={() => saveSchedule.mutate(scheduleDraft)} className="mt-2 inline-flex h-7 w-full items-center justify-center gap-1 rounded-btn border border-border text-[10px] text-secondary hover:border-accent/40 hover:text-accent disabled:opacity-50"><Save className="h-3 w-3" />保存自动配置</button></section>}
         </div>
       </aside>
 

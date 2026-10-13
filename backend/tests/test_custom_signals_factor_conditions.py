@@ -12,6 +12,9 @@ import pytest
 
 from app.strategy import custom_signals
 
+pytestmark = pytest.mark.usefixtures("private_owner")
+
+
 
 def _frame(n_days: int = 30) -> pl.DataFrame:
     """两标的收盘价缓涨; ma20 手工预置为 0.9 倍滚动均值 (保证乖离恒为正)。"""

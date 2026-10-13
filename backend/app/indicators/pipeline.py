@@ -56,42 +56,18 @@ _custom_signal_exprs_today: dict[str, pl.Expr] | None = None
 
 
 def _get_custom_signal_exprs() -> dict[str, pl.Expr]:
-    """懒加载自定义信号表达式（带模块级缓存，allow_shift=True）。"""
-    global _custom_signal_exprs
-    if _custom_signal_exprs is None:
-        from app.strategy import custom_signals
-        try:
-            sigs = custom_signals.load_all(settings.data_dir)
-            _custom_signal_exprs = custom_signals.build_expressions(sigs)
-        except Exception as e:  # noqa: BLE001 - 自定义信号编译失败不影响内置指标流水线。
-            logger.warning("custom signals load failed: %s", e, exc_info=True)
-            _custom_signal_exprs = {}
-    return _custom_signal_exprs
+    # Shared market frames must never contain one user's private formulas.
+    # Personal expressions are injected into owner-local strategy/monitor inputs.
+    return {}
 
 
 def _get_custom_signal_exprs_today() -> dict[str, pl.Expr]:
-    """盘中增量热路径专用 (allow_shift=False, 跳过日期偏移条件)。
-
-    与全量版分开缓存：盘中单日快照上 .shift 跨 symbol 语义不正确,
-    build_expressions(allow_shift=False) 会跳过带偏移的信号, 结果集不同。
-    """
-    global _custom_signal_exprs_today
-    if _custom_signal_exprs_today is None:
-        from app.strategy import custom_signals
-        try:
-            sigs = custom_signals.load_all(settings.data_dir)
-            _custom_signal_exprs_today = custom_signals.build_expressions(sigs, allow_shift=False)
-        except Exception as e:  # noqa: BLE001 - 盘中自定义信号加载失败不影响内置信号。
-            logger.warning("custom signals load failed (today): %s", e, exc_info=True)
-            _custom_signal_exprs_today = {}
-    return _custom_signal_exprs_today
+    return {}
 
 
 def invalidate_custom_signals() -> None:
-    """失效自定义信号缓存（保存/删除信号后调用，下次计算重新加载）。"""
-    global _custom_signal_exprs, _custom_signal_exprs_today
-    _custom_signal_exprs = None
-    _custom_signal_exprs_today = None
+    from app.strategy.custom_signals import invalidate_intraday_cache
+    invalidate_intraday_cache()
 
 
 # enriched parquet 仅存储的列 (14 列)

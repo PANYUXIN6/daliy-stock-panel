@@ -20,6 +20,8 @@ from app.backtest.walkforward import (
     generate_folds,
 )
 
+pytestmark = pytest.mark.usefixtures("private_owner")
+
 # ---------------------------------------------------------------
 # fold 生成
 # ---------------------------------------------------------------

@@ -9,10 +9,11 @@ from app.services import preferences
 
 
 @pytest.fixture(autouse=True)
-def _isolated(tmp_path, monkeypatch):
+def _isolated(tmp_path, monkeypatch, authenticated_actor):
     path = tmp_path / "preferences.json"
     monkeypatch.setattr(preferences, "_path", lambda: path)
     preferences._invalidate_cache()
+    preferences.set_review_schedule(True, 15, 40)
     yield path
     preferences._invalidate_cache()
 
@@ -93,7 +94,7 @@ def _patch_scheduled_review(monkeypatch, pushed: list, archived: list):
         return "正文", {"as_of": "2026-07-18", "emotion_label": "中性"}
 
     monkeypatch.setattr("app.services.trading_day.is_trading_day", lambda: True)
-    monkeypatch.setattr("app.services.shared_runtime.publish_data_update", lambda *args: None)
+    monkeypatch.setattr("app.services.shared_runtime.publish_data_update", lambda *args, **kwargs: None)
     monkeypatch.setattr("app.secrets_store.get_ai_key", lambda: "sk-test")
     monkeypatch.setattr(daily_pipeline, "_stream_review_with_retry", _fake_stream)
     monkeypatch.setattr(
@@ -107,7 +108,7 @@ def _patch_scheduled_review(monkeypatch, pushed: list, archived: list):
     )
 
 
-def test_scheduled_review_manual_archives_without_push(monkeypatch):
+def test_scheduled_review_manual_archives_without_push(monkeypatch, tmp_path):
     from app.jobs import daily_pipeline
 
     pushed: list = []
@@ -116,14 +117,14 @@ def test_scheduled_review_manual_archives_without_push(monkeypatch):
     preferences.set_review_push_mode("manual")
 
     from types import SimpleNamespace
-    asyncio.run(daily_pipeline._run_scheduled_review(SimpleNamespace(store=SimpleNamespace(data_dir=None))))
+    asyncio.run(daily_pipeline._run_scheduled_review(SimpleNamespace(store=SimpleNamespace(data_dir=tmp_path))))
 
     # manual 模式: 归档发生, 但不外发
     assert len(archived) == 1
     assert pushed == []
 
 
-def test_scheduled_review_auto_pushes(monkeypatch):
+def test_scheduled_review_auto_pushes(monkeypatch, tmp_path):
     from app.jobs import daily_pipeline
 
     pushed: list = []
@@ -132,7 +133,7 @@ def test_scheduled_review_auto_pushes(monkeypatch):
     preferences.set_review_push_mode("auto")
 
     from types import SimpleNamespace
-    asyncio.run(daily_pipeline._run_scheduled_review(SimpleNamespace(store=SimpleNamespace(data_dir=None))))
+    asyncio.run(daily_pipeline._run_scheduled_review(SimpleNamespace(store=SimpleNamespace(data_dir=tmp_path))))
 
     # auto 模式: 归档并外发
     assert len(archived) == 1

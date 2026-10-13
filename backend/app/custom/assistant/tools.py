@@ -720,15 +720,11 @@ def _get_factor_values(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]
 # ----------------------------------------------------------------
 def _invalidate_custom_signals(data_dir: Path, repo: Any) -> None:
     """与 api/signals.py 的 _invalidate 同一条失效链, 保证创建后立即可回测。"""
-    from app.indicators.pipeline import invalidate_custom_signals
     from app.services import strategy_cache
     from app.strategy import custom_signals
 
-    custom_signals.invalidate_intraday_cache()
-    invalidate_custom_signals()
+    custom_signals.invalidate_intraday_cache(data_dir)
     strategy_cache.clear_cache(data_dir)
-    if repo is not None and hasattr(repo, "clear_cache"):
-        repo.clear_cache()
 
 
 _SIGNAL_FIELD_HINT = (
@@ -1346,10 +1342,19 @@ async def execute_assistant_tool(name: str, args: dict[str, Any], ctx: ToolConte
 
     契约与核心 tool_catalog.execute_tool 一致: {"ok": bool, "result"|"error"}。
     """
+    from app.services.auth import AuthError, require_current_session
+    try:
+        require_current_session()
+    except AuthError as exc:
+        return {"ok": False, "error": exc.detail}
     handler = _LOCAL_TOOLS.get(name)
     if handler is not None:
         try:
-            result = await asyncio.to_thread(handler, dict(args or {}), ctx)
+            def execute_local():
+                # The executor may have queued this action before the session was revoked.
+                require_current_session()
+                return handler(dict(args or {}), ctx)
+            result = await asyncio.to_thread(execute_local)
             return {"ok": True, "result": result}
         except Exception as exc:  # 工具失败按契约回填给模型, 不打断对话流
             logger.exception("assistant tool %s failed", name)

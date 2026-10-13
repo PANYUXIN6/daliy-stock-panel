@@ -16,10 +16,13 @@ from app.backtest.walkforward import WalkForwardConfig
 from app.backtest.worker import BacktestWorkerError, make_worker_task, run_worker_task
 from app.enriched_generation import bump_enriched_generation, get_enriched_generation
 from app.services.mining_jobs import MiningRunStore
+from app.services.user_context import user_data_dir
+
+pytestmark = pytest.mark.usefixtures("private_owner")
 
 
 def _write_worker_strategy(data_dir) -> None:
-    strategy_dir = data_dir / "strategies" / "custom"
+    strategy_dir = data_dir / "strategies" / "templates"
     strategy_dir.mkdir(parents=True)
     (strategy_dir / "worker_always_entry.py").write_text(
         """import numpy as np
@@ -659,3 +662,43 @@ def test_mining_fails_with_guidance_when_generation_keeps_drifting(
             progress_cb=None,
             cancel_check=None,
         )
+
+
+def test_spawn_worker_does_not_load_another_users_private_strategy(tmp_path):
+    from app.services.user_context import UserContext, user_scope
+    start = date(2024, 1, 1)
+    _write_worker_strategy(tmp_path)
+    private = user_data_dir(tmp_path) / 'strategies' / 'custom'
+    private.mkdir(parents=True)
+    (tmp_path / 'strategies' / 'templates' / 'worker_always_entry.py').rename(private / 'worker_always_entry.py')
+    _write_market_data(tmp_path, start)
+    config = StrategyBacktestConfig(strategy_id='worker_always_entry', symbols=['600000.SH'],
+                                    start=start, end=start + timedelta(days=2))
+    with user_scope(UserContext('b' * 32, 'admin', tmp_path)):
+        result = run_worker_task(make_worker_task('backtest', tmp_path, config))
+    assert result['error']
+    assert result['trades'] == []
+
+
+def test_spawn_worker_rejects_python_disguised_as_personal_composite(tmp_path):
+    from app.api.strategy import _render_composite_code
+
+    start = date(2024, 1, 1)
+    _write_worker_strategy(tmp_path)
+    _write_market_data(tmp_path, start)
+    directory = user_data_dir(tmp_path) / 'strategies' / 'composite'
+    directory.mkdir(parents=True)
+    code = _render_composite_code(
+        'composite_archived', '历史策略', '',
+        [{'strategy_id': 'worker_always_entry', 'weight': 1.0}], 'union', 0,
+    ) + '\nimport polars as pl\nIMPORT_PROBE = pl.lit(731503)\n'
+    archive = directory / 'composite_archived.py'
+    archive.write_text(code, encoding='utf-8')
+    config = StrategyBacktestConfig(
+        strategy_id='composite_archived', symbols=['600000.SH'],
+        start=start, end=start + timedelta(days=2),
+    )
+    result = run_worker_task(make_worker_task('backtest', tmp_path, config))
+    assert 'unknown strategy' in result['error']
+    assert result['trades'] == []
+    assert archive.read_text(encoding='utf-8') == code

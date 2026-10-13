@@ -224,6 +224,7 @@ def _run_uvmicorn(port: int, ready_event: threading.Event) -> None:
         host="127.0.0.1",  # 仅本机, 不暴露外网 (桌面版无需远程访问)
         port=port,
         log_level="info",
+        proxy_headers=False,  # 应用按 AUTH_TRUSTED_PROXIES 校验原始连接方
         access_log=False,    # 桌面版不需要访问日志
         loop="auto",
     )
@@ -392,7 +393,7 @@ def _run_collector_service() -> int:
 
     from app.collector import app
 
-    uvicorn.run(app, host='127.0.0.1', port=_collector_port(), access_log=False)
+    uvicorn.run(app, host='127.0.0.1', port=_collector_port(), access_log=False, proxy_headers=False)
     return 0
 
 

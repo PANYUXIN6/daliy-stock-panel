@@ -4,7 +4,12 @@ from __future__ import annotations
 import threading
 import time
 
+import pytest
+
 from app.services import strategy_run_queue as q
+
+pytestmark = pytest.mark.usefixtures("private_owner")
+
 
 
 def test_order_strategy_ids_fast_first_unknown_last():

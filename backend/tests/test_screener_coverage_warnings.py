@@ -12,6 +12,8 @@ import logging
 from datetime import date
 from types import SimpleNamespace
 
+import pytest
+
 from app.api import screener as screener_api
 from app.jobs import daily_pipeline
 from app.services.screener import (
@@ -20,6 +22,7 @@ from app.services.screener import (
     enriched_history_days,
 )
 
+pytestmark = pytest.mark.usefixtures("private_owner")
 
 def _make_partitions(root, dirname: str, dates: list[str]) -> None:
     for ds in dates:
@@ -116,7 +119,7 @@ def test_run_preset_response_carries_warnings(monkeypatch, tmp_path):
     engine = _MinimalEngine()
     request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(
         repo=SimpleNamespace(store=SimpleNamespace(data_dir=tmp_path)),
-        strategy_engine=engine,
+        user_runtimes=SimpleNamespace(get=lambda owner: SimpleNamespace(strategy_engine=engine)),
     )))
     monkeypatch.setattr(screener_api, "ScreenerService", lambda *a, **k: svc)
     monkeypatch.setattr(screener_api, "_load_ext_value_maps", lambda *a, **k: {})
@@ -137,7 +140,7 @@ def test_run_preset_no_warnings_key_when_sufficient(monkeypatch, tmp_path):
     engine = _MinimalEngine()
     request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(
         repo=SimpleNamespace(store=SimpleNamespace(data_dir=tmp_path)),
-        strategy_engine=engine,
+        user_runtimes=SimpleNamespace(get=lambda owner: SimpleNamespace(strategy_engine=engine)),
     )))
     monkeypatch.setattr(screener_api, "ScreenerService", lambda *a, **k: svc)
     monkeypatch.setattr(screener_api, "_load_ext_value_maps", lambda *a, **k: {})

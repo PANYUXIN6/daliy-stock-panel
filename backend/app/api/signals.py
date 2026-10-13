@@ -20,21 +20,10 @@ def _data_dir(request: Request) -> Path:
 
 
 def _invalidate(request: Request) -> None:
-    """失效自定义信号表达式缓存, 并清掉含旧信号列的计算缓存。
-
-    信号增删会改变注入列集合: 只清表达式缓存不够, repo 内存缓存 /
-    strategy 磁盘缓存里算好的历史窗口仍不含新 csg_ 列 (或仍含已删列),
-    需要一并清除, 否则创建信号后立即运行策略仍会报缺列。
-    盘中信号定义缓存(intraday)一并失效, 下一分钟 bucket 即生效。
-    """
-    custom_signals.invalidate_intraday_cache()
-    from app.indicators.pipeline import invalidate_custom_signals
-    invalidate_custom_signals()
+    """清当前用户的信号定义和结果；矩阵/监控状态按定义指纹刷新。"""
+    custom_signals.invalidate_intraday_cache(_data_dir(request))
     from app.services import strategy_cache
     strategy_cache.clear_cache(_data_dir(request))
-    repo = request.app.state.repo
-    if hasattr(repo, "clear_cache"):
-        repo.clear_cache()
 
 
 class ConditionModel(BaseModel):

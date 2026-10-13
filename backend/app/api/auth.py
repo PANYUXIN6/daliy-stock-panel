@@ -1,227 +1,143 @@
-"""访问认证 API。
+"""Account login and fixed-lifetime, HttpOnly browser sessions."""
 
-端点:
-  GET  /api/auth/status        — 是否已设密码、当前会话是否有效
-  POST /api/auth/setup         — 首次设置密码(仅限本机/内网, 防公网抢占)
-  POST /api/auth/login         — 登录(密码 → 会话 token, 含限流)
-  POST /api/auth/logout        — 注销当前会话
-  POST /api/auth/change-password — 改密码(需已登录)
-
-安全:
-  - setup 端点只接受本机/内网请求(request.client.host), 公网请求 403。
-    否则黑客可比用户更早扫到域名, 抢先设密码, 反客为主。
-  - login 限流: 同一来源 IP 连续失败 5 次, 锁 5 分钟(内存计数)。
-  - 会话 token 通过 HttpOnly cookie 下发, 前端无需手动管理。
-"""
 from __future__ import annotations
 
-import logging
-import time
-from collections import defaultdict
-from contextlib import suppress
-from threading import Lock
+import ipaddress
+from urllib.parse import urlsplit
 
-from fastapi import APIRouter, HTTPException, Request, Response
+from fastapi import APIRouter, Request, Response
 from pydantic import BaseModel, Field
 
+from app.config import settings
 from app.services import auth
 
-logger = logging.getLogger(__name__)
-
 router = APIRouter(prefix="/api/auth", tags=["auth"])
-
 COOKIE_NAME = "tf_session"
-_COOKIE_MAX_AGE = 30 * 24 * 3600  # 与 SESSION_TTL 一致
-
-# 限流: { ip: (fail_count, lock_until_ts) }
-_fail_counter: dict[str, tuple[int, float]] = defaultdict(lambda: (0, 0.0))
-_fail_lock = Lock()
-_MAX_FAILS = 5
-_LOCK_SECONDS = 300
 
 
-def _is_local_network(host: str | None) -> bool:
-    """是否本机或内网请求。
+def store_for(request: Request) -> auth.AuthStore:
+    return getattr(request.app.state, "auth_store", None) or auth.get_store()
 
-    反向代理(Nginx)场景下 request.client.host 是代理本身(127.0.0.1),
-    需信任 X-Forwarded-For 的最左(原始客户端)。本项目部署若经反代,
-    请在反代配置正确的 X-Forwarded-For(标准做法)。
-    """
-    if not host:
+
+def _trusted(host: str) -> bool:
+    try:
+        address = ipaddress.ip_address(host)
+        return any(
+            address in ipaddress.ip_network(cidr.strip())
+            for cidr in settings.auth_trusted_proxies.split(",")
+            if cidr.strip()
+        )
+    except ValueError:
         return False
-    if host in ("127.0.0.1", "::1", "localhost"):
-        return True
-    # 内网网段: 10.x / 172.16-31.x / 192.168.x
-    if host.startswith("10.") or host.startswith("192.168."):
-        return True
-    if host.startswith("172."):
-        with suppress(IndexError, ValueError):
-            second = int(host.split(".")[1])
-            if 16 <= second <= 31:
-                return True
-    return False
 
 
 def _client_ip(request: Request) -> str:
-    """取真实客户端 IP。
+    direct = request.client.host if request.client else "unknown"
+    if not _trusted(direct):
+        return direct
+    chain = [
+        part.strip()
+        for part in request.headers.get("x-forwarded-for", "").split(",")
+        if part.strip()
+    ]
+    current = direct
+    for part in reversed(chain):
+        if not _trusted(current):
+            break
+        try:
+            current = str(ipaddress.ip_address(part))
+        except ValueError:
+            return direct
+    return current
 
-    安全关键: 仅当直连 peer(request.client.host)本身是回环/内网地址
-    (即请求确实经过同机/内网的可信反代)时, 才采信 X-Forwarded-For。
-    否则公网请求可伪造 `X-Forwarded-For: 127.0.0.1` 冒充内网, 绕过
-    「未设密码仅本机可访问」闸门、抢占 setup 端点、并绕过登录限流。
-    """
+
+def request_origin(request: Request) -> str:
+    scheme = request.url.scheme
     direct = request.client.host if request.client else ""
-    xff = request.headers.get("x-forwarded-for")
-    if xff and direct and _is_local_network(direct):
-        return xff.split(",")[0].strip()
-    return direct or "unknown"
+    if _trusted(direct):
+        forwarded = request.headers.get("x-forwarded-proto", "").strip().lower()
+        if forwarded in ("http", "https"):
+            scheme = forwarded
+    return f"{scheme}://{request.url.netloc}"
 
 
-def _check_login_rate_limit(ip: str) -> None:
-    """登录失败限流检查, 触发则抛 429。锁定过期后重置计数(重新给 5 次机会)。"""
-    with _fail_lock:
-        _count, until = _fail_counter.get(ip, (0, 0.0))
-        now = time.time()
-        if until > now:
-            wait = int(until - now)
-            raise HTTPException(
-                status_code=429,
-                detail=f"登录失败次数过多, 请 {wait} 秒后重试",
-            )
-        if until and until <= now:
-            # 锁定已过期: 清除旧计数, 否则之后每失败一次都会立刻再锁 5 分钟
-            _fail_counter.pop(ip, None)
+def same_origin(request: Request) -> bool:
+    if request.headers.get("sec-fetch-site") == "cross-site":
+        return False
+    origin = request.headers.get("origin")
+    if not origin and request.headers.get("referer"):
+        parsed = urlsplit(request.headers["referer"])
+        origin = f"{parsed.scheme}://{parsed.netloc}"
+    # Non-browser clients without ambient cross-site origins remain usable.
+    if origin is None:
+        return True
+    allowed = {
+        request_origin(request),
+        *(o.strip().rstrip("/") for o in settings.auth_allowed_origins.split(",") if o.strip()),
+    }
+    return origin.rstrip("/") in allowed
 
 
-def _record_login_fail(ip: str) -> None:
-    """记录一次登录失败, 达阈值则锁定。"""
-    with _fail_lock:
-        # 防内存膨胀: 条目过多时清掉已过锁定期的记录
-        if len(_fail_counter) > 1000:
-            now = time.time()
-            for stale in [k for k, (_, u) in _fail_counter.items() if u <= now]:
-                _fail_counter.pop(stale, None)
-        count, until = _fail_counter.get(ip, (0, 0.0))
-        count += 1
-        if count >= _MAX_FAILS:
-            until = time.time() + _LOCK_SECONDS
-            logger.warning("auth login locked for %s after %d fails", ip, count)
-        _fail_counter[ip] = (count, until)
-
-
-def _clear_login_fails(ip: str) -> None:
-    """登录成功后清除该 IP 的失败计数。"""
-    with _fail_lock:
-        _fail_counter.pop(ip, None)
-
-
-# ================================================================
-# 端点
-# ================================================================
-
-class PasswordIn(BaseModel):
-    password: str = Field(min_length=6, max_length=128)
+def _cookie(request: Request, response: Response, token: str):
+    response.set_cookie(
+        COOKIE_NAME,
+        token,
+        max_age=auth.SESSION_TTL,
+        httponly=True,
+        samesite="strict",
+        path="/",
+        secure=settings.auth_cookie_secure or request_origin(request).startswith("https://"),
+    )
+    response.headers["Cache-Control"] = "no-store"
 
 
 class LoginIn(BaseModel):
+    username: str = Field(min_length=1, max_length=64)
     password: str = Field(min_length=1, max_length=128)
 
 
 class ChangePasswordIn(BaseModel):
     old_password: str = Field(min_length=1, max_length=128)
-    new_password: str = Field(min_length=6, max_length=128)
+    new_password: str = Field(min_length=8, max_length=128)
 
 
 @router.get("/status")
-def auth_status(request: Request) -> dict:
-    """认证状态: 是否已设密码 + 当前请求是否已登录。"""
-    token = request.cookies.get(COOKIE_NAME)
-    return {
-        "configured": auth.is_configured(),
-        "authenticated": bool(token and auth.is_valid_session(token)),
-    }
-
-
-@router.post("/setup")
-def setup_password(req: PasswordIn, request: Request) -> dict:
-    """首次设置访问密码。仅限本机/内网请求(防公网抢占)。
-
-    若已设置过密码, 返回 409(改密码走 /change-password)。
-    """
-    # 关键: 限制只有服务器主人(本机/内网)能设密码
-    client_ip = _client_ip(request)
-    if not _is_local_network(client_ip):
-        logger.warning("setup rejected from non-local ip: %s", client_ip)
-        raise HTTPException(
-            status_code=403,
-            detail="首次设置密码仅允许本机或内网访问,请通过 SSH/本地浏览器操作",
-        )
-
-    if auth.is_configured():
-        raise HTTPException(status_code=409, detail="密码已设置,如需修改请登录后使用改密码功能")
-
-    auth.set_password(req.password)
-    logger.info("access password set up from %s", client_ip)
-    return {"ok": True, "configured": True}
+def auth_status(request: Request, response: Response) -> dict:
+    response.headers["Cache-Control"] = "no-store"
+    return store_for(request).status(request.cookies.get(COOKIE_NAME))
 
 
 @router.post("/login")
 def login(req: LoginIn, request: Request, response: Response) -> dict:
-    """登录: 密码 → 会话 token(写 HttpOnly cookie)。含失败限流。"""
-    ip = _client_ip(request)
-    _check_login_rate_limit(ip)
-
-    if not auth.is_configured():
-        raise HTTPException(status_code=409, detail="尚未设置访问密码")
-
-    token = auth.verify_and_create_session(req.password)
-    if not token:
-        _record_login_fail(ip)
-        raise HTTPException(status_code=401, detail="密码错误")
-
-    _clear_login_fails(ip)
-    # HttpOnly: 防 XSS 窃取; SameSite=Lax: 防 CSRF; Path=/: 全站生效
-    response.set_cookie(
-        key=COOKIE_NAME,
-        value=token,
-        max_age=_COOKIE_MAX_AGE,
-        httponly=True,
-        samesite="lax",
-        path="/",
-        secure=False,  # 自托管可能无 HTTPS, 不强制 secure(建议反代加 HTTPS)
+    store = store_for(request)
+    if not store.configured():
+        raise auth.AuthError("请在服务器配置初始管理员账号和密码", 409, "NOT_INITIALIZED")
+    token, status = store.login(
+        req.username, req.password, _client_ip(request), request.headers.get("user-agent", "")
     )
-    return {"ok": True, "authenticated": True}
+    _cookie(request, response, token)
+    return status
 
 
 @router.post("/logout")
 def logout(request: Request, response: Response) -> dict:
-    """注销当前会话。"""
     token = request.cookies.get(COOKIE_NAME)
     if token:
-        auth.revoke_session(token)
-    response.delete_cookie(key=COOKIE_NAME, path="/")
+        store_for(request).revoke_session(token)
+    response.delete_cookie(
+        COOKIE_NAME,
+        path="/",
+        samesite="strict",
+        secure=settings.auth_cookie_secure or request_origin(request).startswith("https://"),
+    )
+    response.headers["Cache-Control"] = "no-store"
     return {"ok": True}
 
 
 @router.post("/change-password")
-def change_password(req: ChangePasswordIn, request: Request) -> dict:
-    """修改密码: 需验证旧密码, 成功后所有会话失效(含当前, 需重新登录)。"""
-    token = request.cookies.get(COOKIE_NAME)
-    if not (token and auth.is_valid_session(token)):
-        raise HTTPException(status_code=401, detail="请先登录")
-
-    if not auth.is_configured():
-        raise HTTPException(status_code=409, detail="尚未设置访问密码")
-
-    # 验证旧密码
-    new_token = auth.verify_and_create_session(req.old_password)
-    if not new_token:
-        ip = _client_ip(request)
-        _record_login_fail(ip)
-        raise HTTPException(status_code=401, detail="旧密码错误")
-    # 临时 token 用完即弃
-    auth.revoke_session(new_token)
-
-    # 改密码(set_password 会清空所有会话)
-    auth.set_password(req.new_password)
-    return {"ok": True, "message": "密码已修改, 请重新登录"}
+def change_password(req: ChangePasswordIn, request: Request, response: Response) -> dict:
+    token, status = store_for(request).change_password(
+        request.cookies.get(COOKIE_NAME, ""), req.old_password, req.new_password
+    )
+    _cookie(request, response, token)
+    return status

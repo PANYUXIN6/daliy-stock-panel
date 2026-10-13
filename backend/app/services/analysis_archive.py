@@ -14,6 +14,13 @@ async def archive_analysis(stream: AsyncIterator[str], save: Callable[[dict], di
     content = []
     failed = False
     async for chunk in stream:
+        from app.services.auth import AuthError, require_current_session
+        try:
+            require_current_session()
+        except AuthError as exc:
+            yield json.dumps({"type": "error", "message": exc.detail, "code": exc.code}, ensure_ascii=False)
+            yield json.dumps({"type": "done"})
+            return
         event = json.loads(chunk)
         if event.get("type") == "meta":
             meta = {key: value for key, value in event.items() if key != "type"}
@@ -23,6 +30,6 @@ async def archive_analysis(stream: AsyncIterator[str], save: Callable[[dict], di
             failed = True
         elif event.get("type") == "done" and not failed and content:
             report = save({**meta, **fields, "content": "".join(content)})
-            publish_data_update(data_dir, [dataset])
+            publish_data_update(data_dir, [dataset], private=True)
             chunk = json.dumps({**event, "archived": True, "report_id": report["id"]}, ensure_ascii=False)
         yield chunk

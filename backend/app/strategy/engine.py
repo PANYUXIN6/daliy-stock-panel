@@ -6,6 +6,7 @@
 """
 from __future__ import annotations
 
+import ast
 import contextlib
 import importlib.util
 import logging
@@ -17,6 +18,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from datetime import date
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import numpy as np
@@ -53,6 +55,10 @@ DEFAULT_BASIC_FILTER: dict = {
 
 # 叠加策略硬上限：子策略数量。控制信号计算成本与字段并集膨胀，避免 OOM。
 MAX_COMPOSITE_CHILDREN = 8
+
+
+class _PersonalPythonArchiveError(ValueError):
+    """个人历史 Python 仅存档，隔离它不阻断声明式策略刷新。"""
 
 
 def _normalize_param_defs(params: Any) -> list[dict]:
@@ -226,6 +232,7 @@ class StrategyResult:
 class _RealtimeMatrixEntry:
     fingerprint: tuple[Any, ...]
     buffer: Any
+    signal_history: pl.DataFrame | None = None
 
 
 class StrategyEngine:
@@ -238,10 +245,12 @@ class StrategyEngine:
         strategy_dirs: list[Path] | None = None,
         *,
         override_loader: Callable[[str], dict] | None = None,
+        declarative_dirs: list[Path] | None = None,
     ):
         self._strategies: dict[str, StrategyDef] = {}
         self._load_errors: list[dict] = []  # 加载失败的策略 [{file, error}]
         self._strategy_dirs = strategy_dirs or []
+        self._declarative_dirs = {directory.resolve() for directory in declarative_dirs or []}
         self._realtime_matrices: dict[str, _RealtimeMatrixEntry] = {}
         self._realtime_matrix_lock = threading.RLock()
         # 可选的 override 加载器: 叠加策略执行时用它查子策略的用户覆盖配置,
@@ -258,6 +267,7 @@ class StrategyEngine:
         candidates: dict[str, StrategyDef] = {}
         candidate_paths: dict[str, Path] = {}
         errors: list[dict] = []
+        archives: list[dict] = []
         duplicate_ids: set[str] = set()
         for d in self._strategy_dirs:
             if not d.exists():
@@ -266,7 +276,7 @@ class StrategyEngine:
                 if f.name.startswith("_"):
                     continue
                 try:
-                    s = self._load_file(f)
+                    s = self._load_file(f, declarative=d.resolve() in self._declarative_dirs)
                     strategy_id = str(s.meta["id"])
                     if strategy_id in duplicate_ids:
                         errors.append({
@@ -286,6 +296,8 @@ class StrategyEngine:
                         continue
                     candidates[strategy_id] = s
                     candidate_paths[strategy_id] = f
+                except _PersonalPythonArchiveError as e:
+                    archives.append({"file": str(f), "error": str(e)})
                 except Exception as e:  # noqa: BLE001 - 策略文件可执行用户代码, 加载失败按文件隔离。
                     logger.warning("load strategy %s failed: %s", f.name, e, exc_info=True)
                     errors.append({"file": str(f), "error": str(e)})
@@ -308,7 +320,7 @@ class StrategyEngine:
                 candidates.pop(sid, None)
                 candidate_paths.pop(sid, None)
 
-        self._load_errors = errors
+        self._load_errors = errors + archives
         if errors and retain_previous_on_error:
             return False
 
@@ -369,8 +381,7 @@ class StrategyEngine:
         return None
 
     @staticmethod
-    def _load_file(path: Path) -> StrategyDef:
-        """从 Python 文件加载策略定义"""
+    def _load_strategy_module(path: Path):
         # 纵深防御: 执行前再跑一次 AST 安全校验, 防止策略文件被直接篡改
         # 绕过 API 校验后, 在 exec_module 时执行恶意代码。
         dependency_paths = [
@@ -424,6 +435,49 @@ class StrategyEngine:
             finally:
                 with contextlib.suppress(ValueError):
                     sys.path.remove(inserted_path)
+        return mod
+
+    @staticmethod
+    def _load_composite_declaration(path: Path) -> SimpleNamespace:
+        """个人叠加策略只读取字面量声明，不导入或执行其 Python 文件。"""
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        except (SyntaxError, UnicodeDecodeError) as e:
+            raise _PersonalPythonArchiveError("个人策略文件已损坏，仅保留存档") from e
+        values = {}
+        for index, node in enumerate(tree.body):
+            if (
+                index == 0
+                and isinstance(node, ast.Expr)
+                and isinstance(node.value, ast.Constant)
+                and isinstance(node.value.value, str)
+            ):
+                continue
+            if (
+                not isinstance(node, ast.Assign)
+                or len(node.targets) != 1
+                or not isinstance(node.targets[0], ast.Name)
+                or node.targets[0].id not in {"META", "EXECUTION_BACKEND"}
+                or node.targets[0].id in values
+            ):
+                raise _PersonalPythonArchiveError("个人 Python 策略仅保留存档，叠加策略只允许字面量声明")
+            try:
+                values[node.targets[0].id] = ast.literal_eval(node.value)
+            except ValueError as e:
+                raise _PersonalPythonArchiveError("个人 Python 策略仅保留存档，叠加策略不允许执行表达式") from e
+        if "META" not in values or values.get("EXECUTION_BACKEND") != "composite":
+            raise _PersonalPythonArchiveError("个人 Python 策略仅保留存档，未找到叠加策略声明")
+        if not isinstance(values["META"], dict):
+            raise ValueError("个人叠加策略 META 必须是字典")
+        return SimpleNamespace(**values)
+
+    @staticmethod
+    def _load_file(path: Path, *, declarative: bool = False) -> StrategyDef:
+        """从受信任模块或个人叠加策略字面量声明加载策略定义。"""
+        mod = (
+            StrategyEngine._load_composite_declaration(path)
+            if declarative else StrategyEngine._load_strategy_module(path)
+        )
 
         meta = dict(getattr(mod, "META", {}) or {})
         meta.setdefault("id", path.stem)
@@ -714,7 +768,8 @@ class StrategyEngine:
     ) -> int:
         params_map = params_map or {}
         overrides_map = overrides_map or {}
-        required = 1
+        from app.strategy.custom_signals import required_user_history
+        required = required_user_history()
         for strategy_id in strategy_ids:
             strategy = self.get(strategy_id)
             overrides = overrides_map.get(strategy_id) or {}
@@ -767,6 +822,7 @@ class StrategyEngine:
     ):
         """Build once, then update only the latest live bar for matrix strategies."""
         from app.backtest.matrix import RealtimeMarketDataMatrix
+        from app.strategy.custom_signals import apply_user_context, required_user_history
 
         current = context.current
         if current is None:
@@ -817,7 +873,9 @@ class StrategyEngine:
         if not isinstance(as_of, date):
             raise ValueError("realtime matrix timestamp cannot be converted to date")
         symbols = tuple(current["symbol"].cast(pl.Utf8).unique().sort().to_list())
+        from app.strategy.custom_signals import definition_fingerprint
         fingerprint = (
+            definition_fingerprint(),
             tuple(sorted(field_columns)),
             max_warmup,
             symbols,
@@ -826,9 +884,27 @@ class StrategyEngine:
         with self._realtime_matrix_lock:
             cache_key = context.cache_key or f"{context.asset_type}:{context.timeframe}"
             entry = self._realtime_matrices.get(cache_key)
-            if entry is not None and entry.fingerprint == fingerprint:
+            matching_entry = entry is not None and entry.fingerprint == fingerprint
+            signal_bars = required_user_history() if context.timeframe == '1d' else 1
+            if signal_bars > 1 and context.history is None and matching_entry:
+                context = replace(context, history=entry.signal_history)
+            context = apply_user_context(context)
+            current = context.current
+            # Matrix extra fields are numeric; convert only requested personal booleans.
+            current = current.with_columns(
+                pl.col(name).cast(pl.Float32)
+                for name in field_columns
+                if name.startswith("csg_") and current.schema.get(name) == pl.Boolean
+            )
+            signal_history = None
+            if signal_bars > 1 and context.history is not None:
+                signal_history = context.history.sort(['symbol', 'date']).group_by(
+                    'symbol', maintain_order=True,
+                ).tail(signal_bars)
+            if matching_entry:
                 try:
                     entry.buffer.update(current)
+                    entry.signal_history = signal_history
                     return entry.buffer.snapshot()
                 except ValueError as exc:
                     logger.info("realtime matrix %s invalidated: %s", cache_key, exc)
@@ -852,8 +928,13 @@ class StrategyEngine:
             self._realtime_matrices[cache_key] = _RealtimeMatrixEntry(
                 fingerprint=fingerprint,
                 buffer=buffer,
+                signal_history=signal_history,
             )
             return buffer.snapshot()
+
+    def clear_realtime_matrices(self) -> None:
+        with self._realtime_matrix_lock:
+            self._realtime_matrices.clear()
 
     def realtime_matrix_stats(self, cache_key: str) -> dict[str, int]:
         with self._realtime_matrix_lock:
@@ -889,6 +970,8 @@ class StrategyEngine:
         """
         t0 = time.perf_counter()
 
+        from app.strategy.custom_signals import apply_user_context
+        context = apply_user_context(context)
         s = self.get(strategy_id)
         self.validate_context(s, context)
         as_of = context.as_of
@@ -1183,7 +1266,8 @@ class StrategyEngine:
             with ThreadPoolExecutor(
                 max_workers=workers, thread_name_prefix="strategy-run"
             ) as pool:
-                futures = [pool.submit(_execute, sid) for sid, _ in selected]
+                from contextvars import copy_context
+                futures = [pool.submit(copy_context().run, _execute, sid) for sid, _ in selected]
                 # 按原顺序收集: 首个失败策略的异常语义与串行执行一致。
                 for future in futures:
                     sid, result = future.result()
@@ -1633,11 +1717,10 @@ class StrategyEngine:
     )
 
     def _user_data_dir(self) -> Path | None:
-        """从策略目录推导 data_dir(…/strategies/custom → data_dir)。推不出则跳过注入。"""
-        for d in self._strategy_dirs:
-            if d.name == "custom" and d.parent.name == "strategies":
-                return d.parent.parent
-        return None
+        """个人声明式信号归属来自当前用户，不依赖是否加载历史 Python 目录。"""
+        from app.services.user_context import current_user
+        user = current_user(required=False)
+        return user.data_dir if user is not None else None
 
     def _inject_intraday_signal_columns(self, minute_df: pl.DataFrame) -> pl.DataFrame:
         """向当日分钟K帧注入自定义盘中信号列(csgi_, 当日条件上升沿)。

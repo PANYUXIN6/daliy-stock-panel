@@ -9,6 +9,10 @@ from fastapi import HTTPException
 from app.api import watchlist as watchlist_api
 from app.config import settings
 from app.services import watchlist
+from app.services.user_context import user_data_dir
+
+pytestmark = pytest.mark.usefixtures("private_owner")
+
 
 
 def _request():
@@ -19,7 +23,7 @@ def _request():
 
 def test_historical_watchlist_is_read_as_ungrouped(monkeypatch, tmp_path):
     monkeypatch.setattr(settings, "data_dir", tmp_path)
-    path = tmp_path / "user_data" / "watchlist.parquet"
+    path = user_data_dir(tmp_path) / "user_data" / "watchlist.parquet"
     path.parent.mkdir(parents=True)
     pl.DataFrame({
         "symbol": ["600000.SH"],
@@ -138,7 +142,7 @@ def test_group_api_contract(monkeypatch, tmp_path):
 
 def test_historical_groups_default_to_sky(monkeypatch, tmp_path):
     monkeypatch.setattr(settings, "data_dir", tmp_path)
-    path = tmp_path / "user_data" / "watchlist_groups.json"
+    path = user_data_dir(tmp_path) / "user_data" / "watchlist_groups.json"
     path.parent.mkdir(parents=True)
     path.write_text(
         '[{"id":"legacy","name":"旧分组"},'
@@ -259,7 +263,7 @@ def test_clear_group_strips_only_that_group(monkeypatch, tmp_path):
 def test_legacy_single_group_id_migration(monkeypatch, tmp_path):
     """旧 schema(单值 group_id 列)读取迁移 + 首次写回前自动备份 .bak。"""
     monkeypatch.setattr(settings, "data_dir", tmp_path)
-    path = tmp_path / "user_data" / "watchlist.parquet"
+    path = user_data_dir(tmp_path) / "user_data" / "watchlist.parquet"
     path.parent.mkdir(parents=True)
     pl.DataFrame({
         "symbol": ["600000.SH", "000001.SZ"],
@@ -271,10 +275,10 @@ def test_legacy_single_group_id_migration(monkeypatch, tmp_path):
     rows = watchlist.list_symbols()
     assert rows[0]["group_ids"] == ["g1"]
     assert rows[1]["group_ids"] == []
-    assert not (tmp_path / "user_data" / "watchlist.parquet.bak").exists()  # 只读不备份
+    assert not (user_data_dir(tmp_path) / "user_data" / "watchlist.parquet.bak").exists()  # 只读不备份
 
     # 触发写入 → 备份生成, 文件落新 schema
     watchlist.add("300750.SZ")
-    assert (tmp_path / "user_data" / "watchlist.parquet.bak").exists()
+    assert (user_data_dir(tmp_path) / "user_data" / "watchlist.parquet.bak").exists()
     df = pl.read_parquet(path)
     assert "group_ids" in df.columns and "group_id" not in df.columns

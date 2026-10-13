@@ -62,9 +62,10 @@ def test_message_falls_back_to_conditions_when_no_truth_hit():
     assert "现价 3000.0" in msg
 
 
-def test_message_resolves_custom_signal_cn_name(tmp_path):
+def test_message_resolves_custom_signal_cn_name(tmp_path, private_owner):
     """csg_ 自定义信号在 message 中显示用户命名, 而非原始列名。"""
-    d = tmp_path / "user_data" / "custom_signals"
+    from app.services.user_context import user_data_dir
+    d = user_data_dir(tmp_path) / "user_data" / "custom_signals"
     d.mkdir(parents=True)
     (d / "ma_dead_5_10.json").write_text(json.dumps({
         "id": "ma_dead_5_10", "name": "5日线下穿10日线", "kind": "exit",
@@ -74,7 +75,7 @@ def test_message_resolves_custom_signal_cn_name(tmp_path):
     eng = MonitorRuleEngine()
     eng.set_data_dir(tmp_path)
     rule = _rule(conditions=[{"field": "csg_ma_dead_5_10", "op": "truth"}])
-    msg = _fire(eng, rule, _df(csg_ma_dead_5_10=[True]))
+    msg = _fire(eng, rule, _df(ma5=[10.0], ma10=[11.0]))
     assert "5日线下穿10日线" in msg
     assert "csg_ma_dead_5_10" not in msg
 

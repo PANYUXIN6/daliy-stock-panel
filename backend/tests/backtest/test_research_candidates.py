@@ -9,6 +9,9 @@ from app.backtest.candidates import (
     CandidateStoreError,
     CandidateValidationError,
 )
+from app.services.user_context import user_data_dir
+
+pytestmark = pytest.mark.usefixtures("private_owner")
 
 
 def _create(store: CandidateStore):
@@ -204,7 +207,7 @@ def test_candidate_rejects_non_json_config(tmp_path):
 
 
 def test_candidate_loads_legacy_missing_optional_fields(tmp_path):
-    path = tmp_path / "user_data" / "research_candidates.json"
+    path = user_data_dir(tmp_path) / "user_data" / "research_candidates.json"
     path.parent.mkdir(parents=True)
     path.write_text(
         json.dumps(
@@ -229,7 +232,7 @@ def test_candidate_loads_legacy_missing_optional_fields(tmp_path):
 
 
 def test_candidate_corrupt_file_fails_closed(tmp_path):
-    path = tmp_path / "user_data" / "research_candidates.json"
+    path = user_data_dir(tmp_path) / "user_data" / "research_candidates.json"
     path.parent.mkdir(parents=True)
     path.write_text("{broken", encoding="utf-8")
     store = CandidateStore(tmp_path)

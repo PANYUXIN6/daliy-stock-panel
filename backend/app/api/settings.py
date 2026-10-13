@@ -82,7 +82,7 @@ def get_settings() -> dict:
 
     key = secrets_store.get_tickflow_key()
     ai_provider = secrets_store.get_ai_config("ai_provider", settings.ai_provider)
-    return {
+    result = {
         "mode": tf_client.current_mode(),
         "tickflow_api_key_masked": "",
         "has_tickflow_key": bool(key),
@@ -108,6 +108,14 @@ def get_settings() -> dict:
         "ai_context_window": current_ai_context_window(),
         "ai_round_checkpoint": current_ai_round_checkpoint(),
     }
+
+    from app.services.user_context import current_user
+    user = current_user(required=False)
+    if user is not None and user.role != "admin":
+        readable = {"mode", "tier_label", "ai_provider", "has_ai_key", "ai_configured",
+                    "ai_model", "ai_max_output_tokens", "ai_context_window", "ai_round_checkpoint"}
+        return {key: value for key, value in result.items() if key in readable}
+    return result
 
 
 class SwitchEndpointIn(BaseModel):
@@ -169,6 +177,8 @@ class AiSettingsIn(BaseModel):
 @router.post("/ai")
 def save_ai_settings(req: AiSettingsIn) -> dict:
     """保存 AI 非密钥选项；密钥由后端环境配置提供。"""
+    if req.provider not in {"openai", "openai_compat"}:
+        raise HTTPException(status_code=403, detail="仅支持模型 API，本地 Codex CLI 模式已停用")
     if req.api_key is not None:
         raise HTTPException(status_code=403, detail="AI API Key 由后端配置，请修改后端 .env 后重启服务")
     from app.config import settings
@@ -406,7 +416,7 @@ class MiningSchedulePrefs(BaseModel):
 def get_preferences() -> dict:
     """返回用户偏好设置。"""
     from app.services import preferences
-    return {
+    result = {
         "realtime_quotes_enabled": preferences.get_realtime_quotes_enabled(),
         "realtime_allowed": _realtime_allowed(),
         "watchlist_groups_in_nav": preferences.get_watchlist_groups_in_nav(),
@@ -473,6 +483,19 @@ def get_preferences() -> dict:
         "review_push_mode": preferences.get_review_push_mode(),
         **preferences.get_mining_schedule(),
     }
+
+    from app.services.user_context import current_user
+    user = current_user(required=False)
+    if user is not None and user.role != "admin":
+        # Only display capabilities and this account's preferences to ordinary users.
+        readable = preferences.PERSONAL_KEYS | {
+            "realtime_quotes_enabled", "realtime_allowed", "minute_history_days",
+            "daily_data_provider", "adj_factor_provider", "minute_data_provider",
+            "full_minute_data_provider", "depth5_data_provider", "realtime_data_provider",
+            "financial_data_provider", "ordinary_minute_enabled",
+        }
+        return {key: value for key, value in result.items() if key in readable}
+    return result
 
 
 @router.get("/data-sources")
@@ -988,27 +1011,43 @@ def update_realtime_monitor_config(req: RealtimeMonitorConfigIn, request: Reques
     from app.services import preferences
 
     cfg = req.model_dump(exclude_none=True)
+    from app.services.user_context import current_user
+    user = current_user(required=False)
+    if user is not None and user.role != "admin" and cfg.keys() - preferences.PERSONAL_KEYS:
+        raise HTTPException(status_code=403, detail="采集设置仅限管理员修改")
     result = preferences.set_realtime_monitor_config(cfg)
 
     # 策略监控开关/池变化 → 同步迁移为 type=strategy 规则 + reload 引擎
     if req.strategy_monitor_ids is not None or req.strategy_monitor_enabled is not None:
-        monitor_engine = getattr(request.app.state, "monitor_engine", None)
-        strategy_engine = getattr(request.app.state, "strategy_engine", None)
-        data_dir = request.app.state.repo.store.data_dir
-        if monitor_engine is not None and strategy_engine is not None:
+        try:
+            from app.services.user_runtime import runtime_for
             from app.strategy import monitor_rules as mr_store
-            try:
-                if preferences.get_strategy_monitor_enabled():
-                    ids = preferences.get_strategy_monitor_ids()
-                    names = {s.id: s.name for s in strategy_engine.list_strategies()}
-                    mr_store.migrate_strategy_monitors(data_dir, ids, names)
-                else:
-                    # 关闭策略监控: 停用所有策略规则
-                    mr_store.migrate_strategy_monitors(data_dir, [], {})
-                # reload 规则到引擎
-                monitor_engine.set_rules(mr_store.load_all(data_dir))
-            except Exception:
-                logger.exception("strategy monitor reload failed")
+            runtime = runtime_for(request)
+            monitor_engine = runtime.monitor_engine
+            strategy_engine = runtime.strategy_engine
+            data_dir = request.app.state.repo.store.data_dir
+            previous_ids = {
+                rule["strategy_id"] for rule in monitor_engine.rules.values()
+                if rule.get("type") == "strategy"
+            }
+            if preferences.get_strategy_monitor_enabled():
+                ids = preferences.get_strategy_monitor_ids()
+                names = {s["id"]: s["name"] for s in strategy_engine.list_strategies()}
+                mr_store.migrate_strategy_monitors(data_dir, ids, names)
+            else:
+                # 关闭策略监控: 停用偏好监控池迁移的规则
+                mr_store.migrate_strategy_monitors(data_dir, [], {})
+            # reload 规则到引擎
+            monitor_engine.set_rules(mr_store.load_all(data_dir))
+            active_ids = {
+                rule["strategy_id"] for rule in monitor_engine.rules.values()
+                if rule.get("type") == "strategy"
+            }
+            for strategy_id in previous_ids - active_ids:
+                monitor_engine.invalidate_strategy_state(strategy_id)
+        except Exception:
+            logger.exception("strategy monitor reload failed")
+            raise HTTPException(status_code=503, detail="策略监控配置已保存，但运行状态同步失败，请重试") from None
 
     return result
 

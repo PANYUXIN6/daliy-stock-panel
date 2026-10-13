@@ -9,10 +9,13 @@ change_pct / amplitude 在 enriched 里是小数。提示词却写「涨跌幅/�
 from __future__ import annotations
 
 import polars as pl
+import pytest
 
 from app.custom.assistant import tools as assistant_tools
 from app.custom.assistant.prompt import build_system_prompt
 from app.services.quote_service import QuoteService
+
+pytestmark = pytest.mark.usefixtures("authenticated_actor")
 
 
 def _unit_lines() -> list[str]:

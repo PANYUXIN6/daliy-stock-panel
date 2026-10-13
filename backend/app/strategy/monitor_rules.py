@@ -22,6 +22,7 @@ from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 from app.services.fs_utils import atomic_write_text
+from app.services.private_storage import identifier, private_path
 from app.strategy.custom_signals import ALLOWED_FIELDS
 from app.strategy.intraday_signals import uses_intraday_signals
 
@@ -66,13 +67,13 @@ _SIGNAL_PREFIXES = ("signal_", "csg_")
 
 # ── 持久化 (镜像 custom_signals.py) ─────────────────────
 def _dir(data_dir: Path) -> Path:
-    d = data_dir / "user_data" / "monitor_rules"
+    d = private_path(data_dir, "user_data", "monitor_rules")
     d.mkdir(parents=True, exist_ok=True)
     return d
 
 
 def _path(data_dir: Path, rule_id: str) -> Path:
-    return _dir(data_dir) / f"{rule_id}.json"
+    return _dir(data_dir) / f"{identifier(rule_id)}.json"
 
 
 def load_all(data_dir: Path) -> list[dict]:

@@ -1,14 +1,12 @@
 from __future__ import annotations
 
-from types import SimpleNamespace
+from contextlib import asynccontextmanager
 
 import pytest
 
 from app.api.strategy import (
-    StrategyCodeSaveRequest,
     StrategyCodeValidateRequest,
     _prepare_strategy_code,
-    _save_strategy_code,
 )
 from app.strategy.engine import StrategyEngine
 
@@ -42,14 +40,6 @@ def filter(df: pl.DataFrame, params: dict) -> pl.Expr:
 '''
 
 
-def _request(tmp_path):
-    ai_dir = tmp_path / "strategies" / "ai"
-    custom_dir = tmp_path / "strategies" / "custom"
-    engine = StrategyEngine(strategy_dirs=[custom_dir, ai_dir])
-    repo = SimpleNamespace(store=SimpleNamespace(data_dir=tmp_path))
-    return SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(repo=repo, strategy_engine=engine)))
-
-
 def test_prepare_strategy_code_rejects_forbidden_import():
     req = StrategyCodeValidateRequest(
         strategy_id="custom_bad",
@@ -73,122 +63,71 @@ def test_prepare_strategy_code_rejects_unknown_scoring_field():
         _prepare_strategy_code(req)
 
 
-def test_save_strategy_code_creates_ai_strategy_in_ai_dir(tmp_path):
-    request = _request(tmp_path)
-    req = StrategyCodeSaveRequest(
-        strategy_id="ai_saved",
-        target_source="ai",
-        mode="create",
-        code=_code("wrong"),
-        name="AI 策略",
-    )
+@pytest.fixture(params=['admin', 'guest', 'pro'])
+def code_client(request, tmp_path):
+    from fastapi.testclient import TestClient
 
-    result = _save_strategy_code(req, request)
+    from app.api.auth import COOKIE_NAME
+    from app.main import create_app
+    from app.services.auth import AuthStore
 
-    assert result["ok"] is True
-    assert result["source"] == "ai"
-    assert (tmp_path / "strategies" / "ai" / "ai_saved.py").exists()
-    loaded = request.app.state.strategy_engine.get("ai_saved")
-    assert loaded.source == "ai"
-    assert loaded.file_path == tmp_path / "strategies" / "ai" / "ai_saved.py"
+    store = AuthStore(tmp_path)
+    store.bootstrap('admin', 'initial-secret')
+    role = request.param
+    username = 'admin'
+    password = 'initial-secret'
+    if role != 'admin':
+        username = role
+        store.create_user(username, 'temporary-secret', role, '2099-12-31' if role == 'pro' else None)
+        token, _ = store.login(username, 'temporary-secret', 'test', '')
+        store.change_password(token, 'temporary-secret', 'changed-secret')
+        password = 'changed-secret'
+    token, _ = store.login(username, password, 'test', '')
 
+    @asynccontextmanager
+    async def lifespan(app):
+        app.state.auth_store = store
+        yield
 
-def test_save_strategy_code_creates_custom_strategy_in_custom_dir(tmp_path):
-    request = _request(tmp_path)
-    req = StrategyCodeSaveRequest(
-        strategy_id="custom_saved",
-        target_source="custom",
-        mode="create",
-        code=_code("wrong"),
-        name="自定义策略",
-    )
-
-    result = _save_strategy_code(req, request)
-
-    assert result["ok"] is True
-    assert result["source"] == "custom"
-    assert (tmp_path / "strategies" / "custom" / "custom_saved.py").exists()
-    loaded = request.app.state.strategy_engine.get("custom_saved")
-    assert loaded.source == "custom"
-    assert loaded.file_path == tmp_path / "strategies" / "custom" / "custom_saved.py"
+    app = create_app('collector')
+    app.router.lifespan_context = lifespan
+    with TestClient(app) as client:
+        client.cookies.set(COOKIE_NAME, token)
+        yield client
 
 
-def test_save_strategy_code_updates_existing_source_file(tmp_path):
-    request = _request(tmp_path)
-    create = StrategyCodeSaveRequest(
-        strategy_id="custom_update",
-        target_source="custom",
-        mode="create",
-        code=_code("custom_update", "旧名称"),
-    )
-    _save_strategy_code(create, request)
-
-    update = StrategyCodeSaveRequest(
-        strategy_id="custom_update",
-        target_source="ai",
-        mode="update",
-        code=_code("custom_update", "新名称"),
-    )
-    result = _save_strategy_code(update, request)
-
-    assert result["source"] == "custom"
-    custom_path = tmp_path / "strategies" / "custom" / "custom_update.py"
-    assert custom_path.exists()
-    assert not (tmp_path / "strategies" / "ai" / "custom_update.py").exists()
-    assert '"name": "新名称"' in custom_path.read_text(encoding="utf-8")
-
-
-def test_save_strategy_code_rejects_undefined_custom_signal(tmp_path):
-    """REQUIRED_FEATURES 引用未定义的自定义信号 → 拒绝保存并恢复文件。
-
-    回归: 之前保存不校验, 运行期才抛 polars 缺列错 (500)。
-    """
-    request = _request(tmp_path)
-    code = _code("custom_missing_sig") + (
-        '\nREQUIRED_FEATURES = {"csg_oversold_macd_about_to_golden"}\n'
-    )
-    req = StrategyCodeSaveRequest(
-        strategy_id="custom_missing_sig",
-        target_source="custom",
-        mode="create",
-        code=code,
-        name="引用不存在信号的策略",
-    )
-
-    with pytest.raises(ValueError, match="csg_oversold_macd_about_to_golden"):
-        _save_strategy_code(req, request)
-
-    # 校验失败不落盘
-    assert not (tmp_path / "strategies" / "custom" / "custom_missing_sig.py").exists()
-
-
-def test_save_strategy_code_ok_when_custom_signal_defined(tmp_path):
-    """信号已定义时, 引用它的策略可以正常保存。"""
-    from app.strategy import custom_signals
-
-    custom_signals.save_one(tmp_path, {
-        "id": "oversold_macd_about_to_golden",
-        "name": "超跌接近金叉",
-        "kind": "entry",
-        "conditions": [
-            {"left": "momentum_60d", "op": "<=", "right": "-0.30",
-             "leftDays": 0, "rightDays": 0},
-        ],
-        "enabled": True,
+@pytest.mark.parametrize('source,mode', [('ai', 'create'), ('custom', 'create'), ('custom', 'update')])
+def test_web_code_save_rejected_for_every_role(code_client, tmp_path, source, mode):
+    target = tmp_path / 'strategies' / 'templates' / 'custom_saved.py'
+    target.parent.mkdir(parents=True)
+    original = _code('custom_saved', '服务器可信模板')
+    target.write_text(original)
+    response = code_client.post('/api/strategies/code/save', json={
+        'strategy_id': 'custom_saved', 'target_source': source, 'mode': mode,
+        'code': _code('custom_saved', '网页替换'),
     })
-    request = _request(tmp_path)
-    code = _code("custom_with_sig") + (
-        '\nREQUIRED_FEATURES = {"csg_oversold_macd_about_to_golden"}\n'
-    )
-    req = StrategyCodeSaveRequest(
-        strategy_id="custom_with_sig",
-        target_source="custom",
-        mode="create",
-        code=code,
-        name="引用已定义信号的策略",
-    )
+    assert response.status_code == 403
+    assert 'Python' in response.json()['detail']
+    assert target.read_text() == original
+    assert not (tmp_path / 'users').exists()
 
-    result = _save_strategy_code(req, request)
-    assert result["ok"] is True
-    loaded = request.app.state.strategy_engine.get("custom_with_sig")
-    assert "csg_oversold_macd_about_to_golden" in loaded.required_features
+
+@pytest.mark.parametrize('path', ['/api/strategies/code/validate', '/api/strategies/ai/save'])
+def test_other_web_python_entrypoints_rejected(code_client, path):
+    response = code_client.post(path, json={'strategy_id': 'custom_test', 'code': _code('custom_test')})
+    assert response.status_code == 403
+    assert 'Python' in response.json()['detail']
+
+
+def test_server_maintained_template_remains_loadable(tmp_path):
+    import polars as pl
+
+    directory = tmp_path / 'strategies' / 'templates'
+    directory.mkdir(parents=True)
+    target = directory / 'custom_trusted.py'
+    target.write_text(_code('custom_trusted', '服务器可信模板'))
+    engine = StrategyEngine(strategy_dirs=[directory])
+    strategy = engine.get('custom_trusted')
+    assert strategy.file_path == target
+    assert strategy.meta['name'] == '服务器可信模板'
+    assert pl.DataFrame({'close': [10.0]}).filter(strategy.filter_fn(pl.DataFrame(), {})).height == 1

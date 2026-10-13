@@ -23,6 +23,9 @@ from app.custom.assistant import actions as assistant_actions
 from app.custom.assistant import chat_service
 from app.custom.assistant import tools as assistant_tools
 from app.extensions.loader import configure_backend_extensions
+from app.services.user_context import user_data_dir
+
+pytestmark = pytest.mark.usefixtures("authenticated_actor")
 
 # ── PendingRegistry 单元: 批准 / 拒绝 / 超时 / 未知 id ─────────────
 
@@ -194,7 +197,7 @@ def test_create_signal_strategy_roundtrip(tmp_path: Path) -> None:
     assert payload["created"] is True
     sig = payload["signal"]
     assert sig["id"].startswith("csg_a")
-    files = list((tmp_path / "user_data" / "custom_signals").glob("*.json"))
+    files = list((user_data_dir(tmp_path) / "user_data" / "custom_signals").glob("*.json"))
     assert len(files) == 1
     saved = json.loads(files[0].read_text(encoding="utf-8"))
     assert saved["id"] == sig["id"]
@@ -213,7 +216,7 @@ def test_create_signal_strategy_rejects_unknown_field(tmp_path: Path) -> None:
             ctx,
         )
     # 校验失败不应落盘
-    assert not list((tmp_path / "user_data" / "custom_signals").glob("*.json"))
+    assert not list((user_data_dir(tmp_path) / "user_data" / "custom_signals").glob("*.json"))
 
 
 def test_create_signal_strategy_requires_conditions(tmp_path: Path) -> None:

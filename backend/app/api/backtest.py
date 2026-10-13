@@ -7,6 +7,7 @@ import json
 import logging
 import threading
 import time
+from contextvars import copy_context
 from dataclasses import asdict
 from datetime import date, timedelta
 from typing import Literal
@@ -16,11 +17,14 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from app.config import settings
+from app.services.auth import AuthError, require_current_session
 from app.services.backtest import (
     BacktestConfig,
     BacktestService,
     VectorbtUnavailable,
 )
+from app.services.user_context import current_user
+from app.services.user_runtime import runtime_for
 
 logger = logging.getLogger(__name__)
 
@@ -353,7 +357,7 @@ def _guard_minute_strategy_backtest(
     request: Request, strategy_id: str, start: date, asset_type: str,
 ) -> None:
     """分钟策略回测入口守卫: 仅 A 股 + 本地分钟K覆盖检查 (fail-fast)。"""
-    engine = getattr(request.app.state, "strategy_engine", None)
+    engine = runtime_for(request).strategy_engine
     if engine is None:
         return
     try:
@@ -422,9 +426,10 @@ def strategy_run(req: StrategyBacktestRequest, request: Request):
 
 class _BacktestJob:
     """单个回测任务的状态, 存模块级供重连使用。"""
-    __slots__ = ("cancel_event", "done", "error", "finish_ts", "key", "progress", "result")
+    __slots__ = ("cancel_event", "done", "error", "finish_ts", "key", "owner_id", "progress", "result")
 
     def __init__(self, key: str):
+        self.owner_id = current_user().id
         self.key = key
         self.cancel_event = threading.Event()
         self.progress: list[dict] = []   # 进度历史 (新连接可回放)
@@ -482,7 +487,7 @@ def _make_job_key(
     regime_filter: str | None = None,
 ) -> str:
     raw = f"{strategy_id}|{symbols}|{start}|{end}|{matching}|{entry_fill}|{exit_fill}|{fees_pct}|{slippage_bps}|{max_positions}|{max_exposure_pct}|{initial_capital}|{position_sizing}|{params}|{overrides}|{mode}|{holding_days}|{commission_pct}|{stamp_tax_pct}|{asset_type}|{minute_fill}|{regime_filter}"
-    return hashlib.md5(raw.encode()).hexdigest()[:12]
+    return current_user().id + ":" + hashlib.md5(raw.encode()).hexdigest()[:12]
 
 
 @router.get("/strategy/stream")
@@ -636,7 +641,7 @@ async def strategy_stream(
                     _finish_job(job, error=str(e))
 
             # 启动后台线程 (不阻塞事件循环)
-            threading.Thread(target=_run_backtest, daemon=True).start()
+            threading.Thread(target=copy_context().run, args=(_run_backtest,), daemon=True).start()
 
         # 订阅进度: 用读指针读 job.progress 列表 (多连接互不干扰)
         cursor = 0
@@ -644,6 +649,10 @@ async def strategy_stream(
 
         try:
             while True:
+                try:
+                    require_current_session()
+                except AuthError:
+                    return
                 # 已完成: 推送最终结果/错误并退出
                 if job.done:
                     if job.error:
@@ -719,7 +728,7 @@ async def strategy_cancel(request: Request):
     # 持锁读任务表: 与 _cleanup_stale_jobs 的 pop、stream 的写入互斥
     with _jobs_lock:
         job = _running_jobs.get(job_key)
-    if job and not job.done:
+    if job and job.owner_id == current_user().id and not job.done:
         job.cancel_event.set()
         return {"ok": True}
     return {"ok": False, "message": "任务不存在或已完成"}
@@ -768,7 +777,7 @@ def _make_opt_job_key(
         f"OPT|{strategy_id}|{symbols}|{start}|{end}|{param_grid}|{objective}|"
         f"{direction}|{bt_sig}|{params}|{overrides}|cache={matrix_cache_max_mb}"
     )
-    return hashlib.md5(raw.encode()).hexdigest()[:12]
+    return current_user().id + ":" + hashlib.md5(raw.encode()).hexdigest()[:12]
 
 
 def _opt_backtest_kwargs(
@@ -942,12 +951,16 @@ async def optimize_stream(
                         logger.exception("backtest worker failed")
                         _finish_job(job, error=str(e))
 
-                threading.Thread(target=_run_opt, daemon=True).start()
+                threading.Thread(target=copy_context().run, args=(_run_opt,), daemon=True).start()
 
         cursor = 0
         tick = 0
         try:
             while True:
+                try:
+                    require_current_session()
+                except AuthError:
+                    return
                 if job.done:
                     if job.error:
                         yield f"event: error\ndata: {json.dumps({'message': job.error}, ensure_ascii=False)}\n\n"
@@ -982,7 +995,7 @@ async def optimize_cancel(request: Request):
     body = await request.json()
     job_key = body.get("job_key", "")
     job = _running_jobs.get(job_key)
-    if job and not job.done:
+    if job and job.owner_id == current_user().id and not job.done:
         job.cancel_event.set()
         return {"ok": True}
     return {"ok": False, "message": "任务不存在或已完成"}
@@ -1010,7 +1023,7 @@ def _make_wf_job_key(
         f"WF|{strategy_id}|{symbols}|{start}|{end}|{param_grid}|{objective}|"
         f"{direction}|{windows}|{bt_sig}|{params}|{overrides}|cache={matrix_cache_max_mb}"
     )
-    return hashlib.md5(raw.encode()).hexdigest()[:12]
+    return current_user().id + ":" + hashlib.md5(raw.encode()).hexdigest()[:12]
 
 
 @router.get("/walkforward/stream")
@@ -1171,12 +1184,16 @@ async def walkforward_stream(
                         logger.exception("backtest worker failed")
                         _finish_job(job, error=str(e))
 
-                threading.Thread(target=_run_wf, daemon=True).start()
+                threading.Thread(target=copy_context().run, args=(_run_wf,), daemon=True).start()
 
         cursor = 0
         tick = 0
         try:
             while True:
+                try:
+                    require_current_session()
+                except AuthError:
+                    return
                 if job.done:
                     if job.error:
                         yield f"event: error\ndata: {json.dumps({'message': job.error}, ensure_ascii=False)}\n\n"
@@ -1205,7 +1222,7 @@ async def walkforward_cancel(request: Request):
     body = await request.json()
     job_key = body.get("job_key", "")
     job = _running_jobs.get(job_key)
-    if job and not job.done:
+    if job and job.owner_id == current_user().id and not job.done:
         job.cancel_event.set()
         return {"ok": True}
     return {"ok": False, "message": "任务不存在或已完成"}

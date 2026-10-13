@@ -21,6 +21,8 @@ from app.backtest.matrix import build_market_data_matrix
 from app.backtest.strategy import StrategyBacktestConfig, StrategyBacktestService
 from app.strategy.engine import StrategyEngine
 
+pytestmark = pytest.mark.usefixtures("private_owner")
+
 
 def _synthetic_panel() -> pl.DataFrame:
     """构造上涨趋势的合成 panel: 前 50 天横盘, 后 50 天上涨, 制造金叉信号。"""
@@ -154,17 +156,17 @@ def test_composite_backtest_intersect_min1_equals_union(composite_setup):
     assert len(result.trades) > 0, "min_confirm=1 应产出交易(等价 union)"
 
 
-def test_worker_strategy_dirs_includes_composite(tmp_path):
-    """回归: 回测 worker 子进程重建引擎时必须扫描 composite 目录。
+def test_worker_strategy_dirs_includes_composite(tmp_path, private_owner):
+    """回归: worker 加载受信任策略和当前用户的声明式 composite。
 
     缺陷历史: worker._strategy_dirs 曾遗漏 composite 目录, 导致回测子进程
-    找不到 composite 策略(报 unknown strategy)。main.py 与 worker.py 必须一致。
+    找不到 composite 策略(报 unknown strategy)。个人 custom/ai Python 不得加载。
     """
     from app.backtest.worker import _strategy_dirs
 
     dirs = _strategy_dirs(tmp_path)
-    dir_names = [d.name for d in dirs]
-    assert "builtin" in dir_names
-    assert "composite" in dir_names, f"worker._strategy_dirs 缺 composite 目录: {dir_names}"
-    assert "custom" in dir_names
-    assert "ai" in dir_names
+    assert set(dirs) == {
+        Path(__file__).resolve().parents[2] / "app" / "strategy" / "builtin",
+        tmp_path / "strategies" / "templates",
+        tmp_path / "users" / private_owner.id / "strategies" / "composite",
+    }

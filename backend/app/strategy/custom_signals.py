@@ -23,6 +23,7 @@ from pathlib import Path
 import polars as pl
 
 from app.services.fs_utils import atomic_write_text
+from app.services.private_storage import identifier, private_path
 
 logger = logging.getLogger(__name__)
 
@@ -132,13 +133,13 @@ def materialize_factor_columns(
 
 # ── 持久化（镜像 strategy/config.py 的写法）──────────────
 def _dir(data_dir: Path) -> Path:
-    d = data_dir / "user_data" / "custom_signals"
+    d = private_path(data_dir, "user_data", "custom_signals")
     d.mkdir(parents=True, exist_ok=True)
     return d
 
 
 def _path(data_dir: Path, signal_id: str) -> Path:
-    return _dir(data_dir) / f"{signal_id}.json"
+    return _dir(data_dir) / f"{identifier(signal_id)}.json"
 
 
 def load_all(data_dir: Path) -> list[dict]:
@@ -526,19 +527,32 @@ def load_intraday_all(data_dir: Path) -> list[dict]:
     """
     d = _dir(data_dir)
     fp = _dir_fingerprint(d)
-    cached = _intraday_cache.get(data_dir)
+    cached = _intraday_cache.get(d)
     if cached is not None and cached[0] == fp:
         return cached[1]
     sigs = [
         s for s in load_all(data_dir)
         if s.get("timeframe") == TIMEFRAME_INTRADAY and s.get("enabled") is not False
     ]
-    _intraday_cache[data_dir] = (fp, sigs)
+    _intraday_cache[d] = (fp, sigs)
     return sigs
 
 
-def invalidate_intraday_cache() -> None:
-    _intraday_cache.clear()
+def invalidate_intraday_cache(data_dir: Path | None = None) -> None:
+    from app.services.user_context import current_user
+    owner = current_user(required=False)
+    if owner is not None:
+        _intraday_cache.pop(_dir(data_dir or owner.data_dir), None)
+
+
+def definition_fingerprint():
+    """现有文件修改时间指纹用于失效当前用户的派生计算。"""
+    from app.services.user_context import current_user
+    owner = current_user(required=False)
+    if owner is None:
+        return None
+    directory = _dir(owner.data_dir)
+    return str(directory), _dir_fingerprint(directory)
 
 
 # ── 信号命名映射 (告警文案把 csg_/csgi_ 列名翻译成用户命名) ──────────
@@ -552,7 +566,7 @@ def signal_names(data_dir: Path) -> dict[str, str]:
     """
     d = _dir(data_dir)
     fp = _dir_fingerprint(d)
-    cached = _names_cache.get(data_dir)
+    cached = _names_cache.get(d)
     if cached is not None and cached[0] == fp:
         return cached[1]
     names: dict[str, str] = {}
@@ -561,5 +575,72 @@ def signal_names(data_dir: Path) -> dict[str, str]:
         if sid and name:
             names[column_name(sid)] = name
             names[intraday_column_name(sid)] = name
-    _names_cache[data_dir] = (fp, names)
+    _names_cache[d] = (fp, names)
     return names
+
+
+def apply_user_signals(frame: pl.DataFrame | None, *, allow_shift: bool = True) -> pl.DataFrame | None:
+    """Compute personal columns on an immutable caller-local frame, never shared caches."""
+    from app.services.user_context import current_user
+    user = current_user(required=False)
+    if user is None or frame is None or frame.is_empty():
+        return frame
+    definitions = [sig for sig in load_all(user.data_dir)
+                   if sig.get('timeframe', TIMEFRAME_DAILY) == TIMEFRAME_DAILY]
+    expressions = build_expressions(definitions, allow_shift=allow_shift)
+    # Drop any stale personal columns produced by an older shared cache.
+    frame = frame.drop([c for c in frame.columns if c.startswith(PREFIX)], strict=False)
+    frame = materialize_factor_columns(frame, expressions)
+    return inject(frame, expressions)
+
+
+def required_user_history() -> int:
+    from app.services.user_context import current_user
+    user = current_user(required=False)
+    if user is None:
+        return 1
+    definitions = load_all(user.data_dir)
+    return max((int(condition.get(key, 0) or 0) + 1
+                for definition in definitions if definition.get('enabled') is not False
+                for condition in definition.get('conditions', [])
+                for key in ('leftDays', 'rightDays')), default=1)
+
+
+def apply_user_context(context):
+    from dataclasses import replace
+
+    from app.services.user_context import current_user
+    owner = current_user(required=False)
+    if context.timeframe != '1d' or owner is None:
+        return context
+    history, current = context.history, context.current
+    definitions = [sig for sig in load_all(owner.data_dir)
+                   if sig.get('timeframe', TIMEFRAME_DAILY) == TIMEFRAME_DAILY]
+    if not definitions or not build_expressions(definitions):
+        def without_stale_signals(frame):
+            if frame is None:
+                return None
+            stale = [name for name in frame.columns if name.startswith(PREFIX)]
+            return frame.drop(stale) if stale else frame
+        return replace(context, history=without_stale_signals(history),
+                       current=without_stale_signals(current))
+    if history is None or history.is_empty() or current is None or current.is_empty():
+        return replace(context, history=apply_user_signals(history),
+                       current=apply_user_signals(current, allow_shift=False))
+    keys = ['symbol', 'date']
+    if not set(keys).issubset(history.columns) or 'symbol' not in current.columns:
+        return replace(context, history=apply_user_signals(history),
+                       current=apply_user_signals(current, allow_shift=False))
+    had_date = 'date' in current.columns
+    live = current if had_date else current.with_columns(pl.lit(context.as_of).alias('date'))
+    # Replace only matching live rows; symbols missing from this quote retain history.
+    previous = history.join(live.select(keys).unique(), on=keys, how='anti')
+    panel = pl.concat([previous, live], how='diagonal_relaxed').sort(keys)
+    history = apply_user_signals(panel)
+    columns = [name for name in history.columns if name.startswith(PREFIX)]
+    current = live.drop([name for name in live.columns if name.startswith(PREFIX)])
+    if columns:
+        current = current.join(history.select(*keys, *columns), on=keys, how='left', maintain_order='left')
+    if not had_date:
+        current = current.drop('date')
+    return replace(context, current=current, history=history)

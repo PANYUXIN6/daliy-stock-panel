@@ -1,3 +1,4 @@
+import { accountStorage } from '@/lib/sessionRuntime'
 /**
  * 模拟盘 (虚拟账户) — 多账户对比主视图 + 行展开账户操作。
  *
@@ -158,7 +159,7 @@ type NewAccountDefaults = {
 
 function loadNewAccountDefaults(): Required<NewAccountDefaults> {
   let saved: NewAccountDefaults = {}
-  try { saved = JSON.parse(localStorage.getItem(NEW_ACCOUNT_DEFAULTS_KEY) || '{}') } catch { /* 忽略坏数据 */ }
+  try { saved = JSON.parse(accountStorage.getItem(NEW_ACCOUNT_DEFAULTS_KEY) || '{}') } catch { /* 忽略坏数据 */ }
   return {
     cash: saved.cash ?? '1000000',
     commissionWan: saved.commissionWan ?? '2.5',   // 万2.5
@@ -190,7 +191,7 @@ function SetupCard({ accId, onDone, onCancel }: { accId: string; onDone: (create
     onSuccess: r => {
       // 记住本次取值, 作为下次新建账户的默认
       try {
-        localStorage.setItem(NEW_ACCOUNT_DEFAULTS_KEY, JSON.stringify({
+        accountStorage.setItem(NEW_ACCOUNT_DEFAULTS_KEY, JSON.stringify({
           cash, commissionWan, stampQian, slippageBps,
         }))
       } catch { /* 存储不可用时静默 */ }
@@ -1342,7 +1343,7 @@ function BatchCreateModal({ onClose, onCreated }: { onClose: () => void; onCreat
     onSuccess: r => {
       qc.invalidateQueries({ queryKey: QK.paperAll })
       try {
-        localStorage.setItem(NEW_ACCOUNT_DEFAULTS_KEY, JSON.stringify({ cash, commissionWan, stampQian, slippageBps }))
+        accountStorage.setItem(NEW_ACCOUNT_DEFAULTS_KEY, JSON.stringify({ cash, commissionWan, stampQian, slippageBps }))
       } catch { /* 存储不可用时静默 */ }
       onCreated(r.created.length)
     },

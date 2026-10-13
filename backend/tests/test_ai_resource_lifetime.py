@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import asyncio
-import threading
-from pathlib import Path
+import subprocess
+import tempfile
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import anyio
 import pytest
@@ -13,46 +13,26 @@ from app.services import ai_provider
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('level_cancel', [False, True])
-async def test_cancelled_codex_holds_slot_and_directory_until_process_exits(monkeypatch, level_cancel):
-    entered = threading.Event()
-    release = threading.Event()
-    paths = []
-    monkeypatch.setattr(ai_provider.settings, 'ai_max_concurrent', 1)
-    monkeypatch.setattr(ai_provider, '_prepare_codex_home', lambda path: None)
-    monkeypatch.setattr(ai_provider, '_codex_base_command', lambda: ['codex'])
-    monkeypatch.setattr(ai_provider, 'current_ai_model', lambda: '')
+@pytest.mark.parametrize('entrypoint', ['cli', 'process'])
+async def test_disabled_codex_does_not_create_process_or_temporary_home(monkeypatch, entrypoint):
+    process = Mock(side_effect=AssertionError('disabled CLI must not spawn a process'))
+    temporary = Mock(side_effect=AssertionError('disabled CLI must not create a home'))
+    prepare = Mock(side_effect=AssertionError('disabled CLI must not copy credentials'))
+    monkeypatch.setattr(subprocess, 'Popen', process)
+    monkeypatch.setattr(tempfile, 'TemporaryDirectory', temporary)
+    monkeypatch.setattr(ai_provider, '_prepare_codex_home', prepare)
 
-    def process(args, prompt, env, timeout):
-        paths.append(Path(env['CODEX_HOME']).parent)
-        entered.set()
-        assert release.wait(5)
-        return 0, b'done', b''
-
-    monkeypatch.setattr(ai_provider, '_run_codex_process', process)
-    scope = anyio.CancelScope()
-
-    async def run():
-        with scope:
-            return await ai_provider._run_codex_cli([], max_tokens=None, timeout=10)
-
-    first = asyncio.create_task(run())
-    second = None
-    try:
-        while not entered.is_set():
-            await asyncio.sleep(.01)
-        if level_cancel:
-            scope.cancel()
+    with pytest.raises(RuntimeError, match='本地 Codex CLI 模式已停用'):
+        if entrypoint == 'cli':
+            await asyncio.wait_for(
+                ai_provider._run_codex_cli([], max_tokens=None, timeout=10), timeout=1,
+            )
         else:
-            first.cancel()
-        second = asyncio.create_task(ai_provider._run_codex_cli([], max_tokens=None, timeout=10))
-        await asyncio.sleep(.15)
-        assert len(paths) == 1
-        assert paths[0].exists()
-    finally:
-        release.set()
-        await asyncio.gather(first, *([second] if second else []), return_exceptions=True)
-    assert all(not path.exists() for path in paths)
+            ai_provider._run_codex_process(['codex'], '', {}, 10)
+
+    process.assert_not_called()
+    temporary.assert_not_called()
+    prepare.assert_not_called()
 
 
 @pytest.mark.asyncio

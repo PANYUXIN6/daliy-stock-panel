@@ -15,8 +15,11 @@ from app.services.mining_candidates import (
     _published_strategy_id,
 )
 from app.services.mining_jobs import MiningRunStore
+from app.services.user_context import user_data_dir
 from app.strategy import config as strategy_config
 from app.strategy.engine import StrategyEngine
+
+pytestmark = pytest.mark.usefixtures("private_owner")
 
 
 class _StrategyEngine:
@@ -136,7 +139,7 @@ def _real_service(
     monitor_invalidator=None,
 ) -> tuple[MiningCandidateService, StrategyEngine]:
     builtin_dir = Path(__file__).resolve().parents[1] / "app" / "strategy" / "builtin"
-    custom_dir = tmp_path / "strategies" / "custom"
+    custom_dir = user_data_dir(tmp_path) / "strategies" / "custom"
     engine = StrategyEngine(strategy_dirs=[builtin_dir, custom_dir])
     service = MiningCandidateService(
         tmp_path,
@@ -452,7 +455,7 @@ def test_publish_factor_discovers_public_strategy_and_repairs_runtime_state(tmp_
     assert strategy_config.load_override(
         tmp_path, "factor_rank_research"
     ) == {"params": {"entry_score": 99.0}}
-    assert not (tmp_path / "user_data" / "strategy_overrides" / f"{result['strategy_id']}.json").exists()
+    assert not (user_data_dir(tmp_path) / "user_data" / "strategy_overrides" / f"{result['strategy_id']}.json").exists()
     persisted = pl.read_parquet(store.artifact_path(run_id, "candidates")).row(0, named=True)
     assert persisted["published_strategy_id"] == result["strategy_id"]
     assert invalidations == [tmp_path, "monitor", tmp_path, "monitor"]
@@ -479,7 +482,7 @@ def test_publish_factor_repairs_backlink_after_source_was_verified(
         service.publish(run_id, signature)
 
     result = service.publish(run_id, signature)
-    strategy_path = tmp_path / "strategies" / "custom" / f"{result['strategy_id']}.py"
+    strategy_path = user_data_dir(tmp_path) / "strategies" / "custom" / f"{result['strategy_id']}.py"
     assert strategy_path.is_file()
     persisted = pl.read_parquet(store.artifact_path(run_id, "candidates")).row(0, named=True)
     assert persisted["published_strategy_id"] == result["strategy_id"]
@@ -493,7 +496,7 @@ def test_publish_factor_uses_server_run_scoped_id_and_refuses_collision(tmp_path
     with pytest.raises(TypeError):
         service.publish(run_id, signature, "mined_factor_caller_selected")
 
-    target = tmp_path / "strategies" / "custom" / f"{expected_id}.py"
+    target = user_data_dir(tmp_path) / "strategies" / "custom" / f"{expected_id}.py"
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text("user owned", encoding="utf-8")
     with pytest.raises(ValueError, match="collision"):
@@ -538,7 +541,7 @@ def test_publish_factor_rejects_inconsistent_backlink(tmp_path) -> None:
 
     expected_id = _published_strategy_id(run_id, signature)
     assert not engine.has(expected_id)
-    assert not (tmp_path / "strategies" / "custom" / f"{expected_id}.py").exists()
+    assert not (user_data_dir(tmp_path) / "strategies" / "custom" / f"{expected_id}.py").exists()
 
 
 def test_publish_factor_rolls_back_file_and_skips_invalidations_on_reload_failure(
@@ -568,7 +571,7 @@ def test_publish_factor_rolls_back_file_and_skips_invalidations_on_reload_failur
     with pytest.raises(RuntimeError, match="injected reload failure"):
         service.publish(run_id, signature)
 
-    assert not (tmp_path / "strategies" / "custom" / f"{expected_id}.py").exists()
+    assert not (user_data_dir(tmp_path) / "strategies" / "custom" / f"{expected_id}.py").exists()
     assert not engine.has(expected_id)
     assert invalidations == []
     persisted = pl.read_parquet(store.artifact_path(run_id, "candidates")).row(0, named=True)
@@ -595,7 +598,7 @@ def test_publish_factor_rolls_back_on_runtime_invalidation_failure(tmp_path) -> 
         service.publish(run_id, signature)
 
     assert invalidations == ["cache", "monitor"]
-    assert not (tmp_path / "strategies" / "custom" / f"{expected_id}.py").exists()
+    assert not (user_data_dir(tmp_path) / "strategies" / "custom" / f"{expected_id}.py").exists()
     assert not engine.has(expected_id)
     persisted = pl.read_parquet(store.artifact_path(run_id, "candidates")).row(0, named=True)
     assert persisted["published_strategy_id"] is None

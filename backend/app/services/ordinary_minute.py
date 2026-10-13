@@ -32,10 +32,14 @@ def minute_allowed(capset) -> bool:
 def collection_pool(repo) -> dict[str, list[str]]:
     """只依据共享工作区配置选池，不接受浏览行为添加订阅。"""
     symbols = set(CORE_INDEX_SYMBOLS)
-    symbols.update(row["symbol"] for row in watchlist.list_symbols())
-    for rule in monitor_rules.load_all(repo.store.data_dir):
-        if rule.get("enabled", True):
-            symbols.update(rule.get("symbols", []))
+    from app.services.auth import get_store
+    from app.services.user_context import UserContext, user_scope
+    for user in get_store().list_active_users():
+        with user_scope(UserContext(user['id'], user['role'], repo.store.data_dir)):
+            symbols.update(row["symbol"] for row in watchlist.list_symbols())
+            for rule in monitor_rules.load_all(repo.store.data_dir):
+                if rule.get("enabled", True):
+                    symbols.update(rule.get("symbols", []))
     groups = {asset: [] for asset in MINUTE_TABLES}
     for symbol in sorted(symbols):
         groups[repo.resolve_asset_type(symbol)].append(symbol)

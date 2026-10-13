@@ -18,6 +18,8 @@ import pytest
 from app.custom.assistant import prompt as assistant_prompt
 from app.custom.assistant import tools as assistant_tools
 
+pytestmark = pytest.mark.usefixtures("authenticated_actor")
+
 BJ = date(2026, 9, 21)  # 北京周一
 LOCAL = date(2026, 9, 20)  # 服务器本地周日
 

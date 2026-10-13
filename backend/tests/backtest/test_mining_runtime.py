@@ -23,6 +23,8 @@ from app.backtest.mining_runtime import (
 )
 from app.services import regime_builder
 
+pytestmark = pytest.mark.usefixtures("private_owner")
+
 
 def test_runtime_rejects_insufficient_balanced_range_before_loading_panel(
     tmp_path,

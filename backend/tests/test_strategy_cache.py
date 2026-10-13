@@ -1,6 +1,11 @@
 from __future__ import annotations
 
+import pytest
+
 from app.services import strategy_cache
+
+pytestmark = pytest.mark.usefixtures("private_owner")
+
 
 
 def _result(*symbols: str) -> dict:

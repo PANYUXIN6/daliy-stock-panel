@@ -211,7 +211,7 @@ $backendJob = Start-Job -Name 'backend' -ScriptBlock {
     $env:COLLECTOR_URL = "http://127.0.0.1:$collectorPort"
     Set-Location $dir
     $envArgs = if (Test-Path $envFile) { @('--env-file', $envFile) } else { @() }
-    & .\.venv\Scripts\python.exe -m uvicorn app.main:app @envArgs --reload --host $bindAddress --port $port 2>&1
+    & .\.venv\Scripts\python.exe -m uvicorn app.main:app --no-proxy-headers @envArgs --reload --host $bindAddress --port $port 2>&1
 } -ArgumentList $backendPidFile, $BackendDir, $EnvFile, $BindAddress, $BackendPort, $CollectorPort
 
 $collectorJob = Start-Job -Name 'collector' -ScriptBlock {
@@ -222,7 +222,7 @@ $collectorJob = Start-Job -Name 'collector' -ScriptBlock {
     $env:SERVICE_ROLE = 'collector'
     Set-Location $dir
     $envArgs = if (Test-Path $envFile) { @('--env-file', $envFile) } else { @() }
-    & .\.venv\Scripts\python.exe -m uvicorn app.collector:app @envArgs --host 127.0.0.1 --port $port 2>&1
+    & .\.venv\Scripts\python.exe -m uvicorn app.collector:app --no-proxy-headers @envArgs --host 127.0.0.1 --port $port 2>&1
 } -ArgumentList $collectorPidFile, $BackendDir, $EnvFile, $CollectorPort
 
 $frontendJob = Start-Job -Name 'frontend' -ScriptBlock {

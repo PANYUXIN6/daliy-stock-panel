@@ -15,6 +15,8 @@ import pytest
 
 from app.custom.assistant import tools as assistant_tools
 
+pytestmark = pytest.mark.usefixtures("authenticated_actor")
+
 _ASSET_TYPES = {"510300.SH": "etf", "000300.SH": "index"}
 
 

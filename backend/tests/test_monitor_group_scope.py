@@ -17,6 +17,9 @@ from app.services import watchlist
 from app.strategy import monitor_rules
 from app.strategy.monitor import MonitorRuleEngine
 
+pytestmark = pytest.mark.usefixtures("private_owner")
+
+
 
 def _group_rule(rid="r_grp", group_id="g1", **overrides):
     rule = {
@@ -148,7 +151,7 @@ def _fake_request(tmp_path):
     repo = MagicMock()
     repo.store.data_dir = tmp_path
     repo.resolve_asset_type.return_value = "stock"
-    return SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(repo=repo)))
+    return SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(repo=repo, user_runtimes=SimpleNamespace(get=lambda _: SimpleNamespace()))))
 
 
 def test_api_save_rejects_missing_group(monkeypatch, tmp_path):

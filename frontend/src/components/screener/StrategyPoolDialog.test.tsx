@@ -1,7 +1,5 @@
 // @vitest-environment jsdom
-// AI 标签「草稿」分区只列 AI 来源的 research_only 草稿: 发布闸 (POST /{id}/publish)
-// 仅接受 source=ai, 内置研究模板 (factor_rank_research, research_only) 混入会渲染出
-// 点了必然 400「仅 AI 策略可经发布端点上线」的「发布」按钮, 属误导性 UI。
+// 旧 AI 草稿保留可见；任何角色均不能从网页发布 Python。
 import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
@@ -66,17 +64,17 @@ afterEach(() => {
   container.innerHTML = ''
 })
 
-it('AI tab lists only ai-source drafts with a publish button', async () => {
+it('keeps old AI drafts visible without exposing Python publish or import', async () => {
   await render()
   clickAiTab()
 
   expect(container.textContent).toContain('AI突破')
   const publishBtn = Array.from(container.querySelectorAll('button'))
     .find(b => b.textContent?.includes('发布'))
-  expect(publishBtn).toBeTruthy()
-
-  await act(async () => { publishBtn!.click() })
-  expect(mockStrategyPublish).toHaveBeenCalledWith('ai_breakout_v1')
+  expect(publishBtn).toBeUndefined()
+  expect(container.querySelector('input[type="file"]')).toBeNull()
+  expect(container.textContent).toContain('需服务器维护者部署')
+  expect(mockStrategyPublish).not.toHaveBeenCalled()
 })
 
 it('builtin research template is not offered for publish anywhere in the pool', async () => {

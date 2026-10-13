@@ -10,7 +10,7 @@ import threading
 import time
 import traceback
 from collections.abc import Callable
-from contextlib import suppress
+from contextlib import ExitStack, suppress
 from dataclasses import asdict
 from datetime import date
 from pathlib import Path
@@ -83,13 +83,8 @@ def _rss_bytes() -> int:
 
 
 def _strategy_dirs(data_dir: Path) -> list[Path]:
-    app_dir = Path(__file__).resolve().parents[1]
-    return [
-        app_dir / "strategy" / "builtin",
-        data_dir / "strategies" / "custom",
-        data_dir / "strategies" / "ai",
-        data_dir / "strategies" / "composite",
-    ]
+    from app.services.user_runtime import strategy_directories
+    return strategy_directories(data_dir)
 
 
 def _decode_backtest_config(payload: dict[str, Any]):
@@ -148,7 +143,10 @@ def make_worker_task(kind: str, data_dir: Path, config) -> dict[str, Any]:
         encoded = dict(config)
     else:
         raise ValueError(f"unsupported worker task kind: {kind}")
+    from app.services.user_context import current_user
+    owner = current_user()
     return {
+        "owner": {"id": owner.id, "role": owner.role},
         "kind": kind,
         "data_dir": str(data_dir.resolve()),
         "config": encoded,
@@ -180,7 +178,11 @@ def _worker_entry(task: dict[str, Any], event_queue, cancel_event) -> None:
     sampler.start()
     started = time.perf_counter()
     store = None
+    owner_scope = ExitStack()
     try:
+        from app.services.user_context import UserContext, user_data_dir, user_scope
+        owner = task["owner"]
+        owner_scope.enter_context(user_scope(UserContext(owner["id"], owner["role"], Path(task["data_dir"]))))
         from app.backtest.engine import BacktestEngine
         from app.backtest.optimizer import StrategyOptimizer
         from app.backtest.strategy import StrategyBacktestService
@@ -199,6 +201,7 @@ def _worker_entry(task: dict[str, Any], event_queue, cancel_event) -> None:
         load_into_registry(data_dir)
         strategy_engine = StrategyEngine(
             strategy_dirs=_strategy_dirs(data_dir),
+            declarative_dirs=[user_data_dir(data_dir) / "strategies" / "composite"],
             override_loader=lambda sid: strategy_config.load_override(data_dir, sid),
         )
         service = StrategyBacktestService(BacktestEngine(repo), strategy_engine)
@@ -269,6 +272,7 @@ def _worker_entry(task: dict[str, Any], event_queue, cancel_event) -> None:
             "traceback": traceback.format_exc(),
         })
     finally:
+        owner_scope.close()
         if store is not None:
             with suppress(Exception):
                 store.db.close()

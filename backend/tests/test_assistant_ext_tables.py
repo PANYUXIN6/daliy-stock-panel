@@ -11,8 +11,12 @@ from __future__ import annotations
 from datetime import date
 from pathlib import Path
 
+import pytest
+
 from app.custom.assistant import tools as assistant_tools
 from app.services.ext_data import ExtConfig, ExtConfigStore, ExtField, rows_to_parquet
+
+pytestmark = pytest.mark.usefixtures("authenticated_actor")
 
 
 def _make_timeseries_table(data_dir: Path, days: list[str]) -> None:

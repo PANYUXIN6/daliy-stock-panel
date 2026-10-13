@@ -7,8 +7,10 @@ from pathlib import Path
 
 import pytest
 
+from app.services.user_context import user_data_dir
 from app.strategy import config as strat_config
 
+pytestmark = pytest.mark.usefixtures("private_owner")
 
 @pytest.fixture(autouse=True)
 def _clean_cache():
@@ -46,7 +48,7 @@ def test_external_file_change_visible(tmp_path):
     strat_config.save_override(tmp_path, "s1", {"params": {"p": 1}})
     assert strat_config.load_override(tmp_path, "s1")["params"]["p"] == 1
 
-    p: Path = tmp_path / "user_data" / "strategy_overrides" / "s1.json"
+    p: Path = user_data_dir(tmp_path) / "user_data" / "strategy_overrides" / "s1.json"
     p.write_text(json.dumps({"params": {"p": 2}}), encoding="utf-8")
     st = p.stat()
     os.utime(p, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000))

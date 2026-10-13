@@ -14,6 +14,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import polars as pl
+import pytest
 
 from app.services.quote_service import QuoteService
 from app.strategy.monitor import MonitorRuleEngine
@@ -40,6 +41,8 @@ class _Repo:
         )
 
 
+pytestmark = pytest.mark.usefixtures("private_owner")
+
 def _run(etf_date: date) -> list[dict]:
     engine = MonitorRuleEngine()
     engine.set_rules([{
@@ -63,7 +66,7 @@ def _run(etf_date: date) -> list[dict]:
         patch("app.services.alert_store.append_many", lambda *a, **k: None),
         patch("app.services.quote_service.cn_today", return_value=TODAY),
     ):
-        svc._evaluate_monitors(pl.DataFrame(), None)
+        svc._evaluate_user_monitors(pl.DataFrame(), None, svc._app_state)
     return broadcast
 
 

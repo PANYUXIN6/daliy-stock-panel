@@ -19,6 +19,8 @@ from app.services import strategy_cache
 AS_OF = "2026-09-04"
 
 
+pytestmark = pytest.mark.usefixtures("private_owner")
+
 @dataclass
 class _FakeResult:
     total: int = 1
@@ -51,6 +53,7 @@ class _FakeService:
 def _request(tmp_path):
     repo = SimpleNamespace(store=SimpleNamespace(data_dir=tmp_path))
     state = SimpleNamespace(repo=repo, strategy_engine=_FakeEngine(), monitor_engine=None)
+    state.user_runtimes = SimpleNamespace(get=lambda owner: state)
     return SimpleNamespace(app=SimpleNamespace(state=state))
 
 

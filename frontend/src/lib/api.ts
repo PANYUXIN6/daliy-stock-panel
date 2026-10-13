@@ -1,3 +1,4 @@
+import { sessionFetch } from '@/lib/sessionRuntime'
 // 后端 API 客户端 — 全项目统一入口
 //
 // Dev: Vite 按启动脚本解析出的 BACKEND_HOST/BACKEND_PORT 代理 /api
@@ -60,7 +61,7 @@ async function request<T>(path: string, init?: RequestOptions): Promise<T> {
   if (ctl && timeoutMs != null) timer = window.setTimeout(() => ctl.abort(), timeoutMs)
   let res: Response
   try {
-    res = await fetch(`${BASE}${path}`, {
+    res = await sessionFetch(`${BASE}${path}`, {
       ...fetchInit,
       headers,
       ...(ctl ? { signal: ctl.signal } : {}),
@@ -2196,30 +2197,34 @@ export interface SectorRotationUniverseItem {
   excluded?: boolean
 }
 
+export type UserRole = 'admin' | 'pro' | 'guest'
+export interface User {
+  id: string; username: string; is_initial_admin: boolean; role: UserRole; pro_expires_on: string | null
+  is_active: boolean; must_change_password: boolean; created_at: string
+  last_login_at: string | null; last_login_ip: string | null; login_count: number
+}
+export interface AuthStatus { configured: boolean; authenticated: boolean; user: User | null; expires_at: string | null }
+export interface LoginEvent { id: number; user_id: string | null; username: string; occurred_at: string; ip: string; user_agent: string; success: boolean; reason: string }
+
 // ===== API surface =====
 export const api = {
   health: () => request<{ status: string; version: string; mode: string }>('/health'),
 
   // ===== Auth (访问认证) =====
-  authStatus: () =>
-    request<{ configured: boolean; authenticated: boolean }>('/api/auth/status'),
-  authSetup: (password: string) =>
-    request<{ ok: boolean }>('/api/auth/setup', {
-      method: 'POST',
-      body: JSON.stringify({ password }),
-    }),
-  authLogin: (password: string) =>
-    request<{ ok: boolean }>('/api/auth/login', {
-      method: 'POST',
-      body: JSON.stringify({ password }),
-    }),
-  authLogout: () =>
-    request<{ ok: boolean }>('/api/auth/logout', { method: 'POST' }),
-  authChangePassword: (oldPassword: string, newPassword: string) =>
-    request<{ ok: boolean }>('/api/auth/change-password', {
-      method: 'POST',
-      body: JSON.stringify({ old_password: oldPassword, new_password: newPassword }),
-    }),
+  authStatus: () => request<AuthStatus>('/api/auth/status', { quiet: true }),
+  authLogin: (username: string, password: string) => request<AuthStatus>('/api/auth/login', {
+    method: 'POST', body: JSON.stringify({ username, password }), quiet: true,
+  }),
+  authLogout: () => request<{ ok: boolean }>('/api/auth/logout', { method: 'POST' }),
+  authChangePassword: (oldPassword: string, newPassword: string) => request<AuthStatus>('/api/auth/change-password', {
+    method: 'POST', body: JSON.stringify({ old_password: oldPassword, new_password: newPassword }), quiet: true,
+  }),
+  users: (search = '', offset = 0) => request<{ users: User[]; total: number }>(`/api/users?search=${encodeURIComponent(search)}&offset=${offset}&limit=50`),
+  createUser: (value: { username: string; password: string; role: UserRole; pro_expires_on?: string | null }) => request<{ user: User }>('/api/users', { method: 'POST', body: JSON.stringify(value) }),
+  updateUser: (id: string, value: { role?: UserRole; pro_expires_on?: string | null; is_active?: boolean }) => request<{ user: User }>(`/api/users/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify(value) }),
+  resetUserPassword: (id: string, password: string) => request<{ ok: boolean }>(`/api/users/${encodeURIComponent(id)}/reset-password`, { method: 'POST', body: JSON.stringify({ password }) }),
+  revokeUserSession: (id: string) => request<{ ok: boolean }>(`/api/users/${encodeURIComponent(id)}/revoke-session`, { method: 'POST' }),
+  loginEvents: (userId = '', offset = 0) => request<{ events: LoginEvent[]; total: number }>(`/api/users/login-events?user_id=${encodeURIComponent(userId)}&offset=${offset}&limit=50`),
 
   settings: () => request<SettingsState>('/api/settings'),
   /** 保存 AI 配置 */
@@ -3503,7 +3508,7 @@ export const api = {
     content?: string
     message?: string
   }> {
-    const res = await fetch('/api/financials/analyze', {
+    const res = await sessionFetch('/api/financials/analyze', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ symbol, focus: focus ?? '' }),
@@ -3577,7 +3582,7 @@ export const api = {
     content?: string
     message?: string
   }> {
-    const res = await fetch('/api/stock-analysis/analyze', {
+    const res = await sessionFetch('/api/stock-analysis/analyze', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ symbol, focus: focus ?? '' }),
@@ -3657,7 +3662,7 @@ export const api = {
     content?: string
     message?: string
   }> {
-    const res = await fetch('/api/market-recap/analyze', {
+    const res = await sessionFetch('/api/market-recap/analyze', {
       method: 'POST',
       signal,
       headers: { 'Content-Type': 'application/json' },
@@ -3706,7 +3711,7 @@ export const api = {
     content?: string
     message?: string
   }> {
-    const res = await fetch('/api/rps/rotation-analyze', {
+    const res = await sessionFetch('/api/rps/rotation-analyze', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ days, focus: focus ?? '', kind: kind ?? 'concept', level: level ?? null }),
@@ -3995,66 +4000,6 @@ export const api = {
   /** 获取策略源文件内容 */
   strategyGetSource: (id: string) =>
     request<{ code: string; source: string }>(`/api/strategies/${id}/source`),
-  strategyBuild: (step: number, payload: Record<string, any>) =>
-    request<StrategyBuildResult>(
-      '/api/strategies/build',
-      { method: 'POST', body: JSON.stringify({ step, ...payload }) },
-    ),
-
-  async *strategyBuildStream(step: number, payload: Record<string, any>): AsyncGenerator<StrategyBuildStreamEvent> {
-    const res = await fetch('/api/strategies/build/stream', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ step, ...payload }),
-    })
-    if (!res.ok) {
-      let detail = ''
-      try { const j = JSON.parse(await res.text()); detail = j.detail ?? j.message ?? '' } catch { /* ignore */ }
-      const msg = detail || `${res.status} ${res.statusText}`
-      toast(msg, 'error')
-      throw new Error(msg)
-    }
-    if (!res.body) throw new Error('响应无 body')
-
-    const reader = res.body.getReader()
-    const decoder = new TextDecoder()
-    let buf = ''
-    for (;;) {
-      const { done, value } = await reader.read()
-      if (done) break
-      buf += decoder.decode(value, { stream: true })
-      const lines = buf.split('\n')
-      buf = lines.pop() ?? ''
-      for (const line of lines) {
-        const s = line.trim()
-        if (!s) continue
-        try { yield JSON.parse(s) } catch { /* ignore */ }
-      }
-    }
-    if (buf.trim()) {
-      try { yield JSON.parse(buf.trim()) } catch { /* ignore */ }
-    }
-  },
-
-  strategyValidateCode: (payload: { code: string; strategy_id?: string; name?: string; description?: string }) =>
-    request<StrategyBuildResult>('/api/strategies/code/validate', {
-      method: 'POST',
-      body: JSON.stringify(payload),
-    }),
-
-  strategySaveCodeV2: (payload: {
-    strategy_id: string
-    code: string
-    target_source: 'ai' | 'custom'
-    mode: 'create' | 'update'
-    name?: string
-    description?: string
-  }) =>
-    request<StrategyCodeSaveResult>('/api/strategies/code/save', {
-      method: 'POST',
-      body: JSON.stringify(payload),
-    }),
-
   /** 创建/更新叠加策略(composite): 声明式引用多个子策略 */
   strategySaveComposite: (payload: {
     strategy_id: string
@@ -4070,27 +4015,7 @@ export const api = {
       body: JSON.stringify(payload),
     }),
 
-  /** 保存 AI 生成的策略文件 */
-  strategySaveCode: (strategyId: string, code: string, meta?: { name?: string; description?: string }) =>
-    request<{ ok: boolean; path: string }>('/api/strategies/ai/save', {
-      method: 'POST',
-      body: JSON.stringify({ strategy_id: strategyId, code, name: meta?.name ?? '', description: meta?.description ?? '' }),
-    }),
 
-  /** AI 迭代: 生成 v1 → 跑回测 → 诊断 → 修改 的有界闭环, 草稿已落盘 data/strategies/ai/ */
-  strategyAiIterate: (payload: {
-    name?: string
-    description?: string
-    direction?: string
-    rules?: string
-    execution_backend?: 'polars_expr' | 'matrix_native'
-    max_rounds?: number
-  }) =>
-    request<AiIterateResult>('/api/strategies/ai/iterate', {
-      method: 'POST',
-      timeoutMs: null,
-      body: JSON.stringify(payload),
-    }),
 }
 
 // ===== Pipeline =====

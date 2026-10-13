@@ -49,10 +49,11 @@ def test_proxy_routes_keep_batch_queries_local_and_forward_owner_state():
     assert collector_owns('POST', '/api/custom/assistant/chat')
 
 
-def test_web_auth_runs_before_collector_forward(monkeypatch):
+def test_web_auth_runs_before_collector_forward(monkeypatch, tmp_path):
     from app.services import auth
-    monkeypatch.setattr(auth, 'is_configured', lambda: True)
-    monkeypatch.setattr(auth, 'is_valid_session', lambda token: token == 'valid')
+    store = auth.AuthStore(tmp_path)
+    store.bootstrap('admin', 'initial-secret')
+    token, _ = store.login('admin', 'initial-secret', 'test', '')
     calls = []
 
     async def respond(request):
@@ -64,6 +65,7 @@ def test_web_auth_runs_before_collector_forward(monkeypatch):
 
     @asynccontextmanager
     async def fake_lifespan(app):
+        app.state.auth_store = store
         app.state.collector_url = 'http://collector'
         async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
             app.state.collector_client = client
@@ -75,7 +77,7 @@ def test_web_auth_runs_before_collector_forward(monkeypatch):
         assert client.post('/api/pipeline/run').status_code == 401
         assert calls == []
         from app.api.auth import COOKIE_NAME
-        client.cookies.set(COOKIE_NAME, 'valid')
+        client.cookies.set(COOKIE_NAME, token)
         response = client.post('/api/pipeline/run')
         assert response.json() == {'job_id': 'same-owner-job'}
     assert calls == [('POST', '/api/pipeline/run')]
@@ -94,6 +96,7 @@ def test_collector_initial_snapshot_includes_etf_and_index_without_stocks(tmp_pa
 
     monkeypatch.setattr(main.settings, 'data_dir', tmp_path)
     monkeypatch.setattr(main.settings, 'backtest_matrix_disk_cache_enabled', False)
+    monkeypatch.setattr(main, 'detect_capabilities', lambda: shared_runtime.CapabilitySet())
     monkeypatch.setattr(auth, 'bootstrap_from_env', lambda: None)
     monkeypatch.setattr('app.data_providers.custom.load_all', lambda: None)
     calendar_ready = []

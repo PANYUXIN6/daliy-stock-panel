@@ -18,6 +18,9 @@ from app.market_time import CN_TZ
 from app.strategy import paper, paper_auto
 from app.tickflow.repository import DataStore, KlineRepository
 
+pytestmark = pytest.mark.usefixtures("private_owner")
+
+
 SYM = "600519.SH"
 ETF = "510300.SH"
 DAY = date(2026, 9, 24)

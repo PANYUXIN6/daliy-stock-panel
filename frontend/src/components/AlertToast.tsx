@@ -1,3 +1,4 @@
+import { accountStorage } from '@/lib/sessionRuntime'
 import { useCallback, useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { motion, AnimatePresence } from 'framer-motion'
@@ -28,14 +29,14 @@ const _listeners: Set<(items: Item[]) => void> = new Set()
 /** 从 localStorage 读取配置 */
 function getEnabled(): boolean {
   try {
-    const v = localStorage.getItem('alert_toast_enabled')
+    const v = accountStorage.getItem('alert_toast_enabled')
     return v === null ? true : v === '1'   // 默认开启
   } catch { return true }
 }
 
 function getMaxVisible(): number {
   try {
-    const v = parseInt(localStorage.getItem('alert_toast_max') || '', 10)
+    const v = parseInt(accountStorage.getItem('alert_toast_max') || '', 10)
     return v >= 1 && v <= 10 ? v : 3       // 默认 3, 范围 1-10
   } catch { return 3 }
 }

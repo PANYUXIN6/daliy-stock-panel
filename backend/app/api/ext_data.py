@@ -1477,6 +1477,9 @@ def _refresh_views(request: Request) -> None:
     # 帧, 必须一并清理, 否则写入后监控/列表仍用旧值 (服务层已清扩展帧与策略缓存)。
     repo.clear_cache()
     repo.refresh_cache()
+    runtimes = getattr(request.app.state, "user_runtimes", None)
+    if runtimes is not None:
+        runtimes.invalidate_shared_strategy_state()
     invalidate_dimension_intraday_cache()
     from app.services.shared_runtime import publish_data_update, publish_quotes
 

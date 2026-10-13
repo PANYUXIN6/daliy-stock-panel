@@ -225,3 +225,30 @@ def test_matrix_native_resolves_raw_fields_and_protocol_warmup_without_indicator
     assert {"open", "high", "low", "close", "volume", "amount"} <= set(plan.base_columns)
     assert plan.warmup_bars == 120
     assert plan.full_feature_fallback is False
+
+
+def test_private_signal_dependencies_and_panel_are_owner_local(tmp_path, monkeypatch):
+    import pytest
+
+    from app.backtest.engine import BacktestEngine
+    from app.services.user_context import UserContext, user_scope
+    from app.strategy import custom_signals
+    frame = pl.DataFrame({'symbol': ['600000.SH'], 'date': [date(2026, 1, 1)],
+                          'close': [12.0], 'open': [12.0], 'high': [12.0], 'low': [12.0],
+                          'volume': [100.0], 'raw_close': [12.0], 'raw_high': [12.0],
+                          'raw_low': [12.0], 'name': ['test'],
+                          'signal_limit_up': [False], 'signal_limit_down': [False]})
+    engine = BacktestEngine(types.SimpleNamespace(get_instruments_asset=lambda _: pl.DataFrame()))
+    monkeypatch.setattr(engine, 'load_panel', lambda *args, **kwargs: frame)
+    strategy = _strategy(meta={'id': 'personal'}, filter_fn=None, required_features=frozenset())
+    def plan():
+        return StrategyDependencyResolver().resolve(strategy, params={}, basic_filter={'enabled': False},
+                                                   entry_signals=['csg_private'], exit_signals=[])
+    with user_scope(UserContext('a' * 32, 'guest', tmp_path)):
+        custom_signals.save_one(tmp_path, {'id': 'private', 'name': 'private', 'kind': 'entry',
+                                          'conditions': [{'left': 'close', 'op': '>', 'right': 10}]})
+        loaded = engine.load_panel_for_backtest(None, date(2026, 1, 1), date(2026, 1, 1), plan())
+        assert loaded['csg_private'].to_list() == [True]
+        assert 'csg_private' not in frame.columns
+    with user_scope(UserContext('b' * 32, 'admin', tmp_path)), pytest.raises(ValueError, match='不存在'):
+        plan()

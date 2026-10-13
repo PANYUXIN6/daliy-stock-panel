@@ -9,6 +9,11 @@ from app.jobs import daily_pipeline
 from app.services import market_recap, market_recap_reports, preferences, shared_runtime
 
 
+@pytest.fixture(autouse=True)
+def scheduled_owner(authenticated_actor):
+    preferences.set_review_schedule(True, 15, 40)
+
+
 @pytest.mark.parametrize("failure", ["error", "eof"])
 def test_scheduled_review_rejects_all_failed_attempts(tmp_path, monkeypatch, failure):
     attempts = []
@@ -36,7 +41,7 @@ def test_scheduled_review_rejects_all_failed_attempts(tmp_path, monkeypatch, fai
     monkeypatch.setattr(market_recap_reports, "save_report", lambda report: archived.append(report))
     monkeypatch.setattr(daily_pipeline, "_maybe_push_review", lambda *args: pushed.append(args))
     monkeypatch.setattr(preferences, "get_review_push_mode", lambda: "auto")
-    monkeypatch.setattr(shared_runtime, "publish_data_update", lambda *args: published.append(args))
+    monkeypatch.setattr(shared_runtime, "publish_data_update", lambda *args, **kwargs: published.append(args))
 
     asyncio.run(daily_pipeline._run_scheduled_review(SimpleNamespace(store=SimpleNamespace(data_dir=tmp_path))))
 
@@ -70,7 +75,7 @@ def test_scheduled_review_archives_only_successful_retry(tmp_path, monkeypatch):
     monkeypatch.setattr(market_recap_reports, "save_report", lambda report: archived.append(report))
     monkeypatch.setattr(daily_pipeline, "_maybe_push_review", lambda content, meta: pushed.append(content))
     monkeypatch.setattr(preferences, "get_review_push_mode", lambda: "auto")
-    monkeypatch.setattr(shared_runtime, "publish_data_update", lambda *args: None)
+    monkeypatch.setattr(shared_runtime, "publish_data_update", lambda *args, **kwargs: None)
 
     asyncio.run(daily_pipeline._run_scheduled_review(SimpleNamespace(store=SimpleNamespace(data_dir=tmp_path))))
 

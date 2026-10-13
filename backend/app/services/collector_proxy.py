@@ -49,7 +49,19 @@ async def forward(request: Request):
     url = request.app.state.collector_url + request.url.path
     if request.url.query:
         url += '?' + request.url.query
-    headers = {key: value for key, value in request.headers.items() if key.lower() not in _HOP_HEADERS}
+    headers = {
+        key: value for key, value in request.headers.items()
+        if key.lower() not in _HOP_HEADERS
+        and key.lower() != 'forwarded'
+        and not key.lower().startswith('x-forwarded-')
+    }
+    # The browser origin was validated by the outer web authentication middleware.
+    # Forwarding headers belong to that outer connection; retaining its HTTPS
+    # scheme would disagree with the collector transport origin below.
+    if 'origin' in headers:
+        target = httpx.URL(request.app.state.collector_url)
+        headers['origin'] = str(target.copy_with(path='/', query=None)).rstrip('/')
+    headers.pop('referer', None)
     outgoing = client.build_request(request.method, url, headers=headers, content=await request.body())
     try:
         response = await client.send(outgoing, stream=True)

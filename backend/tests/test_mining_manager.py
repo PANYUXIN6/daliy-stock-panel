@@ -12,6 +12,8 @@ import app.services.mining_manager as mining_manager_module
 from app.services.heavy_job_limiter import HeavyJobLimiter
 from app.services.mining_manager import MiningJobManager
 
+pytestmark = pytest.mark.usefixtures("private_owner")
+
 
 def _task_factory(kind: str, data_dir: Path, payload: dict[str, Any]) -> dict[str, Any]:
     return {

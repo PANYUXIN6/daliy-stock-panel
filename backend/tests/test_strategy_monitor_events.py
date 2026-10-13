@@ -15,6 +15,7 @@ from app.strategy import monitor_rules
 from app.strategy.engine import StrategyDataContext, StrategyDef, StrategyEngine, StrategyResult
 from app.strategy.monitor import MonitorRuleEngine
 
+pytestmark = pytest.mark.usefixtures("private_owner")
 
 def _rule(*events: str, **overrides) -> dict:
     return monitor_rules.normalize({
@@ -428,6 +429,6 @@ def test_quote_service_forwards_real_strategy_id(monkeypatch, tmp_path):
     service.get_enriched_today = lambda: (_quotes(), quote_service.cn_today())
 
     with patch.object(QuoteService, "_is_continuous_trading", return_value=True):
-        service._evaluate_monitors(pl.DataFrame(), None)
+        service._evaluate_user_monitors(pl.DataFrame(), None, service._app_state)
 
     assert subscriber.pop()["alerts"][0]["strategy_id"] == "demo"

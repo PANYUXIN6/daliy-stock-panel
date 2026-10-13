@@ -1,3 +1,4 @@
+import { sessionFetch } from '@/lib/sessionRuntime'
 /**
  * AI 助手自包含 HTTP 客户端 — NDJSON 流式解析 + 状态/快捷指令查询。
  *
@@ -63,7 +64,7 @@ export interface AssistantContext {
 }
 
 async function requestJson<T>(path: string): Promise<T> {
-  const res = await fetch(path)
+  const res = await sessionFetch(path)
   if (!res.ok) throw new Error(`AI 助手接口请求失败: ${res.status}`)
   return res.json() as Promise<T>
 }
@@ -79,7 +80,7 @@ export function fetchAssistantSuggests(): Promise<QuickSuggest[]> {
 
 /** 动作工具确认卡回调: approve=false 拒绝执行(后端超时同样视为拒绝)。 */
 export async function decideAssistantAction(callId: string, approve: boolean): Promise<void> {
-  const res = await fetch(`/api/custom/assistant/actions/${callId}/decision`, {
+  const res = await sessionFetch(`/api/custom/assistant/actions/${callId}/decision`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ approve }),
@@ -92,7 +93,7 @@ export async function* assistantChatStream(
   body: { messages: ChatHistoryMessage[]; context?: AssistantContext },
   signal?: AbortSignal,
 ): AsyncGenerator<AssistantEvent> {
-  const res = await fetch('/api/custom/assistant/chat', {
+  const res = await sessionFetch('/api/custom/assistant/chat', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),

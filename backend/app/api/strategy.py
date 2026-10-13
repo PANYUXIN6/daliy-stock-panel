@@ -20,6 +20,7 @@ from pydantic import BaseModel, Field
 
 from app.backtest.minute_trigger import MINUTE_EXIT_TRIGGER_SIGNALS
 from app.services.ndjson_heartbeat import with_heartbeat
+from app.services.user_runtime import runtime_for
 from app.strategy import config as strategy_config
 from app.strategy.ai_generator import AIStrategyGenerator, find_meta_assignment
 from app.strategy.engine import StrategyDef, StrategyEngine
@@ -38,7 +39,7 @@ logger = logging.getLogger(__name__)
 
 
 def _get_engine(request: Request) -> StrategyEngine:
-    engine = getattr(request.app.state, "strategy_engine", None)
+    engine = getattr(runtime_for(request), "strategy_engine", None)
     if not engine:
         raise HTTPException(status_code=503, detail="策略引擎未初始化")
     return engine
@@ -55,7 +56,7 @@ def _get_public_strategy(engine: StrategyEngine, strategy_id: str) -> StrategyDe
 
 
 def _get_monitor(request: Request) -> StrategyMonitorService:
-    mon = getattr(request.app.state, "strategy_monitor", None)
+    mon = getattr(runtime_for(request), "strategy_monitor", None)
     if not mon:
         raise HTTPException(status_code=503, detail="策略监控未初始化")
     return mon
@@ -69,7 +70,7 @@ def _invalidate_strategy_runtime(request: Request, strategy_id: str | None = Non
     from app.services import strategy_cache
 
     strategy_cache.clear_cache(_data_dir(request), strategy_id)
-    monitor_engine = getattr(request.app.state, "monitor_engine", None)
+    monitor_engine = getattr(runtime_for(request), "monitor_engine", None)
     if monitor_engine is not None:
         if strategy_id is None:
             monitor_engine.invalidate_strategy_state()
@@ -133,7 +134,7 @@ def _cleanup_deleted_strategy(request: Request, strategy_id: str) -> list[str]:
                 monitor_rules.save_one(data_dir, rule)
                 rules_changed = True
 
-        monitor_engine = getattr(request.app.state, "monitor_engine", None)
+        monitor_engine = getattr(runtime_for(request), "monitor_engine", None)
         if rules_changed and monitor_engine is not None:
             monitor_engine.set_rules(monitor_rules.load_all(data_dir))
     except Exception as e:  # noqa: BLE001 -- 清理各步独立执行，失败逐项返回warnings
@@ -705,7 +706,8 @@ def _validate_strategy_id(strategy_id: str) -> str:
 def _target_dir(data_dir: Path, source: str) -> Path:
     if source not in {"ai", "custom", "composite"}:
         raise ValueError("target_source 必须是 ai、custom 或 composite")
-    return data_dir / "strategies" / source
+    from app.services.user_context import user_data_dir
+    return user_data_dir(data_dir) / "strategies" / source
 
 
 def _prepare_strategy_code(req: StrategyCodeValidateRequest | StrategyCodeSaveRequest) -> dict:
@@ -1233,7 +1235,7 @@ def delete_strategy(strategy_id: str, request: Request):
         raise HTTPException(status_code=400, detail="策略源文件路径无效, 无法删除")
 
     try:
-        allowed_dir = (data_dir / "strategies" / s.source).resolve()
+        allowed_dir = (_target_dir(data_dir, s.source)).resolve()
         resolved_path = path.resolve()
     except (OSError, RuntimeError) as e:
         raise HTTPException(status_code=409, detail=f"无法访问策略文件: {e}") from e

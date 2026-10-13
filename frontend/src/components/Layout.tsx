@@ -1,3 +1,6 @@
+import { useCurrentUser } from '@/lib/auth'
+import { announceSessionChange, lockSession } from '@/lib/sessionRuntime'
+import { accountStorage } from '@/lib/sessionRuntime'
 import { useEffect, useMemo, useRef, useState, Suspense, type ReactNode } from 'react'
 import { NavLink, Outlet, useNavigate, useLocation } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
@@ -143,7 +146,7 @@ function MonitorBadge({ active }: { active: boolean }) {
   const unread = useUnreadAlerts()
   // 尊重用户设置: 可在菜单设置里关闭数字提示
   const badgeEnabled = (() => {
-    try { return localStorage.getItem('monitor_badge_enabled') !== '0' } catch { return true }
+    try { return accountStorage.getItem('monitor_badge_enabled') !== '0' } catch { return true }
   })()
   if (active || unread <= 0 || !badgeEnabled) return null
   return (
@@ -213,6 +216,7 @@ function AIConfigBadge({ configured, model }: { configured?: boolean; model?: st
 type NavState = 'expanded' | 'rail' | 'hidden'
 
 export function Layout() {
+  const user = useCurrentUser()
   // ===== 共享 hooks (替代内联 useQuery) =====
   const { data: settingsState } = useSettings()
   const { data: versionData } = useVersion()
@@ -224,6 +228,7 @@ export function Layout() {
   const { data: dataSources } = useQuery({
     queryKey: QK.dataSources,
     queryFn: api.dataSources,
+    enabled: user?.role === 'admin',
     staleTime: 60_000,
   })
   // poll=true: 全局唯一开启条件轮询 (非交易时段 60s 兜底, 交易时段靠 SSE)
@@ -251,9 +256,9 @@ export function Layout() {
   // 持久化到 localStorage; 迁移旧两态键 tf-nav-collapsed (收起 → 图标条)。
   const [navState, setNavState] = useState<NavState>(() => {
     try {
-      const v = localStorage.getItem('tf-nav-state')
+      const v = accountStorage.getItem('tf-nav-state')
       if (v === 'expanded' || v === 'rail' || v === 'hidden') return v
-      return localStorage.getItem('tf-nav-collapsed') === '1' ? 'rail' : 'expanded'
+      return accountStorage.getItem('tf-nav-collapsed') === '1' ? 'rail' : 'expanded'
     } catch { return 'expanded' }
   })
   const [drawerOpen, setDrawerOpen] = useState(false)
@@ -263,7 +268,7 @@ export function Layout() {
   const overlayTimer = useRef<number | undefined>(undefined)
   const setNavStatePersist = (s: NavState) => {
     setNavState(s)
-    try { localStorage.setItem('tf-nav-state', s) } catch {}
+    try { accountStorage.setItem('tf-nav-state', s) } catch {}
   }
   // 图标条形态仅桌面 rail 态成立 (移动端抽屉与 overlay 预览恒为完整形态)
   const railMode = isDesktop && navState === 'rail'
@@ -306,6 +311,7 @@ export function Layout() {
   const { data: pipelineJobs } = useQuery({
     queryKey: QK.pipelineJobs,
     queryFn: () => api.pipelineJobs(1),
+    enabled: user?.role === 'admin',
     refetchInterval: (query) => (query.state.data?.active_id ? 2000 : 15000),
   })
   const isDataSyncing = !!pipelineJobs?.active_id
@@ -439,7 +445,7 @@ export function Layout() {
     : allNav
 
   const hiddenIds = new Set(prefs?.nav_hidden ?? [])
-  const visibleNavItems = navItems.filter(n => !hiddenIds.has(n.to) && !hiddenIds.has(n.to.replace(/^\/analysis\//, '')))
+  const visibleNavItems = navItems.filter(n => (user?.role === 'admin' || n.to !== '/data') && !hiddenIds.has(n.to) && !hiddenIds.has(n.to.replace(/^\/analysis\//, '')))
 
   return (
     <div
@@ -540,10 +546,10 @@ export function Layout() {
           {/* AI 状态 — 收起时隐藏 */}
           {!railMode && (
             <div className="mt-2.5 border-t border-border/60 pt-1">
-              <AIConfigBadge
+              {user?.role === 'admin' && <AIConfigBadge
                 configured={settingsState?.ai_configured ?? settingsState?.has_ai_key}
                 model={settingsState?.ai_model}
-              />
+              />}
             </div>
           )}
         </div>
@@ -749,6 +755,10 @@ export function Layout() {
         </div>
         )}
 
+        <div className="border-t border-border px-3 py-2 text-xs text-muted">
+          {!railMode && <div className="mb-1 truncate" title={user?.username}>{user?.username} · {user?.role}{user?.role === 'pro' && <div>有效至 {user.pro_expires_on}</div>}</div>}
+          <button className="text-secondary hover:text-foreground" title="退出登录" onClick={async () => { await api.authLogout(); announceSessionChange(); lockSession(); window.location.reload() }}>退出</button>
+        </div>
         <div className={cn('border-t border-border py-3 shrink-0', railMode ? 'px-2 flex flex-col items-center gap-1' : 'px-2')}>
           <div className={railMode ? 'flex flex-col items-center gap-1' : 'flex items-center gap-1'}>
             <ThemeToggle />
@@ -778,7 +788,7 @@ export function Layout() {
                   {!railMode && version && (
                     <span className="ml-auto flex items-center gap-1.5 font-mono text-[10px] text-muted/50 select-none shrink-0">
                       {version}
-                      {hasUpdate && update.info && (
+                      {user?.role === 'admin' && hasUpdate && update.info && (
                         <span
                           role="button"
                           tabIndex={0}

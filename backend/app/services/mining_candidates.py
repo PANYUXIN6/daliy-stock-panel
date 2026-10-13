@@ -541,7 +541,8 @@ class MiningCandidateService:
             raise ValueError("candidate publication backlink is inconsistent")
 
     def _custom_strategy_path(self, strategy_id: str) -> Path:
-        unresolved_root = self.data_dir / "strategies" / "custom"
+        from app.services.private_storage import private_path
+        unresolved_root = private_path(self.data_dir, "strategies", "custom")
         unresolved_root.mkdir(parents=True, exist_ok=True)
         if unresolved_root.is_symlink():
             raise ValueError("custom strategy directory must not be a symlink")

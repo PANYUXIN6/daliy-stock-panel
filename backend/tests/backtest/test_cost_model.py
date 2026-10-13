@@ -11,8 +11,11 @@ from __future__ import annotations
 from datetime import date, timedelta
 
 import polars as pl
+import pytest
 
 from app.backtest.engine import BacktestEngine, MatcherConfig
+
+pytestmark = pytest.mark.usefixtures("private_owner")
 
 # ---------------------------------------------------------------
 # 复用 portfolio 测试的最小面板/掩码构造

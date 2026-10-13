@@ -15,6 +15,7 @@ from pathlib import Path
 from app.factors.dsl import compile_formula
 from app.factors.registry import FactorSpec, factor_dependencies, get_factor, register_factor
 from app.services.fs_utils import atomic_write_text
+from app.services.private_storage import identifier, private_path
 
 logger = logging.getLogger(__name__)
 
@@ -25,13 +26,13 @@ STATUSES = frozenset({"draft", "active", "watch", "retired"})
 
 
 def _dir(data_dir: Path) -> Path:
-    directory = data_dir / "user_data" / "custom_factors"
+    directory = private_path(data_dir, "user_data", "custom_factors")
     directory.mkdir(parents=True, exist_ok=True)
     return directory
 
 
 def _path(data_dir: Path, factor_id: str) -> Path:
-    return _dir(data_dir) / f"{factor_id}.json"
+    return _dir(data_dir) / f"{identifier(factor_id)}.json"
 
 
 def load_all(data_dir: Path) -> list[dict]:

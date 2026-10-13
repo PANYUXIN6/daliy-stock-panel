@@ -81,7 +81,7 @@ collector 的 [QuoteService](../backend/app/services/quote_service.py) 默认每
 | 事件通道 | 后端归属 | 消费与恢复方式 |
 | --- | --- | --- |
 | 面板 `/api/intraday/stream` | `api/intraday.py` 与 `QuoteService` 订阅机制 | collector 经内部事件连接传入 web；`Layout` 的 `useQuoteStream` 处理行情、告警及 `data_updated`，按数据集失效查询，焦点日 K 可增量合并；重连补读数据与任务状态 |
-| 开放 `/api/events` | `api/events.py`、`services/event_tickets.py`、`services/events.py::bus` | Bearer Token 换一次性短期票据，再订阅按 scope 过滤的事件流；重连需新票据，持久结果通过 REST 补取 |
+| 历史开放事件入口 | `api/events.py`、`services/event_tickets.py` | 现已由认证边界拒绝访问；旧票据与 Bearer Token 不提供业务权限 |
 
 两类通道使用不同的订阅底座。开放总线使用有界队列，慢消费者可能丢旧事件，不是持久事件回放系统。
 
@@ -103,27 +103,37 @@ collector 的 [QuoteService](../backend/app/services/quote_service.py) 默认每
 | 专有榜单与调度日历 | `dragon_tiger/date=YYYY-MM-DD.json`、`auction_benchmark/date=YYYY-MM-DD.json` 保存当日及历史榜单；`calendar/trading_days.json` 保存调度日历，collector 更新、各查询只读 |
 | 跨服务行情与复盘 | `runtime/quotes.zip` 保存行情快照；`runtime/data_update.json` 保存更新标记；`market_recap/date=YYYY-MM-DD.json` 保存已发布复盘 |
 | 采集任务 | `job_store/<id>.json` 保存创建／运行／终态，运行中进度由 collector 内存持有，web 查询与取消转发到 collector |
-| 策略源码、参数与结果 | `strategies/custom`、`ai`、`composite`；`strategy/config.py` 管参数；`user_data/strategy_cache.json` 管结果，监控引擎还保存盘中结果 |
-| 自选、规则、告警与偏好 | 对应服务管理用户文件；告警在 `user_data/alerts.jsonl`，运行中规则与冷却状态由监控引擎管理 |
-| 自定义因子 | `user_data/custom_factors/`；`factors/store.py` 持久化，`factors/registry.py` 管运行时注册 |
+| 策略源码、参数与结果 | `users/<user_id>/strategies/{custom,ai,composite}` 保存个人策略；维护者可信模板位于 `strategies/templates`；`strategy/config.py` 管个人参数；`users/<user_id>/user_data/strategy_cache.json` 管个人结果，监控引擎还保存盘中结果 |
+| 自选、规则、告警与偏好 | 对应服务管理用户文件；告警在 `users/<user_id>/user_data/alerts.jsonl`，运行中规则与冷却状态由监控引擎管理 |
+| 自定义因子 | `users/<user_id>/user_data/custom_factors/`；`factors/store.py` 持久化，`factors/registry.py` 管运行时注册 |
 | 扩展数据 | `ext_data/<config_id>/` 下配置与 Parquet；`ExtConfigStore`、扩展因子和仓库各有派生缓存 |
-| 挖掘任务 | `research/mining/runs/`；`MiningRunStore` 管状态与产物，`MiningJobManager` 管执行和取消 |
-| 回测矩阵缓存 | `.backtest_matrix_cache/`；`backtest/matrix.py` 与 `strategy.py` 管构建和复用，数据 generation 由 enriched 发布机制维护 |
-| 模拟盘 | `paper/accounts/<account_id>/`；`fills.jsonl` 是成交事实源，持仓等由台账重放推导 |
-| 登录与开放授权 | `services/auth.py`、`api_tokens.py` 管持久凭据；开放限流、票据与事件队列在进程内 |
+| 挖掘任务 | `users/<user_id>/research/mining/runs/`；`MiningRunStore` 管状态与产物，`MiningJobManager` 管执行和取消 |
+| 回测矩阵缓存 | `.backtest_matrix_cache/` 为共享行情矩阵缓存；`backtest/matrix.py` 与 `strategy.py` 管构建和复用，数据 generation 由 enriched 发布机制维护 |
+| 模拟盘 | `users/<user_id>/paper/accounts/<account_id>/`；`fills.jsonl` 是成交事实源，持仓等由台账重放推导 |
+| 账号与会话 | `auth/auth.sqlite3` 保存用户、有效会话与登录事件；`services/auth.py` 管认证权威，旧开放 Token 与事件票据入口停用 |
 | 浏览器查询与界面状态 | `main.tsx` 的 TanStack Query；`queryPersist.ts` 只持久化白名单慢变查询，长任务另由 `backtestTask.ts` 等 store 管理 |
 
 这些缓存没有一个统一失效开关。一个写操作可能需要同步仓库、enriched generation、策略结果、扩展因子和前端查询；具体范围应沿真实调用链确认。
 
 财务全市场同步在 `financial_sync._get_symbols` 核对请求股票池。实现可选 `get_financial_universe` 的 provider 提供当前 canonical 代码范围；Fuyao 使用全市场快照清单，因此不会请求其清单外的历史代码，也会纳入基础维表尚未收录的代码。服务将核对时间、源名称、数量与双向差异保存到 `financials/universe.json`，不修改基础维表或删除历史报表。未实现该方法的源沿用本地维表；清单异常或为空时停止同步，后续报表请求仍保留原有失败、限流和取消语义。清单存在不代表每股每期都有报表，实际覆盖以落库结果为准。
 
+## 账号与个人数据边界
+
+web 与 collector 均通过 `auth_access.py` 验证 SQLite 会话，建立不可变 `UserContext`；账号库位于 `data/auth/auth.sqlite3`，保存用户、会话及登录事件。单账号只允许一个 7 天会话，停用及密码变更撤销会话；角色调整在后续请求中读取最新权限。pro 到期按北京时间日期判断。旧密码文件、Bearer Token 和事件票据不再参与认证。
+
+共享行情和系统配置仍在公共数据目录，个人文件位于 `data/users/<user_id>/`。`user_runtime.py` 按用户建立运行时，文件存储从 `user_context.py` / `private_storage.py` 解析归属，缺少归属时拒绝个人数据访问。管理员账号不具备读取其他用户个人数据的替代身份入口。首次启动迁移仅把旧个人文件复制给初始管理员，保留源文件、拒绝符号链接且不覆盖已有目标。
+
+后台任务、助手确认、报告归档和个人事件继承用户归属；助手执行与流式归档会重新核验会话。定时复盘保存配置管理员的 owner，执行和归档前检查其仍为有效管理员。外部通知只允许有效管理员，其他用户保留自己的站内记录与提示。网页不能保存或执行用户 Python 策略，也不能启用本地 CLI；服务端受信任策略仍由维护者管理。
+
+前端认证边界在业务页面挂载前验证会话。请求携带预期用户 ID 仅用于检测跨标签页 Cookie 变化，服务端身份始终来自有效会话。缓存和本地状态按账号分区，并在退出或身份切换时清理运行中订阅与任务引用。
+
 ## 前端与扩展边界
 
 核心前端请求和类型集中在 [lib/api.ts](../frontend/src/lib/api.ts)，查询键与共享查询主要在 `queryKeys.ts`、`useSharedQueries.ts`。页面路由按需加载，`Layout` 负责跨页面状态与行情订阅。慢变查询可由 localStorage 恢复，但挂载后仍按查询策略刷新；快变行情不在持久化白名单。
 
-首页由 [router.tsx](../frontend/src/router.tsx) 直接挂载 `Layout` 和 `Dashboard`，保留既有认证流程。首次配置向导、完成标记与专用完成接口已移除；进入页面只读取后端现有配置，不自动选择或保存能力路由。Key 由 [secrets_store.py](../backend/app/secrets_store.py) 读取本地凭据及环境后备值，路由由 [preferences.py](../backend/app/services/preferences.py) 读取，未设置时使用既有默认值。TickFlow / AI 密钥只由后端配置，settings API 仅暴露配置状态（旧脱敏字段为空），拒绝网页替换或清除密钥。能力路由和 AI 非密钥选项仍通过设置页及 settings API 修改。
+首页由 [router.tsx](../frontend/src/router.tsx) 在认证边界通过后挂载 `Layout` 和 `Dashboard`。首次配置向导、完成标记与专用完成接口已移除；进入页面只读取后端现有配置，不自动选择或保存能力路由。Key 由 [secrets_store.py](../backend/app/secrets_store.py) 读取本地凭据及环境后备值，路由由 [preferences.py](../backend/app/services/preferences.py) 读取，未设置时使用既有默认值。TickFlow / AI 密钥只由后端配置，settings API 仅暴露配置状态（旧脱敏字段为空），拒绝网页替换或清除密钥。能力路由和 AI 非密钥选项仍通过设置页及 settings API 修改。
 
-采集、共享数据重算和缓存维护集中在 [Data.tsx](../frontend/src/pages/Data.tsx)：财务五表、指数日 K、单标的分钟、概念／行业预设、历史环境与主线、实时采集开关与手动获取、五档盘口更新、共享缓存重建均复用现有接口。管道任务通过 `active_id` 恢复；分钟与财务维护复用 `useCollectorJob`，财务以 `active_job_id` 恢复。盘后同步由维护者手动发起，盘前基础资料与交易日历维护仍由 collector 调度器执行。数据页和设置页的 admin 权限尚未实现。
+采集、共享数据重算和缓存维护集中在 [Data.tsx](../frontend/src/pages/Data.tsx)：财务五表、指数日 K、单标的分钟、概念／行业预设、历史环境与主线、实时采集开关与手动获取、五档盘口更新、共享缓存重建均复用现有接口。管道任务通过 `active_id` 恢复；分钟与财务维护复用 `useCollectorJob`，财务以 `active_job_id` 恢复。盘后同步由维护者手动发起，盘前基础资料与交易日历维护仍由 collector 调度器执行。数据维护与共享系统设置由后端校验 admin 权限；各账号仍可修改自己的个人偏好。
 
 页面常用同步按行情与基础数据、分钟历史、财务、板块分类四个大模块组织，配置与单项补采留在维护选项。前端一次提交一个模块任务，不并行拼接子接口。行情沿用原管道依赖顺序；分钟历史复用全 A 股批量任务，独立于随管道同步开关；财务五表沿用串行执行。显式声明 `on_chunk_done` 的财务插件报告原生进度，旧插件仍按服务已有的 100 股批长逐批调用；Generic HTTP 保留原配置批长与共享 RPM。Fuyao 仅在单表内使用两个有界在途任务并行逐股取数，指标仍先查询利润表、再获取 BPS 快照和对应报告期指标；所有 Fuyao 客户端 API 请求共用采集进程内的两个请求槽及 0.12 秒发包间距，这是项目控频策略，官方仅公开动态限流规则。协调线程通过原任务进度回调检查取消后才补交请求，取消／异常等待已在途请求收尾；429／4001 以 `ProviderRateLimitError` 传播，当前未完成表不写入。整张表仍在获取结束后合并历史并原子写入。新增板块分类动作 `POST /api/ext-data/presets/sync` 复用既有预设转换，概念与行业串行写入，共用 JobStore、写入槽、容量与取消机制；执行退出时对实际写入统一刷新并发布，部分失败或取消也保留已保存结果且任务终态如实报告。原单表接口保持可用。现有扩展 PullScheduler 仍是原独立定时路径，此次没有改变其调度或并发边界。
 
@@ -141,6 +151,6 @@ AI 助手由 `frontend/src/custom/assistant/` 和 `backend/app/custom/assistant/
 
 ## 外部系统与核对范围
 
-外部依赖包括行情供应商或用户 HTTP 源、AI 服务或 Codex CLI、通知通道。外部程序可通过开放 API 访问面板；stocksdk 插件另有 Node 桥接，OCR 涉及 Tesseract 等机器能力，详情在对应模块与配置文档。
+外部依赖包括行情供应商或用户 HTTP 源、模型 API 与通知通道。本地 Codex CLI 和旧 Token 开放通道已停用；stocksdk 插件另有 Node 桥接，OCR 涉及 Tesseract 等机器能力，详情在对应模块与配置文档。
 
 本文基于入口、代表性调用链、存储与类型定义及现有测试源码核对，没有验证真实行情源、模型服务、通知投递或全部平台运行行为。具体性能数值、第三方可用性和业务正确性需要对应任务的实际验证；后续修改入口、职责、数据流或缓存归属时应同步相关段落。

@@ -1,7 +1,7 @@
-import { lazy, Suspense } from 'react'
+import { AdminOnly } from './lib/auth'
+import { lazy } from 'react'
 import { createBrowserRouter, Navigate, useSearchParams } from 'react-router-dom'
 import { Layout } from './components/Layout'
-import { Logo } from './components/Logo'
 import { ExtensionBoundary } from './extensions/ExtensionBoundary'
 import {
   finalizeFrontendExtensions,
@@ -36,11 +36,10 @@ const Regime = lazy(() => import('./pages/Regime').then(m => ({ default: m.Regim
 const AbnormalMoves = lazy(() => import('./pages/AbnormalMoves').then(m => ({ default: m.AbnormalMoves })))
 const Dev = lazy(() => import('./pages/Dev').then(m => ({ default: m.Dev })))
 // Auth 只在登录页用到, 按需加载。
-const Auth = lazy(() => import('./pages/Auth').then(m => ({ default: m.Auth })))
+
 
 const CORE_ROUTE_PATHS = new Set([
   '/',
-  '/login',
   '/overview',
   '/analysis',
   '/analysis/:menuId',
@@ -82,28 +81,12 @@ function MiningRedirect() {
   return <Navigate to={`/factors?tab=mining${search ? `&${search}` : ''}`} replace />
 }
 
-// 按需路由的加载占位。
-function RouteFallback() {
-  return (
-    <div className="min-h-full bg-base grid place-items-center">
-      <Logo size={28} className="text-foreground" />
-    </div>
-  )
-}
-
 export const router = createBrowserRouter([
-  {
-    path: '/login',
-    element: (
-      <Suspense fallback={<RouteFallback />}>
-        <Auth />
-      </Suspense>
-    ),
-  },
   {
     path: '/',
     element: <Layout />,
     children: [
+      { path: 'login', element: <Navigate to="/" replace /> },
       { index: true, element: <Dashboard /> },
       { path: 'overview', element: <Navigate to="/" replace /> },
       { path: 'analysis', element: <Navigate to="/settings?tab=ext-pages" replace /> },
@@ -118,7 +101,7 @@ export const router = createBrowserRouter([
       { path: 'factors', element: <Factors /> },
       { path: 'mining', element: <MiningRedirect /> },
       { path: 'financials', element: <Financials /> },
-      { path: 'data', element: <Data /> },
+      { path: 'data', element: <AdminOnly><Data /></AdminOnly> },
       { path: 'monitor', element: <Monitor /> },
       { path: 'lots', element: <Lots /> },
       { path: 'paper', element: <Paper /> },
@@ -130,7 +113,7 @@ export const router = createBrowserRouter([
       { path: 'branding', element: <Branding /> },
       { path: 'settings', element: <Settings /> },
       // 隐藏路由：开发者工具（不暴露在菜单，仅供调试）
-      { path: 'dev', element: <Dev /> },
+      { path: 'dev', element: <AdminOnly><Dev /></AdminOnly> },
       // 旧路由兼容重定向
       { path: 'settings/keys', element: <Navigate to="/settings?tab=data-sources" replace /> },
       { path: 'settings/ai', element: <Navigate to="/settings?tab=ai" replace /> },

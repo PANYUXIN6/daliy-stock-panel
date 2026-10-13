@@ -128,6 +128,9 @@ async def quote_stream(request: Request):
     此前四通道共用服务级 Event + pop 取走语义, 告警只会被先醒的连接消费。
     """
     qs = _get_quote_service(request)
+    from app.services.auth import get_store
+    from app.services.user_context import current_user
+    owner = current_user()
 
     async def event_generator():
         if qs is None:
@@ -142,13 +145,17 @@ async def quote_stream(request: Request):
             while True:
                 # 等待任一通道有新信号 (5s 超时保持循环, 便于断线时尽快退出)
                 await asyncio.sleep(0.25)
+                if not owner.session_token or get_store().session(owner.session_token) is None:
+                    return
                 data = sub.pop()
                 while not updates.empty():
                     try:
                         update = updates.get_nowait()
                     except queue.Empty:
                         break
-                    yield {"event": "data_updated", "data": json.dumps(update["data"])}
+                    if (update['type'] == 'data_updated'
+                            and update['data'].get('owner_id') in {None, owner.id}):
+                        yield {"event": "data_updated", "data": json.dumps(update["data"])}
 
                 # 告警 (分片推送, 避免单条 SSE 过大)
                 alerts = data["alerts"]

@@ -40,10 +40,10 @@ export function shouldPersistQuery(query: { queryKey: readonly unknown[]; state:
 }
 
 /** localStorage 同步 persister (throttle 2s 合并高频写) */
-export function createAppPersister() {
+export function createAppPersister(userId: string) {
   return createSyncStoragePersister({
     storage: window.localStorage,
-    key: 'tf-query-cache',
+    key: `tf-user:${userId}:query-cache`,
     throttleTime: 2_000,
   })
 }

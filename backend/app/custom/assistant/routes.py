@@ -50,7 +50,8 @@ def build_router() -> APIRouter:
 
     @router.post("/chat")
     async def chat(request: Request, req: ChatRequest):
-        engine = getattr(request.app.state, "strategy_engine", None)
+        from app.services.user_runtime import runtime_for
+        engine = runtime_for(request).strategy_engine
         repo = getattr(request.app.state, "repo", None)
         data_dir = str(repo.store.data_dir) if repo is not None else None
         context = req.context.model_dump() if req.context else None

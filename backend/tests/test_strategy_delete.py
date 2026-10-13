@@ -8,9 +8,11 @@ from fastapi import HTTPException
 
 from app.api.strategy import delete_strategy
 from app.services import preferences
+from app.services.user_context import user_data_dir
 from app.strategy import monitor_rules
 from app.strategy.engine import StrategyEngine
 
+pytestmark = pytest.mark.usefixtures("private_owner")
 
 def _strategy_code(strategy_id: str) -> str:
     return f'''import polars as pl
@@ -40,11 +42,12 @@ class _MonitorEngine:
 def _request(data_dir: Path, engine: StrategyEngine, monitor: _MonitorEngine | None = None):
     repo = SimpleNamespace(store=SimpleNamespace(data_dir=data_dir))
     state = SimpleNamespace(repo=repo, strategy_engine=engine, monitor_engine=monitor)
+    state.user_runtimes = SimpleNamespace(get=lambda owner: state)
     return SimpleNamespace(app=SimpleNamespace(state=state))
 
 
 def test_delete_strategy_is_not_blocked_by_another_broken_file(monkeypatch, tmp_path):
-    custom_dir = tmp_path / "strategies" / "custom"
+    custom_dir = user_data_dir(tmp_path) / "strategies" / "custom"
     custom_dir.mkdir(parents=True)
     strategy_path = custom_dir / "target.py"
     strategy_path.write_text(_strategy_code("target"), encoding="utf-8")
@@ -57,10 +60,10 @@ def test_delete_strategy_is_not_blocked_by_another_broken_file(monkeypatch, tmp_
         engine.reload()
     assert engine.has("target")
 
-    override_path = tmp_path / "user_data" / "strategy_overrides" / "target.json"
+    override_path = user_data_dir(tmp_path) / "user_data" / "strategy_overrides" / "target.json"
     override_path.parent.mkdir(parents=True)
     override_path.write_text("{}", encoding="utf-8")
-    cache_path = tmp_path / "user_data" / "strategy_cache.json"
+    cache_path = user_data_dir(tmp_path) / "user_data" / "strategy_cache.json"
     cache_path.write_text("{}", encoding="utf-8")
 
     rule = monitor_rules.normalize({
@@ -98,7 +101,7 @@ def test_delete_strategy_is_not_blocked_by_another_broken_file(monkeypatch, tmp_
 
 
 def test_delete_strategy_reports_read_only_volume_without_unregistering(monkeypatch, tmp_path):
-    custom_dir = tmp_path / "strategies" / "custom"
+    custom_dir = user_data_dir(tmp_path) / "strategies" / "custom"
     custom_dir.mkdir(parents=True)
     strategy_path = custom_dir / "target.py"
     strategy_path.write_text(_strategy_code("target"), encoding="utf-8")

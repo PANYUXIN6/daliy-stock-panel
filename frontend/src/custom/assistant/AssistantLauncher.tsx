@@ -1,3 +1,4 @@
+import { useCurrentUser } from '@/lib/auth'
 /**
  * AI 助手宿主 — 挂载于 layout.navigation.extra 插槽(全站常驻渲染点),
  * 但不在侧栏菜单里渲染任何入口。聚合三件套:
@@ -64,7 +65,7 @@ export function AssistantLauncher(props: AnySlotContext) {
   return (
     <>
       <AssistantFloatingButton />
-      <AiConfigEntry />
+      {useCurrentUser()?.role === 'admin' && <AiConfigEntry />}
       <AssistantDrawer />
     </>
   )

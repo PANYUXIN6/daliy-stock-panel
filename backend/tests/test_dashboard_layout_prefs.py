@@ -21,7 +21,7 @@ def _blob(**overrides) -> dict:
     return {"v": 1, "items": [item]}
 
 
-def test_layout_round_trip_and_get_default_none():
+def test_layout_round_trip_and_get_default_none(private_owner):
     assert preferences.get_dashboard_layout() is None
 
     saved = preferences.set_dashboard_layout(_blob())
@@ -29,13 +29,13 @@ def test_layout_round_trip_and_get_default_none():
     assert preferences.get_dashboard_layout() == _blob()
 
 
-def test_layout_null_clears_back_to_default():
+def test_layout_null_clears_back_to_default(private_owner):
     preferences.set_dashboard_layout(_blob())
     assert preferences.set_dashboard_layout(None) is None
     assert preferences.get_dashboard_layout() is None
 
 
-def test_layout_clamps_and_normalizes_fields():
+def test_layout_clamps_and_normalizes_fields(private_owner):
     saved = preferences.set_dashboard_layout({
         "v": 1,
         "items": [
@@ -69,7 +69,7 @@ def test_layout_rejects_oversized_blob():
         preferences.set_dashboard_layout({"v": 1, "items": items})
 
 
-def test_settings_endpoint_round_trip(monkeypatch):
+def test_settings_endpoint_round_trip(monkeypatch, private_owner):
     from fastapi import HTTPException
 
     from app.api import settings as settings_api

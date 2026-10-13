@@ -16,6 +16,8 @@ from app.services import strategy_cache, strategy_run_queue
 AS_OF = "2026-09-04"
 
 
+pytestmark = pytest.mark.usefixtures("private_owner")
+
 @dataclass
 class _FakeResult:
     total: int = 1
@@ -57,6 +59,7 @@ class _FakeService:
 def _request(tmp_path, engine):
     repo = SimpleNamespace(store=SimpleNamespace(data_dir=tmp_path))
     state = SimpleNamespace(repo=repo, strategy_engine=engine, monitor_engine=None)
+    state.user_runtimes = SimpleNamespace(get=lambda owner: state)
     return SimpleNamespace(app=SimpleNamespace(state=state))
 
 
@@ -64,7 +67,8 @@ def _wait_cache_results(tmp_path, want_ids, timeout=8.0) -> dict:
     deadline = time.time() + timeout
     while time.time() < deadline:
         results = (strategy_cache.read_cache(tmp_path) or {}).get("results") or {}
-        if all(i in results for i in want_ids):
+        timings = strategy_run_queue.load_run_timings(tmp_path)
+        if all(i in results and i in timings for i in want_ids):
             return results
         time.sleep(0.05)
     return (strategy_cache.read_cache(tmp_path) or {}).get("results") or {}

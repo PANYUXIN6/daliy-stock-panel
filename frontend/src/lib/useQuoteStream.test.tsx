@@ -1,3 +1,5 @@
+import { activateSession } from './sessionRuntime'
+import { beforeEach } from 'vitest'
 // @vitest-environment jsdom
 import { act } from 'react'
 import { createRoot } from 'react-dom/client'
@@ -62,3 +64,5 @@ it('refreshes only the updated dataset even when realtime display is off, and ca
     expect(qc.getQueryState(['unrelated'])?.isInvalidated).toBe(false)
   } finally { await act(async () => root.unmount()); qc.clear(); vi.unstubAllGlobals() }
 })
+
+beforeEach(() => activateSession('test-user'))

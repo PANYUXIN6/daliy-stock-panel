@@ -1,3 +1,5 @@
+import { useCurrentUser } from '@/lib/auth'
+import { accountStorage } from '@/lib/sessionRuntime'
 /**
  * 统一设置页面 — Tab 切换外壳。
  *
@@ -9,7 +11,7 @@ import { motion } from 'framer-motion'
 import { BarChart3, Database, KeyRound, Radio, SlidersHorizontal, Sparkles, Settings2, PanelLeftClose, PanelLeftOpen, Clock3 } from 'lucide-react'
 // 面板按 tab 按需加载: 8 个面板源码 270KB+, 同步打包会让设置页 chunk 膨胀
 const SettingsAIPanel = lazy(() => import('./settings/AI').then(m => ({ default: m.SettingsAIPanel })))
-const SettingsApiTokensPanel = lazy(() => import('./settings/ApiTokens').then(m => ({ default: m.SettingsApiTokensPanel })))
+const SettingsUsersPanel = lazy(() => import('./settings/Users').then(m => ({ default: m.SettingsUsersPanel })))
 const SettingsMonitoringPanel = lazy(() => import('./settings/Monitoring').then(m => ({ default: m.SettingsMonitoringPanel })))
 const SettingsExtPagesPanel = lazy(() => import('./settings/ExtPages').then(m => ({ default: m.SettingsExtPagesPanel })))
 const SettingsMenuSettingsPanel = lazy(() => import('./settings/MenuSettings').then(m => ({ default: m.SettingsMenuSettingsPanel })))
@@ -18,6 +20,8 @@ const SettingsSystemPanel = lazy(() => import('./settings/System').then(m => ({ 
 const SettingsDataSourcesPanel = lazy(() => import('./settings/DataSources').then(m => ({ default: m.SettingsDataSourcesPanel })))
 import { PageHeader } from '@/components/PageHeader'
 import { cn } from '@/lib/cn'
+
+const SettingsAccountPanel = lazy(() => import('./settings/Account').then(m => ({ default: m.SettingsAccountPanel })))
 
 // ===== Tab 定义 =====
 
@@ -30,13 +34,14 @@ type TabDef = {
 }
 
 const TABS: readonly TabDef[] = [
+  { key: 'account', label: '个人账号', icon: KeyRound, panel: SettingsAccountPanel },
   { key: 'data-sources', label: '数据源',     icon: Database,  panel: SettingsDataSourcesPanel },
   { key: 'ai',         label: 'AI 设置',    icon: Sparkles,  panel: SettingsAIPanel },
   { key: 'monitoring', label: '实时监控',   icon: Radio,     panel: SettingsMonitoringPanel },
   { key: 'ext-pages',  label: '扩展页面',   icon: BarChart3, panel: SettingsExtPagesPanel },
   { key: 'timeout',    label: '网络设置',   icon: Clock3,    panel: SettingsTimeoutPanel },
   { key: 'menus',      label: '菜单设置',   icon: SlidersHorizontal, panel: SettingsMenuSettingsPanel },
-  { key: 'api-tokens', label: '开放接口',   icon: KeyRound, panel: SettingsApiTokensPanel },
+  { key: 'users', label: '用户管理', icon: KeyRound, panel: SettingsUsersPanel },
   { key: 'system',     label: '系统设置',   icon: Settings2, panel: SettingsSystemPanel },
 ]
 
@@ -45,17 +50,20 @@ type TabKey = (typeof TABS)[number]['key']
 export function Settings() {
   const [searchParams, setSearchParams] = useSearchParams()
   const tabParam = searchParams.get('tab') as TabKey | null
-  const activeTab = TABS.find((t) => t.key === tabParam) ?? TABS[0]
+  const user = useCurrentUser()
+  const tabs = TABS.filter(t => user?.role === 'admin' || ['menus', 'account'].includes(t.key))
+  const activeTab = tabs.find((t) => t.key === tabParam) ?? tabs[0]
+  const forbidden = tabParam && !tabs.some(t => t.key === tabParam)
   const highlight = searchParams.get('highlight') ?? ''
 
   // 设置菜单收起状态 — 持久化到 localStorage
   const [collapsed, setCollapsed] = useState(() => {
-    try { return localStorage.getItem('tf-settings-nav-collapsed') === '1' } catch { return false }
+    try { return accountStorage.getItem('tf-settings-nav-collapsed') === '1' } catch { return false }
   })
   const toggleCollapsed = () => {
     setCollapsed(prev => {
       const next = !prev
-      try { localStorage.setItem('tf-settings-nav-collapsed', next ? '1' : '0') } catch {}
+      try { accountStorage.setItem('tf-settings-nav-collapsed', next ? '1' : '0') } catch {}
       return next
     })
   }
@@ -67,7 +75,7 @@ export function Settings() {
         subtitle="管理账户、数据刷新策略和高级功能配置。"
       />
 
-      <div className="px-8 py-6">
+      <div className="px-4 sm:px-8 py-6">
         <div className="flex gap-6 items-stretch">
           {/* ===== 竖向 Tab 侧栏 ===== */}
           <nav className={cn('shrink-0 transition-all duration-200 ease-smooth', collapsed ? 'w-10' : 'w-36')}>
@@ -89,7 +97,7 @@ export function Settings() {
               </button>
 
               {/* Tab 按钮列表 — 收起时只显示图标 */}
-              {TABS.map(({ key, label, icon: Icon, badge }) => (
+              {tabs.map(({ key, label, icon: Icon, badge }) => (
                 <button
                   key={key}
                   onClick={() => setSearchParams({ tab: key }, { replace: true })}
@@ -123,7 +131,7 @@ export function Settings() {
             className="min-w-0 flex-1"
           >
             <Suspense fallback={<div className="py-12 text-center text-xs text-muted">加载中…</div>}>
-              {activeTab.key === 'monitoring'
+              {forbidden ? <p role="alert" className="text-sm text-secondary">此设置不可用或仅管理员可访问。</p> : activeTab.key === 'monitoring'
                 ? <SettingsMonitoringPanel highlight={highlight} />
                 : <activeTab.panel highlight={highlight} />}
             </Suspense>

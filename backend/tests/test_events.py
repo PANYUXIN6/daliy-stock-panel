@@ -95,7 +95,7 @@ def test_sse_format_frame():
 
 # ── 告警落盘 → 总线联动 ────────────────────────────────
 
-def test_alert_append_publishes_to_bus(tmp_path: Path):
+def test_alert_append_publishes_to_bus(tmp_path: Path, private_owner):
     q = bus.subscribe()
     try:
         alert_store.append(tmp_path, {"ts": 1, "rule_id": "r1", "source": "test"})
@@ -107,7 +107,7 @@ def test_alert_append_publishes_to_bus(tmp_path: Path):
         bus.unsubscribe(q)
 
 
-def test_alert_append_many_publishes_each(tmp_path: Path):
+def test_alert_append_many_publishes_each(tmp_path: Path, private_owner):
     q = bus.subscribe()
     try:
         alert_store.append_many(tmp_path, [

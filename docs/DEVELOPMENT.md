@@ -23,13 +23,13 @@
 # 终端一，从项目根开始
 cd backend
 uv sync --extra dev --frozen
-SERVICE_ROLE=collector uv run uvicorn app.collector:app --host 127.0.0.1 --port 3019
+SERVICE_ROLE=collector uv run uvicorn app.collector:app --no-proxy-headers --host 127.0.0.1 --port 3019
 ```
 
 ```bash
 # 终端二，从项目根开始；只让 web 热重载
 cd backend
-SERVICE_ROLE=web COLLECTOR_URL=http://127.0.0.1:3019 uv run uvicorn app.main:app --reload --port 3018
+SERVICE_ROLE=web COLLECTOR_URL=http://127.0.0.1:3019 uv run uvicorn app.main:app --no-proxy-headers --reload --port 3018
 ```
 
 ```bash
@@ -41,7 +41,7 @@ pnpm dev
 
 浏览器访问前端 `http://localhost:3011`，Vite 将 `/api` 和 `/health` 代理到后端。后端端口或主机改变时，同步设置前端使用的 `BACKEND_PORT`、`BACKEND_HOST`，见 [vite.config.ts](../frontend/vite.config.ts)。
 
-首页直接进入看板；已启用访问认证时先登录。首次配置向导已移除，页面沿用现有 Key 和数据源路由，进入页面不会自动改写路由。需要变更时在“设置 → 数据源”手动操作。看板不再提供首次获取弹窗或一键取数卡片，无数据时显示组件原有空态；维护者上线前在“数据”页手动准备基础数据，后续手动同步也从数据页发起。
+空账号库默认创建内置管理员 `pyxadmin`，无需先配置 `.env`，登录后直接进入看板；默认密码、可选初始凭据覆盖及账号规则见 [deploy-password.md](deploy-password.md)。首次配置向导已移除，页面沿用现有 Key 和数据源路由，进入页面不会自动改写路由。需要变更时在“设置 → 数据源”手动操作。看板不再提供首次获取弹窗或一键取数卡片，无数据时显示组件原有空态；维护者上线前在“数据”页手动准备基础数据，后续手动同步也从数据页发起。
 
 collector 启动会创建或使用数据目录、恢复任务并启动调度、日历和行情后台服务，可能访问数据源。web 启动只加载共享结果并连接 collector，不启动采集。隔离验证时为两个服务设置同一个独立 `DATA_DIR`，并核对 `.env` 和数据源配置；未配置付费 Key 不代表 collector 离线。只重启网页进程可保持采集任务运行；停止整个开发启动器则会停止它启动的全部进程。
 
@@ -101,11 +101,11 @@ Ruff 规则定义在 `backend/pyproject.toml`。后端源码扩展和助手已�
 
 ## 对外接入与专项脚本
 
-- [examples/open-api/README.md](../examples/open-api/README.md)：行情读取、扩展写入、回测与事件流示例；写入与计算示例会改变面板状态，运行前将 `TSP_BASE` 指向用于验证的面板，并按 README 配置 Token 与 scope。
+- [examples/open-api/README.md](../examples/open-api/README.md) 为历史接口示例；当前 Bearer Token、Token 管理与开放事件票据入口均停用，不可据此绕过账号认证。
 - `backend/scripts/stress_polars_concurrency.py`：Polars 并发专项验证；`probe_tickflow_pro.py`：供应商能力探针，`--live` 会发真实请求。它们服务特定问题，不能替代定向测试。
 - [scripts/upgrade_check.py](../scripts/upgrade_check.py)：源码二开升级的只读 Git 预检，目标 ref 须已在本地可解析，未提交修改不参与预演；详情见二开指南。
 
-开放端点以 `services/api_gateway.py` 的规则表和 `/api/openapi.json?tier=a` 为准；`test_openapi_contract.py` 保存 method/path 快照。README 中的接口数量是介绍信息，后续接入不应依赖这些数字。
+多用户回归入口：`uv run pytest tests/test_multiuser_auth.py tests/test_multiuser_ai.py tests/test_user_private_stores.py tests/test_user_runtime_boundaries.py tests/test_research_ownership.py -q`。这些测试使用独立临时目录；不要指向实际用户数据执行迁移或写入测试。旧开放接口契约文件保留用于历史维护，不代表当前认证入口已开放。
 
 ## 领域文档导航
 

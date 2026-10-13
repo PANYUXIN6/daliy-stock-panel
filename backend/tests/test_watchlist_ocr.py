@@ -24,6 +24,7 @@ from app.services.watchlist_ocr.pipeline import (
 )
 from app.services.watchlist_ocr.provider import OcrProvider, preprocess_for_ocr
 
+pytestmark = pytest.mark.usefixtures("private_owner")
 
 class _FakeOcr(OcrProvider):
     name = "fake"

@@ -19,6 +19,7 @@ from app.config import settings
 from app.db_safe import is_valid_ext_ident, quote_ident
 from app.services import strategy_cache, strategy_run_queue
 from app.services.screener import ScreenerService
+from app.services.user_runtime import runtime_for
 from app.strategy import config as strategy_config
 
 logger = logging.getLogger(__name__)
@@ -261,7 +262,7 @@ def strategies(
 ):
     """兼容策略清单端点；唯一数据源为 StrategyEngine。"""
     data_dir = request.app.state.repo.store.data_dir
-    engine = getattr(request.app.state, "strategy_engine", None)
+    engine = getattr(runtime_for(request), "strategy_engine", None)
     if engine is None:
         raise HTTPException(status_code=503, detail="策略引擎未初始化")
     presets = []
@@ -318,7 +319,7 @@ def run_preset(req: PresetRequest, request: Request):
     data_dir = request.app.state.repo.store.data_dir
     ext_values = _load_ext_value_maps(repo, req.ext_columns)
     overrides = strategy_config.load_override(data_dir, req.strategy_id)
-    engine = getattr(request.app.state, "strategy_engine", None)
+    engine = getattr(runtime_for(request), "strategy_engine", None)
     if not engine:
         raise HTTPException(status_code=404, detail=f"策略引擎未初始化或策略 {req.strategy_id} 不存在")
 
@@ -372,7 +373,7 @@ def _cached_with_realtime(request: Request) -> dict:
         cached = {"as_of": None, "results": {}, "updated_at": None}
 
     # 叠加监控引擎内存里的实时结果 (若有), 用新鲜数据覆盖同策略的盘后结果
-    monitor_engine = getattr(request.app.state, "monitor_engine", None)
+    monitor_engine = getattr(runtime_for(request), "monitor_engine", None)
     if monitor_engine is not None:
         realtime_results = monitor_engine.latest_strategy_results()
         if realtime_results:
@@ -672,7 +673,7 @@ def run_all(request: Request, body: dict | None = None):
     asset_type = str(body.get("asset_type") or "stock")
     timeframe = str(body.get("timeframe") or "1d")
     svc = ScreenerService(repo, asset_type=asset_type)
-    engine = getattr(request.app.state, "strategy_engine", None)
+    engine = getattr(runtime_for(request), "strategy_engine", None)
     if engine is None:
         raise HTTPException(status_code=503, detail="策略引擎未初始化")
 

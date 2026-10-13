@@ -4,9 +4,12 @@ import types
 from datetime import date
 from typing import ClassVar
 
+import pytest
+
 from app.api import screener as screener_api
 from app.services.screener import ScreenerResult
 
+pytestmark = pytest.mark.usefixtures("private_owner")
 
 class _CapturingScreenerService:
     calls: ClassVar[list[dict]] = []
@@ -75,6 +78,7 @@ class _CapturingStrategyEngine:
 def _api_request(tmp_path, engine):
     repo = types.SimpleNamespace(store=types.SimpleNamespace(data_dir=tmp_path))
     state = types.SimpleNamespace(repo=repo, strategy_engine=engine)
+    state.user_runtimes = types.SimpleNamespace(get=lambda owner: state)
     return types.SimpleNamespace(app=types.SimpleNamespace(state=state))
 
 

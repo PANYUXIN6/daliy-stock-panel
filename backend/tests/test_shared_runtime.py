@@ -13,6 +13,7 @@ from app.services.shared_runtime import QuoteMirror, publish_quotes
 from app.tickflow.capabilities import Cap, CapabilityLimits, CapabilitySet
 from app.tickflow.repository import DataStore, KlineRepository
 
+pytestmark = pytest.mark.usefixtures("private_owner")
 
 def test_two_web_readers_install_same_persisted_quote_without_recomputation(tmp_path, monkeypatch):
     writer = KlineRepository(DataStore(tmp_path))

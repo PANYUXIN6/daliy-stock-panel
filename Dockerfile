@@ -9,7 +9,6 @@ ARG PYPI_INDEX=https://pypi.tuna.tsinghua.edu.cn/simple
 # 备用 PyPI 源:主源同步延迟/故障时自动兜底(阿里云与清华互为补充)
 ARG PYPI_FALLBACK=https://mirrors.aliyun.com/pypi/simple
 ARG BACKEND_EXTRAS=
-ARG CODEX_CLI_VERSION=0.144.3
 
 # === Stage 1: 前端构建 ===
 FROM node:20-alpine AS frontend-builder
@@ -47,21 +46,6 @@ RUN if [ "$INCLUDE_STOCKSDK" = "1" ]; then \
       mkdir -p /build/node_modules; \
     fi
 
-# === Stage 1c: Codex CLI ===
-# 固定版本保证镜像可复现；只复制安装产物到运行镜像，不保留 npm。
-FROM node:20-bookworm-slim AS codex-builder
-ARG USE_CN_MIRROR=1
-ARG NPM_REGISTRY=https://registry.npmmirror.com
-# 版本由顶层 ARG CODEX_CLI_VERSION 提供, 这里仅声明以继承, 不再重复默认值。
-ARG CODEX_CLI_VERSION
-RUN if [ "$USE_CN_MIRROR" = "1" ]; then npm config set registry "$NPM_REGISTRY"; fi \
-    && npm install --global --prefix /opt/codex "@openai/codex@${CODEX_CLI_VERSION}" \
-    && CODEX_NATIVE="$(find /opt/codex -type f -path '*/vendor/*/bin/codex' -print -quit)" \
-    && test -n "$CODEX_NATIVE" \
-    && cp "$CODEX_NATIVE" /opt/codex-native \
-    && chmod +x /opt/codex-native \
-    && /opt/codex-native --version
-
 # === Stage 2: Python 运行时 ===
 FROM python:3.11-slim AS runtime
 ARG USE_CN_MIRROR=1
@@ -72,7 +56,6 @@ ARG INCLUDE_STOCKSDK=0
 WORKDIR /app
 
 # Node.js 运行时: 仅在启用 stock-sdk 插件时安装(供 node bridge.mjs 使用)。
-# Codex CLI 从官方 npm 包提取原生二进制，不依赖运行时 Node.js。
 # bookworm 自带 nodejs 18.19, 满足插件 engines>=18; --no-install-recommends 精简,
 # 自带 libnode/libc-ares 等全部动态依赖, 无需手动补库。
 # 国内构建换 apt 阿里云镜像 (bookworm deb822 格式)。官方 python slim 镜像的
@@ -136,10 +119,6 @@ ENV STATIC_DIR=/app/static \
 # Frontend 静态产物
 COPY --from=frontend-builder /build/dist ./static
 
-# Codex CLI 使用官方 npm 包携带的当前平台原生二进制，无需运行时 Node.js。
-COPY --from=codex-builder /opt/codex-native /usr/local/bin/codex
-RUN codex --version
-
 ENV PYTHONPATH=/app
 # 运行时 uv 镜像源持久化: CMD 用 `uv run` 启动, 锁与 pyproject 不一致等场景下
 # uv 会在容器内重新解析/安装 —— 无源配置时默认 pypi.org, 国内网络会卡死启动
@@ -152,4 +131,4 @@ ENV UV_DEFAULT_INDEX=${PYPI_INDEX} \
 # 此处让日志时间戳等其余 naive 时间也对齐北京时间。
 ENV TZ=Asia/Shanghai
 EXPOSE 3018
-CMD ["uv", "run", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "3018"]
+CMD ["uv", "run", "uvicorn", "app.main:app", "--no-proxy-headers", "--host", "0.0.0.0", "--port", "3018"]

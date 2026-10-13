@@ -1,3 +1,4 @@
+import { accountStorage } from '@/lib/sessionRuntime'
 /**
  * AI 助手悬浮球 — 可拖动, 位置持久化(localStorage)。
  *
@@ -29,7 +30,7 @@ function clampPos(pos: BallPos): BallPos {
 
 function loadPos(): BallPos {
   try {
-    const raw = localStorage.getItem(POS_STORAGE_KEY)
+    const raw = accountStorage.getItem(POS_STORAGE_KEY)
     if (raw) {
       const parsed = JSON.parse(raw) as { x?: unknown; y?: unknown }
       if (typeof parsed.x === 'number' && typeof parsed.y === 'number') {
@@ -42,7 +43,7 @@ function loadPos(): BallPos {
 
 function savePos(pos: BallPos) {
   try {
-    localStorage.setItem(POS_STORAGE_KEY, JSON.stringify(pos))
+    accountStorage.setItem(POS_STORAGE_KEY, JSON.stringify(pos))
   } catch { /* 存储不可用时仅内存态 */ }
 }
 

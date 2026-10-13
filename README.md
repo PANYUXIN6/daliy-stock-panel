@@ -17,14 +17,14 @@
 
 [![官网](https://img.shields.io/badge/%E5%AE%98%E7%BD%91-tsp.shy313.com-8B5CF6?style=for-the-badge&labelColor=181717&logo=googlechrome&logoColor=white)](https://tsp.shy313.com/)
 
-`选股` · `回测` · `监控` · `因子挖掘` · `AI 助手` · `Open API`
+`选股` · `回测` · `监控` · `因子挖掘` · `AI 助手` · `多用户`
 
 <a href="https://trendshift.io/repositories/64327?utm_source=repository-badge&amp;utm_medium=badge&amp;utm_campaign=badge-repository-64327" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/repositories/64327" alt="shy3130%2Ftick-stock-panel | Trendshift" width="250" height="55"/></a>
 <a href="https://trendshift.io/repositories/64327?utm_source=trendshift-badge&amp;utm_medium=badge&amp;utm_campaign=badge-trendshift-64327" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/trendshift/repositories/64327/daily?language=TypeScript" alt="shy3130%2Ftick-stock-panel | Trendshift" width="250" height="55"/></a>
 
 <table>
-<tr><td align="center"><big><b>61</b></big><br/><sub>开放 API 端点</sub></td>
-<td align="center"><big><b>6</b></big><br/><sub>Token 权限档</sub></td>
+<tr><td align="center"><big><b>多用户</b></big><br/><sub>个人数据隔离</sub></td>
+<td align="center"><big><b>3</b></big><br/><sub>账号角色</sub></td>
 <td align="center"><big><b>2400+</b></big><br/><sub>测试全绿 · CI 守护</sub></td>
 <td align="center"><big><b>ms 级</b></big><br/><sub>全市场策略扫描</sub></td>
 <td align="center"><big><b>双服务</b></big><br/><sub>零外部数据库</sub></td></tr>
@@ -51,7 +51,7 @@
 | 选股、回测、监控各用一套工具,口径对不上      | 全站统一 **enriched 数据口径**:选股 → 回测 → 监控 → 复盘一条链                                           |
 | 盘中异动靠人盯盘,错过就是错过                | **竞价/盘中/偏移**全时段异动 + 实时弹窗、语音播报、飞书推送                                              |
 | 想查个数据要在几个页面之间来回点             | **AI 对话助手**:一句话问出全站数据,取数过程逐条可见、可展开核对;还能经确认卡放行生成信号、跑回测、加自选 |
-| 想基于面板数据做自己的工具/机器人,只能爬页面 | **开放接口**:Token 六档权限、61 端点契约化、SSE 事件流,脚本与自建工具直接调用                           |
+| 多人共用面板时,自选与报告容易混在一起 | **账号隔离**:共享行情、个人自选、规则、报告与研究结果按账号保存 |
 | 付费终端贵、云端平台数据出不了本地           | **自托管**:Docker 网页与采集双服务共享本地 Parquet,无需外部数据库                                                 |
 
 ## ✨ 核心功能
@@ -128,7 +128,7 @@
 <tr>
 <td width="50%" valign="top">
 
-**🌐 开放接口**<br/>Token 六档权限, 61 端点契约化, 读+写闭环
+**👥 多用户账号**<br/>管理员管理账号,个人数据按用户隔离
 
 </td>
 <td width="50%" valign="top">
@@ -183,7 +183,7 @@
 
 - **数据** Data — 本地数据画像与同步状态(维表/日K/除权/Enriched/指数/ETF/分钟K/财务),盘后管道与历史扩展
 - **扩展分析** (动态菜单) — 把任意第三方/扩展数据字段配成一级菜单,与内置数据同台分析
-- **设置** Settings — 数据源与能力检测(能力路由矩阵、档位徽章)、AI 接口、实时监控、扩展页面、开放接口(Token 管理)、菜单与系统设置
+- **设置** Settings — 数据源与能力检测(能力路由矩阵、档位徽章)、AI 接口、实时监控、扩展页面、账号与用户管理、菜单与系统设置
 
 **🤖 AI 助手**
 
@@ -240,7 +240,7 @@
 | 🧬 **单一 enriched 口径** | 只存 15 列基础数据、现算 68 列指标信号;选股 → 回测 → 监控 → 复盘吃同一份数据 |
 | 📁 **文件型零运维存储** | Parquet + DuckDB,网页/采集双服务共享本地数据目录,无需外部数据库 |
 | 🔁 **回测 = 实盘同路径** | 策略执行只此一条 `StrategyEngine.run`;分钟策略逐日回放 +「当日已知」纪律,杜绝未来函数 |
-| 🏛️ **网关居中的开放单体** | 面板密码会话与 Token 网关双通道并行;61 端点契约快照 + CI 守护,SSE 事件流按权限开放 |
+| 🏛️ **统一账号边界** | SQLite 账号和会话在网页与采集服务共同校验,共享行情与个人数据分离 |
 | 🧩 **核心域 / 扩展域边界** | 8 个核心域拥有数据与语义,5 条扩展通道只消费契约——删除目录即整体卸载,零核心改动 |
 | 🚀 **重活进程隔离** | 回测跑在 spawn worker 子进程,刷新/切页重连不丢任务,主服务永不被计算卡住 |
 | 📅 **共享交易日历** | collector 保存 fuyao 日历,查询与调度只读本地;休市停止轮询,日历未知时保持未就绪 |
@@ -248,17 +248,17 @@
 ### 总览 · 网关居中的开放单体
 
 
-> **双通道并行**:面板走密码会话,外部走 Token 网关 —— 互不影响、互不挤占限流。核心域 8 个域是数据与语义的所有者;扩展域 5 条通道只消费契约,零核心改动。
+> **多用户访问**：账号会话统一认证，管理员维护共享数据，各用户在自己的目录保存个人数据。旧 Bearer Token 与开放事件票据入口已停用。
 
 ```mermaid
 flowchart TB
     subgraph CLIENTS["🖥️ 消费端"]
         direction LR
         UI["面板 UI<br/>React · 19 页面"]
-        APPC["外部程序<br/>脚本 · 看板"]
+        APPC["账号管理<br/>admin · guest · pro"]
     end
 
-    GW{"开放网关<br/>Token · 六档 scope<br/>限流 120/min · 61 端点契约"}
+    GW{"账号认证<br/>SQLite 会话<br/>权限与归属校验"}
 
     API["应用层 · ⚡ FastAPI<br/>REST · SSE 事件流"]
 
@@ -279,9 +279,9 @@ flowchart TB
         X5["custom 后端模块<br/>★ AI 助手参考实现"]
     end
 
-    UI -->|"密码会话"| API
-    APPC -->|"Bearer + scope"| GW
-    GW -->|"契约放行"| API
+    UI -->|"账号会话"| GW
+    APPC -->|"管理员权限"| GW
+    GW -->|"身份与权限"| API
     API ==> S1
     S3 -.-> X3
 
@@ -329,8 +329,8 @@ flowchart TB
 | **非路由数据集采集** | 龙虎榜/盘前风向标/交易日历等 fuyao 专有能力不进路由矩阵,由 collector 后台获取并保存;页面只读本地结果,榜单未保存时显示无数据 |
 | **回测执行隔离**     | 回测在 spawn worker 子进程运行,持久 run ID,刷新/切页重连不丢任务;子进程结果消息经锁保护回传                                                                                                                              |
 | **分层缓存**         | enriched 读取时现算指标(存储仅 15 列基础数据,现算 68 列指标与信号)+ 进程内快照缓存;扩展字段按日分区快照,页面即配即用                                                                                                     |
-| **开放网关**         | Token 通道与面板密码会话并行互不影响:认证 → 六档 scope 校验 → 每 Token 滑动窗口限流(默认 120 次/分,O(1) 内存)→ 放行;管理面(数据同步/表结构/设置)永不开放给 Token                                                         |
-| **事件总线**         | 进程内发布/订阅(慢消费者丢旧保新,广播失败不反噬主流程),告警落盘唯一入口已挂接;SSE 流按票据 scope 过滤,票据一次性 60 秒过期                                                                                               |
+| **账号认证** | SQLite 保存账号与会话；每账号一个有效会话，7 天过期，停用和密码变更撤销会话，角色调整在后续请求生效；管理接口仅 admin 可用 |
+| **事件总线** | 共享行情事件与个人事件区分归属；个人告警和报告更新仅推送给所属用户 |
 | **完全解耦扩展**     | 后端 `app/custom/<包>/` 启动时自动发现、注册独立路由(版本不符或 setup 失败即隔离跳过), 前端 `src/custom/*/extension.tsx` 构建时自动挂载到插槽; 删除目录即整体卸载, 扩展无需改动核心 —— **AI 对话助手**即该机制的参考实现 |
 
 ### 技术栈
@@ -362,51 +362,11 @@ flowchart TB
 | 回测           | 子进程隔离不卡主服务,刷新重连不丢任务                             | spawn worker + 持久 run ID + 重活并发闸        |
 | 部署与兼容     | 网页/采集双服务共享本地目录,**无需外部数据库**(Parquet + DuckDB) · 新老 CPU 双内核 | polars rtcompat 兼容内核,运行时自动探测        |
 
-### 开放层(0.3.2 新架构带来)
+### 账号与访问
 
-| 能力         | 表现                                | 靠什么                                     |
-| :----------- | :---------------------------------- | :----------------------------------------- |
-| 开放 API     | **61 端点** · 每 Token 120 次/分    | 进程内滑动窗口限流,O(1) 内存,零外部依赖    |
-| 网关裁决     | 认证→scope→限流,纯内存单函数完成    | 单一裁决点(`evaluate`),无数据库往返        |
-| 契约稳定性   | 机器可读契约 + **快照测试**守护     | 开放面增删必须显式改快照,CI 拦截无意识变更 |
-| 数据写闭环   | 外部写入复用管理端同一校验/落盘路径 | `write:ext` 只写行数据,表结构锁死管理面    |
-| 事件推送     | 告警落盘即广播,**亚秒级**到 SSE 流  | 进程内事件总线(丢旧保新)+ 一次性票据订阅   |
-| 质量保障     | **2400+ 测试全绿,约 100 秒跑完**    | GitHub Actions CI(后端全量 + 前端构建)     |
+共享行情由管理员维护；自选、监控规则、告警、模拟盘、研究结果和 AI 报告按账号保存。管理员可创建账号、调整角色、停用账号和重置临时密码，不能代入其他用户查看个人数据。pro 到期按北京时间日期降为 guest 权限。
 
----
-
-## 🌐 开放能力(Open API)
-
-面板的核心能力不只长在页面上 —— **全部开放成受控接口**,外部程序通过 Token 按权限调用:
-
-> 🌐 **开放平台门户已上线 → [tsp.shy313.com](https://tsp.shy313.com/)**
-> 浏览 TSP 全部功能 · 注册账户 · 邀请好友 · 创建 API Key · 在线调用开放接口,一个入口直达。
-
-<table>
-  <tr>
-    <td width="50%" align="center"><b>设置 → 开放接口 · Token 管理</b><br/><sub>明文只显示一次,六档 scope 按需授予</sub></td>
-    <td width="50%" align="center"><b>设置 → 菜单设置 · 架构标注</b><br/><sub>每页核心/扩展徽标,悬停看归属原因</sub></td>
-  </tr>
-  <tr>
-    <td width="50%"><img src="./screenshots/开放接口.png" alt="开放接口 Token 管理"></td>
-    <td width="50%"><img src="./screenshots/菜单架构标注.png" alt="菜单核心/扩展架构标注"></td>
-  </tr>
-</table>
-
-| 能力            | 说明                                                                                                                                                                           |
-| :-------------- | :----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **API Token**   | `设置 → 开放接口` 创建,明文只显示一次,SHA-256 哈希存储,吊销立即生效                                                                                                            |
-| **六档 scope**  | `read:market` / `read:ext` / `write:ext` / `read:analysis` / `run:backtest` / `paper:trade`,管理面永不开放给 Token                                                             |
-| **61 端点契约** | `GET /api/openapi.json?tier=a` 机器可读,Postman/代码生成即用;**契约快照测试 + CI 守护**,开放面变更必须显式确认                                                                 |
-| **数据写闭环**  | `write:ext` 程序化写入扩展表行数据(与内置数据同台分析),表结构锁死在管理面                                                                                                      |
-| **SSE 事件流**  | 60 秒一次性票据订阅实时告警推送,票据只继承 scope 不放大权限                                                                                                                    |
-| **示例与文档**  | [examples/open-api](./examples/open-api/README.md) 四个零依赖可运行示例 · [docs/features.md → 开放接口](./docs/features.md) · [开放平台设计方案](./docs/open-platform-plan.md) |
-
-```bash
-# 十行内跑通第一个调用
-curl -H "Authorization: Bearer tsp_xxxx" \
-  "http://localhost:3018/api/kline/daily?symbol=600519.SH&limit=10"
-```
+旧 Open API Bearer Token、Token 管理和事件票据入口已停用；仓库中的旧示例与契约文件不代表这些入口仍可调用。账号初始化、7 天单会话和备份恢复规则见 [部署说明](./docs/deploy-password.md)。
 
 ---
 
@@ -449,7 +409,7 @@ curl -H "Authorization: Bearer tsp_xxxx" \
 
 **完全解耦的扩展模块**
 
-助手是项目扩展系统的参考实现: 后端 `app/custom/assistant/`(启动时自动发现并注册独立路由)与前端 `src/custom/assistant/`(构建时自动挂载到插槽)各自独立, **删除目录即整体卸载**。助手查询后台已采集的本地数据，数据同步统一由维护者在数据页发起。未配置 AI Key 或使用不支持工具调用的供应商(如 Codex CLI)时 fail-closed, 直接提示前往设置页。
+助手是项目扩展系统的参考实现: 后端 `app/custom/assistant/`(启动时自动发现并注册独立路由)与前端 `src/custom/assistant/`(构建时自动挂载到插槽)各自独立, **删除目录即整体卸载**。助手查询后台已采集的本地数据，数据同步统一由维护者在数据页发起。未配置模型 API Key 或使用不支持工具调用的供应商时 fail-closed, 直接提示前往设置页。
 
 > ⚠️ 助手是数据分析工具, 不提供买卖指令; 涉及交易决策的问题会转换为客观的技术/财务状态、关键价位、风险因素与条件情景。
 
@@ -500,27 +460,9 @@ docker compose up --build
 # 打开 http://localhost:3018
 ```
 
-<details>
-<summary><b>🐳 Codex CLI 挂载、版本覆盖与插件开关(点开查看)</b></summary>
+本地 Codex CLI 模式已停用，AI 功能使用后端配置的模型 API。网页不提供 Python 策略代码生成、编辑或执行入口；仍可使用声明式信号及已有受信任策略。
 
-镜像内置固定版本的 **Codex CLI**，Compose 会将主机 `${HOME}/.codex` 只读挂载到容器，因此主机需先完成 Codex 登录。若主机 Codex 使用 loopback local-access provider，容器会保留实际端口并自动将主机名映射为 `host.docker.internal`。需要覆盖镜像内版本时可设置构建参数：
-
-```bash
-CODEX_CLI_VERSION=0.144.3 docker compose up --build
-```
-
-> **Windows 用户注意**：纯 PowerShell / CMD 下 `HOME` 环境变量通常未设置，会导致挂载路径解析失败、容器读不到 Codex 登录态。请在 `.env` 中显式指定主机 Codex 目录：
->
-> ```bash
-> # PowerShell 示例(实际路径以本机为准)
-> echo "CODEX_HOME_HOST=C:\Users\你的用户名\.codex" >> .env
-> ```
-
-> Codex CLI 模式允许 TickFlow 容器读取本机 Codex 登录凭据，仅应在受信任的本机环境启用。凭据目录以只读方式挂载，不会写入镜像。
-
-镜像默认**不含** stock-sdk 插件(合规考虑);确需启用执行 `docker compose build --build-arg INCLUDE_STOCKSDK=1` 后再 `docker compose up -d`,详见 [docs/deployment.md](./docs/deployment.md)。
-
-</details>
+镜像默认不含 stock-sdk 插件；插件配置见 [部署说明](./docs/deployment.md)。
 
 > 📖 Docker 进阶、老 CPU 兼容、访问密码设置等见 [docs/deployment.md](./docs/deployment.md)。
 
@@ -566,23 +508,23 @@ xattr -dr com.apple.quarantine /Applications/TSP.app
 
 ### 跑起来后的第一次使用
 
-1. **设置 → 凭据与能力** → 点 **重新检测**,确认档位标签与能力路由矩阵
+1. 使用内置管理员 `pyxadmin` 登录（默认密码见[账号初始化与部署](./docs/deploy-password.md)；如已自定义则使用自己的账号）；**设置 → 凭据与能力** → 点 **重新检测**,确认档位标签与能力路由矩阵
 2. **设置** → **立即跑盘后管道**:拉日 K + 计算 enriched 表(None / Free 走 free-api,当日数据盘后 1-2 小时可用)
 3. **自选**页加标的 → **选股**页点策略卡片扫描 / 配自定义信号
 4. **回测**页选策略 + 区间 → 看净值 / 夏普 / 交易明细(SSE 实时进度),结果可导出 CSV、存候选一键复测
 5. **监控中心**配规则,盘中实时弹窗 + 持久化记录;**异动监控**覆盖竞价/盘中/偏移全时段
 6. 配好 AI Key 后,**悬浮球 / ⌘K** 呼出 **AI 对话助手**,直接问「今天市场怎么样」「我的自选表现如何」「我的扩展数据表里有什么」,或让它「生成一个放量站上 20 日线的信号」「检查一下数据完整性」——写操作会先弹确认卡, 你点确认才执行
-7. 想接自己的程序?**设置 → 开放接口**建个 Token,照着 [examples/open-api](./examples/open-api/README.md) 十分钟跑通第一个脚本
+7. **设置 → 用户管理**创建其他账号并分配角色；使用临时密码的用户先修改密码，再进入个人工作区。
 
 ---
 
 ## ⚙️ 配置
 
-所有配置从根目录 `.env` 读取(复制 `.env.example` 开始),也可在面板 **设置** 页修改。最常用的三项:
+启动配置从根目录 `.env` 读取（复制 `.env.example` 开始）；管理员可在设置页修改支持的系统选项，个人偏好由各账号保存。首次启动默认创建内置管理员 `pyxadmin`，无需预先配置账号；默认密码及可选覆盖方式见[账号初始化与部署](./docs/deploy-password.md)。
 
 ```ini
 TICKFLOW_API_KEY=              # 留空 = None 模式(历史日K免费);填 Key 解锁更多
-AI_API_KEY=                    # 留空 = 关闭 AI;填 Key 启用策略生成与 AI 对话助手
+AI_API_KEY=                    # 留空 = 关闭 AI;填 Key 启用 AI 分析、声明式信号与对话助手
 PORT=3018                      # 服务端口
 ```
 
@@ -601,7 +543,7 @@ PORT=3018                      # 服务端口
 | **v0.2**              | 因子挖掘全链路 · 市场阶段与主线识别 · 异动监控 · 数据源插件化                                                                      | ✅            |
 | **v0.3**              | 能力路由矩阵 · fuyao 数据源(财务/龙虎榜/风向标) · 分钟策略与回测 · 交易日探针 · 全时段异动中心 · 回测导出与候选复测                | ✅            |
 | **AI 助手**           | 对话式数据问答与操作: 21 查询 + 3 动作工具(确认卡放行, 含生成信号/回测/加自选) · 逐字流式 + 工具足迹卡 · 完全解耦扩展模块 | ✅            |
-| **v0.3.2 开放能力版** | API Token + 六档 scope 网关 · 61 端点契约(快照+CI 守护) · 扩展数据读写闭环 · SSE 事件流 · 核心/扩展域边界标注         | ✅            |
+| **v0.3.2 开放能力版（历史，当前入口停用）** | API Token + 六档 scope 网关 · 61 端点契约(快照+CI 守护) · 扩展数据读写闭环 · SSE 事件流 · 核心/扩展域边界标注         | ✅            |
 
 ---
 

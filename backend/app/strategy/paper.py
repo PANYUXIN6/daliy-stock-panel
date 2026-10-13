@@ -41,6 +41,7 @@ import polars as pl
 
 from app.market_time import CN_TZ, cn_now, cn_today
 from app.services.fs_utils import atomic_write_text
+from app.services.private_storage import identifier, private_path
 
 logger = logging.getLogger(__name__)
 
@@ -63,7 +64,7 @@ MAX_POSITION_SYMBOLS = 50          # 持仓标的数上限 (防误操作)
 DEFAULT_ACCOUNT_ID = "default"
 _ACCOUNT_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,32}$")
 
-_MIGRATION_DONE = False
+_MIGRATED_ROOTS: set[Path] = set()
 
 
 # ── 路径与账户目录 ──────────────────────────────────────
@@ -75,7 +76,7 @@ def validate_account_id(account_id: str) -> str:
 
 
 def accounts_base(data_dir: Path) -> Path:
-    return Path(data_dir) / "paper" / "accounts"
+    return private_path(data_dir, "paper", "accounts")
 
 
 def _migrate_legacy(data_dir: Path) -> None:
@@ -84,7 +85,7 @@ def _migrate_legacy(data_dir: Path) -> None:
     仅当旧 account.json 存在且 accounts/ 尚不存在时迁移; 移动失败只留痕不阻断
     (下次访问重试), 避免迁移异常导致模拟盘整体不可用。
     """
-    legacy = Path(data_dir) / "paper"
+    legacy = private_path(data_dir, "paper")
     base = accounts_base(data_dir)
     if not (legacy / "account.json").exists() or base.exists():
         return
@@ -109,11 +110,12 @@ def _migrate_legacy(data_dir: Path) -> None:
 
 
 def _root(data_dir: Path, account_id: str = DEFAULT_ACCOUNT_ID) -> Path:
-    global _MIGRATION_DONE
-    if not _MIGRATION_DONE:
-        _migrate_legacy(data_dir)
-        _MIGRATION_DONE = True
-    d = accounts_base(data_dir) / validate_account_id(account_id)
+    root = accounts_base(data_dir)
+    with PAPER_LOCK:
+        if root not in _MIGRATED_ROOTS:
+            _migrate_legacy(data_dir)
+            _MIGRATED_ROOTS.add(root)
+    d = private_path(data_dir, "paper", "accounts", validate_account_id(account_id))
     d.mkdir(parents=True, exist_ok=True)
     return d
 
@@ -322,12 +324,12 @@ def load_orders(data_dir: Path, account_id: str = DEFAULT_ACCOUNT_ID) -> list[di
 
 
 def save_order(data_dir: Path, order: dict, account_id: str = DEFAULT_ACCOUNT_ID) -> None:
-    p = _orders_dir(data_dir, account_id) / f"{order['id']}.json"
+    p = _orders_dir(data_dir, account_id) / f"{identifier(order['id'])}.json"
     atomic_write_text(p, json.dumps(order, ensure_ascii=False, indent=2))
 
 
 def get_order(data_dir: Path, order_id: str, account_id: str = DEFAULT_ACCOUNT_ID) -> dict | None:
-    p = _orders_dir(data_dir, account_id) / f"{order_id}.json"
+    p = _orders_dir(data_dir, account_id) / f"{identifier(order_id)}.json"
     if not p.exists():
         return None
     try:

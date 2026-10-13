@@ -15,6 +15,7 @@ from fastapi.testclient import TestClient
 from app.api.alerts import router
 from app.services import alert_store
 
+pytestmark = pytest.mark.usefixtures("private_owner")
 
 def _client(tmp_path) -> TestClient:
     app = FastAPI()

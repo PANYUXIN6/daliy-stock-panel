@@ -17,6 +17,8 @@ import logging
 import threading
 from pathlib import Path
 
+from app.services.private_storage import private_path
+
 logger = logging.getLogger(__name__)
 
 # 保留策略
@@ -30,7 +32,7 @@ _write_count = 0
 
 
 def _path(data_dir: Path) -> Path:
-    p = data_dir / "user_data" / "alerts.jsonl"
+    p = private_path(data_dir, "user_data", "alerts.jsonl")
     p.parent.mkdir(parents=True, exist_ok=True)
     return p
 

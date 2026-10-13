@@ -14,6 +14,8 @@ from app.services.auto_mining import (
     screen_all_factors,
 )
 
+pytestmark = pytest.mark.usefixtures("authenticated_actor")
+
 # ── classify_factor: 门槛分支 ──
 
 
@@ -140,7 +142,7 @@ class _FakeManager:
 
 
 @pytest.fixture()
-def client(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> Any:
+def client(monkeypatch: pytest.MonkeyPatch, tmp_path: Any, authenticated_actor) -> Any:
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
 
@@ -152,6 +154,7 @@ def client(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> Any:
 
     app = FastAPI()
     app.include_router(mining_api.router)
+    app.state.user_runtimes = SimpleNamespace(get=lambda user: app.state)
     app.state.repo = SimpleNamespace(store=SimpleNamespace(data_dir=tmp_path))
     app.state.mining_manager = manager
 

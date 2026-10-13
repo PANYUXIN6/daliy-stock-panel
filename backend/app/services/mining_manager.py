@@ -22,6 +22,7 @@ from app.services.mining_jobs import (
     MiningRunValidationError,
     compute_run_signature,
 )
+from app.services.user_context import current_user, user_scope
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +45,7 @@ class MiningJobManager:
         worker_runner: WorkerRunner = run_worker_task,
         task_factory: TaskFactory = make_worker_task,
     ) -> None:
+        self._owner = current_user()
         self._data_dir = Path(data_dir).resolve()
         self._store = MiningRunStore(self._data_dir)
         self._worker_runner = worker_runner
@@ -152,7 +154,7 @@ class MiningJobManager:
             return
         cancel_event = threading.Event()
         thread = threading.Thread(
-            target=self._run_job,
+            target=self._run_owned_job,
             args=(run_id, source, cancel_event),
             name=f"mining-{run_id}",
             daemon=True,
@@ -160,6 +162,10 @@ class MiningJobManager:
         self._cancel_events[run_id] = cancel_event
         self._threads[run_id] = thread
         thread.start()
+
+    def _run_owned_job(self, *args) -> None:
+        with user_scope(self._owner):
+            self._run_job(*args)
 
     def _run_job(
         self,

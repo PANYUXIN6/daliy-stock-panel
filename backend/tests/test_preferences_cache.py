@@ -8,6 +8,9 @@ import pytest
 
 from app.services import preferences
 
+pytestmark = pytest.mark.usefixtures("private_owner")
+
+
 
 @pytest.fixture(autouse=True)
 def _isolated(tmp_path, monkeypatch):
@@ -76,6 +79,7 @@ def test_mining_schedule_defaults_are_disabled(_isolated):
         "mining_schedule_enabled": False,
         "mining_schedule_weekday": 4,
         "mining_budget_profile": "balanced",
+        "mining_schedule_owner_id": None,
     }
 
 
@@ -95,6 +99,7 @@ def test_mining_schedule_invalid_stored_values_fail_closed(_isolated):
         "mining_schedule_enabled": False,
         "mining_schedule_weekday": 4,
         "mining_budget_profile": "balanced",
+        "mining_schedule_owner_id": None,
     }
 
 
@@ -108,6 +113,7 @@ def test_mining_schedule_setter_saves_group_once(monkeypatch):
         "mining_schedule_enabled": True,
         "mining_schedule_weekday": 2,
         "mining_budget_profile": "strict",
+        "mining_schedule_owner_id": "a" * 32,
     }
     assert calls == [result]
 
@@ -150,3 +156,12 @@ def test_email_smtp_config_falls_back_from_malformed_stored_values(_isolated):
         "from_address": "",
         "to_addresses": [],
     }
+
+
+def test_mining_schedule_preserves_owner_without_actor(private_owner):
+    from app.services.user_context import user_scope
+    saved = preferences.set_mining_schedule(True, 4, 'balanced')
+    assert saved['mining_schedule_owner_id'] == private_owner.id
+    with user_scope(None):
+        updated = preferences.set_mining_schedule(True, 2, 'strict')
+    assert updated['mining_schedule_owner_id'] == private_owner.id

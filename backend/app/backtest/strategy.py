@@ -177,7 +177,13 @@ class StrategyDependencyResolver:
 
         full_fallback = bool(strategy.filter_history_fn and not strategy.required_features)
         full_fallback = full_fallback or not filter_resolved
-        signal_dependencies = get_signal_dependencies()
+        signal_dependencies = dict(get_signal_dependencies())
+        from app.services.user_context import current_user
+        from app.strategy import custom_signals
+        owner = current_user(required=False)
+        if owner is not None:
+            expressions = custom_signals.build_expressions(custom_signals.load_all(owner.data_dir))
+            signal_dependencies.update(custom_signals.expression_dependencies(expressions))
         if full_fallback:
             logger.warning(
                 "strategy %s has dynamic Python dependencies without REQUIRED_FEATURES; "

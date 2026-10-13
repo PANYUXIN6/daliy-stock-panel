@@ -60,7 +60,8 @@ def test_browser_cannot_replace_or_clear_keys(client, method, path, payload):
     response = client.request(method, path, json=payload)
 
     assert response.status_code == 403
-    assert "后端" in response.json()["detail"]
+    expected = "本地 Codex CLI 模式已停用" if payload and payload.get("provider") == "codex_cli" else "后端"
+    assert expected in response.json()["detail"]
     assert "replacement-secret" not in response.text
     assert secrets_store.load() == before
     assert (settings.ai_api_key, settings.ai_provider, settings.ai_model) == runtime_before

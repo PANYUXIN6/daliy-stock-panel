@@ -1,3 +1,4 @@
+import { accountStorage } from '@/lib/sessionRuntime'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { ArrowDown, ArrowUp, BookmarkPlus, ChevronRight, ChevronsUpDown, Clock, Info, Layers3, ListFilter, ListPlus, Play, Search, Sparkles, Zap } from 'lucide-react'
@@ -628,7 +629,7 @@ export function FactorDiscovery({ focusFactor }: { focusFactor?: string } = {}) 
   const [autoOpen, setAutoOpen] = useState(false)
   const [introCollapsed, setIntroCollapsed] = useState(() => {
     try {
-      return localStorage.getItem(INTRO_STORAGE_KEY) === '1'
+      return accountStorage.getItem(INTRO_STORAGE_KEY) === '1'
     } catch {
       return false
     }
@@ -636,7 +637,7 @@ export function FactorDiscovery({ focusFactor }: { focusFactor?: string } = {}) 
   const collapseIntro = () => {
     setIntroCollapsed(true)
     try {
-      localStorage.setItem(INTRO_STORAGE_KEY, '1')
+      accountStorage.setItem(INTRO_STORAGE_KEY, '1')
     } catch { /* 隐私模式等场景忽略 */ }
   }
   const inspect = (factorName: string) => {

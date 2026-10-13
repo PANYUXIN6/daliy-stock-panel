@@ -144,9 +144,13 @@ class Settings(BaseSettings):
     # 前端轮询 cached-summary 点亮卡片。0 = 关闭 (整段阻塞, 旧行为)。
     strategy_run_all_first_return_s: float = 15.0
 
-    # Auth — 首次启动时预置访问密码(明文, 仅用于初始化, 详见 services/auth.bootstrap_from_env)
-    # 公网服务器部署时免去 SSH 端口转发设密码的麻烦。写入 auth.json(哈希)后即不再读取。
-    auth_password: str = ""
+    # Optional complete override for the built-in administrator on an empty database.
+    # Legacy AUTH_PASSWORD has no authority.
+    auth_admin_username: str = ""
+    auth_admin_password: str = ""
+    auth_cookie_secure: bool = False  # automatically enabled for HTTPS requests
+    auth_trusted_proxies: str = ""  # explicit comma-separated IP/CIDR list
+    auth_allowed_origins: str = ""  # extra browser origins, e.g. local Vite dev server
 
     # Data — frozen: exe 同级 data/ 子目录; 非 frozen: 项目根 data/
     # (均可被环境变量 DATA_DIR 覆盖, pydantic-settings 自动注入)

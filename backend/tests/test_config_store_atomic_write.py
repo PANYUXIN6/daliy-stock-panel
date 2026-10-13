@@ -29,7 +29,7 @@ from app.strategy import custom_signals
 
 
 @pytest.fixture()
-def data_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+def data_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, private_owner) -> Path:
     from app.config import settings
 
     monkeypatch.setattr(settings, "data_dir", tmp_path, raising=False)

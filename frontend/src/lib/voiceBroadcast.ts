@@ -1,3 +1,4 @@
+import { accountStorage } from '@/lib/sessionRuntime'
 /**
  * 语音播报 — 用浏览器原生 speechSynthesis, 无需依赖/音频文件。
  *
@@ -72,7 +73,7 @@ function resolveVoice(): SpeechSynthesisVoice | undefined {
     if (voices.length === 0) return undefined
 
     // 1. 用户手选
-    const configured = localStorage.getItem(LS.voice)
+    const configured = accountStorage.getItem(LS.voice)
     if (configured) {
       const m = voices.find(v => v.voiceURI === configured)
       if (m) return m
@@ -177,14 +178,14 @@ let _speaking = false
 export function speakAlerts(alerts: AlertEvent[]) {
   try {
     if (alerts.length === 0) return
-    if (localStorage.getItem(LS.enabled) !== '1') return   // 开关关: 不播报
+    if (accountStorage.getItem(LS.enabled) !== '1') return   // 开关关: 不播报
     if (!isVoiceSupported()) return                          // 不支持: 静默
     if (_speaking) return                                    // 正在念: 丢弃新批次
 
     const text = buildText(alerts)
     const u = new SpeechSynthesisUtterance(text)
     u.lang = 'zh-CN'
-    u.rate = parseFloat(localStorage.getItem(LS.rate) || '1')
+    u.rate = parseFloat(accountStorage.getItem(LS.rate) || '1')
 
     const v = resolveVoice()
     if (v) u.voice = v
@@ -215,7 +216,7 @@ export function previewVoice(text = '语音播报已开启, 这是试听效果')
     activateVoice()
     const u = new SpeechSynthesisUtterance(text)
     u.lang = 'zh-CN'
-    u.rate = parseFloat(localStorage.getItem(LS.rate) || '1')
+    u.rate = parseFloat(accountStorage.getItem(LS.rate) || '1')
     const v = resolveVoice()
     if (v) u.voice = v
     window.speechSynthesis.cancel()   // 试听前停掉正在念的

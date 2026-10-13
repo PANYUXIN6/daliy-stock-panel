@@ -16,7 +16,7 @@ from pathlib import Path
 
 import httpx
 import polars as pl
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, HTTPException, Request
 from sse_starlette.sse import EventSourceResponse
 
 from app.services.events import EventBus, bus
@@ -77,12 +77,16 @@ def publish_quotes(quote_service) -> None:
         os.replace(temporary, target / 'quotes.zip')
 
 
-def publish_data_update(data_dir: Path, datasets: list[str]) -> None:
+def publish_data_update(data_dir: Path, datasets: list[str], *, private: bool = False) -> None:
     """保存更新通知以便重连补读；实时事件使用现有有界总线。"""
     target = _directory(data_dir)
     target.mkdir(parents=True, exist_ok=True)
     payload = {'datasets': sorted(set(datasets)), 'updated_at': time.time_ns()}
-    atomic_write_text(target / 'data_update.json', json.dumps(payload))
+    if private:
+        from app.services.user_context import current_user
+        payload['owner_id'] = current_user().id
+    else:
+        atomic_write_text(target / 'data_update.json', json.dumps(payload))
     runtime_bus.publish('data_updated', payload, '*')
 
 
@@ -119,6 +123,8 @@ class QuoteMirror:
 
     def subscribe(self) -> QuoteSubscriber:
         subscriber = QuoteSubscriber()
+        from app.services.user_context import current_user
+        subscriber.owner_id = current_user().id
         with self._lock:
             self._subscribers.add(subscriber)
         return subscriber
@@ -131,6 +137,9 @@ class QuoteMirror:
         with self._lock:
             subscribers = tuple(self._subscribers)
         for subscriber in subscribers:
+            if (event in {'strategy_alert', 'review_progress', 'strategy_results_updated'}
+                    and payload.get('owner_id') != getattr(subscriber, 'owner_id', None)):
+                continue
             if event == 'quotes_updated':
                 subscriber.notify_quote()
             elif event == 'strategy_results_updated':
@@ -206,11 +215,12 @@ def refresh_web_data(state, datasets: list[str]) -> None:
 
 async def bridge_events(app, collector_url: str) -> None:
     """每个网页进程唯一连接；断线后重读共享快照，再恢复事件广播。"""
+    from app.services.internal_auth import credential
     state = app.state
     async with httpx.AsyncClient(timeout=httpx.Timeout(10, read=None), trust_env=False) as client:
         while True:
             try:
-                async with client.stream('GET', collector_url + '/internal/runtime/events') as response:
+                async with client.stream('GET', collector_url + '/internal/runtime/events', headers={'X-Internal-Key': credential(state.repo.store.data_dir)}) as response:
                     response.raise_for_status()
                     state.collector_connected = True
                     event = ''
@@ -260,6 +270,11 @@ router = APIRouter()
 
 @router.get('/internal/runtime/events')
 async def internal_events(request: Request):
+    import secrets
+
+    from app.services.internal_auth import credential
+    if not secrets.compare_digest(request.headers.get('X-Internal-Key', ''), credential(request.app.state.repo.store.data_dir)):
+        raise HTTPException(status_code=403, detail='内部服务凭据无效')
     qs = request.app.state.quote_service
     subscriber = qs.subscribe()
     updates = runtime_bus.subscribe()

@@ -207,7 +207,7 @@ echo
   # python -m uvicorn: 强制用 venv 的解释器和 uvicorn 模块, 防止 PATH 里
   # 其他 Python(如 /usr/local/bin/uvicorn) 抢先, 导致用错误版本启动后端。
   SERVICE_ROLE=web COLLECTOR_URL="http://127.0.0.1:$COLLECTOR_PORT" \
-    uv run --no-sync python -m uvicorn app.main:app ${UVICORN_ENV_ARGS[@]+"${UVICORN_ENV_ARGS[@]}"} --reload \
+    uv run --no-sync python -m uvicorn app.main:app --no-proxy-headers ${UVICORN_ENV_ARGS[@]+"${UVICORN_ENV_ARGS[@]}"} --reload \
     --host "$BACKEND_HOST" --port "$BACKEND_PORT" 2>&1 \
     | prefix_awk "$(printf "${BLUE}[backend ]${NC} ")"
 ) &
@@ -217,7 +217,7 @@ PIDS+=("$!")
   set +m
   cd "$BACKEND_DIR"
   # collector 不使用 reload；修改网页代码或重启网页不能中断采集任务。
-  SERVICE_ROLE=collector uv run --no-sync python -m uvicorn app.collector:app \
+  SERVICE_ROLE=collector uv run --no-sync python -m uvicorn app.collector:app --no-proxy-headers \
     ${UVICORN_ENV_ARGS[@]+"${UVICORN_ENV_ARGS[@]}"} --host 127.0.0.1 --port "$COLLECTOR_PORT" 2>&1 \
     | prefix_awk "[collector] "
 ) &

@@ -1,3 +1,5 @@
+import { useCurrentUser } from '@/lib/auth'
+import { accountStorage } from '@/lib/sessionRuntime'
 /**
  * AI 助手面板 — 非模态, 从页面最右缘滑入(right: 0), 默认 720px 宽,
  * 左缘拖拽可调宽并持久化到 localStorage。
@@ -54,7 +56,7 @@ const MIN_WIDTH = 480
 
 function loadWidth(): number {
   try {
-    const raw = localStorage.getItem(WIDTH_STORAGE_KEY)
+    const raw = accountStorage.getItem(WIDTH_STORAGE_KEY)
     const value = raw ? Number.parseInt(raw, 10) : Number.NaN
     return Number.isFinite(value) && value >= MIN_WIDTH ? value : DEFAULT_WIDTH
   } catch {
@@ -64,7 +66,7 @@ function loadWidth(): number {
 
 function saveWidth(width: number) {
   try {
-    localStorage.setItem(WIDTH_STORAGE_KEY, String(Math.round(width)))
+    accountStorage.setItem(WIDTH_STORAGE_KEY, String(Math.round(width)))
   } catch { /* 存储不可用时仅内存态 */ }
 }
 
@@ -363,6 +365,7 @@ const SUGGEST_GROUP_ICONS: Record<string, typeof TrendingUp> = {
 }
 
 function EmptyState({ status, suggests }: { status: AssistantStatus | null; suggests: QuickSuggest[] }) {
+  const isAdmin = useCurrentUser()?.role === 'admin'
   const navigate = useNavigate()
 
   if (status && !status.configured) {
@@ -375,10 +378,11 @@ function EmptyState({ status, suggests }: { status: AssistantStatus | null; sugg
         <p className="mt-1.5 text-secondary">AI 助手需要先配置 AI 供应商和 API Key 才能对话。</p>
         <button
           type="button"
+          disabled={!isAdmin}
           onClick={() => navigate('/settings?tab=ai')}
           className="mt-2 cursor-pointer rounded-btn bg-accent px-3 py-1.5 text-xs text-white transition-colors duration-150 ease-smooth hover:bg-accent/90"
         >
-          去设置页配置
+          {isAdmin ? '去设置页配置' : '请联系管理员配置'}
         </button>
       </div>
     )
@@ -396,10 +400,11 @@ function EmptyState({ status, suggests }: { status: AssistantStatus | null; sugg
         </p>
         <button
           type="button"
+          disabled={!isAdmin}
           onClick={() => navigate('/settings?tab=ai')}
           className="mt-2 cursor-pointer rounded-btn bg-accent px-3 py-1.5 text-xs text-white transition-colors duration-150 ease-smooth hover:bg-accent/90"
         >
-          去设置页调整
+          {isAdmin ? '去设置页调整' : '请联系管理员调整'}
         </button>
       </div>
     )

@@ -22,6 +22,7 @@ from app.backtest.mining import (
 from app.enriched_generation import EnrichedGenerationUnavailableError
 from app.factors.registry import factor_columns_view
 from app.services import preferences
+from app.services.auth import AuthError, require_current_session
 from app.services.mining_jobs import (
     RUN_STATUSES,
     SUCCESS_RUN_STATUSES,
@@ -39,6 +40,7 @@ from app.services.mining_schedule import (
     MINING_ALGORITHM_VERSION,
     build_data_fingerprint,
 )
+from app.services.user_runtime import runtime_for
 
 router = APIRouter(prefix="/api/backtest/mining", tags=["backtest"])
 # 校验时动态读取 (含运行期注册的自定义/复合因子)
@@ -204,7 +206,7 @@ def start_run(payload: MiningStartRequest, request: Request) -> dict[str, Any]:
     worker_request = payload.model_dump(mode="json", exclude={"force"})
     try:
         _validate_selected_strategies(
-            request.app.state.strategy_engine,
+            runtime_for(request).strategy_engine,
             payload.strategy_ids,
             payload.asset_type,
         )
@@ -405,6 +407,10 @@ def stream_events(
         terminal_sent = False
         first_batch = True
         while not await request.is_disconnected():
+            try:
+                require_current_session()
+            except AuthError:
+                return
             events = await asyncio.to_thread(store.read_events, run_id, after_id=cursor)
             if first_batch and events and int(events[0]["id"]) > cursor + 1:
                 summary = await asyncio.to_thread(store.read_summary, run_id)
@@ -506,14 +512,14 @@ def update_config(payload: MiningSchedulePatch) -> dict[str, Any]:
 
 
 def _manager(request: Request):
-    manager = getattr(request.app.state, "mining_manager", None)
+    manager = getattr(runtime_for(request), "mining_manager", None)
     if manager is None:
         raise HTTPException(status_code=503, detail="mining manager is unavailable")
     return manager
 
 
 def _candidate_service(request: Request):
-    service = getattr(request.app.state, "mining_candidate_service", None)
+    service = getattr(runtime_for(request), "mining_candidate_service", None)
     if service is not None:
         return service
     from app.backtest.candidates import CandidateStore
@@ -521,19 +527,19 @@ def _candidate_service(request: Request):
 
     manager = _manager(request)
     data_dir = request.app.state.repo.store.data_dir
-    monitor_engine = getattr(request.app.state, "monitor_engine", None)
+    monitor_engine = getattr(runtime_for(request), "monitor_engine", None)
     service = MiningCandidateService(
         data_dir,
         manager.store,
         CandidateStore(data_dir),
-        request.app.state.strategy_engine,
+        runtime_for(request).strategy_engine,
         monitor_state_invalidator=(
             monitor_engine.invalidate_strategy_state
             if monitor_engine is not None
             else None
         ),
     )
-    request.app.state.mining_candidate_service = service
+    runtime_for(request).mining_candidate_service = service
     return service
 
 

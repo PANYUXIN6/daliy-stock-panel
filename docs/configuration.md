@@ -4,7 +4,7 @@
 
 部署相关配置(端口/密码/老 CPU 兼容)的实操见 [deployment.md](./deployment.md)。
 
-首页直接进入看板,不再经过首次配置向导。TickFlow 和 AI Key 由后端读取，网页仅显示是否配置，不返回密钥片段，也不提供输入或清除入口。历史 `data/user_data/secrets.json` 凭据仍兼容读取，优先于对应环境配置；迁移到 `.env` 时，先写入并核对，再移除该文件中对应的密钥字段。能力路由从 `data/user_data/preferences.json` 读取,未设置的能力沿用后端默认值。数据目录可由 `DATA_DIR` 更改。
+登录后进入看板；新建账号或重置密码后须先修改临时密码。TickFlow 和 AI Key 由后端读取，网页仅显示是否配置，不返回密钥片段，也不提供输入或清除入口。历史 `data/user_data/secrets.json` 凭据仍兼容读取，优先于对应环境配置；迁移到 `.env` 时，先写入并核对，再移除该文件中对应的密钥字段。能力路由从 `data/user_data/preferences.json` 读取,未设置的能力沿用后端默认值。数据目录可由 `DATA_DIR` 更改。
 
 进入页面和读取能力矩阵不会自动改写路由。需要切换时在 **设置 → 数据源 → 能力路由** 手动选择;保存插件 Key 与切换路由是两个独立操作。
 
@@ -16,7 +16,7 @@
 | :--- | :--- | :--- |
 | `SERVICE_ROLE` | `web` | 网页只读取本地数据；`app.collector:app` 入口显式启动唯一采集服务。 |
 | `COLLECTOR_URL` | `http://127.0.0.1:3019` | 网页转交同步、设置及任务操作的采集地址；Compose 使用 `http://collector:3018`。 |
-| `AI_MAX_CONCURRENT` | `2` | collector 同时执行 AI 请求的上限，含流式请求和本地 Codex CLI。取消 CLI 后，真实进程退出才释放名额。 |
+| `AI_MAX_CONCURRENT` | `2` | collector 同时执行模型 API 请求的上限，含流式请求；本地 Codex CLI 已停用。 |
 
 两个服务必须使用同一个 `DATA_DIR`。启动、独立健康检查和备份恢复见 [部署说明](deployment.md)。
 
@@ -138,16 +138,18 @@ DATA_DIR=./data       # Parquet / DuckDB 数据存储目录
 
 ---
 
-## 访问密码(公网部署)
+## 账号与认证
 
 ```ini
-AUTH_PASSWORD='你的密码'  # 至少 6 位;仅首次生效,已设过则不覆盖
+# 可选：同时填写，仅覆盖空账号库的首次管理员；留空使用内置 pyxadmin
+AUTH_ADMIN_USERNAME=
+AUTH_ADMIN_PASSWORD=
+AUTH_COOKIE_SECURE=false
+AUTH_TRUSTED_PROXIES=
+AUTH_ALLOWED_ORIGINS=
 ```
 
-面板首次设置访问密码时,出于安全考虑**仅允许本机或内网访问**(防公网陌生人抢先设置锁死面板)。公网服务器部署可通过此环境变量预置首个密码。
-密码建议使用单引号包裹，Docker 启动时会把整个原始 `.env` 只读挂载到容器内 `/app/.env`，兼容已有的未加引号配置。容器可以读取其中的密钥但不能修改该文件，请保持主机文件权限为 `600` 并仅运行可信镜像。
-
-详细步骤、SSH 转发方案、重置密码方法见 [deployment.md → 访问密码设置](./deployment.md#访问密码设置公网部署必读)。
+初始管理员仅在账号库为空时创建；两项自定义凭据都留空时使用内置 `pyxadmin`，可直接登录，无需首次配置或强制改密；自定义须同时填写，空账号库仅配置一项会报错。密码 8–128 位。账号保存在 `data/auth/auth.sqlite3`，已有账号时不会追加内置管理员，环境变量不会重置已有账号或密码。`AUTH_PASSWORD` 与旧 `auth.json` 已不参与认证。HTTPS 部署可强制 Secure Cookie；代理 IP/CIDR 与额外允许来源均需明确配置，默认不信任转发头。默认密码及详细说明见 [账号初始化与部署](deploy-password.md)。
 
 ---
 
@@ -165,6 +167,6 @@ BACKEND_EXTRAS=             # 留空默认;legacy-cpu 兼容老 CPU
 
 TickFlow / AI 凭据及 AI 选项：历史 `data/user_data/secrets.json` > 系统环境变量 > 根目录 `.env` > 默认值。TickFlow 和 AI 密钥只能从后端配置；网页保存的 AI 非密钥选项仍写入 `secrets.json` 并立即生效。
 
-启动配置由系统环境变量优先于 `.env` 提供。用户偏好通过设置页保存到 `data/user_data/preferences.json`。更改 `.env` 后需重启网页与采集服务，两者必须读取相同配置。
+启动配置由系统环境变量优先于 `.env` 提供。个人偏好通过设置页保存到 `data/users/<user_id>/user_data/preferences.json`，系统共享配置仍在 `data/user_data/preferences.json`。更改 `.env` 后需重启网页与采集服务，两者必须读取相同配置。
 
 `.env` 不提交到 Git，建议文件权限为 `600`。迁移历史凭据时只清理对应字段，保留其他用户配置。

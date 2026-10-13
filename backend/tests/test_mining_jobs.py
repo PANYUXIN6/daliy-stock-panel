@@ -18,6 +18,9 @@ from app.services.mining_jobs import (
     canonicalize_request,
     compute_run_signature,
 )
+from app.services.user_context import user_data_dir
+
+pytestmark = pytest.mark.usefixtures("private_owner")
 
 
 def _store(tmp_path: Path) -> MiningRunStore:
@@ -31,7 +34,7 @@ def test_create_and_atomic_summary_reads(tmp_path: Path) -> None:
         {"daily_generation": 7},
         run_id="run_atomic",
     )
-    run_dir = tmp_path / "research" / "mining" / "runs" / "run_atomic"
+    run_dir = user_data_dir(tmp_path) / "research" / "mining" / "runs" / "run_atomic"
 
     assert manifest["status"] == "queued"
     assert manifest["request"]["start"] == "2025-01-01"
@@ -189,7 +192,7 @@ def test_run_ids_and_paths_are_restricted_to_runs_root(tmp_path: Path) -> None:
         store.create({}, "v1", run_id="../escape")
     with pytest.raises(MiningRunValidationError):
         store.create({}, "v1", run_id="")
-    assert not (tmp_path / "research" / "mining" / "escape").exists()
+    assert not (user_data_dir(tmp_path) / "research" / "mining" / "escape").exists()
 
 
 def test_find_by_signature_can_filter_active_and_success_runs(tmp_path: Path) -> None:

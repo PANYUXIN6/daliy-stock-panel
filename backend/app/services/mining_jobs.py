@@ -128,7 +128,8 @@ class MiningRunStore:
             from app.config import settings
 
             data_dir = settings.data_dir
-        self.runs_root = (Path(data_dir).resolve() / "research" / "mining" / "runs").resolve()
+        from app.services.private_storage import private_path
+        self.runs_root = private_path(data_dir, "research", "mining", "runs").resolve()
         self.runs_root.mkdir(parents=True, exist_ok=True)
 
     def create(

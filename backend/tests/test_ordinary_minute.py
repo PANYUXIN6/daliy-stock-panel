@@ -16,6 +16,7 @@ from app.services import ordinary_minute, preferences
 from app.tickflow.capabilities import Cap, CapabilityLimits, CapabilitySet
 from app.tickflow.repository import DataStore, KlineRepository
 
+pytestmark = pytest.mark.usefixtures("authenticated_actor")
 
 @pytest.fixture(autouse=True)
 def isolated_preferences(tmp_path, monkeypatch):

@@ -1,6 +1,9 @@
+import pytest
+
 from app.strategy import monitor_rules
 from app.strategy.monitor import MonitorRuleEngine
 
+pytestmark = pytest.mark.usefixtures("private_owner")
 
 def test_history_loader_selection_by_asset_type():
     eng = MonitorRuleEngine()
@@ -151,7 +154,7 @@ def test_api_save_persists_reconciled_etf_asset_type(tmp_path):
     repo.store.data_dir = tmp_path
     repo.resolve_asset_type.side_effect = lambda s: "etf" if s == "510300.SH" else "stock"
     req = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(
-        repo=repo, monitor_engine=None, capabilities=None,
+        repo=repo, user_runtimes=SimpleNamespace(get=lambda owner: SimpleNamespace(monitor_engine=None)), capabilities=None,
     )))
     model = monitor_rules_api.RuleModel(
         id="etf_px", name="ETF 点位", type="price", asset_type="stock",

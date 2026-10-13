@@ -14,6 +14,7 @@ P1 边界 (诚实声明):
 """
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass, field
 from typing import Literal
 
@@ -301,14 +302,75 @@ _CATALOG: tuple[FactorSpec, ...] = (
 )
 
 _REGISTRY: dict[str, FactorSpec] = {}
+_USER_REGISTRIES: dict[str, dict[str, FactorSpec]] = {}
+_USER_FINGERPRINTS: dict[str, tuple] = {}
+_USER_REVISIONS: dict[str, int] = {}
+_USER_LOADING: set[str] = set()
+_USER_LOCK = threading.RLock()
+
+
+def _owner_key() -> str | None:
+    from app.services.user_context import current_user
+    owner = current_user(required=False)
+    return str(owner.data_dir.resolve() / owner.id) if owner else None
+
+
+def _ensure_private_factors() -> None:
+    from app.services.user_context import current_user
+    owner = current_user(required=False)
+    if owner is None:
+        return
+    key = _owner_key()
+    from app.factors import store
+    with _USER_LOCK:
+        if key in _USER_LOADING:
+            return
+        directory = store._dir(owner.data_dir)
+        fingerprint = tuple(sorted((f.name, f.stat().st_mtime_ns, f.stat().st_size)
+                                   for f in directory.glob('*.json')))
+        if _USER_FINGERPRINTS.get(key) == fingerprint:
+            return
+        _USER_LOADING.add(key)
+        try:
+            _USER_REGISTRIES[key] = {}
+            store.load_into_registry(owner.data_dir)
+            _USER_FINGERPRINTS[key] = fingerprint
+            _USER_REVISIONS[key] = _USER_REVISIONS.get(key, 0) + 1
+        finally:
+            _USER_LOADING.remove(key)
+
+
+def private_registry_revision() -> tuple[str | None, int]:
+    _ensure_private_factors()
+    key = _owner_key()
+    return key, _USER_REVISIONS.get(key, 0)
+
+
+
+def _registry(fid: str = "") -> dict[str, FactorSpec]:
+    from app.services.user_context import current_user
+    if fid.startswith(("uf_", "cf_")):
+        owner = current_user()
+        key = str(owner.data_dir.resolve() / owner.id)
+        if key not in _USER_FINGERPRINTS and key not in _USER_LOADING:
+            from app.factors import store
+            directory = store._dir(owner.data_dir)
+            _USER_FINGERPRINTS[key] = tuple(sorted((f.name, f.stat().st_mtime_ns, f.stat().st_size)
+                                                   for f in directory.glob('*.json')))
+        return _USER_REGISTRIES.setdefault(key, {})
+    return _REGISTRY
+
 
 
 def register_factor(spec: FactorSpec) -> None:
     """注册因子; 重复 id 且版本未增时拒绝 (fail-closed)。"""
-    existing = _REGISTRY.get(spec.id)
+    existing = _registry(spec.id).get(spec.id)
     if existing is not None and existing.version >= spec.version:
         raise ValueError(f"factor id 已注册且版本未提升: {spec.id}")
-    _REGISTRY[spec.id] = spec
+    _registry(spec.id)[spec.id] = spec
+    if spec.id.startswith(("uf_", "cf_")):
+        key = _owner_key()
+        _USER_REVISIONS[key] = _USER_REVISIONS.get(key, 0) + 1
 
 
 for _spec in _CATALOG:
@@ -316,21 +378,32 @@ for _spec in _CATALOG:
 
 
 def get_factor(fid: str) -> FactorSpec | None:
-    return _REGISTRY.get(fid)
+    if fid.startswith(('uf_', 'cf_')):
+        _ensure_private_factors()
+    return _registry(fid).get(fid)
 
 
 def unregister_factor(fid: str) -> FactorSpec | None:
     """注销动态注册的因子 (内置目录因子不可注销, fail-closed)。"""
     if any(spec.id == fid for spec in _CATALOG):
         raise ValueError(f"内置因子不可注销: {fid}")
-    return _REGISTRY.pop(fid, None)
+    removed = _registry(fid).pop(fid, None)
+    if removed is not None and fid.startswith(("uf_", "cf_")):
+        key = _owner_key()
+        _USER_REVISIONS[key] = _USER_REVISIONS.get(key, 0) + 1
+    return removed
 
 
 def _ordered_specs() -> list[FactorSpec]:
     """内置目录顺序在前, 动态注册因子 (custom/composite) 按注册顺序追加。"""
+    _ensure_private_factors()
     ordered: list[FactorSpec] = list(_CATALOG)
     known = {spec.id for spec in _CATALOG}
     ordered.extend(spec for fid, spec in _REGISTRY.items() if fid not in known)
+    from app.services.user_context import current_user
+    owner = current_user(required=False)
+    if owner is not None:
+        ordered.extend(_USER_REGISTRIES.get(str(owner.data_dir.resolve() / owner.id), {}).values())
     return ordered
 
 
@@ -367,7 +440,7 @@ def factor_dependencies(fids) -> frozenset[str]:
     """递归展开依赖到 enriched base 列; 未知 id 原样保留 (与 scoring_dependencies 历史语义一致)。"""
     resolved: set[str] = set()
     for fid in fids:
-        spec = _REGISTRY.get(str(fid))
+        spec = get_factor(str(fid))
         if spec is None:
             resolved.add(str(fid))
         elif spec.dependencies:

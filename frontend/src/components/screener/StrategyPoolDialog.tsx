@@ -1,6 +1,6 @@
-import { useState, useMemo, useEffect, useCallback, useRef } from 'react'
+import { useState, useMemo, useEffect, useCallback } from 'react'
 import { motion, AnimatePresence, Reorder } from 'framer-motion'
-import { X, Plus, GripVertical, Upload, Loader2, Trash2, ListPlus } from 'lucide-react'
+import { X, Plus, GripVertical, Trash2, ListPlus } from 'lucide-react'
 import { api, type StrategyDetail } from '@/lib/api'
 import { useDialogBackdrop } from '@/lib/useDialogBackdrop'
 
@@ -38,15 +38,6 @@ const TABS: { id: SourceTab; label: string }[] = [
   { id: 'ai', label: 'AI' },
 ]
 
-function parseMetaId(code: string): string {
-  const m = code.match(/["']id["']\s*:\s*["']([A-Za-z0-9_-]+)["']/)
-  return m ? m[1] : ''
-}
-
-function fileStem(name: string): string {
-  return name.replace(/\.py$/i, '').replace(/[^A-Za-z0-9_-]/g, '_').replace(/^_+|_+$/g, '')
-}
-
 export function StrategyPoolDialog({ pool, onConfirm, onClose }: Props) {
   const backdrop = useDialogBackdrop(onClose)
   // 草稿状态: 打开时从 pool 复制, 操作只改草稿, 点确定才提交
@@ -54,12 +45,6 @@ export function StrategyPoolDialog({ pool, onConfirm, onClose }: Props) {
   const [allStrategies, setAllStrategies] = useState<StrategyDetail[]>([])
   const [loading, setLoading] = useState(true)
   const [activeTab, setActiveTab] = useState<SourceTab>('all')
-  const [importing, setImporting] = useState(false)
-  const [importError, setImportError] = useState('')
-  const [importMsg, setImportMsg] = useState('')
-  const [publishingId, setPublishingId] = useState<string | null>(null)
-  const fileInputRef = useRef<HTMLInputElement | null>(null)
-
   const loadStrategies = useCallback(async () => {
     setLoading(true)
     try {
@@ -140,51 +125,6 @@ export function StrategyPoolDialog({ pool, onConfirm, onClose }: Props) {
     })
   }, [filteredAvailable])
 
-  // 发布 research_only 草稿 → 刷新后进入公开列表
-  const handlePublish = useCallback(async (id: string) => {
-    setPublishingId(id); setImportError(''); setImportMsg('')
-    try {
-      await api.strategyPublish(id)
-      await loadStrategies()
-      setImportMsg(`已发布: ${id}`)
-    } catch (e: any) {
-      setImportError(String(e?.message ?? '发布失败'))
-    } finally {
-      setPublishingId(null)
-    }
-  }, [loadStrategies])
-
-  const handleImportFile = useCallback(async (file: File) => {
-    setImporting(true); setImportError(''); setImportMsg('')
-    try {
-      if (!file.name.toLowerCase().endsWith('.py')) throw new Error('只能导入 .py 策略文件')
-      const code = await file.text()
-      const rawId = parseMetaId(code) || fileStem(file.name)
-      if (!rawId) throw new Error('无法识别策略 ID，请检查 META.id 或文件名')
-      const target: 'ai' | 'custom' = rawId.startsWith('ai_') ? 'ai' : 'custom'
-      const strategyId = target === 'ai'
-        ? rawId
-        : (rawId.startsWith('custom_') ? rawId : `custom_${rawId}`)
-      const result = await api.strategySaveCodeV2({
-        strategy_id: strategyId,
-        code,
-        target_source: target,
-        mode: 'create',
-      })
-      await loadStrategies()
-      setActiveTab(result.source === 'ai' ? 'ai' : 'custom')
-      const srcLabel = result.source === 'ai'
-        ? (result.research_only ? 'AI 草稿(发布后可用)' : 'AI 策略')
-        : '自定义策略'
-      setImportMsg(`已导入到${srcLabel}: ${result.strategy_id}`)
-    } catch (e: any) {
-      setImportError(String(e?.message ?? '导入失败'))
-    } finally {
-      setImporting(false)
-      if (fileInputRef.current) fileInputRef.current.value = ''
-    }
-  }, [loadStrategies])
-
   return (
     <AnimatePresence>
       <motion.div
@@ -208,35 +148,14 @@ export function StrategyPoolDialog({ pool, onConfirm, onClose }: Props) {
               {invalidPoolCount > 0 && <span className="ml-2 text-[10px] text-danger">{invalidPoolCount} 个失效</span>}
             </span>
             <div className="flex items-center gap-2">
-              <input
-                ref={fileInputRef}
-                type="file"
-                accept=".py,text/x-python,text/plain"
-                className="hidden"
-                onChange={e => {
-                  const file = e.target.files?.[0]
-                  if (file) void handleImportFile(file)
-                }}
-              />
-              <button
-                onClick={() => fileInputRef.current?.click()}
-                disabled={importing}
-                className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-btn border border-accent/30 bg-accent/10 text-accent text-xs font-medium hover:bg-accent/15 disabled:opacity-50 transition-colors cursor-pointer"
-              >
-                {importing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Upload className="h-3.5 w-3.5" />}
-                导入策略
-              </button>
+              <span className="text-[10px] text-muted">Python 策略仅服务器部署</span>
               <button onClick={onClose} className="p-1 rounded hover:bg-elevated transition-colors cursor-pointer">
                 <X className="h-4 w-4 text-muted" />
               </button>
             </div>
           </div>
 
-          {(importError || importMsg) && (
-            <div className={`mx-4 mt-2 px-3 py-2 rounded-btn border text-[11px] shrink-0 ${importError ? 'border-danger/20 bg-danger/10 text-danger' : 'border-emerald-400/20 bg-emerald-400/10 text-emerald-400'}`}>
-              {importError || importMsg}
-            </div>
-          )}
+
 
           {loading ? (
             <div className="flex items-center justify-center py-16">
@@ -297,14 +216,7 @@ export function StrategyPoolDialog({ pool, onConfirm, onClose }: Props) {
                               </span>
                               <span className="text-[10px] text-muted truncate block">{s.description}</span>
                             </span>
-                            <button
-                              onClick={() => handlePublish(s.id)}
-                              disabled={publishingId === s.id}
-                              className="inline-flex items-center gap-1 px-2 py-0.5 rounded-btn text-[10px] text-purple-400 border border-purple-500/25 bg-purple-500/10 hover:bg-purple-500/20 disabled:opacity-50 transition-colors cursor-pointer shrink-0"
-                            >
-                              {publishingId === s.id && <Loader2 className="h-3 w-3 animate-spin" />}
-                              发布
-                            </button>
+                            <span className="text-[10px] text-muted">需服务器维护者部署</span>
                           </div>
                         ))}
                       </div>

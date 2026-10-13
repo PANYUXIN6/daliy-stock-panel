@@ -15,6 +15,9 @@ from app.strategy import config as strategy_config
 from app.strategy.engine import StrategyDataContext, StrategyDef, StrategyEngine
 from app.strategy.monitor import MonitorRuleEngine
 
+pytestmark = pytest.mark.usefixtures("private_owner")
+
+
 
 def _make_engine() -> tuple[StrategyEngine, StrategyDataContext]:
     df = pl.DataFrame({"symbol": ["A", "B", "C"], "value": [1, 2, 3]})
@@ -71,6 +74,7 @@ def test_patch_config_preserves_other_user_overrides(tmp_path):
         strategy_engine=engine,
         repo=SimpleNamespace(store=SimpleNamespace(data_dir=tmp_path)),
     )))
+    request.app.state.user_runtimes = SimpleNamespace(get=lambda _: request.app.state)
     strategy_config.save_override(tmp_path, "saved_params", {
         "params": {"min_value": 2},
         "stop_loss": -0.05,
@@ -98,6 +102,7 @@ def test_save_config_rejects_invalid_scoring_direction(tmp_path):
         strategy_engine=engine,
         repo=SimpleNamespace(store=SimpleNamespace(data_dir=tmp_path)),
     )))
+    request.app.state.user_runtimes = SimpleNamespace(get=lambda _: request.app.state)
 
     with pytest.raises(HTTPException, match="方向无效"):
         strategy_api.save_config(strategy_api.SaveConfigRequest(
@@ -126,6 +131,7 @@ def test_strategy_config_invalidates_only_its_results_and_monitor_state(tmp_path
         monitor_engine=monitor,
         repo=SimpleNamespace(store=SimpleNamespace(data_dir=tmp_path)),
     )))
+    request.app.state.user_runtimes = SimpleNamespace(get=lambda _: request.app.state)
     if operation == "reset":
         strategy_config.save_override(tmp_path, targeted, {"params": {"min_value": 3}})
         strategy_api.reset_config(targeted, request)
@@ -154,6 +160,7 @@ def test_saved_strategy_config_publishes_existing_config_update(tmp_path, monkey
     app.state.service_role = "collector"
     app.state.repo = SimpleNamespace(store=SimpleNamespace(data_dir=tmp_path))
     app.state.strategy_engine = engine
+    app.state.user_runtimes = SimpleNamespace(get=lambda _: app.state)
     app.state.monitor_engine = MonitorRuleEngine()
     app.state.quote_service = SimpleNamespace(_repo=app.state.repo, status=lambda: {}, get_index_quotes=pl.DataFrame)
     bus = EventBus()

@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import polars as pl
+import pytest
 
 from app.market_time import cn_today
 from app.services import quote_service
@@ -14,6 +15,7 @@ from app.services.quote_service import QuoteService, QuoteSubscriber
 from app.strategy.engine import StrategyEngine
 from app.strategy.monitor import MonitorRuleEngine
 
+pytestmark = pytest.mark.usefixtures("private_owner")
 
 def _strategy_rule(scope: str = "all") -> dict:
     return {
@@ -106,7 +108,7 @@ def test_failed_or_skipped_strategy_does_not_mark_result_refresh():
     assert skipped.consume_strategy_result_updates() is False
 
 
-def test_matrix_strategy_monitor_reuses_live_matrix_and_updates_last_row():
+def test_matrix_strategy_monitor_reuses_live_matrix_and_updates_last_row(private_owner):
     target = cn_today()
     start = target - timedelta(days=61)
     rows = []
@@ -144,7 +146,7 @@ def test_matrix_strategy_monitor_reuses_live_matrix_and_updates_last_row():
     }
     monitor = MonitorRuleEngine()
     monitor.set_strategy_engine(strategy_engine)
-    monitor.set_data_dir(Path("test-data"))
+    monitor.set_data_dir(private_owner.data_dir)
     monitor.set_history_loader(load_history)
     monitor.set_rules([{
         "id": "matrix_macd",
@@ -162,6 +164,7 @@ def test_matrix_strategy_monitor_reuses_live_matrix_and_updates_last_row():
         assert monitor.latest_strategy_results()["macd_golden"]["total"] == 2
         first_stats = strategy_engine.realtime_matrix_stats("monitor:stock")
         assert first_stats["build_count"] == 1
+        assert strategy_engine._realtime_matrices["monitor:stock"].signal_history is None
         assert len(load_calls) == 1
 
         updated = current.with_columns((pl.col("close") + 1.0).alias("close"))
@@ -170,6 +173,22 @@ def test_matrix_strategy_monitor_reuses_live_matrix_and_updates_last_row():
         assert second_stats["build_count"] == 1
         assert second_stats["update_count"] == 1
         assert len(load_calls) == 1
+
+        from app.services.user_context import UserContext, user_scope
+        from app.strategy import custom_signals
+        with user_scope(UserContext('b' * 32, 'guest', private_owner.data_dir)):
+            custom_signals.save_one(private_owner.data_dir, {'id': 'other', 'conditions': []})
+        monitor.evaluate(updated)
+        assert strategy_engine.realtime_matrix_stats("monitor:stock")["build_count"] == 1
+        assert len(load_calls) == 1
+
+        custom_signals.save_one(private_owner.data_dir, {
+            'id': 'updated', 'name': 'updated', 'kind': 'entry',
+            'conditions': [{'left': 'close', 'op': '>', 'right': '100'}],
+        })
+        monitor.evaluate(updated)
+        assert strategy_engine.realtime_matrix_stats("monitor:stock")["build_count"] == 2
+        assert len(load_calls) == 2
 
 
 class _MonitorWithUpdate:
@@ -202,7 +221,7 @@ def test_quote_service_notifies_only_after_strategy_result_update():
     service.get_enriched_today = lambda: (_quote_df(), quote_service.cn_today())
 
     with patch.object(QuoteService, "_is_continuous_trading", return_value=True):
-        service._evaluate_monitors(pl.DataFrame(), None)
+        service._evaluate_user_monitors(pl.DataFrame(), None, service._app_state)
 
     assert subscriber.pop()["strategy_results_updated"] is True
 
@@ -214,6 +233,6 @@ def test_quote_service_skips_notification_without_strategy_result_update():
     service.get_enriched_today = lambda: (_quote_df(), quote_service.cn_today())
 
     with patch.object(QuoteService, "_is_continuous_trading", return_value=True):
-        service._evaluate_monitors(pl.DataFrame(), None)
+        service._evaluate_user_monitors(pl.DataFrame(), None, service._app_state)
 
     assert subscriber.pop()["strategy_results_updated"] is False

@@ -18,6 +18,9 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
+from app.services.auth import AuthError, require_current_session
+from app.services.user_context import UserContext, current_user
+
 # 须确认才能执行的工具名(工具实现在 tools.py / tool_catalog)。
 ACTION_TOOLS: frozenset[str] = frozenset({
     "create_signal_strategy",
@@ -50,6 +53,7 @@ class PendingAction:
     call_id: str
     name: str
     args: dict[str, Any]
+    owner: UserContext = field(repr=False)
     created: float = field(default_factory=time.monotonic)
     event: asyncio.Event = field(default_factory=asyncio.Event)
     decision: str | None = None  # approved / denied / expired(超时或溢出回收, 用户未作答)
@@ -63,7 +67,10 @@ class PendingRegistry:
         self._pending: dict[str, PendingAction] = {}
 
     async def register(self, call_id: str, name: str, args: dict[str, Any]) -> PendingAction:
-        action = PendingAction(call_id=call_id, name=name, args=dict(args or {}))
+        require_current_session()
+        if call_id in self._pending:
+            raise ValueError("确认请求标识已存在")
+        action = PendingAction(call_id=call_id, name=name, args=dict(args or {}), owner=current_user())
         self._sweep_expired()
         self._pending[call_id] = action
         # 挂起的确认卡超过上限时按最旧丢弃(视为拒绝), 防注册表无界增长
@@ -76,9 +83,22 @@ class PendingRegistry:
 
     async def resolve(self, call_id: str, approve: bool) -> PendingAction | None:
         """决策端点调用; 条目不存在/已过期返回 None。"""
-        action = self._pending.pop(call_id, None)
+        action = self._pending.get(call_id)
         if action is None:
             return None
+        actor = current_user(required=False)
+        if actor is None or actor.id != action.owner.id or actor.session_token != action.owner.session_token:
+            return None
+        try:
+            require_current_session()
+        except AuthError:
+            return None
+        if time.monotonic() - action.created > self.timeout_s:
+            self._pending.pop(call_id, None)
+            action.decision = "expired"
+            action.event.set()
+            return None
+        self._pending.pop(call_id)
         action.decision = "approved" if approve else "denied"
         action.event.set()
         return action
@@ -94,6 +114,11 @@ class PendingRegistry:
         except TimeoutError:
             self._pending.pop(action.call_id, None)
             return "expired"
+        if action.decision == "approved":
+            try:
+                require_current_session()
+            except AuthError:
+                return "expired"
         return action.decision or "denied"
 
     def _sweep_expired(self) -> None:

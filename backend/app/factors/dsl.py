@@ -740,8 +740,13 @@ def compile_formula(text: str) -> CompiledFormula:
     )
 
 
-@lru_cache(maxsize=256)
 def compile_formula_cached(text: str) -> CompiledFormula:
+    from app.factors.registry import private_registry_revision
+    return _compile_formula_cached(text, private_registry_revision())
+
+
+@lru_cache(maxsize=256)
+def _compile_formula_cached(text: str, owner_revision: tuple[str | None, int]) -> CompiledFormula:
     """带 LRU 缓存的编译入口 (公式文本 → 编译产物, 设计文档 §3.3)。
 
     CompiledFormula 为不可变值对象 (frame_transform 闭包只读), 缓存共享安全。

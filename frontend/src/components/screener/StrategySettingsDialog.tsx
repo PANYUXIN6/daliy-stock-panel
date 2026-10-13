@@ -1,6 +1,6 @@
 ﻿import { useState, useEffect, useCallback } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { X, Settings2, RotateCcw, Save, ChevronDown, Filter, Star, TrendingUp, Sparkles, Download, Layers, Plus, Trash2 } from 'lucide-react'
+import { X, Settings2, RotateCcw, Save, ChevronDown, Filter, Star, TrendingUp, Download, Layers, Plus, Trash2 } from 'lucide-react'
 import { api, type StrategyDetail, type StrategyParamDef, type CompositeChildInfo, type ScoringDirection } from '@/lib/api'
 import { toPercentages, normalizeWeights } from '@/lib/weights'
 import { BUILTIN_COLUMNS } from '@/lib/watchlist-columns'
@@ -30,7 +30,6 @@ interface Props {
   strategyId: string | null
   onClose: () => void
   onSaved?: (displayLimit: number | null) => void
-  onAiModify?: () => void
   onDeleted?: () => void
 }
 
@@ -189,7 +188,7 @@ function ParamField({ def, value, onChange }: {
   )
 }
 
-export function StrategySettingsDialog({ strategyId, onClose, onSaved, onAiModify, onDeleted }: Props) {
+export function StrategySettingsDialog({ strategyId, onClose, onSaved, onDeleted }: Props) {
   const [detail, setDetail] = useState<StrategyDetail | null>(null)
   const [loading, setLoading] = useState(false)
   const [saving, setSaving] = useState(false)
@@ -664,12 +663,6 @@ export function StrategySettingsDialog({ strategyId, onClose, onSaved, onAiModif
               )}
             </div>
             <div className="flex items-center gap-2">
-              {onAiModify && (detail?.source === 'ai' || detail?.source === 'custom') && (
-                <button onClick={onAiModify}
-                  className="inline-flex items-center gap-1.5 h-8 px-3 rounded-lg border border-amber-400/30 bg-amber-400/8 text-amber-400 text-xs font-medium hover:bg-amber-400/15 transition-colors cursor-pointer">
-                  <Sparkles className="h-3.5 w-3.5" />AI 修改
-                </button>
-              )}
               <button onClick={handleSave} disabled={saving}
                 className="inline-flex items-center gap-1.5 h-8 px-4 rounded-lg bg-accent text-white text-xs font-semibold hover:bg-accent/90 transition-colors cursor-pointer disabled:opacity-50">
                 <Save className="h-3.5 w-3.5" />{saving ? '保存中…' : '保存设置'}

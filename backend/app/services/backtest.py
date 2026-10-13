@@ -393,7 +393,9 @@ class BacktestService:
         return result
 
     def _persist(self, result: BacktestResult) -> None:
-        out_dir = settings.data_dir / "backtest_results"
+        from app.services.private_storage import private_path
+
+        out_dir = private_path(settings.data_dir, "backtest_results")
         out_dir.mkdir(parents=True, exist_ok=True)
         # 用 polars 写一份汇总
         summary = pl.DataFrame({

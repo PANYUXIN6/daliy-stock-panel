@@ -16,64 +16,77 @@ from app.services.fs_utils import atomic_write_text
 
 logger = logging.getLogger(__name__)
 
-# 进程内缓存: 行情轮询线程一轮会调用 8~12 次 getter, 每次读盘+parse 是纯重复;
-# 文件仅在用户改设置时变化, 以 (mtime_ns, size) 签名判断是否重读。
-_cache: dict | None = None
-_cache_sig: tuple[int, int] | None = None
+# Personal UI and monitoring preferences never fall back to a different owner.
+PERSONAL_KEYS = frozenset({
+    "watchlist_groups_in_nav", "nav_order", "nav_hidden", "watchlist_columns",
+    "screener_result_columns", "dashboard_layout", "sse_refresh_pages",
+    "strategy_monitor_enabled", "strategy_monitor_ids", "screener_auto_run",
+    "webhook_enabled_default", "webhook_default_channels", "monitor_ext_fields",
+})
+_cache: dict[str, tuple[tuple[int, int], dict]] = {}
+_SAVE_LOCK = threading.RLock()
 
 
 def _path() -> Path:
     from app.config import settings
-    p = settings.data_dir / "user_data" / "preferences.json"
-    p.parent.mkdir(parents=True, exist_ok=True)
-    return p
+    return settings.data_dir / "user_data" / "preferences.json"
+
+
+def _personal_path() -> Path:
+    from app.services.private_storage import private_path
+    return private_path(None, "user_data", "preferences.json")
 
 
 def _invalidate_cache() -> None:
-    global _cache, _cache_sig
-    _cache = None
-    _cache_sig = None
+    _cache.clear()
+
+
+def _read(p: Path) -> dict:
+    try:
+        st = p.stat()
+        sig = (st.st_mtime_ns, st.st_size)
+        cached = _cache.get(str(p))
+        if cached is not None and cached[0] == sig:
+            return copy.deepcopy(cached[1])
+        data = json.loads(p.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            return {}
+        _cache[str(p)] = (sig, data)
+        return copy.deepcopy(data)
+    except FileNotFoundError:
+        return {}
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        logger.warning("preferences.json malformed", exc_info=True)
+        return {}
 
 
 def load() -> dict:
-    """读取 preferences.json (带 mtime 签名缓存)。返回深拷贝, 调用方可自由修改。"""
-    global _cache, _cache_sig
-    p = _path()
-    try:
-        sig = (p.stat().st_mtime_ns, p.stat().st_size)
-    except OSError:
-        return {}
-    if _cache is not None and sig == _cache_sig:
-        return copy.deepcopy(_cache)
-    try:
-        data = json.loads(p.read_text(encoding="utf-8"))
-    except FileNotFoundError:
-        return {}
-    except (OSError, UnicodeError, json.JSONDecodeError) as e:
-        logger.warning("preferences.json malformed: %s", e, exc_info=True)
-        return {}
-    _cache = data
-    _cache_sig = sig
-    return copy.deepcopy(_cache)
-
-
-_SAVE_LOCK = threading.Lock()
+    from app.services.user_context import current_user
+    shared = {k: v for k, v in _read(_path()).items() if k not in PERSONAL_KEYS}
+    if current_user(required=False) is not None:
+        shared.update({k: v for k, v in _read(_personal_path()).items() if k in PERSONAL_KEYS})
+    return shared
 
 
 def save(updates: dict) -> dict:
-    """合并写入。返回新内容。
-
-    锁内 read-modify-write: FastAPI 同步端点跑线程池, 并行 PUT 各自基于旧快照
-    写盘会互相覆盖 (实测: 压缩总开关并行写分时/日K两键, 后写者把先写者覆盖)。
-    """
+    from app.services.user_context import current_user
+    personal = {k: v for k, v in updates.items() if k in PERSONAL_KEYS}
+    shared = {k: v for k, v in updates.items() if k not in PERSONAL_KEYS}
+    user = current_user(required=False)
+    if personal and user is None:
+        raise PermissionError("个人偏好缺少用户身份")
+    if shared and user is not None and user.role != "admin":
+        raise PermissionError("仅管理员可修改系统配置")
     with _SAVE_LOCK:
-        current = load()
-        current.update(updates)
-        atomic_write_text(
-            _path(), json.dumps(current, indent=2, ensure_ascii=False),
-        )
+        for target, values in ((_path(), shared), (_personal_path() if personal else None, personal)):
+            if target is None or not values:
+                continue
+            current = _read(target)
+            current.update(values)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            atomic_write_text(target, json.dumps(current, indent=2, ensure_ascii=False))
         _invalidate_cache()
-    return current
+    return load()
 
 
 def get_realtime_quotes_enabled() -> bool:
@@ -610,6 +623,7 @@ def get_review_schedule() -> dict:
         "enabled": bool(d.get("enabled", False)),
         "hour": d.get("hour", 15),
         "minute": d.get("minute", 40),
+        "owner_id": d.get("owner_id"),
     }
 
 
@@ -623,8 +637,12 @@ def set_review_schedule(enabled: bool, hour: int, minute: int) -> dict:
     # 下限 15:00: A股 15:00 收盘, 收盘后才有当日完整数据复盘
     if h * 60 + m < 15 * 60:
         h, m = 15, 0
-    save({"review_schedule": {"enabled": bool(enabled), "hour": h, "minute": m}})
-    return {"enabled": bool(enabled), "hour": h, "minute": m}
+    from app.services.user_context import current_user
+    actor = current_user(required=False)
+    owner_id = actor.id if actor is not None else get_review_schedule().get("owner_id")
+    schedule = {"enabled": bool(enabled), "hour": h, "minute": m, "owner_id": owner_id}
+    save({"review_schedule": schedule})
+    return schedule
 
 
 MINING_BUDGET_PROFILES = frozenset({"balanced", "strict"})
@@ -646,6 +664,7 @@ def get_mining_schedule() -> dict:
         "mining_schedule_enabled": enabled,
         "mining_schedule_weekday": weekday,
         "mining_budget_profile": profile,
+        "mining_schedule_owner_id": data.get("mining_schedule_owner_id"),
     }
 
 
@@ -655,7 +674,11 @@ def set_mining_schedule(enabled: bool, weekday: int, profile: str) -> dict:
         raise ValueError("mining schedule weekday must be between 0 and 4")
     if profile not in MINING_BUDGET_PROFILES:
         raise ValueError("mining budget profile must be balanced or strict")
+    from app.services.user_context import current_user
+    actor = current_user(required=False)
+    owner_id = actor.id if actor is not None else get_mining_schedule().get("mining_schedule_owner_id")
     result = {
+        "mining_schedule_owner_id": owner_id,
         "mining_schedule_enabled": bool(enabled),
         "mining_schedule_weekday": weekday,
         "mining_budget_profile": profile,

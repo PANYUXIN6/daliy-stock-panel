@@ -24,6 +24,7 @@ from pathlib import Path
 import polars as pl
 
 from app.config import settings
+from app.services.private_storage import private_path
 from app.tickflow.capabilities import Cap, CapabilitySet
 from app.tickflow.client import get_client
 from app.tickflow.rate_limits import chunked, resolve_limit
@@ -64,13 +65,13 @@ _ENTRY_SCHEMA = {
 
 
 def _path() -> Path:
-    p = settings.data_dir / "user_data" / "watchlist.parquet"
+    p = private_path(settings.data_dir, "user_data", "watchlist.parquet")
     p.parent.mkdir(parents=True, exist_ok=True)
     return p
 
 
 def _groups_path() -> Path:
-    p = settings.data_dir / "user_data" / "watchlist_groups.json"
+    p = private_path(settings.data_dir, "user_data", "watchlist_groups.json")
     p.parent.mkdir(parents=True, exist_ok=True)
     return p
 

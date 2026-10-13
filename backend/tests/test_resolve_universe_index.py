@@ -4,6 +4,7 @@ import pytest
 from app.jobs import daily_pipeline
 from app.tickflow.repository import DataStore, KlineRepository
 
+pytestmark = pytest.mark.usefixtures("authenticated_actor")
 
 @pytest.fixture()
 def repo(tmp_path):
@@ -24,6 +25,8 @@ def test_resolve_universe_excludes_index_symbols(repo, monkeypatch, tmp_path):
     monkeypatch.setattr(daily_pipeline.settings, "data_dir", tmp_path)
     monkeypatch.setattr(repo, "get_index_symbol_set", lambda: {"000001.SH"})
 
+    from app.services import user_runtime
+    monkeypatch.setattr(user_runtime, "active_watchlist_symbols", lambda root: {"600000.SH", "000001.SH"})
     universe = daily_pipeline._resolve_universe(_Capset(), repo)
     assert "600000.SH" in universe
     assert "000001.SH" not in universe

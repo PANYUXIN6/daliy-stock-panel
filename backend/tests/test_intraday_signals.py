@@ -13,6 +13,7 @@ from types import SimpleNamespace
 import polars as pl
 import pytest
 
+from app.services.user_context import user_data_dir
 from app.strategy import custom_signals
 from app.strategy.intraday_features import build_feature_frame
 from app.strategy.intraday_signals import IntradaySignalEvaluator, uses_intraday_signals
@@ -20,6 +21,8 @@ from app.strategy.intraday_signals import IntradaySignalEvaluator, uses_intraday
 SYMBOL = "000001.SZ"
 DAY = date(2026, 9, 4)
 
+
+pytestmark = pytest.mark.usefixtures("private_owner")
 
 def _bars(
     prices: list[float],
@@ -280,14 +283,14 @@ def test_uses_intraday_signals_matches_csgi_fields():
 
 def _engine(tmp_path: Path):
     from app.strategy.engine import StrategyEngine
-    custom_dir = tmp_path / "strategies" / "custom"
+    custom_dir = user_data_dir(tmp_path) / "strategies" / "custom"
     custom_dir.mkdir(parents=True, exist_ok=True)
     return StrategyEngine(strategy_dirs=[custom_dir])
 
 
 def test_engine_injects_csgi_columns_into_minute_frame(tmp_path: Path):
     sig = _intraday_sig(id="eng_sig", conditions=[{"left": "price", "op": "cross_up", "right": "field:vwap"}])
-    sig_dir = tmp_path / "user_data" / "custom_signals"
+    sig_dir = user_data_dir(tmp_path) / "user_data" / "custom_signals"
     sig_dir.mkdir(parents=True, exist_ok=True)
     (sig_dir / "eng_sig.json").write_text(json.dumps(sig), encoding="utf-8")
 
@@ -345,7 +348,7 @@ def test_intraday_replay_endpoint(tmp_path: Path):
     request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(repo=repo)))
 
     sig = _intraday_sig(id="replay_sig")
-    sig_dir = tmp_path / "user_data" / "custom_signals"
+    sig_dir = user_data_dir(tmp_path) / "user_data" / "custom_signals"
     sig_dir.mkdir(parents=True, exist_ok=True)
     (sig_dir / "replay_sig.json").write_text(json.dumps(sig), encoding="utf-8")
     daily_sig = {

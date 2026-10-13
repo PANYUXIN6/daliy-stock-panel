@@ -4,14 +4,12 @@ x-service: &service
     dockerfile: Dockerfile
     args:
       BACKEND_EXTRAS: ${BACKEND_EXTRAS:-}
-      CODEX_CLI_VERSION: ${CODEX_CLI_VERSION:-0.144.3}
   env_file:
     - .env
   volumes:
     - ./data:/app/data
     - ./tiers.yaml:/app/tiers.yaml:ro
     - ./.env:/app/.env:ro
-    - ${CODEX_HOME_HOST:-${HOME}/.codex}:/root/.codex:ro
   restart: unless-stopped
   healthcheck:
     test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:3018/health', timeout=3)"]
@@ -36,10 +34,9 @@ services:
   collector:
     <<: *service
     # 只在 Compose 网络内可达，不映射宿主机端口。
-    command: ["uv", "run", "--no-sync", "uvicorn", "app.collector:app", "--host", "0.0.0.0", "--port", "3018"]
+    command: ["uv", "run", "--no-sync", "uvicorn", "app.collector:app", "--no-proxy-headers", "--host", "0.0.0.0", "--port", "3018"]
     extra_hosts:
       - "host.docker.internal:host-gateway"
     environment:
       DATA_DIR: /app/data
       SERVICE_ROLE: collector
-      CODEX_DOCKER_HOST: host.docker.internal

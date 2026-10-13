@@ -1,3 +1,5 @@
+import { activateSession } from './sessionRuntime'
+import { beforeEach } from 'vitest'
 // @vitest-environment jsdom
 import { afterEach, expect, it, vi } from 'vitest'
 import { api } from './api'
@@ -30,7 +32,7 @@ it('显式取消中止 fetch，在没有新事件时收尾并释放响应 reader
   expect(onDone).not.toHaveBeenCalled()
   expect(readerCancel).toHaveBeenCalledOnce()
   expect(readerRelease).toHaveBeenCalledOnce()
-  expect(stream.locked).toBe(false)
+  await vi.waitFor(() => expect(stream.locked).toBe(false))
 })
 
 it('提前退出复盘 generator 时取消响应流并解锁', async () => {
@@ -94,3 +96,5 @@ it('复盘正常 done 收尾一次完成回调且释放 reader', async () => {
   expect(onDone).toHaveBeenCalledExactlyOnceWith('已完成复盘', expect.objectContaining({ as_of: '2026-10-12', archived: true }))
   expect(stream.locked).toBe(false)
 })
+
+beforeEach(() => activateSession('test-user'))

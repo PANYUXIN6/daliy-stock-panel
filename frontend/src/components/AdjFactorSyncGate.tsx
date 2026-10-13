@@ -1,3 +1,4 @@
+import { accountStorage } from '@/lib/sessionRuntime'
 import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { motion } from 'framer-motion'
@@ -25,7 +26,7 @@ export function useAdjFactorSyncGate() {
   })
   const [pending, setPending] = useState<{ run: () => void } | null>(null)
   const [noRemind, setNoRemind] = useState(() => {
-    try { return localStorage.getItem(NO_REMIND_KEY) === '1' } catch { return false }
+    try { return accountStorage.getItem(NO_REMIND_KEY) === '1' } catch { return false }
   })
 
   const adjRoute = matrix.data?.capabilities.find(c => c.id === 'adj_factor')
@@ -88,7 +89,7 @@ export function useAdjFactorSyncGate() {
           </button>
           <button
             onClick={() => {
-              try { localStorage.setItem(NO_REMIND_KEY, noRemind ? '1' : '0') } catch { /* 私隐模式等场景静默 */ }
+              try { accountStorage.setItem(NO_REMIND_KEY, noRemind ? '1' : '0') } catch { /* 私隐模式等场景静默 */ }
               pending.run()
               setPending(null)
             }}

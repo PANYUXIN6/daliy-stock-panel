@@ -159,7 +159,8 @@ def _resolve_universe(capset: CapabilitySet, repo=None) -> list[str]:
 
     # Free 用户兜底: instruments parquet + watchlist + demo
     base: set[str] = set(DEMO_SYMBOLS)
-    base.update(get_pool("watchlist"))
+    from app.services.user_runtime import active_watchlist_symbols
+    base.update(active_watchlist_symbols(settings.data_dir))
     d = Path(settings.data_dir)
     inst_path = d / "instruments" / "instruments.parquet"
     if inst_path.exists():
@@ -761,33 +762,8 @@ def run_now(
     paper_summary: dict = {}
     try:
         emit("paper_settle", 94, "模拟盘结算…")
-        from app.strategy import paper as paper_trading
-        # 逐账户结算 (账户间订单/台账隔离), 汇总合并供日志与结果展示
-        totals = {"filled": 0, "expired": 0, "corp_actions": 0, "nav": None, "accounts": []}
-        for acc_id in paper_trading.list_account_ids(repo.store.data_dir):
-            s = paper_trading.settle_day(repo.store.data_dir, today.isoformat(), account_id=acc_id)
-            totals["filled"] += s.get("filled", 0)
-            totals["expired"] += s.get("expired", 0)
-            totals["corp_actions"] += s.get("corp_actions", 0)
-            if s.get("nav") is not None:
-                totals["nav"] = s["nav"]
-            totals["accounts"].append({"account": acc_id, **{k: s.get(k) for k in ("filled", "expired", "corp_actions")}})
-        paper_summary = totals
-        if paper_summary.get("filled") or paper_summary.get("corp_actions"):
-            logger.info("paper_settle: %s", paper_summary)
-        # 结算成交留痕 (V3): next_open/close 单的成交发生在盘后管道内, 盘中钩子
-        # 覆盖不到; 管道无 SSE 广播器, 这里补 alert_store 留痕进监控中心即可见。
-        if totals["filled"]:
-            try:
-                from app.services import alert_store
-                settle_events = []
-                for acc_id in paper_trading.list_account_ids(repo.store.data_dir):
-                    settle_events.extend(paper_trading.day_fill_events(
-                        repo.store.data_dir, today.isoformat(), account_id=acc_id))
-                if settle_events:
-                    alert_store.append_many(repo.store.data_dir, settle_events)
-            except Exception as e:  # noqa: BLE001 -- 独立阶段隔离，保留warning及原任务错误汇总
-                logger.warning("模拟盘结算成交留痕失败: %s", e, exc_info=True)
+        from app.services.user_runtime import settle_user_accounts
+        paper_summary = settle_user_accounts(repo.store.data_dir, today.isoformat())
         emit("paper_settle", 94, "模拟盘结算完成")
     except Exception as e:  # noqa: BLE001 -- 独立阶段隔离，保留warning及原任务错误汇总
         logger.warning("paper_settle failed (soft): %s", e, exc_info=True)
@@ -1089,6 +1065,28 @@ REVIEW_JOB_ID = "scheduled_review"
 
 
 async def _run_scheduled_review(repo) -> None:
+    """Run the saved admin-owned schedule under its immutable account identity."""
+    from app.services.auth import get_store
+    from app.services.user_context import UserContext, user_scope
+    schedule = _prefs.get_review_schedule()
+    if not schedule["enabled"]:
+        return
+    store = get_store(repo.store.data_dir)
+    owner_id = schedule.get("owner_id")
+    if not owner_id:
+        owner_id = store.first_admin_id()
+        if not owner_id:
+            return
+        # Legacy schedules belong only to the persisted initial administrator.
+        _prefs.save({"review_schedule": {**schedule, "owner_id": owner_id}})
+    owner = store.get_user(owner_id)
+    if not owner or not owner["is_active"] or owner["role"] != "admin":
+        return
+    with user_scope(UserContext(owner["id"], owner["role"], repo.store.data_dir)):
+        await _run_scheduled_review_for_owner(repo)
+
+
+async def _run_scheduled_review_for_owner(repo) -> None:
     """定时复盘 job: 流式生成复盘 → 实时推 SSE(开着页面可见) → 落盘归档 → 推飞书。
 
     与手动「生成复盘」体验一致: 流式事件经 quote_service.push_review_event →
@@ -1126,6 +1124,12 @@ async def _run_scheduled_review(repo) -> None:
                     ensure_ascii=False))
             return
 
+        # Recheck after model latency: a disabled/demoted owner cannot publish.
+        from app.services.auth import get_store
+        from app.services.user_context import current_user
+        owner = get_store(repo.store.data_dir).get_user(current_user().id)
+        if not owner or not owner["is_active"] or owner["role"] != "admin":
+            return
         # 落盘: 与手动生成完全相同的归档格式
         market_recap_reports.save_report({
             "as_of": meta.get("as_of"),
@@ -1136,7 +1140,7 @@ async def _run_scheduled_review(repo) -> None:
             "emotion_label": meta.get("emotion_label", ""),
         })
         from app.services.shared_runtime import publish_data_update
-        publish_data_update(repo.store.data_dir, ["review"])
+        publish_data_update(repo.store.data_dir, ["review"], private=True)
         logger.info("scheduled review saved: as_of=%s", meta.get("as_of"))
 
         # 通知前端: 生成完成且已归档(archived=true 让前端只刷新列表, 不重复归档)
@@ -1221,6 +1225,17 @@ def _maybe_push_review(content: str, meta: dict) -> None:
     channels 为空则不推送; 复用监控中心的全局外部渠道配置。
     推送失败静默降级 (Webhook 是辅助通道), 不影响已归档的报告。
     """
+    from app.services.auth import get_store
+    from app.services.user_context import current_user
+    context = current_user(required=False)
+    if context is None:
+        return
+    store = get_store(context.data_dir)
+    owner = store.get_user(context.id)
+    if not owner or not owner["is_active"] or owner["role"] != "admin":
+        return
+    if context.session_token and not store.session(context.session_token):
+        return
     try:
         from app import secrets_store
         from app.services import email_adapter, preferences, webhook_adapter

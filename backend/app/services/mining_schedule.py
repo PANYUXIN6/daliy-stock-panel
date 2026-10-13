@@ -124,6 +124,24 @@ def schedule_claim(day: date) -> str:
 
 
 def run_weekly_mining(app_state: Any, *, now: datetime | None = None) -> dict[str, Any]:
+    from app.services.auth import get_store
+    from app.services.user_context import UserContext, user_scope
+    config = preferences.get_mining_schedule()
+    if not config["mining_schedule_enabled"]:
+        return {"status": "disabled"}
+    root = app_state.repo.store.data_dir
+    auth = get_store(root)
+    owner_id = config.get("mining_schedule_owner_id") or auth.first_admin_id()
+    owner = auth.get_user(owner_id) if owner_id else None
+    if owner is None or not owner["is_active"] or owner["role"] != "admin":
+        return {"status": "owner_unavailable"}
+    if not config.get("mining_schedule_owner_id"):
+        preferences.save({"mining_schedule_owner_id": owner_id})
+    with user_scope(UserContext(owner_id, "admin", root)):
+        return _run_weekly_mining_owned(app_state, now=now)
+
+
+def _run_weekly_mining_owned(app_state: Any, *, now: datetime | None = None) -> dict[str, Any]:
     """Check the weekly gate and enqueue mining; never perform mining synchronously."""
     config = preferences.get_mining_schedule()
     day = beijing_date(now)
@@ -133,7 +151,8 @@ def run_weekly_mining(app_state: Any, *, now: datetime | None = None) -> dict[st
     if weekday > 4 or weekday < config["mining_schedule_weekday"]:
         return {"status": "weekday_mismatch"}
 
-    manager = getattr(app_state, "mining_manager", None)
+    from app.services.user_context import current_user
+    manager = app_state.user_runtimes.get(current_user()).mining_manager
     repo = getattr(app_state, "repo", None)
     if manager is None or repo is None:
         raise RuntimeError("scheduled mining dependencies are not initialized")
@@ -296,7 +315,8 @@ def _selected_strategy_metadata(
 ) -> list[dict[str, Any]]:
     if not strategy_ids:
         return []
-    engine = getattr(app_state, "strategy_engine", None)
+    from app.services.user_context import current_user, user_data_dir
+    engine = app_state.user_runtimes.get(current_user()).strategy_engine
     if engine is None:
         raise RuntimeError("strategy engine is unavailable for scheduled mining fingerprint")
     metadata: list[dict[str, Any]] = []
@@ -305,7 +325,7 @@ def _selected_strategy_metadata(
         if strategy.execution_backend != "matrix_native":
             raise ValueError(f"scheduled mining strategy is not matrix-native: {strategy_id}")
         source_path = Path(strategy.file_path) if strategy.file_path is not None else None
-        override_path = data_dir / "user_data" / "strategy_overrides" / f"{strategy_id}.json"
+        override_path = user_data_dir(data_dir) / "user_data" / "strategy_overrides" / f"{strategy_id}.json"
         metadata.append(
             {
                 "strategy_id": strategy_id,

@@ -15,8 +15,11 @@ import math
 from datetime import date, datetime
 
 import polars as pl
+import pytest
 
 from app.custom.assistant import tools as assistant_tools
+
+pytestmark = pytest.mark.usefixtures("authenticated_actor")
 
 _TRADE_DATE = date(2026, 9, 18)
 

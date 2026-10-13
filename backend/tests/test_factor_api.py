@@ -9,10 +9,12 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from app.api.factors import router
+from app.services.user_context import user_data_dir
 
+pytestmark = pytest.mark.usefixtures("private_owner")
 
 @pytest.fixture()
-def cleanup_registry():
+def cleanup_registry(private_owner):
     """测试注册的自定义因子在用例后注销, 不污染全局注册表 (快照测试依赖 77 基线)。"""
     created: set[str] = set()
     yield created
@@ -320,7 +322,7 @@ def test_delete_with_strategy_reference_requires_force(tmp_path, cleanup_registr
         "id": "uf_strat_ref", "label": "策略引用", "formula": "rank(-ts_sum(change_pct, 5))",
     })
     cleanup_registry.add("uf_strat_ref")
-    strategies_dir = data_dir / "strategies"
+    strategies_dir = user_data_dir(data_dir) / "strategies"
     strategies_dir.mkdir()
     (strategies_dir / "my_strategy.json").write_text(
         json.dumps({"name": "my_strategy", "factors": {"uf_strat_ref": 1.0}}), encoding="utf-8",

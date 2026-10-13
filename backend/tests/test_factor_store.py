@@ -14,7 +14,11 @@ from app.factors.registry import (
     get_factor,
     unregister_factor,
 )
+from app.services.user_context import user_data_dir
 from app.strategy import scoring
+
+pytestmark = pytest.mark.usefixtures("private_owner")
+
 
 
 @pytest.fixture()
@@ -153,7 +157,7 @@ def test_load_into_registry_isolated_failure(tmp_path, cleanup_registry) -> None
         "formula": "close + 1", "status": "draft",
     }
     store.save_one(tmp_path, good)
-    (tmp_path / "user_data" / "custom_factors" / "uf_broken.json").write_text(
+    (user_data_dir(tmp_path) / "user_data" / "custom_factors" / "uf_broken.json").write_text(
         "{ not json", encoding="utf-8"
     )
     loaded = store.load_into_registry(tmp_path)

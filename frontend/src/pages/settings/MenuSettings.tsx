@@ -1,3 +1,4 @@
+import { accountStorage } from '@/lib/sessionRuntime'
 import { useMemo, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
@@ -324,13 +325,13 @@ export function SettingsMenuSettingsPanel() {
 
   // 监控中心徽标开关 (localStorage)
   const [badgeEnabled, setBadgeEnabled] = useState(() => {
-    try { return localStorage.getItem('monitor_badge_enabled') !== '0' } catch { return true }
+    try { return accountStorage.getItem('monitor_badge_enabled') !== '0' } catch { return true }
   })
   const toggleBadge = (id: string) => {
     if (id !== '/monitor') return
     const next = !badgeEnabled
     setBadgeEnabled(next)
-    try { localStorage.setItem('monitor_badge_enabled', next ? '1' : '0') } catch { /* ignore */ }
+    try { accountStorage.setItem('monitor_badge_enabled', next ? '1' : '0') } catch { /* ignore */ }
   }
 
   return (

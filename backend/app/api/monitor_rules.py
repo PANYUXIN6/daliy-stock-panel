@@ -13,6 +13,7 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
+from app.services.user_runtime import runtime_for
 from app.strategy import monitor_rules
 from app.strategy.intraday_signals import INTRADAY_SIGNAL_LABELS, uses_intraday_signals
 
@@ -51,7 +52,7 @@ def _reconcile_index_asset_type(rule: dict, repo) -> dict:
 
 def _sync_engine(request: Request) -> None:
     """保存/删除后,把最新规则集 reload 到引擎内存态。"""
-    engine = getattr(request.app.state, "monitor_engine", None)
+    engine = getattr(runtime_for(request), "monitor_engine", None)
     if engine is not None:
         repo = request.app.state.repo
         rules = [
@@ -162,7 +163,7 @@ def get_options(request: Request):
     except Exception:
         logger.exception("custom signal options read failed")
 
-    sector_service = getattr(request.app.state, "sector_monitor_service", None)
+    sector_service = getattr(runtime_for(request), "sector_monitor_service", None)
     sector_targets = sector_service.list_targets() if sector_service is not None else {
         "index": [], "concept": [], "industry": [],
     }
@@ -239,7 +240,7 @@ def list_rules(request: Request):
     if runtime_warning:
         for rule in intraday_rules:
             rule["runtime_warning"] = runtime_warning
-    sector_service = getattr(request.app.state, "sector_monitor_service", None)
+    sector_service = getattr(runtime_for(request), "sector_monitor_service", None)
     if sector_service is not None:
         for rule in rules:
             if rule.get("type") != "sector":
@@ -283,7 +284,7 @@ def save_rule(req: RuleModel, request: Request):
     if rule.get("type") == "strategy":
         from app.strategy.engine import StrategyDataContext
 
-        strategy_engine = getattr(request.app.state, "strategy_engine", None)
+        strategy_engine = getattr(runtime_for(request), "strategy_engine", None)
         if strategy_engine is None:
             raise HTTPException(status_code=503, detail="策略引擎未初始化")
         try:
@@ -321,7 +322,7 @@ def save_rule(req: RuleModel, request: Request):
         if group_id not in group_ids:
             raise HTTPException(status_code=400, detail="自选分组不存在或已被删除, 请重新选择")
     if rule.get("type") == "sector":
-        sector_service = getattr(request.app.state, "sector_monitor_service", None)
+        sector_service = getattr(runtime_for(request), "sector_monitor_service", None)
         if sector_service is None:
             raise HTTPException(status_code=503, detail="板块监控服务未初始化")
         targets = rule.get("sector_targets", [])
@@ -460,7 +461,7 @@ def test_ladder(request: Request):
 
     repo = request.app.state.repo
     depth_svc = getattr(request.app.state, "depth_service", None)
-    engine = getattr(request.app.state, "monitor_engine", None)
+    engine = getattr(runtime_for(request), "monitor_engine", None)
 
     if not depth_svc:
         raise HTTPException(status_code=503, detail="depth 服务未初始化")
@@ -576,7 +577,7 @@ def trigger_ladder(request: Request):
 
     repo = request.app.state.repo
     depth_svc = getattr(request.app.state, "depth_service", None)
-    engine = getattr(request.app.state, "monitor_engine", None)
+    engine = getattr(runtime_for(request), "monitor_engine", None)
     quote_svc = getattr(request.app.state, "quote_service", None)
 
     if not depth_svc:

@@ -860,13 +860,13 @@ export function Screener() {
             </button>
             {/* 创建策略 */}
             <button
-              onClick={() => { setBuilderMode('create'); setShowBuilder(true) }}
+              disabled title="Python 策略由服务器维护者部署" onClick={() => { setBuilderMode('create'); setShowBuilder(true) }}
               className="inline-flex items-center gap-1.5 h-7 px-3 rounded-btn
                 text-xs font-medium text-amber-400 border border-amber-400/20 bg-amber-400/5
                 hover:bg-amber-400/15 transition-colors cursor-pointer"
             >
               <Sparkles className="h-3.5 w-3.5" />
-              创建策略 · AI
+              Python 策略仅服务器部署
             </button>
             {/* 获取策略（占位，敬请期待）— 暂时隐藏 */}
             {SHOW_STRATEGY_STORE && (
@@ -1182,25 +1182,6 @@ export function Screener() {
             const tf = strategyMap.get(settingsStrategyId)?.timeframes?.includes('1m') ? '1m' as const : '1d' as const
             run.mutate({ id: settingsStrategyId, date: tf === '1m' ? '' : asOf, timeframe: tf })
           }
-        }}
-        onAiModify={async () => {
-          if (!settingsStrategyId) return
-          try {
-            const [src, detail] = await Promise.all([
-              api.strategyGetSource(settingsStrategyId),
-              api.strategyGet(settingsStrategyId),
-            ])
-            storage.strategyModify.set({
-              name: detail.name ?? '',
-              description: detail.description ?? '',
-              direction: 'long',
-              rules: storage.strategyRules.get({})[settingsStrategyId] ?? '',
-              code: src.code, step: 2, strategyId: settingsStrategyId, source: src.source as any,
-            })
-            setSettingsStrategyId(null)
-            setBuilderMode('modify')
-            setShowBuilder(true)
-          } catch {}
         }}
         onDeleted={() => {
           if (settingsStrategyId) {

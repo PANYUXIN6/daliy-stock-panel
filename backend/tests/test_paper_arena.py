@@ -8,10 +8,15 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from app.api.paper import router
+from app.services.user_context import user_data_dir
+
+pytestmark = pytest.mark.usefixtures("private_owner")
+
 
 
 def _client(tmp_path: Path) -> TestClient:
@@ -102,7 +107,7 @@ def test_compare_arena_fields_with_nav(tmp_path: Path):
     """day_change_pct / last_nav_date 按定版净值序列末两点计算。"""
     c = _client(tmp_path)
     c.post("/api/paper/account", json={"initial_cash": 100000, "name": "甲"})
-    nav_dir = tmp_path / "paper" / "accounts" / "default" / "nav"
+    nav_dir = user_data_dir(tmp_path) / "paper" / "accounts" / "default" / "nav"
     nav_dir.mkdir(parents=True, exist_ok=True)
     with (nav_dir / "daily.jsonl").open("w", encoding="utf-8") as f:
         f.write(json.dumps({"date": "2026-09-30", "nav": 100000.0}) + "\n")

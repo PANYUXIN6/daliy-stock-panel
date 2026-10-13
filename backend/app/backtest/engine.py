@@ -476,6 +476,10 @@ class BacktestEngine:
                     how="left",
                 )
 
+        if any(name.startswith("csg_") for name in feature_plan.signal_columns):
+            from app.strategy.custom_signals import apply_user_signals
+            df = apply_user_signals(df)
+
         required_columns = set(feature_plan.base_columns) | set(feature_plan.instrument_columns)
         required_columns |= set(feature_plan.signal_columns)
         if not matrix_native:

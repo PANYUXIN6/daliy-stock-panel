@@ -20,7 +20,11 @@ import queue
 import threading
 import time
 from collections.abc import Callable
+from contextvars import copy_context
 from pathlib import Path
+
+from app.services.private_storage import private_path
+from app.services.user_context import current_user
 
 logger = logging.getLogger(__name__)
 
@@ -29,7 +33,7 @@ _timings_lock = threading.Lock()
 
 
 def _timings_path(data_dir: Path) -> Path:
-    return data_dir / "user_data" / _TIMINGS_FILENAME
+    return private_path(data_dir, "user_data", _TIMINGS_FILENAME)
 
 
 def load_run_timings(data_dir: Path) -> dict[str, float]:
@@ -145,6 +149,12 @@ class StrategyRunManager:
         ordered_ids: list[str],
         job: Callable[[StrategyRunHandle], None],
     ) -> StrategyRunHandle:
+        owner = current_user()
+        key = (owner.id, *key)
+        context = copy_context()
+        original_job = job
+        def owned_job(handle):
+            return context.run(original_job, handle)
         with self._lock:
             # 顺手清理已完成的 handle, 防止字典随不同 key 无限增长
             for k in [k for k, h in self._handles.items() if h.snapshot()["done"]]:
@@ -155,7 +165,7 @@ class StrategyRunManager:
             handle = StrategyRunHandle(key, ordered_ids)
             self._handles[key] = handle
         self._ensure_worker()
-        self._queue.put((handle, job))
+        self._queue.put((handle, owned_job))
         return handle
 
     def _ensure_worker(self) -> None:

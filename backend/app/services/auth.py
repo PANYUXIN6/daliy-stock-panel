@@ -1,222 +1,454 @@
-"""访问密码认证 — 单用户, 自托管场景。
+"""SQLite account authority. No legacy shared-password credentials are imported.
 
-设计:
-  - 密码用 PBKDF2-HMAC-SHA256 哈希(标准库 hashlib, 无新依赖), 加随机 salt。
-    即使 auth.json 泄露, 也无法逆向出明文密码。
-  - 会话用随机 token(token_urlsafe), 内存 + 文件双存(支持多进程/重启不丢失)。
-  - 存储: data/user_data/auth.json (chmod 0600), 仿 secrets_store 模式。
-
-安全要点:
-  - 设密码接口必须限制本机/内网(见 auth router), 防黑客抢占域名抢先设密码。
-  - 登录限流: 错5次锁5分钟(见 auth router 内存计数)。
-  - 单密码, 不做多用户(避免重构全项目数据层)。
+Connections are short-lived: session revocation and account changes are visible to
+all web/collector processes without an in-memory credential cache.
 """
+
 from __future__ import annotations
 
 import hashlib
-import json
-import logging
+import hmac
 import os
-import secrets as _secrets
-import threading
+import re
+import secrets
+import sqlite3
 import time
+import uuid
+from contextlib import contextmanager
+from datetime import UTC, date, datetime
+from functools import lru_cache
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
-from app.services.fs_utils import atomic_write_text
-
-logger = logging.getLogger(__name__)
-
-# PBKDF2 参数(NIST 推荐, 单次校验 ~100ms, 兼顾安全与响应)
-_PBKDF2_ITER = 200_000
-_SALT_LEN = 16
-_TOKEN_BYTES = 32
-
-# 会话有效期: 30 天(自托管单用户, 长一点减少重登频率)
-SESSION_TTL = 30 * 24 * 3600
-
-_lock = threading.Lock()
-# 内存中的有效会话: { token: expire_ts }。进程重启后从磁盘恢复。
-_sessions: dict[str, float] = {}
-
-# 「是否已设密码」缓存: 每个 /api/ 请求都要判定, auth_middleware 原先每次 read_text
-# 磁盘 (阻塞事件循环)。此处懒加载缓存, set_password 后失效重算 (仍返回最新真值)。
-_configured_cache: bool | None = None
+SESSION_TTL = 7 * 24 * 3600
+_BEIJING = ZoneInfo("Asia/Shanghai")
+_ITERATIONS = 600_000
+# Used only when seeding an empty account database, never as a login fallback.
+_DEFAULT_ADMIN_USERNAME = "pyxadmin"
+_DEFAULT_ADMIN_PASSWORD_HASH = (
+    "600000$500df268429d7b07161b214768f184c1$"
+    "8336ee09a45f471138b81e630e03952841fea51b7285f4df8da7391db225491b"
+)
 
 
-def _path() -> Path:
-    from app.config import settings
-    p = settings.data_dir / "user_data" / "auth.json"
-    p.parent.mkdir(parents=True, exist_ok=True)
-    return p
+class AuthError(ValueError):
+    def __init__(self, detail: str, status: int = 400, code: str = "AUTH_ERROR"):
+        super().__init__(detail)
+        self.detail, self.status, self.code = detail, status, code
 
 
-def _load() -> dict:
-    p = _path()
-    if p.exists():
-        try:
-            return json.loads(p.read_text(encoding="utf-8"))
-        except Exception as e:  # noqa: BLE001
-            logger.warning("auth.json malformed: %s", e)
-    return {}
+def _iso(ts: float) -> str:
+    return datetime.fromtimestamp(ts, UTC).isoformat()
 
 
-def _save(data: dict) -> None:
-    p = _path()
-    atomic_write_text(
-        p, json.dumps(data, indent=2, ensure_ascii=False), mode=0o600,
-    )
+def _password_hash(password: str) -> str:
+    if not 8 <= len(password) <= 128:
+        raise AuthError("密码须为 8 至 128 位")
+    salt = secrets.token_bytes(16)
+    hashed = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, _ITERATIONS)
+    return f"{_ITERATIONS}${salt.hex()}${hashed.hex()}"
 
 
-def _hash_password(password: str, salt: bytes | None = None) -> tuple[str, str]:
-    """返回 (salt_hex, hash_hex)。salt 为 None 时生成新 salt。"""
-    if salt is None:
-        salt = os.urandom(_SALT_LEN)
-    dk = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, _PBKDF2_ITER)
-    return salt.hex(), dk.hex()
+def _verify(password: str, encoded: str) -> bool:
+    iterations, salt, expected = encoded.split("$")
+    hashed = hashlib.pbkdf2_hmac("sha256", password.encode(), bytes.fromhex(salt), int(iterations))
+    return hmac.compare_digest(hashed.hex(), expected)
 
 
-def _verify_password(password: str, salt_hex: str, hash_hex: str) -> bool:
-    """恒定时间比较, 防时序攻击。"""
+def _username(value: str) -> str:
+    value = value.strip()
+    if not re.fullmatch(r"[A-Za-z0-9_\-.]{3,64}", value):
+        raise AuthError("用户名须为 3 至 64 位字母、数字、下划线、点或短横线")
+    return value
+
+
+def _role(role: str, expires: str | None) -> tuple[str, str | None]:
+    if role not in ("admin", "pro", "guest"):
+        raise AuthError("无效角色")
+    if role != "pro":
+        return role, None
     try:
-        salt = bytes.fromhex(salt_hex)
-        expected = bytes.fromhex(hash_hex)
+        parsed = date.fromisoformat(expires or "")
+        if parsed.isoformat() != expires:
+            raise ValueError
     except ValueError:
-        return False
-    actual = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, _PBKDF2_ITER)
-    return _secrets.compare_digest(actual, expected)
+        raise AuthError("Pro 账号必须设置有效到期日（YYYY-MM-DD）") from None
+    return role, expires
 
 
-# ================================================================
-# 密码管理
-# ================================================================
+def _public(row, now: float | None = None) -> dict:
+    user = {
+        key: row[key]
+        for key in (
+            "id",
+            "username",
+            "role",
+            "pro_expires_on",
+            "is_active",
+            "is_initial_admin",
+            "must_change_password",
+            "created_at",
+            "last_login_at",
+            "last_login_ip",
+            "login_count",
+        )
+    }
+    user["is_active"] = bool(user["is_active"])
+    user["is_initial_admin"] = bool(user["is_initial_admin"])
+    user["must_change_password"] = bool(user["must_change_password"])
+    today = datetime.fromtimestamp(time.time() if now is None else now, _BEIJING).date()
+    if user["role"] == "pro" and date.fromisoformat(user["pro_expires_on"]) < today:
+        user["role"] = "guest"
+    return user
 
-def is_configured() -> bool:
-    """是否已设置访问密码 (带缓存)。
 
-    热路径 (auth_middleware 每请求调用): 命中缓存则不碰磁盘, 不阻塞事件循环。
-    首次或 set_password 失效后, 懒加载重读一次 auth.json, 保证返回最新真值。
-    """
-    global _configured_cache
-    if _configured_cache is None:
-        d = _load()
-        _configured_cache = bool(d.get("password_hash"))
-    return _configured_cache
+class AuthStore:
+    def __init__(self, data_dir: Path):
+        self.data_dir = Path(data_dir)
+        self.path = self.data_dir / "auth" / "auth.sqlite3"
+        self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        with self._connection() as db:
+            db.executescript("""
+                CREATE TABLE IF NOT EXISTS users (
+                    id TEXT PRIMARY KEY, username TEXT UNIQUE COLLATE NOCASE NOT NULL,
+                    password_hash TEXT NOT NULL, role TEXT NOT NULL,
+                    pro_expires_on TEXT, is_active INTEGER NOT NULL DEFAULT 1,
+                    is_initial_admin INTEGER NOT NULL DEFAULT 0,
+                    must_change_password INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL,
+                    last_login_at TEXT, last_login_ip TEXT, login_count INTEGER NOT NULL DEFAULT 0
+                );
+                CREATE TABLE IF NOT EXISTS sessions (
+                    user_id TEXT PRIMARY KEY REFERENCES users(id),
+                    digest TEXT UNIQUE NOT NULL, expires REAL NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS login_events (
+                    id INTEGER PRIMARY KEY, user_id TEXT, username TEXT NOT NULL,
+                    occurred REAL NOT NULL, ip TEXT NOT NULL, user_agent TEXT NOT NULL,
+                    success INTEGER NOT NULL, reason TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS event_time ON login_events(occurred);
+                CREATE TABLE IF NOT EXISTS login_limits (
+                    ip TEXT PRIMARY KEY, failures INTEGER NOT NULL, until REAL NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            """)
+        if os.name != "nt":
+            self.path.chmod(0o600)
+
+    @contextmanager
+    def _connection(self, write=False):
+        db = sqlite3.connect(self.path, timeout=30)
+        db.row_factory = sqlite3.Row
+        db.execute("PRAGMA foreign_keys=ON")
+        try:
+            if write:
+                db.execute("BEGIN IMMEDIATE")
+            yield db
+            db.commit()
+        except BaseException:
+            db.rollback()
+            raise
+        finally:
+            db.close()
+
+    @staticmethod
+    def _admin(db, actor_id):
+        if actor_id is None:  # server-owned maintenance calls have no browser actor
+            return
+        actor = db.execute("SELECT * FROM users WHERE id=?", (actor_id,)).fetchone()
+        if (
+            not actor
+            or not actor["is_active"]
+            or actor["role"] != "admin"
+            or actor["must_change_password"]
+        ):
+            raise AuthError("仅管理员可管理账号", 403)
+
+    def bootstrap(self, username: str, password: str) -> dict | None:
+        with self._connection() as db:
+            if db.execute("SELECT 1 FROM users LIMIT 1").fetchone():
+                return None
+        username, hashed = _username(username), _password_hash(password)
+        return self._bootstrap_hashed(username, hashed)
+
+    def bootstrap_default(self) -> dict | None:
+        return self._bootstrap_hashed(_DEFAULT_ADMIN_USERNAME, _DEFAULT_ADMIN_PASSWORD_HASH)
+
+    def _bootstrap_hashed(self, username: str, hashed: str) -> dict | None:
+        with self._connection(True) as db:
+            if db.execute("SELECT 1 FROM users LIMIT 1").fetchone():
+                return None
+            uid = uuid.uuid4().hex
+            db.execute(
+                "INSERT INTO users(id,username,password_hash,role,must_change_password,is_initial_admin,created_at) VALUES(?,?,?,?,0,1,?)",
+                (uid, username, hashed, "admin", _iso(time.time())),
+            )
+            db.execute("INSERT INTO metadata(key,value) VALUES('first_admin_id',?)", (uid,))
+            return _public(db.execute("SELECT * FROM users WHERE id=?", (uid,)).fetchone())
+
+    def configured(self) -> bool:
+        with self._connection() as db:
+            return db.execute("SELECT 1 FROM users LIMIT 1").fetchone() is not None
+
+    def first_admin_id(self) -> str | None:
+        with self._connection() as db:
+            row = db.execute("SELECT value FROM metadata WHERE key='first_admin_id'").fetchone()
+            return row[0] if row else None
+
+    def get_user(self, user_id: str, *, now: float | None = None) -> dict | None:
+        with self._connection() as db:
+            row = db.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
+            return _public(row, now) if row else None
+
+    def list_active_users(self) -> list[dict]:
+        with self._connection() as db:
+            return [_public(row) for row in db.execute("SELECT * FROM users WHERE is_active=1")]
+
+    def list_users(self, search="", limit=50, offset=0) -> dict:
+        with self._connection() as db:
+            pattern = "%" + search + "%"
+            total = db.execute(
+                "SELECT COUNT(*) FROM users WHERE username LIKE ?", (pattern,)
+            ).fetchone()[0]
+            rows = db.execute(
+                "SELECT * FROM users WHERE username LIKE ? ORDER BY created_at,id LIMIT ? OFFSET ?",
+                (pattern, limit, offset),
+            )
+            return {"users": [_public(r) for r in rows], "total": total}
+
+    def create_user(self, username, password, role="guest", pro_expires_on=None, *, actor_id=None):
+        username, hashed = _username(username), _password_hash(password)
+        role, expires = _role(role, pro_expires_on)
+        with self._connection(True) as db:
+            self._admin(db, actor_id)
+            uid = uuid.uuid4().hex
+            try:
+                db.execute(
+                    "INSERT INTO users(id,username,password_hash,role,pro_expires_on,created_at) VALUES(?,?,?,?,?,?)",
+                    (uid, username, hashed, role, expires, _iso(time.time())),
+                )
+            except sqlite3.IntegrityError:
+                raise AuthError("用户名已存在", 409) from None
+            return _public(db.execute("SELECT * FROM users WHERE id=?", (uid,)).fetchone())
+
+    def update_user(self, uid, changes, *, actor_id=None):
+        with self._connection(True) as db:
+            self._admin(db, actor_id)
+            row = db.execute("SELECT * FROM users WHERE id=?", (uid,)).fetchone()
+            if not row:
+                raise AuthError("账号不存在", 404)
+            role, expires = _role(
+                changes.get("role", row["role"]),
+                changes.get("pro_expires_on", row["pro_expires_on"]),
+            )
+            active = changes.get("is_active", bool(row["is_active"]))
+            if (
+                row["role"] == "admin"
+                and row["is_active"]
+                and (role != "admin" or not active)
+                and db.execute(
+                    "SELECT COUNT(*) FROM users WHERE role='admin' AND is_active=1"
+                ).fetchone()[0]
+                <= 1
+            ):
+                raise AuthError("不能禁用或降级最后一个有效管理员", 409)
+            db.execute(
+                "UPDATE users SET role=?,pro_expires_on=?,is_active=? WHERE id=?",
+                (role, expires, active, uid),
+            )
+            if not active:
+                db.execute("DELETE FROM sessions WHERE user_id=?", (uid,))
+            return _public(db.execute("SELECT * FROM users WHERE id=?", (uid,)).fetchone())
+
+    def reset_password(self, uid, password, *, actor_id=None):
+        hashed = _password_hash(password)
+        with self._connection(True) as db:
+            self._admin(db, actor_id)
+            if not db.execute("SELECT 1 FROM users WHERE id=?", (uid,)).fetchone():
+                raise AuthError("账号不存在", 404)
+            db.execute(
+                "UPDATE users SET password_hash=?,must_change_password=1 WHERE id=?", (hashed, uid)
+            )
+            db.execute("DELETE FROM sessions WHERE user_id=?", (uid,))
+
+    @staticmethod
+    def _issue(db, uid, now):
+        token = secrets.token_urlsafe(32)
+        db.execute(
+            "INSERT OR REPLACE INTO sessions(user_id,digest,expires) VALUES(?,?,?)",
+            (uid, hashlib.sha256(token.encode()).hexdigest(), now + SESSION_TTL),
+        )
+        return token
+
+    def login(self, username, password, ip, user_agent):
+        now = time.time()
+        error = None
+        with self._connection(True) as db:
+            db.execute("DELETE FROM login_events WHERE occurred<?", (now - 90 * 86400,))
+            db.execute("DELETE FROM login_limits WHERE until<?", (now,))
+            limit = db.execute("SELECT * FROM login_limits WHERE ip=?", (ip,)).fetchone()
+            row = db.execute("SELECT * FROM users WHERE username=?", (username.strip(),)).fetchone()
+            if limit and limit["until"] > now and limit["failures"] >= 5:
+                error = AuthError("登录失败次数过多，请稍后重试", 429, "RATE_LIMITED")
+                reason = "rate_limited"
+            elif not row or not _verify(password, row["password_hash"]) or not row["is_active"]:
+                # Unknown accounts do equivalent hash work without persisting credentials.
+                if not row:
+                    hashlib.pbkdf2_hmac(
+                        "sha256", password.encode(), b"unknown-account!", _ITERATIONS
+                    )
+                failures = (limit["failures"] if limit and limit["until"] > now else 0) + 1
+                db.execute(
+                    "INSERT OR REPLACE INTO login_limits VALUES(?,?,?)", (ip, failures, now + 300)
+                )
+                error = AuthError("用户名或密码错误，或账号已禁用", 401, "INVALID_CREDENTIALS")
+                reason = "invalid_credentials"
+            else:
+                token = self._issue(db, row["id"], now)
+                db.execute("DELETE FROM login_limits WHERE ip=?", (ip,))
+                db.execute(
+                    "UPDATE users SET login_count=login_count+1,last_login_at=?,last_login_ip=? WHERE id=?",
+                    (_iso(now), ip, row["id"]),
+                )
+                reason = "success"
+            db.execute(
+                "INSERT INTO login_events(user_id,username,occurred,ip,user_agent,success,reason) VALUES(?,?,?,?,?,?,?)",
+                (
+                    row["id"] if row else None,
+                    username[:64],
+                    now,
+                    ip[:128],
+                    user_agent[:512],
+                    int(error is None),
+                    reason,
+                ),
+            )
+        if error:
+            raise error
+        return token, self.status(token)
+
+    def session(self, token: str | None, *, now=None) -> dict | None:
+        if not token or len(token) > 256:
+            return None
+        now = time.time() if now is None else now
+        with self._connection() as db:
+            row = db.execute(
+                "SELECT u.*,s.expires FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.digest=? AND s.expires>? AND u.is_active=1",
+                (hashlib.sha256(token.encode()).hexdigest(), now),
+            ).fetchone()
+            return {"user": _public(row, now), "expires_at": _iso(row["expires"])} if row else None
+
+    def status(self, token=None):
+        session = self.session(token)
+        return {
+            "configured": self.configured(),
+            "authenticated": bool(session),
+            "user": session["user"] if session else None,
+            "expires_at": session["expires_at"] if session else None,
+        }
+
+    def revoke_session(self, token):
+        with self._connection(True) as db:
+            db.execute(
+                "DELETE FROM sessions WHERE digest=?", (hashlib.sha256(token.encode()).hexdigest(),)
+            )
+
+    def revoke_user_session(self, uid, *, actor_id=None):
+        with self._connection(True) as db:
+            self._admin(db, actor_id)
+            if not db.execute("SELECT 1 FROM users WHERE id=?", (uid,)).fetchone():
+                raise AuthError("账号不存在", 404)
+            db.execute("DELETE FROM sessions WHERE user_id=?", (uid,))
+
+    def change_password(self, token, old_password, new_password):
+        hashed = _password_hash(new_password)
+        now = time.time()
+        with self._connection(True) as db:
+            row = db.execute(
+                "SELECT u.* FROM users u JOIN sessions s ON s.user_id=u.id WHERE s.digest=? AND s.expires>? AND u.is_active=1",
+                (hashlib.sha256(token.encode()).hexdigest(), now),
+            ).fetchone()
+            if not row:
+                raise AuthError("未登录或会话已过期", 401)
+            if not _verify(old_password, row["password_hash"]):
+                raise AuthError("旧密码错误", 400)
+            if _verify(new_password, row["password_hash"]):
+                raise AuthError("新密码不能与旧密码相同")
+            db.execute(
+                "UPDATE users SET password_hash=?,must_change_password=0 WHERE id=?",
+                (hashed, row["id"]),
+            )
+            new_token = self._issue(db, row["id"], now)
+        return new_token, self.status(new_token)
+
+    def login_events(self, user_id=None, limit=50, offset=0):
+        with self._connection(True) as db:
+            db.execute("DELETE FROM login_events WHERE occurred<?", (time.time() - 90 * 86400,))
+            where, args = ("WHERE user_id=?", [user_id]) if user_id else ("", [])
+            total = db.execute(f"SELECT COUNT(*) FROM login_events {where}", args).fetchone()[0]
+            events = []
+            for row in db.execute(
+                f"SELECT * FROM login_events {where} ORDER BY id DESC LIMIT ? OFFSET ?",
+                [*args, limit, offset],
+            ):
+                event = dict(row)
+                event["occurred_at"] = _iso(event.pop("occurred"))
+                event["success"] = bool(event["success"])
+                events.append(event)
+            return {"events": events, "total": total}
 
 
-def set_password(password: str) -> None:
-    """设置/修改访问密码。清空所有现有会话(强制重新登录)。"""
-    global _configured_cache
-    if len(password) < 6:
-        raise ValueError("密码至少 6 位")
-    salt_hex, hash_hex = _hash_password(password)
-    with _lock:
-        _sessions.clear()  # 改密码 = 旧会话全部失效
-        _save({
-            "password_hash": hash_hex,
-            "password_salt": salt_hex,
-            "updated_at": int(time.time()),
-            "sessions": {},  # 清空持久化会话
-        })
-    _configured_cache = None  # 失效缓存, 下次 is_configured 重读最新真值
-    logger.info("access password set")
+@lru_cache(maxsize=8)
+def _store_at(data_dir: Path) -> AuthStore:
+    return AuthStore(data_dir)
+
+
+def get_store(data_dir: Path | None = None) -> AuthStore:
+    from app.config import settings
+
+    return _store_at(Path(data_dir) if data_dir is not None else settings.data_dir)
 
 
 def bootstrap_from_env() -> bool:
-    """首次初始化: 若环境变量 AUTH_PASSWORD 已配置且尚未设过密码, 则用它设密码。
-
-    公网服务器部署场景: 避免每次都要 SSH 端口转发才能设首个密码。
-    明文密码只在内存/配置中, 经 set_password() 哈希后写入 auth.json (chmod 0600)。
-    一旦设置成功, 后续重启不再覆盖 (用户改密码走 UI, 不受环境变量影响)。
-
-    Returns:
-        True 表示本次用环境变量初始化了密码; False 表示无需初始化。
-    """
     from app.config import _ENV_FILE, settings
 
-    pwd = (settings.auth_password or "").strip()
-    # Compose 会对 env_file 中未加单引号的 $VAR 做插值。Docker 部署时同时
-    # 只读挂载原始 .env,首次初始化密码直接按 dotenv 语义读取,避免特殊字符被截断。
+    store = get_store()
+    if store.configured():
+        return False
+    username, password = settings.auth_admin_username, settings.auth_admin_password
     if _ENV_FILE.is_file():
         from dotenv import dotenv_values
 
-        raw_pwd = dotenv_values(_ENV_FILE, encoding="utf-8", interpolate=False).get("AUTH_PASSWORD")
-        if isinstance(raw_pwd, str) and raw_pwd.strip():
-            pwd = raw_pwd.strip()
-    if not pwd:
-        return False
-    if is_configured():
-        # 已设过密码, 不覆盖 (避免环境变量反复重置用户在 UI 改的密码)
-        return False
-    try:
-        set_password(pwd)
-        logger.info("access password bootstrapped from AUTH_PASSWORD env (one-time)")
-        return True
-    except ValueError as e:
-        # 密码不合规 (< 6 位), 记日志但不阻断启动
-        logger.warning("AUTH_PASSWORD bootstrap skipped: %s", e)
-        return False
+        values = {key.upper(): value for key, value in dotenv_values(_ENV_FILE, interpolate=False).items()}
+        # Match Settings' case-insensitive environment priority, including explicit
+        # empty values, while preserving literal ${...} passwords from .env.
+        environment = {key.upper(): value for key, value in os.environ.items()}
+        username = environment.get("AUTH_ADMIN_USERNAME", values.get("AUTH_ADMIN_USERNAME") or username)
+        password = environment.get("AUTH_ADMIN_PASSWORD", values.get("AUTH_ADMIN_PASSWORD") or password)
+    if not username and not password:
+        return store.bootstrap_default() is not None
+    if not username or not password:
+        raise AuthError("自定义初始管理员须同时配置 AUTH_ADMIN_USERNAME 和 AUTH_ADMIN_PASSWORD")
+    return store.bootstrap(username, password) is not None
 
 
-def verify_and_create_session(password: str) -> str | None:
-    """验证密码, 成功则创建会话并返回 token, 失败返回 None。"""
-    d = _load()
-    if not d.get("password_hash"):
-        return None
-    if not _verify_password(password, d.get("password_salt", ""), d["password_hash"]):
-        return None
-    token = _secrets.token_urlsafe(_TOKEN_BYTES)
-    expire = time.time() + SESSION_TTL
-    with _lock:
-        _sessions[token] = expire
-        _persist_sessions_locked()
-    return token
-
-
-def revoke_session(token: str) -> None:
-    """注销会话(登出)。"""
-    with _lock:
-        _sessions.pop(token, None)
-        _persist_sessions_locked()
+def is_configured() -> bool:
+    return get_store().configured()
 
 
 def is_valid_session(token: str) -> bool:
-    """检查会话是否有效(存在且未过期)。过期则清理。"""
-    if not token:
-        return False
-    with _lock:
-        expire = _sessions.get(token)
-        if expire is None:
-            return False
-        if time.time() > expire:
-            _sessions.pop(token, None)
-            _persist_sessions_locked()
-            return False
-        return True
+    return get_store().session(token) is not None
 
 
-def _persist_sessions_locked() -> None:
-    """把当前内存会话写回 auth.json(需持锁调用)。"""
-    d = _load()
-    d["sessions"] = {t: exp for t, exp in _sessions.items()}
-    _save(d)
-
-
-def _restore_sessions() -> None:
-    """启动时从 auth.json 恢复未过期会话(支持进程重启不丢登录态)。"""
-    with _lock:
-        d = _load()
-        now = time.time()
-        saved = d.get("sessions") or {}
-        for token, expire in saved.items():
-            if isinstance(expire, (int, float)) and expire > now:
-                _sessions[token] = expire
-        if len(_sessions) != len(saved):
-            # 有过期会话被清理, 落盘一次
-            _persist_sessions_locked()
-
-
-# 模块加载时恢复会话
-try:
-    _restore_sessions()
-except Exception as e:  # noqa: BLE001
-    logger.warning("restore sessions failed: %s", e)
+def require_current_session() -> dict:
+    """Recheck identity before delayed user actions; captured contexts aren't credentials."""
+    from app.services.user_context import current_user
+    owner = current_user(required=False)
+    if owner is None or not owner.session_token:
+        raise AuthError("未登录或会话已过期", 401, "SESSION_INVALID")
+    session = get_store(owner.data_dir).session(owner.session_token)
+    if session is None or session["user"]["id"] != owner.id:
+        raise AuthError("未登录或会话已过期", 401, "SESSION_INVALID")
+    if session["user"]["must_change_password"]:
+        raise AuthError("请先修改临时密码", 403, "PASSWORD_CHANGE_REQUIRED")
+    return session["user"]

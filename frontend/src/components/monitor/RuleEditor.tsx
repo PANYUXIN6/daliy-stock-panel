@@ -1,3 +1,4 @@
+import { useCurrentUser } from '@/lib/auth'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
@@ -79,6 +80,7 @@ const emptyRule = (preset?: Partial<MonitorRule>): MonitorRule => ({
 })
 
 export function RuleEditor({ rule, preset, simple, onClose, onSaved }: Props) {
+  const isAdmin = useCurrentUser()?.role === 'admin'
   const qc = useQueryClient()
   const options = useQuery({ queryKey: QK.monitorRuleOptions, queryFn: api.monitorRuleOptions })
   const { data: prefs } = usePreferences()
@@ -179,7 +181,7 @@ export function RuleEditor({ rule, preset, simple, onClose, onSaved }: Props) {
 
   const save = useMutation({
     mutationFn: () => {
-      const d = { ...draft }
+      const d = { ...draft, ...(!isAdmin ? { webhook_channels: [] } : {}) }
       delete d.runtime_warning
       // name 为空时用默认名
       if (!d.name.trim()) {
@@ -1503,7 +1505,7 @@ export function RuleEditor({ rule, preset, simple, onClose, onSaved }: Props) {
       </div>
 
       {/* 外部推送 */}
-      <div className="rounded-btn border border-border/40 bg-base/40 p-3 space-y-2">
+      {isAdmin && <div className="rounded-btn border border-border/40 bg-base/40 p-3 space-y-2">
         <div className="flex items-center gap-1.5">
           <span className="text-[11px] font-medium text-foreground">外部推送</span>
           <span className="text-[9px] text-muted">触发时推送告警到外部</span>
@@ -1611,6 +1613,7 @@ export function RuleEditor({ rule, preset, simple, onClose, onSaved }: Props) {
         })()}
       </div>
 
+      }
       {error && <div className="rounded-btn border border-danger/30 bg-danger/5 px-3 py-2 text-xs text-danger">{error}</div>}
 
       <div className="flex justify-end gap-2">

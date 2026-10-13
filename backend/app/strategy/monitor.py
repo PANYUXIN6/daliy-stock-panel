@@ -250,12 +250,14 @@ _warned_missing_groups: set[tuple[str, str]] = set()
 def _watchlist_groups_snapshot() -> dict[str, frozenset[str]]:
     """返回 {group_id: 成员symbol集}。读前后版本一致才写缓存, 避免缓存住写竞态下的旧数据。"""
     from app.services import watchlist
-
+    from app.services.user_context import current_user
+    owner = current_user()
+    cache_key = str(owner.data_dir.resolve() / owner.id)
     rev_before = watchlist.revision()
     with _group_cache_lock:
-        cached = _group_cache.get("groups")
-        if cached is not None and _group_cache.get("_rev") == rev_before:
-            return cached
+        cached = _group_cache.get(cache_key)
+        if cached is not None and cached[0] == rev_before:
+            return cached[1]
     groups: dict[str, set[str]] = {g["id"]: set() for g in watchlist.list_groups()}
     for row in watchlist.list_symbols():
         for gid in row.get("group_ids") or []:
@@ -265,8 +267,7 @@ def _watchlist_groups_snapshot() -> dict[str, frozenset[str]]:
     frozen = {gid: frozenset(syms) for gid, syms in groups.items()}
     if watchlist.revision() == rev_before:
         with _group_cache_lock:
-            _group_cache["_rev"] = rev_before
-            _group_cache["groups"] = frozen
+            _group_cache[cache_key] = (rev_before, frozen)
     return frozen
 
 
@@ -623,6 +624,12 @@ class MonitorRuleEngine:
         """
         if not self._rules or df.is_empty():
             return []
+        from app.strategy.custom_signals import apply_user_signals, definition_fingerprint
+        fingerprint = definition_fingerprint()
+        if getattr(self, "_signal_fingerprint", None) != fingerprint:
+            self.invalidate_strategy_state()
+            self._signal_fingerprint = fingerprint
+        df = apply_user_signals(df, allow_shift=False)
 
         now = time.time()
         events: list[dict] = []

@@ -134,7 +134,8 @@ class CandidateValidationError(CandidateStoreError):
 
 class CandidateStore:
     def __init__(self, data_dir: Path) -> None:
-        self.path = Path(data_dir) / "user_data" / "research_candidates.json"
+        from app.services.private_storage import private_path
+        self.path = private_path(data_dir, "user_data", "research_candidates.json")
 
     def list(self) -> list[dict[str, Any]]:
         with _lock:

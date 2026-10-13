@@ -66,13 +66,14 @@ def test_strategy_loads_as_builtin_matrix_native_and_grid_params_validate():
     )
 
 
-def test_research_template_is_hidden_from_ordinary_strategy_apis(tmp_path):
+def test_research_template_is_hidden_from_ordinary_strategy_apis(tmp_path, private_owner):
     engine = StrategyEngine(strategy_dirs=[STRATEGY_PATH.parent])
     repo = SimpleNamespace(store=SimpleNamespace(data_dir=tmp_path))
     request = SimpleNamespace(
         app=SimpleNamespace(state=SimpleNamespace(strategy_engine=engine, repo=repo))
     )
 
+    request.app.state.user_runtimes = SimpleNamespace(get=lambda user: request.app.state)
     screener_payload = screener_api.strategies(request)
     strategy_payload = strategy_api.list_strategies(request)
 

@@ -1,3 +1,4 @@
+import { accountStorage, sessionEventSource } from '@/lib/sessionRuntime'
 import { useSyncExternalStore } from 'react'
 import { api, type MiningResult, type MiningRun, type MiningRunProgress, type MiningRunStatus } from './api'
 
@@ -101,7 +102,7 @@ async function refreshTerminalRun(
       if (result.run_id !== runId) throw new Error('任务结果与运行 ID 不匹配')
     }
     if (current.runId !== runId || connectionToken !== token) return
-    localStorage.removeItem(ACTIVE_RUN_KEY)
+    accountStorage.removeItem(ACTIVE_RUN_KEY)
     update({
       run,
       progress: run.progress ?? current.progress,
@@ -113,7 +114,7 @@ async function refreshTerminalRun(
     })
   } catch (error) {
     if (current.runId !== runId || connectionToken !== token) return
-    localStorage.removeItem(ACTIVE_RUN_KEY)
+    accountStorage.removeItem(ACTIVE_RUN_KEY)
     const run = current.run && fallbackStatus
       ? { ...current.run, status: fallbackStatus, error: fallbackError || current.run.error }
       : current.run
@@ -182,7 +183,7 @@ function startStatusPolling(runId: string, token: number, restart = false) {
 function connect(runId: string) {
   closeEvents()
   const token = connectionToken
-  const source = new EventSource(`/api/backtest/mining/runs/${encodeURIComponent(runId)}/events`)
+  const source = sessionEventSource(`/api/backtest/mining/runs/${encodeURIComponent(runId)}/events`)
   eventSource = source
 
   source.onopen = () => {
@@ -235,7 +236,7 @@ function connect(runId: string) {
 
 export async function startMining(payload: Parameters<typeof api.miningStart>[0]) {
   closeEvents()
-  localStorage.removeItem(ACTIVE_RUN_KEY)
+  accountStorage.removeItem(ACTIVE_RUN_KEY)
   const token = connectionToken
   update({
     runId: null,
@@ -251,7 +252,7 @@ export async function startMining(payload: Parameters<typeof api.miningStart>[0]
   try {
     const run = await api.miningStart(payload)
     if (connectionToken !== token || current.runId !== null) return
-    localStorage.setItem(ACTIVE_RUN_KEY, run.run_id)
+    accountStorage.setItem(ACTIVE_RUN_KEY, run.run_id)
     update({
       runId: run.run_id,
       run,
@@ -277,7 +278,7 @@ export async function startMining(payload: Parameters<typeof api.miningStart>[0]
  */
 export async function startAutoMining(payload: Parameters<typeof api.miningAutoStart>[0]) {
   closeEvents()
-  localStorage.removeItem(ACTIVE_RUN_KEY)
+  accountStorage.removeItem(ACTIVE_RUN_KEY)
   const token = connectionToken
   update({
     runId: null,
@@ -295,7 +296,7 @@ export async function startAutoMining(payload: Parameters<typeof api.miningAutoS
     if (connectionToken !== token || current.runId !== null) return
     if (data.started && data.run) {
       const run = data.run
-      localStorage.setItem(ACTIVE_RUN_KEY, run.run_id)
+      accountStorage.setItem(ACTIVE_RUN_KEY, run.run_id)
       update({
         runId: run.run_id,
         run,
@@ -392,13 +393,13 @@ export async function attachMiningRun(runId: string): Promise<boolean> {
     if (TERMINAL_STATES.has(run.status)) {
       await refreshTerminalRun(runId, run.status, run, token)
     } else {
-      localStorage.setItem(ACTIVE_RUN_KEY, runId)
+      accountStorage.setItem(ACTIVE_RUN_KEY, runId)
       connect(runId)
     }
     return true
   } catch (error) {
     if (current.runId !== runId || connectionToken !== token) return false
-    localStorage.removeItem(ACTIVE_RUN_KEY)
+    accountStorage.removeItem(ACTIVE_RUN_KEY)
     update({
       isPending: false,
       reconnecting: false,
@@ -409,7 +410,7 @@ export async function attachMiningRun(runId: string): Promise<boolean> {
 }
 
 export function tryReconnectMining(): boolean {
-  const runId = localStorage.getItem(ACTIVE_RUN_KEY)
+  const runId = accountStorage.getItem(ACTIVE_RUN_KEY)
   if (!runId) return false
   void attachMiningRun(runId)
   return true
@@ -417,7 +418,7 @@ export function tryReconnectMining(): boolean {
 
 export function clearMiningTask() {
   closeEvents()
-  localStorage.removeItem(ACTIVE_RUN_KEY)
+  accountStorage.removeItem(ACTIVE_RUN_KEY)
   current = {
     runId: null,
     isPending: false,

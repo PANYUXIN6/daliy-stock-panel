@@ -1,3 +1,4 @@
+import { accountStorage } from '@/lib/sessionRuntime'
 /**
  * 板块切换卡片 (盘中轮动) — 概念/行业分析页共用。
  *
@@ -175,15 +176,15 @@ const NO_DATA_HINTS: Record<string, string> = {
 
 export function SectorRotationCard({ kind }: { kind: 'concept' | 'industry' }) {
   const dimLabel = kind === 'industry' ? '行业' : '概念'
-  const [flow, setFlow] = useState<string>(() => localStorage.getItem(`${FLOW_LS_PREFIX}${kind}`) ?? '')
+  const [flow, setFlow] = useState<string>(() => accountStorage.getItem(`${FLOW_LS_PREFIX}${kind}`) ?? '')
   const [bucket, setBucket] = useState(5)
   const [hoverName, setHoverName] = useState<string | null>(null)
   // 展示板块来源: 自动榜 (5 种排序维度, 剔除属性板块) 或自定义监控 (≤20)
   const [rowsMode, setRowsMode] = useState<SectorSource>(() =>
-    parseSectorSource(localStorage.getItem(`${ROWS_MODE_PREFIX}${kind}`)))
+    parseSectorSource(accountStorage.getItem(`${ROWS_MODE_PREFIX}${kind}`)))
   const [customNames, setCustomNames] = useState<string[]>(() => {
     try {
-      const parsed = JSON.parse(localStorage.getItem(`${CUSTOM_NAMES_PREFIX}${kind}`) ?? '[]')
+      const parsed = JSON.parse(accountStorage.getItem(`${CUSTOM_NAMES_PREFIX}${kind}`) ?? '[]')
       return Array.isArray(parsed) ? parsed.filter((n: unknown) => typeof n === 'string').slice(0, MAX_CUSTOM_SECTORS) : []
     } catch {
       return []
@@ -191,12 +192,12 @@ export function SectorRotationCard({ kind }: { kind: 'concept' | 'industry' }) {
   })
   // 自动活跃榜行数 (5/10/15/20) 与排除名单; excludeNames === null = 未自定义 (后端内置名单)
   const [autoRows, setAutoRows] = useState<number>(() => {
-    const parsed = Number(localStorage.getItem(`${AUTO_ROWS_PREFIX}${kind}`))
+    const parsed = Number(accountStorage.getItem(`${AUTO_ROWS_PREFIX}${kind}`))
     return AUTO_ROW_OPTIONS.includes(parsed) ? parsed : 10
   })
   const [excludeNames, setExcludeNames] = useState<string[] | null>(() => {
     try {
-      const raw = localStorage.getItem(`${EXCLUDE_PREFIX}${kind}`)
+      const raw = accountStorage.getItem(`${EXCLUDE_PREFIX}${kind}`)
       if (raw === null) return null
       const parsed = JSON.parse(raw)
       return Array.isArray(parsed) ? parsed.filter((n: unknown) => typeof n === 'string').slice(0, MAX_EXCLUDE_SECTORS) : null
@@ -208,7 +209,7 @@ export function SectorRotationCard({ kind }: { kind: 'concept' | 'industry' }) {
   const [excludeInput, setExcludeInput] = useState('')
   // 显示模式: trend = 每板块一条涨幅走势线 (默认), heatmap = 热力图
   const [displayMode, setDisplayMode] = useState<'trend' | 'heatmap'>(() =>
-    localStorage.getItem(`${DISPLAY_MODE_PREFIX}${kind}`) === 'heatmap' ? 'heatmap' : 'trend')
+    accountStorage.getItem(`${DISPLAY_MODE_PREFIX}${kind}`) === 'heatmap' ? 'heatmap' : 'trend')
   const [pickerOpen, setPickerOpen] = useState(false)
   const [pickerSearch, setPickerSearch] = useState('')
 
@@ -272,7 +273,7 @@ export function SectorRotationCard({ kind }: { kind: 'concept' | 'industry' }) {
 
   // 指数叠加线 (核心四只, 默认上证): 分钟桶涨幅对齐轮动时间轴, 昨收基准
   const [indexSymbol, setIndexSymbol] = useState<string>(
-    () => localStorage.getItem(`${INDEX_LS_PREFIX}${kind}`) ?? CORE_INDEXES[0].symbol,
+    () => accountStorage.getItem(`${INDEX_LS_PREFIX}${kind}`) ?? CORE_INDEXES[0].symbol,
   )
   const indexLabel = CORE_INDEXES.find(item => item.symbol === indexSymbol)?.name ?? indexSymbol
   const indexMinuteQuery = useQuery({
@@ -291,7 +292,7 @@ export function SectorRotationCard({ kind }: { kind: 'concept' | 'industry' }) {
   })
   const onIndexChange = (value: string) => {
     setIndexSymbol(value)
-    localStorage.setItem(`${INDEX_LS_PREFIX}${kind}`, value)
+    accountStorage.setItem(`${INDEX_LS_PREFIX}${kind}`, value)
   }
 
   // 指数逐桶涨幅: 分钟 bar 涨幅 (昨收基准, 缺昨收退化首根收盘) 按桶均值,
@@ -632,26 +633,26 @@ export function SectorRotationCard({ kind }: { kind: 'concept' | 'industry' }) {
 
   const onRowsModeChange = (value: SectorSource) => {
     setRowsMode(value)
-    localStorage.setItem(`${ROWS_MODE_PREFIX}${kind}`, value)
+    accountStorage.setItem(`${ROWS_MODE_PREFIX}${kind}`, value)
   }
   const onFlowChange = (value: string) => {
     setFlow(value)
-    if (value) localStorage.setItem(`${FLOW_LS_PREFIX}${kind}`, value)
+    if (value) accountStorage.setItem(`${FLOW_LS_PREFIX}${kind}`, value)
     else {
-      localStorage.removeItem(`${FLOW_LS_PREFIX}${kind}`)
+      accountStorage.removeItem(`${FLOW_LS_PREFIX}${kind}`)
       // 资金流维度依赖扩展列数据源: 清空列后该维度失效, 自动回退综合分
       if (rowsMode === 'flow') onRowsModeChange('score')
     }
   }
   const onDisplayModeChange = (value: 'trend' | 'heatmap') => {
     setDisplayMode(value)
-    localStorage.setItem(`${DISPLAY_MODE_PREFIX}${kind}`, value)
+    accountStorage.setItem(`${DISPLAY_MODE_PREFIX}${kind}`, value)
   }
   const toggleCustom = (name: string) => {
     if (customNames.includes(name)) {
       const next = customNames.filter(item => item !== name)
       setCustomNames(next)
-      localStorage.setItem(`${CUSTOM_NAMES_PREFIX}${kind}`, JSON.stringify(next))
+      accountStorage.setItem(`${CUSTOM_NAMES_PREFIX}${kind}`, JSON.stringify(next))
       return
     }
     if (customNames.length >= MAX_CUSTOM_SECTORS) {
@@ -660,18 +661,18 @@ export function SectorRotationCard({ kind }: { kind: 'concept' | 'industry' }) {
     }
     const next = [...customNames, name]
     setCustomNames(next)
-    localStorage.setItem(`${CUSTOM_NAMES_PREFIX}${kind}`, JSON.stringify(next))
+    accountStorage.setItem(`${CUSTOM_NAMES_PREFIX}${kind}`, JSON.stringify(next))
   }
 
   const onAutoRowsChange = (value: number) => {
     setAutoRows(value)
-    localStorage.setItem(`${AUTO_ROWS_PREFIX}${kind}`, String(value))
+    accountStorage.setItem(`${AUTO_ROWS_PREFIX}${kind}`, String(value))
   }
   // null = 移除自定义, 回到后端内置名单
   const persistExclude = (next: string[] | null) => {
     setExcludeNames(next)
-    if (next === null) localStorage.removeItem(`${EXCLUDE_PREFIX}${kind}`)
-    else localStorage.setItem(`${EXCLUDE_PREFIX}${kind}`, JSON.stringify(next))
+    if (next === null) accountStorage.removeItem(`${EXCLUDE_PREFIX}${kind}`)
+    else accountStorage.setItem(`${EXCLUDE_PREFIX}${kind}`, JSON.stringify(next))
   }
   const removeExclude = (name: string) => {
     persistExclude(effectiveExclude.filter(item => item !== name))

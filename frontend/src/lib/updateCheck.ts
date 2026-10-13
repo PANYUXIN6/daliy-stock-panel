@@ -1,3 +1,4 @@
+import { accountStorage } from '@/lib/sessionRuntime'
 /**
  * 应用更新检查 — 单例 store (useSyncExternalStore)。
  *
@@ -72,7 +73,7 @@ interface CacheBlob {
 
 function readCache(): CacheBlob | null {
   try {
-    const raw = localStorage.getItem(CACHE_KEY)
+    const raw = accountStorage.getItem(CACHE_KEY)
     if (!raw) return null
     const v = JSON.parse(raw) as Partial<CacheBlob>
     if (
@@ -92,7 +93,7 @@ function readCache(): CacheBlob | null {
 
 function writeCache(blob: CacheBlob): void {
   try {
-    localStorage.setItem(CACHE_KEY, JSON.stringify(blob))
+    accountStorage.setItem(CACHE_KEY, JSON.stringify(blob))
   } catch {
     // 隐私模式/存储满: 只影响下次启动多一次请求, 可忽略
   }

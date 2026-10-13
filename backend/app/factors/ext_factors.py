@@ -349,6 +349,6 @@ def invalidate_ext_caches(data_dir: Path | None = None, *, keep_strategy_cache: 
     from app.services import strategy_cache
 
     try:
-        strategy_cache.clear_cache(Path(data_dir) if data_dir else Path(_settings.data_dir))
+        strategy_cache.clear_all_user_caches(Path(data_dir) if data_dir else Path(_settings.data_dir))
     except Exception as e:  # noqa: BLE001 - 扩展表缓存更新后的策略缓存清理独立隔离。
         logger.warning("扩展数据变更后策略缓存清理失败: %s", e, exc_info=True)

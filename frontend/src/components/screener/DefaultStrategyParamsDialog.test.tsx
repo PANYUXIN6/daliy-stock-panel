@@ -1,3 +1,4 @@
+import { activateSession } from '@/lib/sessionRuntime'
 // @vitest-environment jsdom
 // 「默认基础参数」: 对话框编辑保存写 localStorage; 纯函数把默认参数渲染进
 // 新建策略模板的 META.basic_filter 段 (Python 字面量)。
@@ -52,6 +53,7 @@ async function render(props: { show: boolean; onClose?: () => void }) {
 }
 
 beforeEach(() => {
+  activateSession('test-user')
   localStorage.clear()
   mockPatchConfig.mockClear()
 })

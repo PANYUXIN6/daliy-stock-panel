@@ -13,6 +13,8 @@ import pytest
 
 from app.custom.assistant import tools as assistant_tools
 
+pytestmark = pytest.mark.usefixtures("authenticated_actor")
+
 _SNAPSHOT_DATE = date(2026, 9, 18)  # 周五: 周末问股时 enriched 快照停在这一天
 
 

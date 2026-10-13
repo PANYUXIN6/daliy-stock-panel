@@ -104,12 +104,15 @@ def test_apply_scope_sector_fails_closed():
     assert picked.height == 1
 
 
-def test_ladder_webhook_uses_chinese_title_without_brand(monkeypatch):
+def test_ladder_webhook_uses_chinese_title_without_brand(monkeypatch, authenticated_actor):
     calls = []
 
     class CaptureExecutor:
         def submit(self, fn, *args):
-            calls.append((fn, args))
+            return fn(*args)
+
+    monkeypatch.setattr("app.services.webhook_adapter.send_feishu", lambda *args: calls.append(("feishu", args)))
+    monkeypatch.setattr("app.services.webhook_adapter.send_wecom", lambda *args: calls.append(("wecom", args)))
 
     monkeypatch.setattr(quote_service, "_WEBHOOK_EXECUTOR", CaptureExecutor())
     monkeypatch.setattr("app.services.preferences.get_feishu_webhook_url", lambda: "https://open.feishu.cn/open-apis/bot/v2/hook/test")
@@ -139,12 +142,15 @@ def test_ladder_webhook_uses_chinese_title_without_brand(monkeypatch):
     assert all("TickFlow" not in args[1] for _, args in calls)
 
 
-def test_ladder_dispatches_custom_webhook_and_email(monkeypatch):
+def test_ladder_dispatches_custom_webhook_and_email(monkeypatch, authenticated_actor):
     calls = []
 
     class CaptureExecutor:
         def submit(self, fn, *args):
-            calls.append((fn.__name__, args))
+            return fn(*args)
+
+    monkeypatch.setattr("app.services.webhook_adapter.send_custom", lambda *args: calls.append(("send_custom", args)))
+    monkeypatch.setattr("app.services.email_adapter.send_email", lambda *args: calls.append(("send_email", args)))
 
     email_config = {
         "host": "smtp.example.com",
@@ -178,7 +184,7 @@ def test_ladder_dispatches_custom_webhook_and_email(monkeypatch):
     assert calls[1][1][:2] == (email_config, "smtp-password")
 
 
-def test_review_webhooks_use_title_without_brand(monkeypatch):
+def test_review_webhooks_use_title_without_brand(monkeypatch, authenticated_actor):
     calls = []
     monkeypatch.setattr("app.services.preferences.get_review_push_channels", lambda: ["feishu", "wecom"])
     monkeypatch.setattr("app.services.preferences.get_feishu_webhook_url", lambda: "feishu-url")
@@ -199,7 +205,7 @@ def test_review_webhooks_use_title_without_brand(monkeypatch):
     assert all("TickFlow" not in args[1] for _, args in calls)
 
 
-def test_review_pushes_custom_webhook_and_email(monkeypatch):
+def test_review_pushes_custom_webhook_and_email(monkeypatch, authenticated_actor):
     calls = []
     email_config = {
         "host": "smtp.example.com",

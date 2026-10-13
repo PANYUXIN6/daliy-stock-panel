@@ -19,6 +19,7 @@ import logging
 import os
 import threading
 import time
+import uuid
 from pathlib import Path
 
 from app.market_time import cn_now
@@ -44,8 +45,8 @@ class JsonReportStore:
         self._lock = threading.Lock()
 
     def _path(self) -> Path:
-        from app.config import settings
-        p = settings.data_dir / "user_data" / self.filename
+        from app.services.user_context import user_data_dir
+        p = user_data_dir() / "user_data" / self.filename
         p.parent.mkdir(parents=True, exist_ok=True)
         return p
 
@@ -79,7 +80,7 @@ class JsonReportStore:
         os.replace(tmp, p)
 
     def _make_id(self, report: dict) -> str:
-        base = f"{self.id_prefix}_{int(time.time() * 1000)}"
+        base = f"{self.id_prefix}_{int(time.time() * 1000)}_{uuid.uuid4().hex[:12]}"
         if self.id_with_symbol:
             return f"{base}_{report.get('symbol', 'x')}"
         return base

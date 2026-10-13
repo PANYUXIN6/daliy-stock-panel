@@ -1,3 +1,4 @@
+import { activateSession, accountStorage } from './sessionRuntime'
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -12,11 +13,11 @@ const CACHE_KEY = 'update_check_cache'
 const DAY = 24 * 60 * 60 * 1000
 
 function seedCache(blob: Record<string, unknown>) {
-  localStorage.setItem(CACHE_KEY, JSON.stringify(blob))
+  accountStorage.setItem(CACHE_KEY, JSON.stringify(blob))
 }
 
 function readCacheRaw(): string | null {
-  return localStorage.getItem(CACHE_KEY)
+  return accountStorage.getItem(CACHE_KEY)
 }
 
 /** 模拟 GitHub Releases API 响应 (tag_name 可空以触发 latest.json 兜底) */
@@ -34,6 +35,7 @@ function mockFetchReleases(tagName: string) {
 }
 
 beforeEach(() => {
+  activateSession('test-user')
   localStorage.clear()
 })
 

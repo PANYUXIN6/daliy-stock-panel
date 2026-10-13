@@ -12,6 +12,8 @@ from app.jobs import daily_pipeline
 from app.services import mining_schedule, preferences
 from app.services.mining_jobs import MiningRunStore
 
+pytestmark = pytest.mark.usefixtures("authenticated_actor")
+
 
 class FakeRepo:
     def __init__(self, data_dir: Path, *, latest: date = date(2026, 8, 14)) -> None:
@@ -56,10 +58,11 @@ class FakeManager:
 
 
 @pytest.fixture
-def scheduled_state(tmp_path: Path, monkeypatch):
+def scheduled_state(tmp_path: Path, monkeypatch, authenticated_actor):
     repo = FakeRepo(tmp_path)
     manager = FakeManager(tmp_path)
     state = SimpleNamespace(repo=repo, mining_manager=manager, strategy_engine=None)
+    state.user_runtimes = SimpleNamespace(get=lambda user: state)
     monkeypatch.setattr(
         preferences,
         "get_mining_schedule",
@@ -186,6 +189,7 @@ def test_selected_strategy_metadata_changes_with_same_size_source_edit(tmp_path)
         strategy_engine=SimpleNamespace(get=lambda _strategy_id: strategy)
     )
 
+    state.user_runtimes = SimpleNamespace(get=lambda user: state)
     first = mining_schedule._selected_strategy_metadata(
         state,
         ["demo"],
@@ -382,6 +386,7 @@ def test_insufficient_data_records_visible_skipped_prerequisite(tmp_path, monkey
     repo = FakeRepo(tmp_path)
     manager = FakeManager(tmp_path)
     state = SimpleNamespace(repo=repo, mining_manager=manager, strategy_engine=None)
+    state.user_runtimes = SimpleNamespace(get=lambda user: state)
     monkeypatch.setattr(
         preferences,
         "get_mining_schedule",
@@ -410,3 +415,18 @@ def test_enqueue_failure_does_not_escape_successful_pipeline(monkeypatch):
     monkeypatch.setattr("app.services.mining_schedule.run_weekly_mining", fail_enqueue)
 
     daily_pipeline.run_weekly_mining_after_sync()
+
+
+@pytest.mark.parametrize('existing_guest', [False, True])
+def test_schedule_refuses_missing_or_non_admin_owner(scheduled_state, monkeypatch, authenticated_actor, existing_guest):
+    from app.services.auth import get_store
+    owner_id = 'f' * 32
+    if existing_guest:
+        user = get_store().create_user('guestuser', 'guest-password', actor_id=authenticated_actor.id)
+        owner_id = user['id']
+    original = preferences.get_mining_schedule()
+    monkeypatch.setattr(preferences, 'get_mining_schedule', lambda: {
+        **original, 'mining_schedule_owner_id': owner_id,
+    })
+    assert mining_schedule.run_weekly_mining(scheduled_state)['status'] == 'owner_unavailable'
+    assert scheduled_state.mining_manager.calls == []

@@ -6,12 +6,16 @@ signals.py 的 `/intraday/replay` 与 mining.py 的 `MiningRunRequest` 都把
 """
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from app.api.backtest import router
 from app.config import settings
+
+pytestmark = pytest.mark.usefixtures("authenticated_actor")
 
 # (路径, 该端点的必填参数)
 STREAMS = [
@@ -28,6 +32,7 @@ BAD_DATES = ["not-a-date", "2026-13-01", "2026/09/04", ""]
 def client() -> TestClient:
     app = FastAPI()
     app.include_router(router)
+    app.state.user_runtimes = SimpleNamespace(get=lambda user: SimpleNamespace(strategy_engine=None))
     # raise_server_exceptions=False: 未捕获异常表现为 500 响应, 与线上行为一致
     return TestClient(app, raise_server_exceptions=False)
 

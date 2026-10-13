@@ -23,6 +23,7 @@ from app.services.watchlist_csv import (
     parse_csv_rows,
 )
 
+pytestmark = pytest.mark.usefixtures("private_owner")
 
 def _write_instruments(data_dir: Path) -> None:
     inst = data_dir / "instruments"

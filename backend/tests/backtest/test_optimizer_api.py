@@ -1,7 +1,11 @@
 """优化器 API job_key 契约测试 — 守护 stream 与 cancel 的 key 对齐 (仿 PR3 C1 教训)。"""
 from __future__ import annotations
 
+import pytest
+
 from app.api.backtest import _OPT_BT_FIELDS, _make_opt_job_key, _opt_backtest_kwargs
+
+pytestmark = pytest.mark.usefixtures("private_owner")
 
 
 def _sig(bt: dict) -> str:

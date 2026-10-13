@@ -25,6 +25,8 @@ from app.strategy import custom_signals
 COL = "ext_tags_hot"  # config_id=tags, field=hot
 
 
+pytestmark = pytest.mark.usefixtures("authenticated_actor")
+
 @pytest.fixture(autouse=True)
 def _clean_caches():
     _load_all_cache.clear()
@@ -338,7 +340,9 @@ def test_compute_signals_attaches_ext_columns(data_dir):
 
     frame = _frame([("600000.SH", "2026-01-05", 10.0)])
     try:
-        out = pipeline.compute_signals(frame, needed={"csg_ext_hot"})
+        shared = pipeline.compute_signals(frame, needed={"csg_ext_hot"})
+        assert "csg_ext_hot" not in shared.columns
+        out = custom_signals.apply_user_signals(shared)
     finally:
         pipeline.invalidate_custom_signals()
     assert COL in out.columns

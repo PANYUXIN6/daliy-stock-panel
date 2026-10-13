@@ -15,6 +15,8 @@ import pytest
 from app.custom.assistant import chat_service
 from app.custom.assistant import tools as assistant_tools
 
+pytestmark = pytest.mark.usefixtures("authenticated_actor")
+
 
 def _script_round(script: list[dict[str, Any]], capture: list[list[dict[str, Any]]]):
     async def fake_round(messages, tool_schemas, *, temperature=0.3, timeout=240.0):

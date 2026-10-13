@@ -1,3 +1,4 @@
+import { accountStorage } from '@/lib/sessionRuntime'
 /**
  * AI 助手前端状态 — 会话/消息/发送编排, useSyncExternalStore 单例 store。
  *
@@ -89,13 +90,13 @@ function persistSessions() {
     const trimmed = state.sessions
       .slice(0, MAX_SESSIONS)
       .map(session => ({ ...session, messages: session.messages.slice(-MAX_SESSION_MESSAGES) }))
-    localStorage.setItem(STORAGE_KEY, JSON.stringify({ sessions: trimmed, activeId: state.activeId }))
+    accountStorage.setItem(STORAGE_KEY, JSON.stringify({ sessions: trimmed, activeId: state.activeId }))
   } catch { /* 存储满/隐私模式时静默降级为内存态 */ }
 }
 
 function loadSessions() {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY)
+    const raw = accountStorage.getItem(STORAGE_KEY)
     if (!raw) return
     const parsed = JSON.parse(raw) as { sessions?: AssistantSession[]; activeId?: string }
     if (!Array.isArray(parsed.sessions)) return

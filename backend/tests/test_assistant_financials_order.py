@@ -11,8 +11,11 @@ from __future__ import annotations
 from datetime import date
 
 import polars as pl
+import pytest
 
 from app.custom.assistant import tools as assistant_tools
+
+pytestmark = pytest.mark.usefixtures("authenticated_actor")
 
 _PERIODS = [
     date(2024, 9, 30), date(2024, 12, 31), date(2025, 3, 31),

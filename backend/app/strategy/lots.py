@@ -13,6 +13,7 @@ from datetime import date as _date
 from pathlib import Path
 
 from app.services.fs_utils import atomic_write_text
+from app.services.private_storage import identifier, private_path
 from app.strategy import monitor_rules
 from app.strategy.monitor import MonitorRuleEngine  # 复用条件文本拼装 (静态方法)
 
@@ -24,13 +25,13 @@ _MAX_ID_LEN = 40 - 2  # 派生规则 id 后缀 "_p" / "_d"
 
 
 def _dir(data_dir: Path) -> Path:
-    d = data_dir / "user_data" / "lots"
+    d = private_path(data_dir, "user_data", "lots")
     d.mkdir(parents=True, exist_ok=True)
     return d
 
 
 def _path(data_dir: Path, lot_id: str) -> Path:
-    return _dir(data_dir) / f"{lot_id}.json"
+    return _dir(data_dir) / f"{identifier(lot_id)}.json"
 
 
 def _now_iso() -> str:

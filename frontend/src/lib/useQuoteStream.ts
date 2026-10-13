@@ -1,3 +1,4 @@
+import { sessionEventSource } from '@/lib/sessionRuntime'
 import { useEffect, useRef, useCallback, useSyncExternalStore } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { SSE_INVALIDATE_PREFIXES, QK, DATASET_QUERY_PREFIXES, dataUpdateQueryPrefixes } from './queryKeys'
@@ -118,7 +119,7 @@ export function useQuoteStream(
 
     const connect = () => {
       _setStatus(failCount > 0 ? 'reconnecting' : _streamStatus)
-      const es = new EventSource('/api/intraday/stream')
+      const es = sessionEventSource('/api/intraday/stream')
       esRef.current = es
 
       es.onopen = () => {

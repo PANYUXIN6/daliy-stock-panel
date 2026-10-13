@@ -15,7 +15,7 @@ from app.tickflow.capabilities import CapabilityDenied, CapabilitySet
 
 
 @pytest.fixture
-def local_financials(tmp_path, monkeypatch):
+def local_financials(tmp_path, monkeypatch, authenticated_actor):
     app = FastAPI()
     app.include_router(financials.router)
     app.state.repo = SimpleNamespace(store=SimpleNamespace(data_dir=tmp_path))

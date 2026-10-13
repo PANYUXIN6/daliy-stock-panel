@@ -19,6 +19,8 @@ from app.custom.assistant import chat_service
 from app.custom.assistant import tools as assistant_tools
 from app.extensions.loader import configure_backend_extensions
 
+pytestmark = pytest.mark.usefixtures("authenticated_actor")
+
 
 async def _collect(lines: list[str]) -> list[dict[str, Any]]:
     return [json.loads(line) for line in lines]
@@ -420,6 +422,8 @@ def test_summarize_tool_result_whitelist() -> None:
 
 def test_http_chat_endpoint_streams_ndjson(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(chat_service, "ai_configured", lambda: False)
+    from types import SimpleNamespace
+    monkeypatch.setattr("app.services.user_runtime.runtime_for", lambda request: SimpleNamespace(strategy_engine=None))
 
     app = FastAPI()
     configure_backend_extensions(app)

@@ -24,6 +24,7 @@ from app.api.strategy import (
 )
 from app.strategy.engine import StrategyEngine
 
+pytestmark = pytest.mark.usefixtures("private_owner")
 
 def _filter_code(strategy_id: str) -> str:
     meta = (
@@ -40,15 +41,17 @@ def filter(df, params):
 
 def _setup_engine(tmp_path):
     """构造含 custom + composite 目录的 engine 和假 request。"""
-    custom_dir = tmp_path / "strategies" / "custom"
-    comp_dir = tmp_path / "strategies" / "composite"
+    from app.services.user_context import user_data_dir
+    owner_root = user_data_dir(tmp_path)
+    custom_dir = owner_root / "strategies" / "custom"
+    comp_dir = owner_root / "strategies" / "composite"
     custom_dir.mkdir(parents=True)
     comp_dir.mkdir(parents=True)
     engine = StrategyEngine(strategy_dirs=[custom_dir, comp_dir])
     repo = SimpleNamespace(store=SimpleNamespace(data_dir=tmp_path))
-    request = SimpleNamespace(
-        app=SimpleNamespace(state=SimpleNamespace(repo=repo, strategy_engine=engine))
-    )
+    runtime = SimpleNamespace(strategy_engine=engine)
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(
+        repo=repo, user_runtimes=SimpleNamespace(get=lambda owner: runtime))))
     return engine, request, custom_dir, comp_dir
 
 

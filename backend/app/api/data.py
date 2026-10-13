@@ -572,7 +572,7 @@ def status(request: Request) -> dict:
     scheduler = getattr(request.app.state, "scheduler", None)
     data_dir = repo.store.data_dir
 
-    return {
+    result = {
         "daily":       _get_table_stats("daily",       lambda: _safe_aggregate_daily(repo)),
         "enriched":    _get_table_stats("enriched",    lambda: _safe_aggregate_enriched(repo)),
     "index_daily":       _get_table_stats("index_daily",       lambda: _safe_aggregate_index_daily(repo)),
@@ -586,6 +586,28 @@ def status(request: Request) -> dict:
         "instruments": _get_table_stats("instruments", lambda: _safe_aggregate_instruments(repo)),
         "financials":  _get_table_stats("financials",  lambda: _safe_aggregate_financials(repo)),
 
+        "checked_at": datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z"),
+        # 指标缓存就绪标志 (启动时 enriched 异步预热, 完成前为 false)
+        "indicators_ready": getattr(request.app.state, "indicators_ready", True),
+    }
+
+    from app.services.user_context import current_user
+    user = current_user(required=False)
+    if user is not None and user.role != "admin":
+        safe_stats = {"rows", "earliest_date", "latest_date", "symbols_covered",
+                      "trading_days", "latest_as_of", "named"}
+        for key, stats in result.items():
+            if not isinstance(stats, dict):
+                continue
+            if key == "financials":
+                result[key] = {"rows": stats.get("rows", 0), "tables": {
+                    name: {field: value for field, value in table.items() if field in {"rows", "symbols"}}
+                    for name, table in stats.get("tables", {}).items() if isinstance(table, dict)
+                }}
+            else:
+                result[key] = {field: value for field, value in stats.items() if field in safe_stats}
+        return result
+    result.update({
         # 文件层面信息(缓存)
         "storage": _get_storage(data_dir),
 
@@ -594,10 +616,8 @@ def status(request: Request) -> dict:
         "next_pipeline_run":    _next_cron_run(scheduler, "daily_pipeline"),
         "last_instruments_run": _last_finished("instruments"),
         "last_pipeline_run":    _last_finished("pipeline"),
-        "checked_at": datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z"),
-        # 指标缓存就绪标志 (启动时 enriched 异步预热, 完成前为 false)
-        "indicators_ready": getattr(request.app.state, "indicators_ready", True),
-    }
+    })
+    return result
 
 
 @router.post("/sync-check")

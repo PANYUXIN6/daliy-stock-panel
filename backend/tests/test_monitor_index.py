@@ -3,6 +3,7 @@ import pytest
 
 from app.strategy import monitor_rules
 
+pytestmark = pytest.mark.usefixtures("private_owner")
 
 def _index_rule(rid="r_idx", **over):
     rule = {
@@ -148,7 +149,7 @@ def test_evaluate_monitors_index_round_survives_empty_stock_snapshot():
                      side_effect=lambda df, e, at: df),
         patch("app.services.quote_service.cn_today", return_value=date(2026, 7, 28)),
     ):
-        svc._evaluate_monitors(pl.DataFrame(), None)
+        svc._evaluate_user_monitors(pl.DataFrame(), None, svc._app_state)
 
     # 指数轮执行了 (asset_type="index")
     index_calls = [c for c in engine.evaluate.call_args_list
@@ -195,7 +196,7 @@ def test_evaluate_monitors_stock_round_runs_when_snapshot_ready():
                      side_effect=lambda df, e, at: df),
         patch("app.services.quote_service.cn_today", return_value=date(2026, 7, 28)),
     ):
-        svc._evaluate_monitors(pl.DataFrame(), None)
+        svc._evaluate_user_monitors(pl.DataFrame(), None, svc._app_state)
 
     # 股票轮正常执行
     stock_calls = [c for c in engine.evaluate.call_args_list

@@ -17,6 +17,8 @@ from app.enriched_generation import EnrichedGenerationUnavailableError
 from app.services.mining_jobs import MiningRunStore
 from app.strategy.engine import StrategyEngine
 
+pytestmark = pytest.mark.usefixtures("authenticated_actor")
+
 _FACTOR_DEFINITION = {
     "kind": "factor_rank",
     "factor_names": ["turnover_rate"],
@@ -89,6 +91,7 @@ def _client(tmp_path):
     _write_enriched_dates(tmp_path, 219, first=date(2022, 8, 15))
     app = FastAPI()
     app.include_router(router)
+    app.state.user_runtimes = SimpleNamespace(get=lambda user: app.state)
     app.state.repo = _Repo(tmp_path)
     app.state.mining_manager = _Manager(tmp_path)
     app.state.strategy_engine = SimpleNamespace()
@@ -450,7 +453,8 @@ def test_publish_endpoint_uses_persisted_definition_and_invalidates_runtime(
     client, store = _client(tmp_path)
     _successful_run(store)
     builtin_dir = Path(__file__).resolve().parents[1] / "app" / "strategy" / "builtin"
-    custom_dir = tmp_path / "strategies" / "custom"
+    from app.services.user_context import user_data_dir
+    custom_dir = user_data_dir(tmp_path) / "strategies" / "custom"
     engine = StrategyEngine(strategy_dirs=[builtin_dir, custom_dir])
     invalidations: list[str] = []
     client.app.state.strategy_engine = engine
@@ -623,6 +627,7 @@ def test_start_returns_400_with_guidance_while_enriched_publication_active(
     _write_enriched_dates(tmp_path, 219, first=date(2022, 8, 15))
     app = FastAPI()
     app.include_router(router)
+    app.state.user_runtimes = SimpleNamespace(get=lambda user: app.state)
     app.state.repo = _PublishingRepo(tmp_path)
     app.state.mining_manager = _Manager(tmp_path)
     app.state.strategy_engine = SimpleNamespace()

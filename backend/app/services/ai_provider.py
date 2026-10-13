@@ -1,15 +1,12 @@
 """AI provider adapter for OpenAI-compatible APIs and local Codex CLI."""
 from __future__ import annotations
 
-import asyncio
 import json
 import os
 import re
 import shutil
 import stat
-import subprocess
 import sys
-import tempfile
 import time
 import tomllib
 from collections.abc import AsyncIterator, Callable, Sequence
@@ -275,31 +272,14 @@ def normalize_openai_base_url(url: str) -> str:
 
 
 def codex_cli_available() -> bool:
-    """Codex CLI 是否真正可用: 解析命令后实跑一次 --version。
-
-    仅 which 到二进制不够 — npm 壳缺平台原生二进制时同样存在于 PATH,
-    但一运行就报错(如 "Codex CLI not available"), 状态页会误报已连接。
-    """
-    try:
-        base = _codex_base_command()
-    except RuntimeError:
-        return False
-    try:
-        proc = subprocess.run(
-            [*base, "--version"],
-            capture_output=True,
-            timeout=15,
-            check=False,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return False
-    return proc.returncode == 0
+    """Local CLI execution is disabled for the multi-user server."""
+    return False
 
 
 def ai_configured(provider: str | None = None) -> bool:
     provider = provider or current_ai_provider()
     if is_codex_cli_provider(provider):
-        return codex_cli_available()
+        return False
     return bool(secrets_store.get_ai_key())
 
 
@@ -320,7 +300,7 @@ async def generate_ai_text(
     max_tokens = _resolve_max_tokens(max_tokens)
     _check_input_budget(messages, max_tokens=max_tokens)
     if is_codex_cli_provider():
-        return await _run_codex_cli(messages, max_tokens=max_tokens, timeout=max(timeout, 600.0))
+        raise RuntimeError("本地 Codex CLI 模式已停用，请配置模型 API")
     return await _run_openai_once(
         messages,
         temperature=temperature,
@@ -446,8 +426,7 @@ async def stream_ai_text(
     max_tokens = _resolve_max_tokens(max_tokens)
     _check_input_budget(messages, max_tokens=max_tokens)
     if is_codex_cli_provider():
-        yield await _run_codex_cli(messages, max_tokens=max_tokens, timeout=max(timeout, 600.0))
-        return
+        raise RuntimeError("本地 Codex CLI 模式已停用，请配置模型 API")
 
     async for chunk in _stream_openai(
         messages,
@@ -845,80 +824,13 @@ async def _run_codex_cli(
     max_tokens: int | None,
     timeout: float,
 ) -> str:
-    prompt = _codex_prompt(messages, max_tokens=max_tokens)
-    run_path = Path(tempfile.mkdtemp(prefix="tickflow-codex-run-"))
-    try:
-        codex_home_path = run_path / "codex-home"
-        workspace_path = run_path / "workspace"
-        codex_home_path.mkdir()
-        workspace_path.mkdir()
-        output_path = codex_home_path / "last-message.txt"
-        _prepare_codex_home(codex_home_path)
-
-        # 不传 --ephemeral: 老版本 codex(如 0.58)无此参数, 传了直接报
-        # unexpected argument; 会话隔离已由一次性临时 CODEX_HOME 保证(跑完即删)。
-        args = [
-            *_codex_base_command(),
-            "exec",
-            "--sandbox",
-            "read-only",
-            "--skip-git-repo-check",
-            "--color",
-            "never",
-            "--output-last-message",
-            str(output_path),
-        ]
-        model = current_ai_model().strip()
-        if model:
-            args.extend(["--model", model])
-        args.extend(["--cd", str(workspace_path), "-"])
-
-        env = _codex_process_env(codex_home_path)
-
-        process_task = asyncio.create_task(asyncio.to_thread(
-            _run_codex_process, args, prompt, env, timeout,
-        ))
-        try:
-            returncode, stdout, stderr = await asyncio.shield(process_task)
-        except asyncio.CancelledError:
-            # 线程中的真实进程仍在执行，等它退出后才清理目录和释放并发槽。
-            with anyio.CancelScope(shield=True):
-                await asyncio.gather(process_task, return_exceptions=True)
-            raise
-
-        out = _clean_process_text(stdout)
-        err = _clean_process_text(stderr)
-        final_message = _read_output_file(output_path)
-        if returncode != 0:
-            detail = err or out or f"exit code {returncode}"
-            raise RuntimeError(f"Codex CLI 调用失败: {detail[-1200:]}")
-        result = final_message or out
-        if not result:
-            raise RuntimeError("Codex CLI 未返回内容")
-        return result
-    finally:
-        with anyio.CancelScope(shield=True):
-            await asyncio.to_thread(_remove_tree_best_effort, run_path)
+    raise RuntimeError("本地 Codex CLI 模式已停用，请配置模型 API")
 
 
 def _run_codex_process(
-    args: Sequence[str],
-    prompt: str,
-    env: dict[str, str],
-    timeout: float,
+    args: Sequence[str], prompt: str, env: dict[str, str], timeout: float,
 ) -> tuple[int, bytes, bytes]:
-    try:
-        proc = subprocess.run(
-            list(args),
-            input=prompt.encode("utf-8"),
-            capture_output=True,
-            env=env,
-            timeout=timeout,
-            check=False,
-        )
-    except subprocess.TimeoutExpired as exc:
-        raise RuntimeError("Codex CLI 调用超时, 请稍后重试或检查本机 Codex 登录状态") from exc
-    return proc.returncode, proc.stdout, proc.stderr
+    raise RuntimeError("本地 Codex CLI 模式已停用，请配置模型 API")
 
 
 def _codex_process_env(codex_home_path: Path) -> dict[str, str]:

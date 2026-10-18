@@ -491,7 +491,9 @@ def run_regime_batch(repo, start: date, end: date) -> pl.DataFrame:
 
     # enriched 多日数据(优先缓存)。慢路径在每批内部完成过滤和日级聚合,
     # 避免把所有批次的个股明细同时保留到最终 group_by。
-    df = repo.get_enriched_range(start, end)
+    # 单日增量也必须携带前一交易日，否则缓存路径的晋级率会丢失昨日连板池。
+    previous = max((d for d in enriched_date_set(repo) if d < start), default=start)
+    df = repo.get_enriched_range(previous, end)
     if df is None or df.is_empty():
         logger.info("regime batch: enriched cache miss [%s~%s], fallback to scan", start, end)
         result = _scan_enriched_fallback(
@@ -509,6 +511,11 @@ def run_regime_batch(repo, start: date, end: date) -> pl.DataFrame:
     df = _filter_excluded_symbols(df, excluded_symbols)
     if df.is_empty():
         return pl.DataFrame()
+    if {"symbol", "consecutive_limit_ups"}.issubset(df.columns):
+        from app.services.market_phase import with_prev_consecutive
+
+        df = with_prev_consecutive(df)
+    df = df.filter((pl.col("date") >= start) & (pl.col("date") <= end))
 
     return _aggregate_daily(df, index_pct_map)
 
@@ -668,7 +675,8 @@ def latest_phase_transition(data_dir: Path) -> tuple[str, str, str] | None:
     return prev_phase, cur_phase, str(tail["date"][-1])
 
 
-def compute_regime_incremental(repo, data_dir: Path, *, today: date | None = None) -> pl.DataFrame:
+def compute_regime_incremental(repo, data_dir: Path, *, today: date | None = None,
+                               refresh_today: bool = False) -> pl.DataFrame:
     """增量计算 regime(供 daily_pipeline / 启动补算调用)。
 
     双检测: 1) 缺口(enriched 有但 regime 没有) 2) stale(enriched 被覆写)。
@@ -686,6 +694,8 @@ def compute_regime_incremental(repo, data_dir: Path, *, today: date | None = Non
     stale = detect_stale_dates(data_dir, repo)
 
     to_compute = sorted(set(missing) | set(stale))
+    if refresh_today and today in enriched_dates:
+        to_compute = sorted(set(to_compute) | {today})
     if not to_compute:
         logger.debug("regime incremental: nothing to compute")
         return pl.DataFrame()

@@ -277,26 +277,27 @@ it.each([['financial:all', false], ['pipeline', true]])('后台任务 %s 的行�
   expect(host.textContent?.includes('数据同步期间暂停行情采集')).toBe(paused)
 })
 
-it('数据页保留盘前自动更新时间和状态，盘后数据由行情模块手动启动', async () => {
+it('数据页展示盘前与交易日盘后自动同步时间，手动维护仍可用', async () => {
   mocks.capabilities.mockResolvedValue({ capabilities: { 'kline.daily.batch': true, 'adj_factor': true, 'kline.minute.batch': true } })
   mocks.preferences.mockResolvedValue({
     instruments_schedule: { hour: 9, minute: 10 },
-    pipeline_schedule: { hour: 15, minute: 35 },
+    pipeline_schedule: { hour: 16, minute: 0 },
   })
   mocks.dataStatus.mockResolvedValue({
     instruments: { rows: 1 }, storage: {},
     last_instruments_run: '2026-10-09T09:10:00+08:00',
     next_instruments_run: '2026-10-12T09:10:00+08:00',
     last_pipeline_run: '2026-10-09T15:40:00+08:00',
-    next_pipeline_run: '2026-10-12T15:35:00+08:00',
+    next_pipeline_run: '2026-10-12T16:00:00+08:00',
   })
   await render(<Data />)
   const heading = [...host.querySelectorAll('h3')].find(node => node.textContent === '同步安排')!
   const card = heading.parentElement!.parentElement!
   expect(card.textContent).toContain('09:10')
   expect(card.textContent).toContain(formatScheduleTimePart('2026-10-09T15:40:00+08:00'))
-  expect(card.textContent).toContain('盘后 · 手动同步')
-  expect(card.textContent).not.toContain('15:35')
+  expect(card.textContent).toContain('交易日 · 盘后自动同步')
+  expect(card.textContent).toContain('16:00 北京时间')
+  expect(card.textContent).toContain('当天行情与指标核验通过后')
   for (const [title, label] of [['个股维表', '自动'], ['日 K', '随同步'], ['除权因子', '随同步'], ['Enriched', '随同步'], ['指数', '随同步'], ['分钟 K', '不随同步'], ['市场环境', '不随同步']]) {
     const cardTitle = [...host.querySelectorAll('h3')].find(node => node.textContent === title)!
     expect(cardTitle.parentElement!.textContent).toContain(label)
@@ -398,19 +399,19 @@ it.each([
 
 it('环境计算明确随手动全量同步执行，并保留原范围偏好开关', async () => {
   await render(<RegimeConfigCard />)
-  expect(host.textContent).toContain('随全量同步计算')
-  expect(host.textContent).toContain('点击数据页“同步行情与基础数据”时一并增量计算环境状态')
+  expect(host.textContent).toContain('随手动同步计算')
+  expect(host.textContent).toContain('此开关控制手动“同步行情与基础数据”时是否一并计算')
   await act(async () => host.querySelector<HTMLButtonElement>('[role="checkbox"]')!.click())
   await settle()
   expect(mocks.updatePipelineRegimeEnabled).toHaveBeenCalledWith(true)
 })
 
-it('盘口配置保留盘中轮询间隔，盘后改为手动更新说明', async () => {
+it('盘口配置保留盘中轮询间隔，说明盘后自动更新与手动补采', async () => {
   mocks.capabilities.mockResolvedValue({ capabilities: { 'depth5.batch': true } })
   mocks.preferences.mockResolvedValue({ depth_polling_interval: 10, depth_finalize_time: { hour: 15, minute: 2 } })
   await render(<DepthConfigContent />)
-  expect(host.textContent).toContain('盘后手动更新')
-  expect(host.textContent).toContain('手动拉取最终盘口并定版')
+  expect(host.textContent).toContain('盘后自动更新')
+  expect(host.textContent).toContain('点击“更新五档盘口”手动补采')
   const intervals = host.querySelectorAll<HTMLInputElement>('input[type="number"]')
   expect(intervals).toHaveLength(1)
   await input(intervals[0], '30')

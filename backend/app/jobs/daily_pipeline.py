@@ -2,7 +2,7 @@
 
 调度:
   09:10 盘前 — 同步个股维表 instruments (全量覆盖)
-  盘后日K、除权、指标、榜单由数据页手动同步。
+  16:00 盘后 — 正式行情与指标验收后增量计算环境；数据页仍可手动同步。
 
 盘后同步策略:
   日 K: QuoteService 交易时段已实时落盘 → 有数据时跳过 batch,首次拉 1 年区间
@@ -23,7 +23,7 @@ from apscheduler.triggers.interval import IntervalTrigger
 
 from app.config import settings
 from app.indicators.pipeline import filter_halt_days, run_pipeline
-from app.market_time import cn_now, cn_today
+from app.market_time import CN_TZ, cn_now, cn_today
 from app.services import index_sync, instrument_sync, kline_sync
 from app.services import preferences as _prefs
 from app.tickflow.capabilities import Cap, CapabilitySet
@@ -121,8 +121,7 @@ class PipelineStageError(RuntimeError):
     """管道有阶段软失败(数据可能陈旧)时抛出, 让上层 job_store 把任务标记为 failed。
 
     这些阶段单独 try/except 吞掉异常以不中断整条管道, 但一旦失败即代表对应数据陈旧。
-    抛出前进度协议已走完(done/100), 故前端进度条正常收尾, 仅终态如实反映为 failed ——
-    不再"部分失败却报成功"。
+    异常由任务边界记录为 failed，不能在复盘与收尾尚未完成时上报成功。
     """
 
     def __init__(self, errors: list[str]) -> None:
@@ -225,6 +224,9 @@ def run_now(
     capset: CapabilitySet,
     on_progress: ProgressCb | None = None,
     override_start_date: _date | None = None,
+    *,
+    postmarket: bool = False,
+    target_date: _date | None = None,
 ) -> dict:
     """立即执行一次盘后管道,支持进度回调。
 
@@ -233,23 +235,39 @@ def run_now(
 
     override_start_date: 传入时强制走 batch 拉取分支,用该日期作为日K/除权/指数的
         拉取起点(到今天),用于「数据修正/补数据」场景。None 时走原有自动判定逻辑。
+    postmarket: 自动盘后任务强制同步 A 股、核心指数与环境，并验收当日正式数据。
+    target_date: 排队任务的目标北京日期，跨日期后不执行。
     """
     emit = on_progress or _noop
     skipped: list[str] = []
     # 阶段软失败累积: 下列阶段 try/except 吞异常以不中断管道, 但失败即代表数据可能陈旧。
     # 管道末尾若非空则抛 PipelineStageError, 让任务终态如实标记为 failed(而非误报成功)。
     stage_errors: list[str] = []
+    from app.services import postmarket as postmarket_service
+    from app.services.daily_coverage import DailyCoverage, DailyCoverageError
+
+    today = cn_today()
+    if postmarket and target_date is not None and target_date != today:
+        raise DailyCoverageError("盘后任务已跨日期，取消本次排队执行")
+    coverage = DailyCoverage(today) if postmarket else None
+    index_coverage = DailyCoverage(today) if postmarket else None
+    readiness: dict = {}
 
     # Step 0: 先同步个股维表, 再解析标的池 — 确保标的池基于最新 instruments
     emit("sync_instruments", 2, "同步个股维表…")
-    inst_rows = instrument_sync.sync_instruments(repo.store.data_dir)
+    inst_rows = instrument_sync.sync_instruments(
+        repo.store.data_dir, **({"require_complete": True} if postmarket else {}),
+    )
+    if postmarket and inst_rows <= 0:
+        raise DailyCoverageError("当日股票维表未返回有效数据")
     if inst_rows > 0:
         _refresh_instruments_view(repo)
     emit("sync_instruments", 8, f"个股维表同步完成,{inst_rows} 只标的")
     _invalidate("instruments")
 
     emit("resolve_universe", 9, "解析标的池…")
-    universe = _resolve_universe(capset, repo)
+    universe = (postmarket_service.stock_universe(repo, today) if postmarket
+                else _resolve_universe(capset, repo))
     emit("resolve_universe", 10, f"标的池规模:{len(universe)} 只")
 
     # Step 1: 日 K 同步
@@ -259,10 +277,10 @@ def run_now(
     #   无任何数据 → batch K-line API 拉首次 1 年
     from datetime import datetime as _dt
     from datetime import timedelta as _td
+    boundary_tz = CN_TZ if postmarket else None
     latest_daily = repo.latest_daily_date()
     # 管道「今天」必须是北京日期: 美西主机 15:35 北京时间仍是本地昨天,
     # date.today() 会把昨日日K当成已齐, 当日官方收盘价永远拉不进来。
-    today = cn_today()
     today_exists = latest_daily and latest_daily >= today
     new_daily_days = 0
 
@@ -296,7 +314,7 @@ def run_now(
 
     # A 股日K拉取开关(默认开);关闭时跳过日K同步,保留已有数据。
     # 数据修正(override_start_date)时即使关闭开关也强制拉取 — 修正就是来补数据的。
-    pull_a_share = _prefs.get_pipeline_pull_a_share()
+    pull_a_share = postmarket or _prefs.get_pipeline_pull_a_share()
     if not pull_a_share and not override_start_date:
         emit("sync_daily", 45, "已跳过 A 股日K同步(拉取内容未勾选)")
         logger.info("sync_daily: skipped (pipeline_pull_a_share=False)")
@@ -312,9 +330,10 @@ def run_now(
                  f"日K 批次 {cur}/{tot}", stage_pct=int(100 * cur / tot), skip_log=True)
         written_daily = kline_sync.sync_and_persist_daily_batch(
             universe, repo, capset,
-            start_date=_dt.combine(start_date, _dt.min.time()),
-            end_date=_dt.combine(today, _dt.min.time()),
+            start_date=_dt.combine(start_date, _dt.min.time(), tzinfo=boundary_tz),
+            end_date=_dt.combine(today, _dt.min.time(), tzinfo=boundary_tz),
             on_chunk_done=_daily_chunk_progress,
+            **({"coverage": coverage} if coverage is not None else {}),
         )
         gap_days = (today - start_date).days
         new_daily_days = gap_days
@@ -325,6 +344,7 @@ def run_now(
         and stale_day is None
         and capset.has(Cap.QUOTE_POOL)
         and _prefs.get_daily_data_provider() == "tickflow"
+        and not postmarket
     ):
         # 付费档:今天有数据(QuoteService 已落盘)→ 实时行情覆写,确保最新。
         # stale_day 非空时禁用本分支: "只刷今天"会让停机日的盘中快照永久留存,
@@ -353,9 +373,10 @@ def run_now(
                  f"日K 批次 {cur}/{tot}", stage_pct=int(100 * cur / tot), skip_log=True)
         written_daily = kline_sync.sync_and_persist_daily_batch(
             universe, repo, capset,
-            start_date=_dt.combine(start_date, _dt.min.time()),
-            end_date=_dt.combine(today, _dt.min.time()),
+            start_date=_dt.combine(start_date, _dt.min.time(), tzinfo=boundary_tz),
+            end_date=_dt.combine(today, _dt.min.time(), tzinfo=boundary_tz),
             on_chunk_done=_daily_chunk_progress,
+            **({"coverage": coverage} if coverage is not None else {}),
         )
         gap_days = (today - start_date).days
         new_daily_days = gap_days
@@ -373,19 +394,25 @@ def run_now(
                  f"日K 批次 {cur}/{tot}", stage_pct=int(100 * cur / tot), skip_log=True)
         written_daily = kline_sync.sync_and_persist_daily_batch(
             universe, repo, capset,
-            start_date=_dt.combine(start_date, _dt.min.time()),
-            end_date=_dt.combine(today, _dt.min.time()),
+            start_date=_dt.combine(start_date, _dt.min.time(), tzinfo=boundary_tz),
+            end_date=_dt.combine(today, _dt.min.time(), tzinfo=boundary_tz),
             on_chunk_done=_daily_chunk_progress,
+            **({"coverage": coverage} if coverage is not None else {}),
         )
         new_daily_days = 365
         emit("sync_daily", 45, "日K 完成")
         logger.info("sync_daily: [%s ~ %s] done", start_date, today)
     _invalidate("daily")
+    if coverage is not None:
+        readiness["daily"] = coverage.require(universe)
 
     # 完整性修复时删除股票 enriched 的坏分区: 增量重算只算 enriched 里不存在
     # 的日期, 盘中快照日分区已存在(虽是错的), 不删永远不会被重算。删除后
     # Step 2 把这些日期当"新日期"重算 (剩余分区最近 60 天做历史前缀, 窗口 ≤5 天回看充足)。
     repair_start = override_start_date if override_start_date is not None else stale_day
+    if postmarket:
+        # 正式日线可能只修订成交量额，既有收盘价比较无法发现；当日必须重新加工。
+        repair_start = min(d for d in (repair_start, today) if d is not None)
     if repair_start is not None:
         try:
             from app.services.data_integrity import prune_enriched_partitions
@@ -422,11 +449,13 @@ def run_now(
     affected_symbols: list[str] = []
     adj_provider = _prefs.get_adj_factor_provider()
     can_sync_adj = capset.has(Cap.ADJ_FACTOR) or adj_provider != "tickflow"
+    if postmarket and not can_sync_adj:
+        raise DailyCoverageError("除权因子能力不可用，无法确认复权指标已更新")
     if can_sync_adj:
         from datetime import datetime, timedelta
-        adj_end = datetime.now()
+        adj_end = cn_now()
         if daily_range_start is not None:
-            adj_start = datetime.combine(daily_range_start, datetime.min.time())
+            adj_start = datetime.combine(daily_range_start, datetime.min.time(), tzinfo=CN_TZ)
         else:
             # 日K实时增量/跳过时, 除权兜底拉最近 N 天, 覆盖周末/长假/停机期间的新除权事件。
             # 15 天: 覆盖春节/国庆最长约10天长假 + 故障恢复缓冲; sync_adj_factor 内部 merge+unique 幂等, 多拉无副作用。
@@ -443,6 +472,7 @@ def run_now(
             universe, repo, capset,
             start_time=adj_start, end_time=adj_end,
             on_chunk_done=_adj_chunk_progress,
+            **({"require_complete": True} if postmarket else {}),
         )
         if affected_symbols:
             _refresh_single_view(repo, "adj_factor")
@@ -514,7 +544,7 @@ def run_now(
         emit("compute_enriched", 65, "全量计算 enriched…")
         logger.info("compute_enriched: full rebuild (first=%s, backward=%s, daily=%d, enriched=%d)",
                     not enriched_exists, backward_extension, daily_days, prev_enriched_days)
-        written_enriched = run_pipeline(on_batch_done=_enriched_batch_progress)
+        written_enriched = run_pipeline(data_dir=repo.store.data_dir, on_batch_done=_enriched_batch_progress)
         new_enriched_days = len(list(enriched_dir.glob("date=*")))
         emit("compute_enriched", 88, f"enriched 完成,覆盖 {new_enriched_days} 天")
         logger.info("compute_enriched: full rebuild done, %d days", new_enriched_days)
@@ -527,6 +557,7 @@ def run_now(
         logger.info("compute_enriched: forward incremental, %d symbols to recompute",
                     len(symbols_to_recompute))
         written_enriched = run_pipeline(
+            data_dir=repo.store.data_dir,
             new_dates_only=True,
             symbols=symbols_to_recompute or None,
             on_batch_done=_enriched_batch_progress,
@@ -538,7 +569,7 @@ def run_now(
         # 无新日期,仅除权因子变更 → 只重算受影响个股的全部日期
         emit("compute_enriched", 65, f"增量计算 enriched ({len(affected_symbols)} 只个股)…")
         logger.info("compute_enriched: adj_factor incremental, %d symbols", len(affected_symbols))
-        written_enriched = run_pipeline(symbols=affected_symbols, on_batch_done=_enriched_batch_progress)
+        written_enriched = run_pipeline(data_dir=repo.store.data_dir, symbols=affected_symbols, on_batch_done=_enriched_batch_progress)
         emit("compute_enriched", 88, f"enriched 完成,{len(affected_symbols)} 只个股")
     else:
         written_enriched = 0
@@ -556,7 +587,7 @@ def run_now(
     index_count = 0
     etf_count = 0
     etf_adj_symbols = 0
-    pull_index = _prefs.get_pipeline_pull_index()
+    pull_index = postmarket or _prefs.get_pipeline_pull_index()
     pull_etf = _prefs.get_pipeline_pull_etf()
 
     if capset.has(Cap.KLINE_DAILY_BATCH) and (pull_index or pull_etf):
@@ -591,12 +622,16 @@ def run_now(
                     emit("sync_index", 88, f"指数日K批次 {cur}/{tot}",
                          stage_pct=int(100 * cur / tot) if tot else 100, skip_log=cur < tot)
 
+                from app.services.index_const import CORE_INDEX_SYMBOLS
+
                 written_index_daily = index_sync.sync_and_persist_index_daily(
                     repo,
                     capset,
-                    start_date=_dt.combine(index_start, _dt.min.time()),
-                    end_date=_dt.combine(today, _dt.min.time()),
+                    start_date=_dt.combine(index_start, _dt.min.time(), tzinfo=boundary_tz),
+                    end_date=_dt.combine(today, _dt.min.time(), tzinfo=boundary_tz),
                     on_chunk_done=_index_chunk,
+                    **({"symbols_override": list(CORE_INDEX_SYMBOLS), "coverage": index_coverage}
+                       if postmarket else {}),
                 )
                 emit("sync_index", 88, f"指数日K完成,{written_index_daily} 行")
                 _invalidate("index_instruments")
@@ -649,8 +684,8 @@ def run_now(
                 written_etf_daily = index_sync.sync_and_persist_etf_daily(
                     repo,
                     capset,
-                    start_date=_dt.combine(etf_start, _dt.min.time()),
-                    end_date=_dt.combine(today, _dt.min.time()),
+                    start_date=_dt.combine(etf_start, _dt.min.time(), tzinfo=boundary_tz),
+                    end_date=_dt.combine(today, _dt.min.time(), tzinfo=boundary_tz),
                     on_chunk_done=_etf_chunk,
                 )
                 emit("sync_index", 88, f"ETF 日K完成,{written_etf_daily} 行")
@@ -671,34 +706,35 @@ def run_now(
     else:
         skipped.append("sync_index")
 
-    # Step 2.5: 分钟 K 同步(可选) — 未启用或无 capability 时静默跳过(不 emit)
-    from app.services import preferences
-    minute_on = preferences.get_minute_sync_enabled()
-    minute_days = preferences.get_minute_sync_days()
-    written_minute = 0
-    if minute_on and capset.has(Cap.KLINE_MINUTE_BATCH):
-        emit("sync_minute", 90, f"获取分钟K：首次回溯 {minute_days} 个自然日，已有数据从最新时间增量更新…")
-        logger.info("sync_minute: initial lookback %d calendar days, incremental when history exists", minute_days)
-        minute_symbols = _resolve_minute_symbols(capset, repo)
-        def _minute_chunk_progress(cur: int, tot: int, seg_label: str = "") -> None:
-            emit("sync_minute", 90 + int(3 * cur / tot),
-                 f"分钟K 批次 {cur}/{tot}" + (f" [{seg_label}]" if seg_label else ""),
-                 stage_pct=int(100 * cur / tot), skip_log=True)
-        written_minute = kline_sync.sync_and_persist_minute(
-            minute_symbols, repo, capset, days=minute_days,
-            on_chunk_done=_minute_chunk_progress,
+    if coverage is not None:
+        from app.services.index_const import CORE_INDEX_SYMBOLS
+
+        emit("verify_postmarket", 89, "核验当日正式行情与指标覆盖…")
+        if stage_errors:
+            raise PipelineStageError(stage_errors)
+        readiness["indices"] = index_coverage.require(list(CORE_INDEX_SYMBOLS))
+        if not set(CORE_INDEX_SYMBOLS).issubset(index_coverage.active):
+            raise DailyCoverageError("核心指数当日有效行情未齐，不能按股票停牌豁免")
+        readiness["index_enriched"] = postmarket_service.require_enriched(
+            repo.store.data_dir, index_coverage, asset_type="index",
         )
-        minute_dir = repo.store.data_dir / "kline_minute"
-        minute_cover_days = len(list(minute_dir.glob("date=*"))) if minute_dir.exists() else 0
-        emit("sync_minute", 93, f"分钟K完成，本地累计覆盖 {minute_cover_days} 个日期")
-        logger.info("sync_minute: done, %d local date partitions", minute_cover_days)
-        _invalidate("minute")
-    else:
-        skipped.append("sync_minute")
-        if minute_on:
-            logger.info("sync_minute skipped: no KLINE_MINUTE_BATCH capability")
-        else:
-            logger.info("sync_minute skipped: user disabled")
+        readiness["enriched"] = postmarket_service.require_enriched(repo.store.data_dir, coverage)
+        if cn_today() != today:
+            raise DailyCoverageError("盘后任务已跨交易日期，请重新同步后生成环境")
+        # 环境计算优先使用内存范围；必须先刷新，避免聚合上一轮行情。
+        repo.refresh_cache()
+        emit("sync_classifications", 89, "同步概念与行业分类…")
+        import asyncio
+
+        from app.services import ext_presets
+        classifications: dict[str, int] = {}
+        asyncio.run(ext_presets.sync_classifications(
+            repo.store.data_dir, classifications,
+            lambda _stage, _pct, msg: emit("sync_classifications", 89, msg),
+        ))
+        # 概念映射有进程缓存，刷新后供本轮主线和复盘读取。
+        from app.services.rps_rotation import invalidate_cache as invalidate_rotation_cache
+        invalidate_rotation_cache()
 
     # Step 2.6: 市场环境(regime) 增量计算 — enriched 已就绪后聚合环境指标。
     # 双检测(缺口+stale), 自动补算遗漏/被覆写的日。软失败: 不阻断主管道。
@@ -707,7 +743,8 @@ def run_now(
     # 或直接在该页面点「重算」手动触发(不受此开关影响)。
     regime_days = 0
     from app.services import preferences as _prefs_regime
-    if not _prefs_regime.get_pipeline_regime_enabled():
+    regime_enabled = postmarket or _prefs_regime.get_pipeline_regime_enabled()
+    if not regime_enabled:
         skipped.append("regime")
         logger.info("compute_regime skipped: user disabled (pipeline_regime_enabled=False)")
     else:
@@ -715,7 +752,12 @@ def run_now(
             emit("compute_regime", 90, "计算市场环境…")
             from app.api.regime import invalidate_regime_cache
             from app.services import regime_builder
-            new_regime = regime_builder.compute_regime_incremental(repo, repo.store.data_dir)
+            new_regime = regime_builder.compute_regime_incremental(
+                repo, repo.store.data_dir,
+                **({"refresh_today": True} if postmarket else {}),
+            )
+            if postmarket and (new_regime.is_empty() or not new_regime["date"].eq(today).any()):
+                raise DailyCoverageError("本轮未生成当日市场环境，不能沿用旧结果")
             regime_days = new_regime.height if not new_regime.is_empty() else 0
             if regime_days:
                 invalidate_regime_cache()
@@ -733,10 +775,22 @@ def run_now(
             stage_errors.append(f"compute_regime: {e}")
             skipped.append("regime")
 
+    if postmarket:
+        from app.services import regime_builder
+
+        environment = regime_builder.load_regime_history(repo.store.data_dir)
+        if "regime" in skipped or environment.is_empty() or "phase" not in environment.columns:
+            raise DailyCoverageError("当日市场环境计算未完成")
+        current = environment.filter(pl.col("date") == today)
+        if current.is_empty() or current.select(pl.any_horizontal(
+            pl.col(column).is_null() for column in ("state", "score", "phase")
+        ).any()).item():
+            raise DailyCoverageError("当日市场环境或情绪周期未生成")
+
     # Step 2.7: 市场主线(概念/行业涨停梯队聚合) 增量计算 — regime 同开关。
     # 只窄扫连板 >=1 的行, 增量通常 1 天, 开销可忽略。软失败: 不阻断主管道。
     mainline_rows = 0
-    if not _prefs_regime.get_pipeline_regime_enabled():
+    if not regime_enabled:
         skipped.append("mainline")
     else:
         try:
@@ -744,7 +798,8 @@ def run_now(
             from app.services import market_mainline
             for _kind in ("concept", "industry"):
                 rows = market_mainline.compute_mainline_incremental(
-                    repo, repo.store.data_dir, kind=_kind
+                    repo, repo.store.data_dir, kind=_kind,
+                    **({"refresh_today": True} if postmarket else {}),
                 )
                 mainline_rows += rows.height if not rows.is_empty() else 0
             if mainline_rows:
@@ -769,11 +824,39 @@ def run_now(
         logger.warning("paper_settle failed (soft): %s", e, exc_info=True)
         stage_errors.append(f"paper_settle: {e}")
 
+    # Step 2.9: 分钟 K 同步(可选) — 未启用或无 capability 时静默跳过(不 emit)
+    from app.services import preferences
+    minute_on = preferences.get_minute_sync_enabled()
+    minute_days = preferences.get_minute_sync_days()
+    written_minute = 0
+    if minute_on and capset.has(Cap.KLINE_MINUTE_BATCH):
+        emit("sync_minute", 94, f"获取分钟K：首次回溯 {minute_days} 个自然日，已有数据从最新时间增量更新…")
+        logger.info("sync_minute: initial lookback %d calendar days, incremental when history exists", minute_days)
+        minute_symbols = _resolve_minute_symbols(capset, repo)
+        def _minute_chunk_progress(cur: int, tot: int, seg_label: str = "") -> None:
+            emit("sync_minute", 94 + int(cur / tot),
+                 f"分钟K 批次 {cur}/{tot}" + (f" [{seg_label}]" if seg_label else ""),
+                 stage_pct=int(100 * cur / tot), skip_log=True)
+        written_minute = kline_sync.sync_and_persist_minute(
+            minute_symbols, repo, capset, days=minute_days,
+            on_chunk_done=_minute_chunk_progress,
+        )
+        minute_dir = repo.store.data_dir / "kline_minute"
+        minute_cover_days = len(list(minute_dir.glob("date=*"))) if minute_dir.exists() else 0
+        emit("sync_minute", 95, f"分钟K完成，本地累计覆盖 {minute_cover_days} 个日期")
+        logger.info("sync_minute: done, %d local date partitions", minute_cover_days)
+        _invalidate("minute")
+    else:
+        skipped.append("sync_minute")
+        if minute_on:
+            logger.info("sync_minute skipped: no KLINE_MINUTE_BATCH capability")
+        else:
+            logger.info("sync_minute skipped: user disabled")
+
     # Step 3: 刷新视图
     emit("refresh_views", 95, "刷新 DuckDB 视图…")
     _refresh_views(repo)
 
-    emit("done", 100, "完成")
     _invalidate(None)  # 兜底:全清
 
     result = {
@@ -796,10 +879,10 @@ def run_now(
         "integrity_issues": len(integrity_issues),
         "skipped_stages": skipped,
         "stage_errors": stage_errors,
+        **({"postmarket_date": today.isoformat(), "readiness": readiness} if postmarket else {}),
     }
 
-    # 有阶段软失败: 进度协议已走完(done/100, 前端进度条正常收尾), 但数据可能陈旧,
-    # 抛出让上层 job_store 把终态标记为 failed —— 不再"部分失败却报成功"。
+    # 阶段失败时保留已写入数据，由任务边界刷新读取方并如实记录失败。
     if stage_errors:
         raise PipelineStageError(stage_errors)
 
@@ -807,8 +890,15 @@ def run_now(
     from app.services.review_publication import publish_review_if_ready
     state = _get_app_state()
     repo.refresh_cache()
-    publish_review_if_ready(repo, getattr(state, "quote_service", None), getattr(state, "depth_service", None))
+    if postmarket:
+        depth = getattr(state, "depth_service", None)
+        if depth is not None:
+            emit("depth_finalize", 98, "更新盘后盘口快照…")
+            depth.finalize()
+    emit("sync_boards", 99, "更新竞价与龙虎榜…")
     _sync_recap_boards(repo)
+    publish_review_if_ready(repo, getattr(state, "quote_service", None), getattr(state, "depth_service", None))
+    emit("done", 100, "完成")
     return result
 
 
@@ -1336,7 +1426,7 @@ def _sync_recap_boards(repo) -> None:
 
 
 def start_scheduler(repo: KlineRepository) -> AsyncIOScheduler:
-    """启动基础维护与用户启用的 AI 复盘; 盘后数据采集仅手动执行。"""
+    """基础维护、交易日 16:00 盘后管道和用户启用的 AI 复盘。"""
     from app.services import preferences
     inst_sched = preferences.get_instruments_schedule()
 
@@ -1358,6 +1448,22 @@ def start_scheduler(repo: KlineRepository) -> AsyncIOScheduler:
         id="pre_market_instruments",
         misfire_grace_time=1800,
         replace_existing=True,
+    )
+
+    from app.services import postmarket
+    closing = preferences.get_pipeline_schedule()
+    scheduler.add_job(
+        postmarket.run_scheduled, args=[repo],
+        trigger=CronTrigger(hour=closing["hour"], minute=closing["minute"], timezone="Asia/Shanghai"),
+        id=postmarket.JOB_ID, replace_existing=True, coalesce=True, max_instances=1,
+        misfire_grace_time=8 * 3600,
+    )
+    # 上游延迟／执行槽繁忙／进程晚启动：同一交易日内补跑，成功任务由 JobStore 去重。
+    scheduler.add_job(
+        postmarket.run_scheduled, args=[repo],
+        trigger=CronTrigger(hour="16-23", minute="*/15", timezone="Asia/Shanghai"),
+        id="post_market_retry", replace_existing=True, coalesce=True, max_instances=1,
+        misfire_grace_time=900, next_run_time=cn_now(),
     )
 
     # 周期性能力重探: 付费 Key 中途过期/续费无需重启即可被发现。
@@ -1401,8 +1507,8 @@ def start_scheduler(repo: KlineRepository) -> AsyncIOScheduler:
                     review_sched["hour"], review_sched["minute"])
 
     scheduler.start()
-    logger.info("scheduler started; instruments@%02d:%02d mon-fri; postmarket collection manual only",
-                inst_sched["hour"], inst_sched["minute"])
+    logger.info("scheduler started; instruments@%02d:%02d; postmarket@%02d:%02d Asia/Shanghai",
+                inst_sched["hour"], inst_sched["minute"], closing["hour"], closing["minute"])
     return scheduler
 
 

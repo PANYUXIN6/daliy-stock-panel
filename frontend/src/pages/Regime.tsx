@@ -8,18 +8,20 @@
  * 美化对齐 Dashboard 设计语言: 半透明 surface 卡片 + 渐变竖条标题 + 语义色。
  */
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import { useQuery } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { Link } from 'react-router-dom'
 import * as echarts from 'echarts'
 import {
   Activity, RefreshCw, Gauge, TrendingUp, TrendingDown, Minus,
-  Pencil, CalendarDays, Repeat, Rows3, LayoutGrid, Flame, Layers, X,
+  Pencil, CalendarDays, Repeat, Rows3, LayoutGrid, Flame, Layers, X, Loader2,
 } from 'lucide-react'
 import {
   api, type RegimeRow, type RegimeState, type MarketPhase,
   REGIME_STATE_LABELS, REGIME_STATE_COLORS,
   MARKET_PHASE_LABELS, MARKET_PHASE_COLORS, MARKET_PHASE_ORDER,
 } from '@/lib/api'
-import { QK } from '@/lib/queryKeys'
+import { DATASET_QUERY_PREFIXES, QK } from '@/lib/queryKeys'
+import { useCurrentUser } from '@/lib/auth'
 import { useChartTheme } from '@/lib/theme'
 import { toast } from '@/components/Toast'
 import { Modal } from '@/components/Modal'
@@ -138,6 +140,17 @@ const cardCls = 'rounded-card border border-border bg-surface/80 shadow-[0_1px_2
 
 // ── 主组件 ────────────────────────────────────────────────
 export function Regime() {
+  const qc = useQueryClient()
+  const user = useCurrentUser()
+  const analysis = useMutation({
+    mutationFn: () => api.regimeRecompute(),
+    onSuccess: async result => {
+      await Promise.all(DATASET_QUERY_PREFIXES.regime.map(prefix =>
+        qc.invalidateQueries({ queryKey: [prefix] }),
+      ))
+      if (result.computed > 0) toast(`环境分析完成 · ${result.computed} 天`, 'success')
+    },
+  })
   const [range, setRange] = useState<RangePreset>('1y')
   // 视图 tab: 市场环境(状态/趋势/日历) 与 情绪周期(阶段/主线) 两组内容同页切换,
   // 避免单页过长需要大幅滚动。两组共用时间范围。
@@ -702,6 +715,41 @@ export function Regime() {
         <span className="text-[10px] text-muted">两组内容同页切换 · 共用时间范围</span>
       </div>
 
+      {!latest && (
+        <div className="rounded-card border border-dashed border-border px-4 py-8 text-center text-sm">
+          {history.isLoading ? <span className="text-muted">加载中…</span>
+            : history.isError ? (
+              <span role="alert" className="text-secondary">环境数据加载失败 —{' '}
+                <button type="button" onClick={() => history.refetch()} disabled={history.isFetching} className="text-accent underline underline-offset-2 transition-colors hover:text-accent/70 disabled:opacity-50">
+                  重试
+                </button>
+              </span>
+            ) : (
+              <div className="mx-auto max-w-md space-y-3">
+                <p className="text-secondary">后台尚未生成该范围的市场环境数据</p>
+                {user?.role === 'admin' ? (
+                  <>
+                    <p className="text-xs leading-5 text-muted">使用本地行情生成环境状态、情绪周期与市场主线，首次分析可能需要几分钟。</p>
+                    <button type="button" onClick={() => analysis.mutate()} disabled={analysis.isPending}
+                      className="inline-flex min-h-9 items-center justify-center gap-1.5 rounded-btn bg-accent px-4 py-2 text-xs font-medium text-white transition-colors hover:bg-accent/90 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:cursor-wait disabled:opacity-50">
+                      {analysis.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Activity className="h-3.5 w-3.5" />}
+                      {analysis.isPending ? '分析中…' : '环境分析'}
+                    </button>
+                    {analysis.isPending && <p role="status" className="text-xs text-muted">正在生成分析结果，请等待…</p>}
+                    {analysis.isError && <p role="alert" className="text-xs text-danger">环境分析失败：{analysis.error.message}</p>}
+                    {analysis.isSuccess && analysis.data.computed === 0 && (
+                      <p role="status" className="text-xs leading-5 text-muted">
+                        未生成环境数据，请先到数据页同步行情与基础数据。{' '}
+                        <Link to="/data" className="text-accent underline underline-offset-2">前往数据页</Link>
+                      </p>
+                    )}
+                  </>
+                ) : <p className="text-xs text-muted">请联系管理员生成市场环境数据。</p>}
+              </div>
+            )}
+        </div>
+      )}
+
       {/* ══ 情绪周期 tab: 阶段概览 + 时间轴 + 阶段×主线 + 主线排行 ══ */}
       <div className={cn('space-y-4', view !== 'phase' && 'hidden')}>
 
@@ -769,11 +817,11 @@ export function Regime() {
             )
           })}
         </div>
-      ) : (
+      ) : latest ? (
         <div className="rounded-card border border-dashed border-border p-4 text-center text-xs text-muted">
           后台尚未生成市场阶段、情绪周期与主线数据
         </div>
-      )}
+      ) : null}
 
       {/* ── 阶段规律: 当前阶段的历史统计 + 下阶段转移分布 (窗口内 segments 提炼) ── */}
       {phaseStats && phaseStreak && (
@@ -992,7 +1040,7 @@ export function Regime() {
       <div className={cn('space-y-4', view !== 'regime' && 'hidden')}>
 
       {/* ── 最新日概览 (4 个指标卡, 去掉与看板重复的涨停/涨跌/成交额) ── */}
-      {latest ? (
+      {latest && (
         <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
           {/* 状态卡(保留) */}
           <div className={cn(cardCls, 'p-3')}>
@@ -1069,18 +1117,6 @@ export function Regime() {
               <span className="ml-1">({(transitions.rate * 100).toFixed(0)}%/天)</span>
             </div>
           </div>
-        </div>
-      ) : (
-        <div className="rounded-card border border-dashed border-border p-8 text-center text-sm">
-          {history.isLoading ? <span className="text-muted">加载中…</span>
-            : history.isError ? (
-              <span className="text-secondary">环境数据加载失败 —{' '}
-                <button type="button" onClick={() => history.refetch()} disabled={history.isFetching} className="text-accent underline underline-offset-2 transition-colors hover:text-accent/70 disabled:opacity-50">
-                  重试
-                </button>
-              </span>
-            )
-            : <span className="text-muted">后台尚未生成该范围的市场环境数据</span>}
         </div>
       )}
 

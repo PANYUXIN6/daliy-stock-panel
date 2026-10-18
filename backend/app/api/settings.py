@@ -1682,9 +1682,18 @@ class PipelineScheduleIn(BaseModel):
 
 @router.put("/preferences/pipeline-schedule")
 def update_pipeline_schedule(req: PipelineScheduleIn, request: Request) -> dict:
-    """保留时间偏好接口; 盘后管道由数据页手动触发, 不注册自动任务。"""
+    """保存盘后自动同步时间并立即更新调度；不早于北京时间 16:00。"""
     from app.services import preferences
-    return preferences.set_pipeline_schedule(req.hour, req.minute)
+    sched = preferences.set_pipeline_schedule(req.hour, req.minute)
+    scheduler = getattr(request.app.state, "scheduler", None)
+    if scheduler:
+        from apscheduler.triggers.cron import CronTrigger
+
+        from app.services.postmarket import JOB_ID
+        scheduler.reschedule_job(JOB_ID, trigger=CronTrigger(
+            hour=sched["hour"], minute=sched["minute"], timezone="Asia/Shanghai",
+        ))
+    return sched
 
 
 @router.put("/preferences/instruments-schedule")

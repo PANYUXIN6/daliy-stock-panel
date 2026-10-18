@@ -15,6 +15,7 @@ import polars as pl
 
 from app.indicators.pipeline import compute_enriched
 from app.services import kline_sync, preferences
+from app.services.daily_coverage import DailyCoverage
 from app.tickflow.capabilities import Cap, CapabilitySet
 from app.tickflow.client import get_client
 from app.tickflow.rate_limits import chunked, min_batch, resolve_limit, sleep_between_batches
@@ -197,6 +198,7 @@ def sync_and_persist_index_daily(
     end_date: datetime | None = None,
     symbols_override: list[str] | None = None,
     on_chunk_done: Callable[[int, int], None] | None = None,
+    coverage: DailyCoverage | None = None,
 ) -> int:
     """同步指数/ETF 日K到独立 parquet,并计算 enriched。
 
@@ -237,6 +239,7 @@ def sync_and_persist_index_daily(
             batch_size=None,
             start_time=start_time,
             end_time=end_time,
+            **({"coverage": coverage} if coverage is not None else {}),
         )
         if raw.is_empty():
             continue

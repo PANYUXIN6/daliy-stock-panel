@@ -18,7 +18,7 @@ authority_status: observed
 | `backend/app/data_providers/` | 标准化模型、Provider 协议、能力矩阵，以及 `custom/` 下的 YAML 源和插件加载 |
 | `backend/app/plugins/` | 内置可选数据源插件，当前有 `fuyao/` 和 `stocksdk/` |
 | `backend/app/indicators/` | enriched 数据生产、指标和信号计算、关键价位；核心在 `pipeline.py` |
-| `backend/app/jobs/` | `daily_pipeline.py` 管理手动盘后管道、盘前基础维护及可选 AI 定时任务 |
+| `backend/app/jobs/` | `daily_pipeline.py` 管理交易日 16:00 自动／手动盘后管道、盘前基础维护及可选 AI 定时任务 |
 | `backend/app/strategy/` | 策略加载执行、评分、信号、监控规则、持仓提醒、模拟盘；内置策略在 `builtin/` |
 | `backend/app/backtest/` | 历史撮合、因子研究、矩阵、优化、步进验证、挖掘与独立 worker |
 | `backend/app/factors/` | 因子注册、DSL、自定义因子持久化及扩展字段因子 |
@@ -58,7 +58,7 @@ authority_status: observed
 | 日线、除权、分钟同步 | 前端手动入口 `pages/Data.tsx` → `api/kline.py`、`api/pipeline.py` → `services/kline_sync.py`、`jobs/daily_pipeline.py` | `test_daily_batch_asset.py`、`test_adj_factor_standalone_sync.py`、`test_minute_routing.py`、`test_minute_timezone_contract.py` |
 | 指标、历史读取或缓存 | `indicators/pipeline.py`、`tickflow/repository.py`；schema 在 `parquet.py`，版本发布在 `enriched_generation.py` | `test_enriched_generation.py`、`test_parquet_schema_compat.py`、`test_live_enriched_std_parity.py` |
 | 盘中行情或图表刷新 | `services/quote_service.py`、`services/minute_refresh.py`、`api/intraday.py` → 前端 `lib/useQuoteStream.ts`、`lib/kline.ts` | `test_realtime_turnover_rate.py`、`test_quote_index_merge.py`、`test_kline_daily_latest.py` |
-| 采集时段与盘后手动模式 | `jobs/daily_pipeline.py::start_scheduler` 保留日历、09:10 基础资料及能力维护；`main.py` 在启动日历维护后调用 `run_scheduled_instruments_sync`，以 `instrument_sync.instruments_synced_on` 的本地北京日期去重并补跑；`quote_service.py`、`depth_service.py` 判断交易时段，数据页负责盘后显式同步；周度研究在手动全量同步成功后触发 | `test_instruments_startup.py`、`test_manual_collection_schedule.py`、`test_realtime_polling_schedule.py`、`test_pipeline_capacity.py` |
+| 采集时段与盘后自动顺序 | `jobs/daily_pipeline.py::start_scheduler` → `services/postmarket.py` 判断交易日和当日成功证据 → 既有 pipeline 任务边界 → `run_now(postmarket=True)`；`daily_coverage.py` 验收正式日线，指标落盘核验后才计算环境；顺序约定见 [postmarket-pipeline.md](postmarket-pipeline.md)。09:10 基础资料及启动补跑保留，周度研究在成功并释放执行槽后触发 | `test_postmarket_pipeline.py`、`test_daily_sync_coverage.py`、`test_instruments_startup.py`、`test_manual_collection_schedule.py`、`test_pipeline_capacity.py` |
 | 手动重复拉取提示与普通分钟开关 | `api/data.py::sync_check` → `services/collection_status.py` 只核对本地任务与文件；`api/pipeline.py` 在既有任务结果记录路由／范围，`pipeline_jobs.py` 摘要保留 `request_key`；前端 `lib/useCollectionSyncConfirmation.tsx` 确认后调用原接口；`ordinary_minute_enabled` 仅控制普通分钟自动采集 | `test_collection_sync_check.py`、`test_ordinary_minute.py`；前端 `lib/useCollectionSyncConfirmation.test.tsx`、`components/data/MaintenanceControls.test.tsx` |
 | 数据页按模块同步 | `pages/Data.tsx` 提供行情与基础数据、分钟历史、财务、板块分类四个主入口；前三项复用原聚合任务，板块走 `api/ext_data.py::sync_classifications` → `ext_presets.sync_classifications`，共用 `api/pipeline.py::_submit_job`；逐表／单股操作保留在维护选项 | `test_classification_sync_jobs.py`、`test_collection_sync_check.py`；前端 `components/data/MaintenanceControls.test.tsx` |
 | 自定义财务同步进度与并行 | `services/financial_sync.py::FINANCIAL_SYNC_TABLES` 限制当前应用只采利润表，`all` 和断点入口共用范围，其他表采集被拒绝；`_fetch_table` 接入显式 `on_chunk_done` 原生进度，旧插件仍按 100 股调用；Generic HTTP 保留配置批长与共享 RPM；Fuyao 财报取最近 20 期，财报／指标共用 2 秒间隔；服务按源声明每 20 股保存版本并记录 `financials/sync_progress`，未完成任务按股票代码恢复已保存批次，股票池重排及增减不丢已有进度，后台限流冷却后续跑；“继续未完成”恢复利润表后台任务；扶摇核心指标连续两次明确缺数时，通过标准部分财务异常返回同批成功结果，断点记录 `skipped_symbols` 并继续其他股票；财务任务不暂停行情，写入和取消沿用 JobStore | `test_financial_batch_resume.py`、`test_financial_progress.py`、`test_fuyao_financial.py`、`test_fuyao_financial_concurrency.py`、`test_collector_data_jobs.py` |
@@ -76,7 +76,7 @@ authority_status: observed
 | 监控规则、告警与通知 | `api/monitor_rules.py` → `strategy/monitor_rules.py`、`strategy/monitor.py`；行情驱动评估，通知通道在 `services/*_adapter.py` | `test_monitor_group_scope.py`、`test_monitor_etf.py`、`test_monitor_index.py`、`test_strategy_monitor_events.py` |
 | 自选、持仓提醒或模拟盘 | `api/watchlist.py`、`api/lots.py`、`api/paper.py` → `services/watchlist.py`、`strategy/lots.py`、`strategy/paper.py`、`strategy/paper_auto.py` | `test_watchlist_groups.py`、`test_lots.py`、`test_paper_trading.py`、`test_paper_t1_available_at_order.py` |
 | 扩展数据与分析页面 | 数据页板块分类模块统一同步概念／行业，`components/ext-data/ExtDataStatCard.tsx` 保留单项维护及自定义扩展配置；`api/ext_data.py`、`api/analysis.py` → `services/ext_data.py`、`services/ext_pull.py`；业务 `pages/AnalysisDetail.tsx` 与 `components/ExtDimensionAnalysis.tsx` 只读 | `test_ext_rows_query.py`、`test_ext_sql_safety.py`、`test_ext_pull_refresh.py`、`test_collector_maintenance_publication.py`、`test_classification_sync_jobs.py` |
-| 市场环境、板块、异动或复盘 | 对应 `api/regime.py`、`sector_rotation.py`、`abnormal.py`、`market_recap.py` → `services/` 同领域构建器和分析器 | `test_regime_builder.py`、`test_market_phase.py`、`test_sector_rotation.py`、`test_abnormal_moves.py` |
+| 市场环境、板块、异动或复盘 | 对应 `api/regime.py`、`sector_rotation.py`、`abnormal.py`、`market_recap.py` → `services/` 同领域构建器和分析器；前端 `pages/Regime.tsx` 在历史为空时提供管理员“环境分析”入口，复用环境重算接口 | `test_regime_builder.py`、`test_market_phase.py`、`test_sector_rotation.py`、`test_abnormal_moves.py`；前端 `pages/Regime.test.tsx` |
 | 龙虎榜、竞价风向标及复盘摘要 | `services/dragon_tiger.py`、`auction_benchmark.py` 由后台获取并保存；`api/market_recap.py` 的 GET 只读，页面在 `pages/Review.tsx`、`AbnormalMoves.tsx`、`Dashboard.tsx` | `test_dragon_tiger.py`、`test_auction_benchmark.py` |
 | 财务与个股分析 | 数据页 `FinancialSyncPanel.tsx` 负责五表采集，`pages/Financials.tsx` 读取本地财务与历史报告；`api/financials.py` 的 `/status` 在 web 读取本地覆盖画像，`/execution-status` 转交 collector 查询任务状态；`api/stock_analysis.py`、`services/financial_sync.py`、分析服务沿用原链路，本地读取不受供应商能力门控 | `test_financials_local_api.py`、`test_financial_review_regressions.py`、`test_financial_shares.py`、`test_fuyao_financial.py`、`test_stock_analyzer_index.py` |
 | 账号、权限与个人归属 | `services/auth_access.py` → `auth.py`、`user_context.py`；`api/users.py` 管理账号；`user_runtime.py`、`private_storage.py`、`user_migration.py` 管用户运行时、路径和旧数据归属；`business_access.py` 管业务权限 | `test_multiuser_auth.py`、`test_multiuser_ai.py`、`test_user_private_stores.py`、`test_user_runtime_boundaries.py`、`test_research_ownership.py` |
@@ -89,6 +89,11 @@ authority_status: observed
           → instrument_sync / kline_sync → Parquet
           → indicators.run_pipeline → enriched 分区 → 仓库视图与缓存刷新
           → review_publication / shared_runtime.publish_data_update → web 缓存与页面失效
+
+盘后自动：collector scheduler(默认北京时间16:00；本地日历确认交易日)
+          → postmarket.run_scheduled → 复用 pipeline 任务与写入槽 → run_now(postmarket=True)
+          → 正式日线／因子／指标／核心指数验收 → 分类 → 环境／情绪／主线
+          → 模拟盘／可选分钟／盘口／榜单 → 复盘发布 → 释放槽后按开关触发周度研究
 
 筛选：api/screener → ScreenerService.build_strategy_context
       → StrategyEngine.run → 过滤、评分、排序 → 策略结果缓存 / 响应

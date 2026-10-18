@@ -186,6 +186,35 @@ def test_run_regime_batch_excludes_st(tmp_path, monkeypatch):
     assert r1_all["up_count"] == 2      # A,C 上涨
 
 
+def test_single_day_cache_increment_keeps_previous_trading_day_promotion_pool(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from app.services import preferences
+
+    previous, target = date(2026, 9, 30), date(2026, 10, 9)
+    rows = []
+    for day, consecutive in ((previous, 1), (target, 2)):
+        for i in range(12):
+            rows.append({"date": day, "symbol": str(i), "change_pct": 0.1,
+                         "consecutive_limit_ups": consecutive})
+        directory = tmp_path / "kline_daily_enriched" / f"date={day}"
+        directory.mkdir(parents=True)
+        (directory / "part.parquet").touch()
+    frame = pl.DataFrame(rows)
+    requested = []
+    def cached(start, end):
+        requested.append((start, end))
+        return frame.filter(pl.col("date").is_between(start, end))
+    monkeypatch.setattr(preferences, "get_sentiment_exclude_st", lambda: False)
+    monkeypatch.setattr(regime_builder, "_load_index_pct", lambda *_, **__: {})
+    repo = SimpleNamespace(store=SimpleNamespace(data_dir=tmp_path), get_enriched_range=cached)
+    result = regime_builder.run_regime_batch(repo, target, target)
+    assert requested == [(previous, target)]
+    assert result["date"].to_list() == [target]
+    assert result["promo_pool"].to_list() == [12]
+    assert result["promo_rate"].to_list() == [1.0]
+
+
 def test_run_regime_batch_aggregates_fallback_per_batch(tmp_path, monkeypatch):
     """回归 #241: fallback 不得保留所有批次的个股明细后再统一聚合。"""
     from app.services import market_mainline, preferences

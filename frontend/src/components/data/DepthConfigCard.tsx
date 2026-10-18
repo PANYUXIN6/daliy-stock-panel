@@ -9,7 +9,7 @@ import { MissingCapChip } from '@/lib/capability-labels'
  * 五档盘口 sealed(真假涨停) 配置内容(纯内容, 无外框, 由父级 Card 包裹)。
  *
  * - 轮询间隔: 常规 10~120s · 数据源具备实时推送能力时 3~120s
- * - 盘后最终盘口通过数据页手动更新
+ * - 盘后自动管道按能力更新盘口，数据页仍可手动更新
  * - disabled 时(监控关闭)输入框禁用
  */
 // 注: 文件名保留 DepthConfigCard.tsx, 导出 DepthConfigContent(纯内容无外框)
@@ -79,8 +79,8 @@ export function DepthConfigContent({ disabled }: { disabled?: boolean }) {
       </div>
 
       <div className="space-y-1">
-        <div className="text-xs text-secondary">盘后手动更新</div>
-        <div className="text-[10px] text-muted leading-relaxed">收盘后在数据页点击“更新五档盘口”，手动拉取最终盘口并定版。</div>
+        <div className="text-xs text-secondary">盘后自动更新</div>
+        <div className="text-[10px] text-muted leading-relaxed">交易日盘后自动管道会按数据源能力更新盘口；也可在数据页点击“更新五档盘口”手动补采。</div>
       </div>
     </div>
   )

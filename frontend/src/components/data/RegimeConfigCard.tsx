@@ -91,10 +91,10 @@ export function RegimeConfigCard() {
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-1.5">
             <Activity className="h-3.5 w-3.5 text-accent" />
-            <span className="text-xs font-medium text-foreground">随全量同步计算</span>
+            <span className="text-xs font-medium text-foreground">随手动同步计算</span>
           </div>
           <div className="text-[10px] text-muted leading-snug mt-0.5">
-            默认关闭。开启后，点击数据页“同步行情与基础数据”时一并增量计算环境状态；首次或数据缺口较大时全量回填，耗时与内存较高。
+            交易日盘后自动同步会在行情与指标核验通过后计算环境，不受此开关影响。此开关控制手动“同步行情与基础数据”时是否一并计算；首次回填耗时与内存较高。
           </div>
         </div>
       </label>

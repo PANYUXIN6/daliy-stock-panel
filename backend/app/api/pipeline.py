@@ -39,16 +39,36 @@ async def run_now(request: Request) -> dict:
     )
 
 
-async def trigger_pipeline_job(repo, capset, quote_service=None) -> dict:
+async def trigger_pipeline_job(repo, capset, quote_service=None, *, postmarket: bool = False) -> dict:
     """触发数据页的手动盘后管道后台任务。
 
     若已有任务在跑,**返回该任务 id 而不是开新任务**(防止并发拉数据撞限流)。
     卡死判定按「进度停滞」而非总时长(慢带宽下长任务不会被误杀), 见 reap_stale。
     """
+    from app.market_time import cn_today
+
+    day = cn_today()
+    options = {"postmarket": True, "target_date": day} if postmarket else {}
+    finalize = None
+    if postmarket:
+        def finalize():
+            # 自动任务的部分写入也必须通知读取方；任务终态仍由异常决定。
+            from app.services import preferences
+            from app.services.shared_runtime import publish_data_update, publish_quotes
+
+            repo.refresh_cache()
+            if quote_service is not None:
+                publish_quotes(quote_service)
+            datasets = ["daily", "enriched", "regime", "mainline", "ext_data"]
+            if preferences.get_minute_sync_enabled():
+                datasets.append("minute")
+            publish_data_update(repo.store.data_dir, datasets)
+
     return await _submit_job(
         repo, quote_service,
-        lambda progress: (lambda: daily_pipeline.run_now(repo, capset, on_progress=progress)),
-        request_key="pipeline",
+        lambda progress: (lambda: daily_pipeline.run_now(repo, capset, on_progress=progress, **options)),
+        request_key=f"postmarket:{day}" if postmarket else "pipeline",
+        finalize=finalize,
     )
 
 
@@ -135,7 +155,7 @@ async def _submit_job(repo, quote_service, make_run, *, request_key=None, datase
             release_run_slot(job_id)
 
         # 周度研究沿用原全量同步后触发的语义, 不依赖已停用的盘后采集定时器。
-        if request_key == "pipeline" and job_store.get(job_id)["status"] == "succeeded":
+        if (request_key == "pipeline" or (request_key or "").startswith("postmarket:")) and job_store.get(job_id)["status"] == "succeeded":
             await asyncio.to_thread(daily_pipeline.run_weekly_mining_after_sync)
 
     running = asyncio.create_task(task())

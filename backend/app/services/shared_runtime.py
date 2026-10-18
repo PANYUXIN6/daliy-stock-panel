@@ -210,6 +210,10 @@ def refresh_web_data(state, datasets: list[str]) -> None:
     invalidate_regime_cache()
     if any(name in {'ext_data', 'minute', 'daily', 'pipeline', 'all'} for name in datasets):
         invalidate_dimension_intraday_cache()
+    if any(name in {'ext_data', 'pipeline', 'all'} for name in datasets):
+        from app.services.rps_rotation import invalidate_cache
+
+        invalidate_cache()
     state.quote_service.load_snapshot(state)
 
 

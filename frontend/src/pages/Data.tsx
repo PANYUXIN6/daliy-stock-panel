@@ -238,6 +238,7 @@ export function Data() {
   const minuteAuto = prefs.data?.minute_sync_enabled ?? false
   const ordinaryMinuteEnabled = prefs.data?.ordinary_minute_enabled ?? true
   const instrumentsSched = prefs.data?.instruments_schedule ?? { hour: 9, minute: 10 }
+  const pipelineSched = prefs.data?.pipeline_schedule ?? { hour: 16, minute: 0 }
   const indexDailyBatchSize = prefs.data?.index_daily_batch_size ?? 100
 
   useEffect(() => {
@@ -317,8 +318,12 @@ export function Data() {
     { label: '日K', cap: 'daily' },
     ...(hasAdjCap ? [{ label: '复权', cap: 'adj_factor' as const }] : []),
     { label: '指标' },
-    ...(indexAuto ? [{ label: '指数', cap: 'daily' as const }] : []),
+    { label: '核心指数', cap: 'daily' },
     ...(etfAuto ? [{ label: 'ETF', cap: 'daily' as const }] : []),
+    { label: '当日核验' },
+    { label: '概念/行业' },
+    { label: '环境/主线' },
+    { label: '模拟盘结算' },
     ...((hasMinuteCap && minuteAuto) ? [{ label: '分钟K', cap: 'minute' as const }] : []),
   ]
 
@@ -426,6 +431,8 @@ export function Data() {
     financials: 'financials',
     extend_minute: 'minute',
     compute_regime: 'regime',
+    verify_postmarket: 'enriched',
+    compute_mainline: 'regime',
     // regime 软失败时入 skipped_stages 的是 'regime'(非 stage 名), 也映射到该卡片
     regime: 'regime',
   }
@@ -914,7 +921,7 @@ export function Data() {
                   <span className="text-accent/60 font-medium">盘前自动</span>
                   <span>股票基础资料</span>
                   <span className="text-border">→</span>
-                  <span className="text-accent/60 font-medium">盘后手动</span>
+                  <span className="text-accent/60 font-medium">盘后自动</span>
                   {pipelineSteps.map((step, i) => (
                     <span key={step.label} className="contents">
                       {i > 0 && <span className="text-border">→</span>}
@@ -987,9 +994,10 @@ export function Data() {
                   )}
                 </AnimatePresence>
                 <div className="flex items-center justify-between text-[11px]">
-                  <span className="text-muted">盘后 · 手动同步</span>
-                  <span className="text-secondary">按需更新</span>
+                  <span className="text-muted">交易日 · 盘后自动同步</span>
+                  <span className="text-secondary">{`${String(pipelineSched.hour).padStart(2, '0')}:${String(pipelineSched.minute).padStart(2, '0')}`} 北京时间</span>
                 </div>
+                <p className="text-[10px] leading-4 text-muted">当天行情与指标核验通过后，自动增量计算市场环境。未齐全时当日每 15 分钟重试，手动取消后当天暂停。</p>
                 {s?.last_pipeline_run && (
                   <div className="flex items-center justify-between text-[11px]">
                     <span className="text-muted">上次同步</span>

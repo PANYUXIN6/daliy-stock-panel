@@ -350,6 +350,7 @@ class FuyaoProvider:
         self._client: FuyaoClient | None = None
         self._dump_memo: dict[str, pl.DataFrame] = {}
         self._dump_path_memo: dict[str, Path] = {}
+        self._dump_checked_at: dict[str, float] = {}
 
     def close(self) -> None:  # loader.load_all 重建注册表时会对每个 provider 调 close
         if self._client is not None:
@@ -358,6 +359,7 @@ class FuyaoProvider:
             self._client = None
         self._dump_memo.clear()
         self._dump_path_memo.clear()
+        self._dump_checked_at.clear()
 
     def _get_client(self) -> FuyaoClient:
         if self._client is None:
@@ -365,11 +367,20 @@ class FuyaoProvider:
         return self._client
 
     # ---- dump 缓存 ----
+    def _expire_dump(self, dump_kind: str) -> None:
+        # collector 长驻；跨日和盘后重试必须重新查询 release，不能永久复用昨日 dump。
+        now = time.monotonic()
+        checked_at = self._dump_checked_at.setdefault(dump_kind, now)
+        if now - checked_at >= 300:
+            self._dump_path_memo.pop(dump_kind, None)
+            self._dump_memo.pop(dump_kind, None)
+
     def _ensure_dump_path(self, dump_kind: str, cache_prefix: str) -> Path:
         """确保最新 release 的 dump 已落盘, 返回缓存路径(大文件不整读进内存)。
 
         release 号取自预签名 URL 的 releases/<date>/ 路径; 新 release 落盘后清理旧版缓存。
         """
+        self._expire_dump(dump_kind)
         memo = self._dump_path_memo.get(dump_kind)
         if memo is not None and memo.exists():
             return memo
@@ -384,10 +395,12 @@ class FuyaoProvider:
                     old.unlink(missing_ok=True)
             logger.info("扶摇 dump %s(release %s)已下载: %s", dump_kind, release, dest.name)
         self._dump_path_memo[dump_kind] = dest
+        self._dump_checked_at[dump_kind] = time.monotonic()
         return dest
 
     def _ensure_dump(self, dump_kind: str, cache_prefix: str) -> pl.DataFrame:
         """小体量 dump(快照 10d / 因子)整读 + 进程内 memo, 避免重复打接口/读盘。"""
+        self._expire_dump(dump_kind)
         memo = self._dump_memo.get(dump_kind)
         if memo is not None:
             return memo
@@ -484,6 +497,19 @@ class FuyaoProvider:
         return records
 
     # ---- daily ----
+    def get_daily_halted_symbols(self, day: date) -> set[str]:
+        """仅从目标交易日的正式日线 dump 识别停牌；缺行不能被当成停牌。"""
+        dump = self._ensure_dump(_DAILY10_DUMP_KIND, "daily_k_10d")
+        required = {"date_ms", "thscode", "open_price", "high_price", "volume", "turnover"}
+        if not required.issubset(dump.columns):
+            return set()
+        halted = dump.filter(
+            (pl.col("date_ms") == _ms_of_date(day))
+            & (((pl.col("open_price") == 0) & (pl.col("high_price") == 0))
+               | ((pl.col("volume") == 0) & (pl.col("turnover") == 0)))
+        )
+        return set(halted["thscode"].drop_nulls().to_list())
+
     def get_daily(
         self,
         symbols: list[str],
@@ -734,6 +760,7 @@ class FuyaoProvider:
         end_time: datetime | None,
         asset_type: str = "stock",
         on_chunk_done: Callable[[int, int], None] | None = None,
+        require_complete: bool = False,
     ) -> pl.DataFrame:
         """A 股除权因子 → 内部契约(symbol/trade_date/ex_factor, 单事件比值非累积)
         + 事件明细列(dividend/bonus/allot/allot_price/prev_close, 可空):
@@ -759,6 +786,8 @@ class FuyaoProvider:
         try:
             events = self._load_adj_events(set(symbols), start_time, end_time)
         except FuyaoError as e:
+            if require_complete:
+                raise
             logger.warning("扶摇除权因子 dump 加载失败: %s", e)
             return pl.DataFrame(schema=schema)
         if events.is_empty():

@@ -769,6 +769,45 @@ def test_daily_empty_symbols_or_non_stock_returns_empty(monkeypatch):
 # ---- daily: 10d dump 路径 ----
 
 
+def test_daily_halted_evidence_requires_target_day_row(monkeypatch):
+    provider = _hist_provider(monkeypatch, _FakeHistClient({}))
+    provider._dump_memo[fp._DAILY10_DUMP_KIND] = _daily10_dump([
+        _dump_bar("600519.SH", date(2026, 8, 27), 10.0) | {"open_price": 0.0, "high_price": 0.0},
+        _dump_bar("000001.SZ", date(2026, 8, 27), 10.0),
+    ])
+    assert provider.get_daily_halted_symbols(date(2026, 8, 27)) == {"600519.SH"}
+    assert provider.get_daily_halted_symbols(date(2026, 8, 31)) == set()
+
+
+def test_long_lived_dump_cache_refreshes_after_ttl(monkeypatch, tmp_path):
+    now = [1000.0]
+    monkeypatch.setattr(fp.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(fp, "_cache_dir", lambda: tmp_path)
+    queried = []
+
+    def url(kind):
+        queried.append(kind)
+        return {"presigned_url": f"https://example.test/releases/{len(queried)}/dump"}
+
+    def download(kind, path):
+        pl.DataFrame({"version": [len(queried)]}).write_parquet(path)
+
+    provider = FuyaoProvider()
+    provider._client = type("Client", (), {"dump_download_url": staticmethod(url), "download_dump": staticmethod(download)})()
+    assert provider._ensure_dump("test", "test")["version"].to_list() == [1]
+    now[0] += 299
+    assert provider._ensure_dump("test", "test")["version"].to_list() == [1]
+    now[0] += 2
+    assert provider._ensure_dump("test", "test")["version"].to_list() == [2]
+    assert queried == ["test", "test"]
+
+
+def test_strict_adj_dump_failure_is_not_reported_as_no_events(monkeypatch):
+    provider = _hist_provider(monkeypatch, _FakeHistClient({}))
+    with pytest.raises(fc.FuyaoError, match="无 dump"):
+        provider.get_adj_factors(["600519.SH"], None, None, require_complete=True)
+
+
 def _recent_daily_dump() -> pl.DataFrame:
     rows = []
     for d in [date(2026, 8, 25), date(2026, 8, 26), date(2026, 8, 27), date(2026, 8, 28)]:

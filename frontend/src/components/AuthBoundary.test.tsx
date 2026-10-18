@@ -4,7 +4,7 @@ import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { AuthBoundary } from './AuthBoundary'
 import { AuthContext, AdminOnly } from '@/lib/auth'
-import { activateSession, isSessionLocked, lockSession, sessionFetch } from '@/lib/sessionRuntime'
+import { activateSession, isSessionLocked, lockSession, sessionFetch, sessionEventSource } from '@/lib/sessionRuntime'
 import type { AuthStatus, User } from '@/lib/api'
 
 const mocks = vi.hoisted(() => ({ status: vi.fn(), login: vi.fn(), change: vi.fn(), logout: vi.fn() }))
@@ -19,7 +19,7 @@ beforeEach(() => {
   activateSession('test'); localStorage.clear(); vi.clearAllMocks()
   host = document.createElement('div'); document.body.append(host); root = createRoot(host)
 })
-afterEach(async () => { await act(async () => root.unmount()); host.remove(); vi.unstubAllGlobals() })
+afterEach(async () => { await act(async () => root.unmount()); host.remove(); vi.unstubAllGlobals(); vi.useRealTimers() })
 async function render() { await act(async () => root.render(<AuthBoundary><div data-testid="business">个人业务内容</div></AuthBoundary>)) }
 async function fill(label: string, value: string) {
   const element = host.querySelector<HTMLInputElement>(`input[aria-label="${label}"]`)!
@@ -75,17 +75,66 @@ it('pins mutations to the confirmed temporary-password account before mounting b
   await response.text()
   expect(new Headers(fetchMock.mock.calls[0][1]?.headers).get('X-Expected-User')).toBe(user.id)
 })
-it('locks and discards the temporary-password form when a later check finds another account', async () => {
+it.each([false, true])('does not recheck an idle page or on focus when authenticated=%s', async (loggedIn) => {
+  vi.useFakeTimers()
+  mocks.status.mockResolvedValue(loggedIn ? { ...authenticated(), expires_at: new Date(Date.now() + 30_000).toISOString() } : anonymous)
+  await render()
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(60_000)
+    window.dispatchEvent(new Event('focus'))
+    document.dispatchEvent(new Event('visibilitychange'))
+  })
+  expect(mocks.status).toHaveBeenCalledOnce()
+  expect(isSessionLocked()).toBe(false)
+  expect(host.querySelector('[data-testid="business"]') !== null).toBe(loggedIn)
+})
+it('locks and discards the temporary-password form when a backend request detects another account', async () => {
   mocks.status.mockResolvedValue(authenticated(true))
   await render()
   await fill('当前临时密码', 'temporary-a')
   await fill('新密码', 'new-password-a')
-  mocks.status.mockResolvedValue({ ...authenticated(true), user: { ...user, id: 'user-b', username: 'bob', must_change_password: true } })
-  await act(async () => window.dispatchEvent(new Event('focus')))
+  vi.stubGlobal('fetch', vi.fn(async () => new Response('{"code":"SESSION_OWNER_CHANGED"}', { status: 401 })))
+  await act(async () => { await sessionFetch('/api/auth/change-password', { method: 'POST' }) })
   expect(isSessionLocked()).toBe(true)
   expect(host.querySelector('input[aria-label="当前临时密码"]')).toBeNull()
   expect(host.querySelector<HTMLInputElement>('input[aria-label="密码"]')?.value).toBe('')
   expect(mocks.change).not.toHaveBeenCalled()
+})
+it('returns to login on a business request 401 without another status check', async () => {
+  mocks.status.mockResolvedValue(authenticated())
+  await render()
+  vi.stubGlobal('fetch', vi.fn(async () => new Response('{}', { status: 401 })))
+  await act(async () => { await sessionFetch('/api/watchlist') })
+  expect(host.querySelector('[data-testid="business"]')).toBeNull()
+  expect(host.textContent).toContain('登录 Tick Stock Panel')
+  expect(mocks.status).toHaveBeenCalledOnce()
+})
+it('keeps business content after a forbidden response or network failure', async () => {
+  mocks.status.mockResolvedValue(authenticated())
+  await render()
+  vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(new Response('{}', { status: 403 })).mockRejectedValueOnce(new TypeError('Failed to fetch')))
+  await act(async () => {
+    const response = await sessionFetch('/api/settings')
+    await response.text()
+    await expect(sessionFetch('/api/watchlist')).rejects.toThrow('Failed to fetch')
+  })
+  expect(host.textContent).toContain('个人业务内容')
+  expect(isSessionLocked()).toBe(false)
+  expect(mocks.status).toHaveBeenCalledOnce()
+})
+it('checks identity on an SSE error and returns to login if the session is invalid', async () => {
+  mocks.status.mockResolvedValue(authenticated())
+  await render()
+  const close = vi.fn()
+  class Stream extends EventTarget { close = close }
+  vi.stubGlobal('EventSource', Stream)
+  const stream = sessionEventSource('/api/intraday/stream')
+  mocks.status.mockResolvedValue(anonymous)
+  await act(async () => stream.dispatchEvent(new Event('error')))
+  expect(mocks.status).toHaveBeenCalledTimes(2)
+  expect(host.querySelector('[data-testid="business"]')).toBeNull()
+  expect(host.textContent).toContain('登录 Tick Stock Panel')
+  expect(close).toHaveBeenCalledOnce()
 })
 it('unmounts private content immediately when any transport locks the session', async () => {
   mocks.status.mockResolvedValue(authenticated())

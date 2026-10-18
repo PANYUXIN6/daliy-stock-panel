@@ -230,8 +230,9 @@ def run_backtest(
     )
     # 与其它重回测端点一致: 走共享重任务限流 (容量 2), 防并发迭代/手动回测叠加挤爆内存
     with shared_heavy_job_limiter.slot("normal"):
-        from app.services.auth import require_current_session
-        require_current_session()
+        from app.services.auth import AuthError, require_current_session
+        if require_current_session()['role'] != 'admin':
+            raise AuthError('此操作仅限管理员', 403, 'ADMIN_REQUIRED')
         task = make_worker_task("backtest", Path(data_dir), cfg)
         result = run_worker_task(task)
 

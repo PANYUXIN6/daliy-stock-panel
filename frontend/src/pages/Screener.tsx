@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
+import { useCurrentUser } from '@/lib/auth'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { motion } from 'framer-motion'
 import { ScanSearch, Clock, TrendingUp, Star, Filter, Layers, Network, Sparkles, RefreshCw, Settings2, Store, RotateCcw, X, SlidersHorizontal } from 'lucide-react'
@@ -43,6 +44,7 @@ import {
 const SHOW_STRATEGY_STORE = false
 
 export function Screener() {
+  const isAdmin = useCurrentUser()?.role === 'admin'
   const [assetType, setAssetType] = useState<'stock' | 'etf'>('stock')
   // 周期显示筛选: 全部 / 日线 / 分钟 — 只过滤卡片显示, 不影响池和执行;
   // 执行按每个策略自己声明的 timeframes 路由 (日线走盘后缓存, 分钟走本地分钟K分区)
@@ -704,7 +706,7 @@ export function Screener() {
   })
 
   // 策略监控: 查询规则, 建立 assetType:strategyId → ruleId 映射 (只看 type=strategy 且 enabled)
-  const monitorRules = useQuery({ queryKey: QK.monitorRules, queryFn: api.monitorRulesList })
+  const monitorRules = useQuery({ queryKey: QK.monitorRules, queryFn: api.monitorRulesList, enabled: isAdmin })
   const strategyMonitorMap = useMemo(() => {
     const m = new Map<string, string>()
     for (const r of monitorRules.data?.rules ?? []) {
@@ -963,7 +965,7 @@ export function Screener() {
                   disabled={(run.isPending && activeStrategy === s.id) || (s.id === EARNINGS_GAP_STRATEGY_ID && gapControl.busy)}
                   onSettings={() => setSettingsStrategyId(s.id)}
                   monitored={strategyMonitorMap.has(`${assetType}:${s.id}`)}
-                  onToggleMonitor={s.realtime_supported !== false ? () => toggleStrategyMonitor(s.id, s.name) : undefined}
+                  onToggleMonitor={isAdmin && s.realtime_supported !== false ? () => toggleStrategyMonitor(s.id, s.name) : undefined}
                   timeframeBadge={isMinute ? '分钟' : undefined}
                 />
               )

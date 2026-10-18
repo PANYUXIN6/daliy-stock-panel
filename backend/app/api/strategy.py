@@ -70,11 +70,11 @@ def _invalidate_strategy_runtime(request: Request, strategy_id: str | None = Non
     from app.services import strategy_cache
 
     strategy_cache.clear_cache(_data_dir(request), strategy_id)
-    monitor_engine = getattr(runtime_for(request), "monitor_engine", None)
-    if monitor_engine is not None:
-        if strategy_id is None:
-            monitor_engine.invalidate_strategy_state()
-        else:
+    runtime = runtime_for(request)
+    runtime.strategy_engine.clear_realtime_matrices()
+    for name in ("monitor_engine", "paper_monitor_engine"):
+        monitor_engine = getattr(runtime, name, None)
+        if monitor_engine is not None:
             monitor_engine.invalidate_strategy_state(strategy_id)
 
 

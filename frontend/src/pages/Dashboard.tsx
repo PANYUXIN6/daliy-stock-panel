@@ -1,4 +1,5 @@
 import { useState, useCallback, useMemo } from 'react'
+import { useCurrentUser } from '@/lib/auth'
 import { useQuery } from '@tanstack/react-query'
 import { Check, Gauge, GripVertical, Info, Loader2, RefreshCw, RotateCcw, Timer } from 'lucide-react'
 import { DatePicker } from '@/components/DatePicker'
@@ -19,6 +20,7 @@ import { cloneItems, GRID_COLS, type WidgetType } from '@/components/dashboard/l
 type PreviewSource = 'gain' | 'loss' | 'amount' | 'active' | 'concept' | 'industry' | 'alert'
 
 export function Dashboard() {
+  const isAdmin = useCurrentUser()?.role === 'admin'
   const [selectedDate, setSelectedDate] = useState<string | undefined>()
   const [manualFetching, setManualFetching] = useState(false)
   const [previewStock, setPreviewStock] = useState<{
@@ -193,7 +195,7 @@ export function Dashboard() {
         </div>
       )}
 
-      <DashboardGrid ctx={widgetCtx} items={dashItems} onItemsChange={setDashItems} editing={dashEditing} />
+      <DashboardGrid ctx={widgetCtx} items={dashItems.filter(item => isAdmin || item.t !== 'monitor')} onItemsChange={setDashItems} editing={dashEditing} />
 
       <StockPreviewDialog
         symbol={previewStock?.symbol ?? null}

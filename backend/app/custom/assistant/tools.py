@@ -1105,6 +1105,8 @@ def _get_sync_status(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
     return out
 
 
+_ADMIN_TOOLS = frozenset({tool_catalog.RUN_BACKTEST, 'list_signals', 'create_signal_strategy', 'get_lots'})
+
 _LOCAL_TOOLS: dict[str, Callable[[dict[str, Any], ToolContext], Any]] = {
     "get_stock_quote": _get_stock_quote,
     "get_stock_daily": _get_stock_daily,
@@ -1345,7 +1347,9 @@ async def execute_assistant_tool(name: str, args: dict[str, Any], ctx: ToolConte
     """
     from app.services.auth import AuthError, require_current_session
     try:
-        require_current_session()
+        user = require_current_session()
+        if name in _ADMIN_TOOLS and user['role'] != 'admin':
+            raise AuthError('此操作仅限管理员', 403, 'ADMIN_REQUIRED')
     except AuthError as exc:
         return {"ok": False, "error": exc.detail}
     handler = _LOCAL_TOOLS.get(name)
@@ -1353,7 +1357,9 @@ async def execute_assistant_tool(name: str, args: dict[str, Any], ctx: ToolConte
         try:
             def execute_local():
                 # The executor may have queued this action before the session was revoked.
-                require_current_session()
+                user = require_current_session()
+                if name in _ADMIN_TOOLS and user['role'] != 'admin':
+                    raise AuthError('此操作仅限管理员', 403, 'ADMIN_REQUIRED')
                 return handler(dict(args or {}), ctx)
             result = await asyncio.to_thread(execute_local)
             return {"ok": True, "result": result}

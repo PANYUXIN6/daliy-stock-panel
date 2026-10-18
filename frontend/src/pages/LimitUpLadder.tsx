@@ -1,3 +1,4 @@
+import { useCurrentUser } from '@/lib/auth'
 import React, { useState, useCallback, useMemo, useRef } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { motion, AnimatePresence } from 'framer-motion'
@@ -237,6 +238,7 @@ const StockCard = React.memo(function StockCard({ stock, extFields, direction, s
   active?: boolean
 }) {
   const [showMonitorMenu, setShowMonitorMenu] = useState(false)
+  const isAdmin = useCurrentUser()?.role === 'admin'
   const [menuAnchor, setMenuAnchor] = useState<DOMRect | null>(null)
   const code = stock.symbol.replace(/\.BJ$/, '').replace(/\.SZ$/, '').replace(/\.SH$/, '')
   const tag = boardTag(stock.symbol)
@@ -262,12 +264,11 @@ const StockCard = React.memo(function StockCard({ stock, extFields, direction, s
 
   const hasTags = conceptTags.length > 0 || industryTags.length > 0
 
-  // 齿轮始终可见: 让免费用户也能看到功能入口, 点开后在菜单内提示权限不足。
-  // 有五档盘口能力的用户正常设置; 无能力时保存按钮禁用 + 显示能力提示。
+  // 管理员还需具备五档盘口能力才可保存监控规则。
   return (
     <div className="relative group w-full">
       {/* 监控设置按钮 (右上角): 不能嵌在卡片 button 内 */}
-      <button
+      {isAdmin && <button
         onClick={e => {
           e.stopPropagation()
           setMenuAnchor(e.currentTarget.getBoundingClientRect())
@@ -279,7 +280,7 @@ const StockCard = React.memo(function StockCard({ stock, extFields, direction, s
         }`}
       >
         {monitored ? <Bell className="h-3 w-3" /> : <BellOff className="h-3 w-3" />}
-      </button>
+      </button>}
       {/* 监控菜单 */}
       {showMonitorMenu && menuAnchor && (
         <MonitorMenu
@@ -1458,6 +1459,7 @@ function ExtConfigDialog({ fields, onSave, onClose }: {
 // ===== 主页面 =====
 
 export function LimitUpLadder() {
+  const isAdmin = useCurrentUser()?.role === 'admin'
   const [asOf, setAsOf] = useState('')
   const [direction, setDirection] = useState<Direction>(() => storage.limitLadderDirection.get('up'))
   const [sealMode, setSealMode] = useState<'vol' | 'amount'>(() => storage.limitLadderSealMode.get('vol'))
@@ -1471,6 +1473,7 @@ export function LimitUpLadder() {
   const { data: monitorRulesData, refetch: refetchMonitorRules } = useQuery({
     queryKey: QK.monitorRules,
     queryFn: () => api.monitorRulesList(),
+    enabled: isAdmin,
     staleTime: 30 * 1000,
   })
   const ladderRules = useMemo(() => {

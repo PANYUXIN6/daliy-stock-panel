@@ -1013,6 +1013,9 @@ def update_realtime_monitor_config(req: RealtimeMonitorConfigIn, request: Reques
     cfg = req.model_dump(exclude_none=True)
     from app.services.user_context import current_user
     user = current_user(required=False)
+    if (user is not None and user.role != 'admin'
+            and cfg.keys() & {'strategy_monitor_enabled', 'strategy_monitor_ids', 'monitor_ext_fields'}):
+        raise HTTPException(status_code=403, detail='监控设置仅限管理员修改')
     if user is not None and user.role != "admin" and cfg.keys() - preferences.PERSONAL_KEYS:
         raise HTTPException(status_code=403, detail="采集设置仅限管理员修改")
     result = preferences.set_realtime_monitor_config(cfg)

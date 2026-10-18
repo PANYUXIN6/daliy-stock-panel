@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { useCurrentUser } from '@/lib/auth'
 import { useNavigate } from 'react-router-dom'
 import { Plus, Settings2, Zap } from 'lucide-react'
 import type { CustomSignal } from '@/lib/api'
@@ -14,9 +15,12 @@ interface Props {
 }
 
 export function SignalTriggerActions({ kind, signals, onChange, buttonClassName, iconClassName }: Props) {
+  const isAdmin = useCurrentUser()?.role === 'admin'
   const navigate = useNavigate()
   const [open, setOpen] = useState(false)
   const [factorOpen, setFactorOpen] = useState(false)
+
+  if (!isAdmin) return null
 
   const accent = kind === 'entry' ? 'hover:text-accent hover:border-accent/40' : 'hover:text-warning hover:border-warning/40'
   const btnCls = buttonClassName ?? 'rounded-btn border border-border bg-base p-1 text-muted transition-colors cursor-pointer'

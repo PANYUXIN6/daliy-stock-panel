@@ -1,3 +1,4 @@
+import { useCurrentUser } from '@/lib/auth'
 import { useState, useEffect } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Sparkles, LineChart, History as HistoryIcon, Loader2, ExternalLink, Bell, AlertTriangle } from 'lucide-react'
@@ -26,6 +27,7 @@ import {
  *  - 报告胶囊用蓝色系,与财务分析(紫色)并存
  */
 export function StockAnalysis() {
+  const isAdmin = useCurrentUser()?.role === 'admin'
   const [symbol, setSymbol] = useState<string>('')
   const [name, setName] = useState<string>('')
   const [checking, setChecking] = useState(false)
@@ -114,14 +116,14 @@ export function StockAnalysis() {
                 {checking ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Sparkles className="h-3.5 w-3.5" />}
                 AI 个股分析
               </button>
-              <button
+              {isAdmin && <button
                 onClick={() => setShowPriceAlerts(true)}
                 className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-btn border border-sky-400/25 bg-sky-400/[0.08] text-sky-300 text-xs font-medium hover:border-sky-400/40 hover:bg-sky-400/[0.12] transition-all"
                 title="设置价格点位提醒"
               >
                 <Bell className="h-3.5 w-3.5" />
                 点位提醒
-              </button>
+              </button>}
             </>
           )}
         </div>

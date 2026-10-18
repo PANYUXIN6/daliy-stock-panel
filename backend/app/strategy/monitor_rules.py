@@ -65,6 +65,11 @@ VD_BASIC_FILTER_DEFAULTS: dict = {
 _SIGNAL_PREFIXES = ("signal_", "csg_")
 
 
+def runtime_rule_allowed(_rule: dict, role: str) -> bool:
+    """监控及持仓派生提醒仅管理员运行，存量规则仍保留在磁盘。"""
+    return role == "admin"
+
+
 # ── 持久化 (镜像 custom_signals.py) ─────────────────────
 def _dir(data_dir: Path) -> Path:
     d = private_path(data_dir, "user_data", "monitor_rules")

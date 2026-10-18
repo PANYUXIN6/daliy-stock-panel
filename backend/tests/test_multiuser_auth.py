@@ -245,6 +245,13 @@ def test_ordinary_user_cannot_read_secrets_or_change_shared_monitor_config(tmp_p
             ).status_code
             == 200
         )
+        for payload in (
+            {"strategy_monitor_enabled": True},
+            {"strategy_monitor_ids": ["demo"]},
+            {"monitor_ext_fields": {}},
+        ):
+            response = client.put('/api/settings/preferences/realtime-monitor', json=payload)
+            assert response.status_code == 403
 
 
 @pytest.mark.parametrize("operation", ["create", "promote", "role", "expiry", "disable", "reset", "revoke"])

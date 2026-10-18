@@ -62,15 +62,23 @@ def runtime_client(tmp_path, monkeypatch):
     app.state.user_runtimes.shutdown()
 
 
+@pytest.fixture
+def admin_runtime_client(runtime_client):
+    client, state, owners = runtime_client
+    token, _ = state.auth_store.login('admin', 'initial-password', 'test', '')
+    client.cookies.set('tf_session', token)
+    return client, state, list(reversed(owners))
+
+
 @pytest.mark.parametrize('update,active', [
     ({'strategy_monitor_enabled': False}, set()),
     ({'strategy_monitor_ids': ['trusted_two']}, {'trusted_two'}),
 ])
-def test_monitor_preferences_reload_only_the_current_users_rules(runtime_client, tmp_path, update, active):
+def test_monitor_preferences_reload_only_the_current_users_rules(admin_runtime_client, tmp_path, update, active):
     from app.services import preferences
     from app.strategy import monitor_rules
 
-    client, state, owners = runtime_client
+    client, state, owners = admin_runtime_client
     monitors = []
     for owner in owners:
         with user_scope(owner):
@@ -80,7 +88,7 @@ def test_monitor_preferences_reload_only_the_current_users_rules(runtime_client,
         monitor = state.user_runtimes.get(owner).monitor_engine
         with user_scope(owner):
             monitor.evaluate(pl.DataFrame({'symbol': ['X'], 'close': [10.0]}))
-        assert set(monitor.latest_strategy_results()) == {'trusted_one'}
+        assert set(monitor.latest_strategy_results()) == ({'trusted_one'} if owner.role == 'admin' else set())
         monitors.append(monitor)
     response = client.put('/api/settings/preferences/realtime-monitor', json=update)
     assert response.status_code == 200, response.text
@@ -94,8 +102,8 @@ def test_monitor_preferences_reload_only_the_current_users_rules(runtime_client,
     with user_scope(owners[1]):
         assert monitor_rules.load_one(tmp_path, 'mr_strategy_trusted_one')['enabled'] is True
         assert preferences.get_strategy_monitor_enabled() is True
-    assert {rule['strategy_id'] for rule in monitors[1].rules.values()} == {'trusted_one'}
-    assert set(monitors[1].latest_strategy_results()) == {'trusted_one'}
+    assert monitors[1].rules == {}
+    assert monitors[1].latest_strategy_results() == {}
 
 
 def test_runtime_reconciles_previously_disabled_monitors(runtime_client, tmp_path):
@@ -115,11 +123,11 @@ def test_runtime_reconciles_previously_disabled_monitors(runtime_client, tmp_pat
 
 
 @pytest.mark.parametrize('initialized', [False, True])
-def test_monitor_preferences_report_reload_failure_and_allow_retry(runtime_client, tmp_path, monkeypatch, initialized):
+def test_monitor_preferences_report_reload_failure_and_allow_retry(admin_runtime_client, tmp_path, monkeypatch, initialized):
     from app.services import preferences
     from app.strategy import monitor_rules
 
-    client, state, owners = runtime_client
+    client, state, owners = admin_runtime_client
     with user_scope(owners[0]):
         preferences.set_realtime_monitor_config({
             'strategy_monitor_enabled': True, 'strategy_monitor_ids': ['trusted_one'],

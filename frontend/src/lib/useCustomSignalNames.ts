@@ -1,4 +1,5 @@
 import { useMemo } from 'react'
+import { useCurrentUser } from './auth'
 import { useQuery } from '@tanstack/react-query'
 import { api } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
@@ -11,7 +12,8 @@ import { QK } from '@/lib/queryKeys'
  * 会显示原始列名 (如 csg_ma_dead_5_10) 而非用户命名。
  */
 export function useCustomSignalNames(): Record<string, string> {
-  const query = useQuery({ queryKey: QK.customSignals, queryFn: api.customSignalsList })
+  const isAdmin = useCurrentUser()?.role === 'admin'
+  const query = useQuery({ queryKey: QK.customSignals, queryFn: api.customSignalsList, enabled: isAdmin })
   return useMemo(() => {
     const names: Record<string, string> = {}
     for (const s of query.data?.signals ?? []) {

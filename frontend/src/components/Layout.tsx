@@ -1,4 +1,4 @@
-import { useCurrentUser } from '@/lib/auth'
+import { canAccessPage, useCurrentUser } from '@/lib/auth'
 import { announceSessionChange, lockSession } from '@/lib/sessionRuntime'
 import { accountStorage } from '@/lib/sessionRuntime'
 import { useEffect, useMemo, useRef, useState, Suspense, type ReactNode } from 'react'
@@ -392,6 +392,7 @@ export function Layout() {
   const alertsTotalQuery = useQuery({
     queryKey: ['alerts-total'],
     queryFn: () => api.alertsList({ days: 7, limit: 1 }),
+    enabled: user?.role === 'admin',
     refetchInterval: () => (isTrading ? 15000 : 120000),
     select: (data) => data.total,
   })
@@ -445,7 +446,7 @@ export function Layout() {
     : allNav
 
   const hiddenIds = new Set(prefs?.nav_hidden ?? [])
-  const visibleNavItems = navItems.filter(n => (user?.role === 'admin' || n.to !== '/data') && !hiddenIds.has(n.to) && !hiddenIds.has(n.to.replace(/^\/analysis\//, '')))
+  const visibleNavItems = navItems.filter(n => canAccessPage(user, n.to) && !hiddenIds.has(n.to) && !hiddenIds.has(n.to.replace(/^\/analysis\//, '')))
 
   return (
     <div

@@ -8,7 +8,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from app.api import kline
-from app.indicators.earnings_breakout import compute_earnings_breakout
+from app.indicators.earnings_breakout import compute_earnings_breakout, pullback_price_candidates
 from app.services import earnings_breakout as service
 from app.services.financial_versions import read_versions, record_versions
 
@@ -58,6 +58,17 @@ def test_icon_9_gap_pullback_without_date_cutoff(year):
     broken = frame.with_columns(pl.when(pl.col("date") == frame["date"][43])
                                 .then(10.2).otherwise(pl.col("low")).alias("low"))
     assert not compute_earnings_breakout(broken, {event})["signal_earnings_9"][43:].any()
+
+
+@pytest.mark.parametrize("kind", ["9", "42"])
+def test_price_only_candidates_never_drop_a_valid_pullback_and_exclude_flat_prices(kind):
+    frame = bars(kind)
+    output = compute_earnings_breakout(frame, {frame["date"][40]})
+    hits = output.filter(pl.col("signal_earnings_9") | pl.col("signal_earnings_42")).select("symbol", "date")
+    assert not hits.is_empty()
+    candidates = pullback_price_candidates(frame, frame.select("symbol", "date"))
+    assert hits.join(candidates, on=["symbol", "date"], how="anti").is_empty()
+    assert frame["date"][39] not in candidates["date"].to_list()
 
 
 def test_icon_42_midpoint_holds_short_window_and_future_prefix():

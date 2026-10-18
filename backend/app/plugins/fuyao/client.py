@@ -246,7 +246,7 @@ class FuyaoClient:
 
     # ---- 财务 ----
     # 端点均单标的(thscode 不接受逗号)。取数模式二选一: limit=最近N期 或 start/end 区间,
-    # 这里只用 limit。period=quarterly 覆盖每个季度末(含年报期), 与项目"各报告期累积"口径一致。
+    # period=quarterly 覆盖每个季度末(含年报期), 与项目"各报告期累积"口径一致。
     _STATEMENT_ENDPOINTS: ClassVar[dict[str, str]] = {
         "income": "income-statements",
         "balance_sheet": "balance-sheets",
@@ -255,7 +255,7 @@ class FuyaoClient:
 
     def financial_statements(
         self, stmt: str, thscode: str, limit: int = 1,
-        *, cancel_event: threading.Event | None = None,
+        *, cancel_event: threading.Event | None = None, start: int | None = None, end: int | None = None,
     ) -> list[dict]:
         """单标的财务报表多期序列。stmt: income | balance_sheet | cash_flow。
 
@@ -265,9 +265,14 @@ class FuyaoClient:
         endpoint = self._STATEMENT_ENDPOINTS.get(stmt)
         if endpoint is None:
             raise FuyaoError(f"未知财务报表类型: {stmt}")
+        params = {"thscode": thscode, "period": "quarterly"}
+        if start is not None and end is not None:
+            params.update(start=start, end=end)
+        else:
+            params["limit"] = max(1, min(20, limit))
         data = self._get(
             f"/api/a-share/financials/{endpoint}",
-            {"thscode": thscode, "period": "quarterly", "limit": max(1, min(20, limit))},
+            params,
             cancel_event=cancel_event,
         )
         rows = data.get("item")

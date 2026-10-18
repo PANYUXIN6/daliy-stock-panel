@@ -30,6 +30,8 @@ class _CapturingScreenerService:
         timeframe="1d",
         params_map=None,
         overrides_map=None,
+        prepare_financials=False,
+        pool=None,
     ):
         self.calls.append({
             "kind": "context",

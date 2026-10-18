@@ -1,24 +1,27 @@
 import { useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { CalendarDays, TrendingUp, FileText, Wallet, Activity, Sparkles, AlertTriangle, Loader2, ChartPie } from 'lucide-react'
+import { CalendarDays, TrendingUp, FileText, Wallet, Activity, Sparkles, AlertTriangle, Loader2, ChartPie, ChevronDown } from 'lucide-react'
 import {
   useFinancialMetrics,
   useFinancialIncome,
   useFinancialBalanceSheet,
   useFinancialCashFlow,
   useFinancialShares,
+  useFinancialCollectionOptions,
+  useFinancialFetch,
 } from '@/lib/useFinancials'
 import { cnDateFromUtc, fmtPrice, fmtBigNum } from '@/lib/format'
 import { Skeleton } from '@/components/data/Skeleton'
 import { startAnalysis, findLatestHistoryReport, openHistoryReport } from '@/lib/aiReportStore'
 import { toast } from '@/components/Toast'
+import type { FinancialTable } from '@/lib/api'
 
 interface Props {
   symbol: string
   name: string
 }
 
-type TabKey = 'metrics' | 'income' | 'balance_sheet' | 'cash_flow' | 'shares'
+type TabKey = FinancialTable
 
 const TABS: { key: TabKey; label: string; icon: typeof TrendingUp }[] = [
   { key: 'metrics', label: '核心指标', icon: TrendingUp },
@@ -155,6 +158,14 @@ export function StockFinancialDetail({ symbol, name }: Props) {
   const balance = useFinancialBalanceSheet(symbol)
   const cashFlow = useFinancialCashFlow(symbol)
   const shares = useFinancialShares(symbol)
+  const collection = useFinancialCollectionOptions()
+  const fetch = useFinancialFetch()
+  const fetching = fetch.isPending && fetch.variables?.symbol === symbol && fetch.variables?.table === tab
+  const fetchingMore = fetching && !!fetch.variables?.before
+  const pendingHere = fetch.variables?.symbol === symbol && fetch.variables?.table === tab
+  const fetchError = fetch.isError && fetch.variables?.symbol === symbol && fetch.variables?.table === tab ? fetch.error.message : null
+  const canFetch = collection.data?.tables.includes(tab) === true
+  const collect = () => { if (!fetch.isPending) fetch.mutate({ symbol, table: tab }) }
 
   const queryMap = {
     metrics: metrics,
@@ -170,6 +181,10 @@ export function StockFinancialDetail({ symbol, name }: Props) {
     (b.period_end ?? '').localeCompare(a.period_end ?? '')
   )
   const fieldDefs = FIELD_DEFS[tab]
+  const historyStart = current.data?.history_start
+  const collectMore = () => {
+    if (!fetch.isPending && historyStart) fetch.mutate({ symbol, table: tab, before: historyStart })
+  }
 
   // 头部报告期信息取最新一期(优先用当前 tab,兜底用 metrics)
   const latestPeriod = rows[0]?.period_end ?? metrics.data?.data?.[0]?.period_end ?? null
@@ -187,7 +202,11 @@ export function StockFinancialDetail({ symbol, name }: Props) {
           <span className="text-lg font-semibold text-foreground">{name}</span>
           <span className="text-xs font-mono text-muted">{symbol}</span>
         </div>
-        <div className="flex items-center gap-2 ml-auto">
+        <div className="flex flex-wrap items-center gap-2 w-full sm:w-auto sm:ml-auto">
+          {rows.length > 0 && canFetch && <button type="button" onClick={collect} disabled={fetch.isPending}
+            className="shrink-0 whitespace-nowrap inline-flex items-center gap-1 rounded-btn border border-border px-2.5 py-1 text-xs text-secondary hover:text-foreground disabled:opacity-50">
+            {fetching && !fetchingMore && <Loader2 className="h-3 w-3 animate-spin" />}更新近 2 年
+          </button>}
           <button
             onClick={handleAiClick}
             disabled={checking}
@@ -198,11 +217,11 @@ export function StockFinancialDetail({ symbol, name }: Props) {
             AI 财务分析
           </button>
           {latestPeriod && (
-            <div className="flex items-center gap-1.5 text-xs text-secondary">
+            <div className="flex flex-wrap items-center gap-1.5 basis-full sm:basis-auto text-xs text-secondary">
               <CalendarDays className="h-3.5 w-3.5" />
-              <span>报告期 <span className="font-mono">{latestPeriod}</span></span>
+              <span className="whitespace-nowrap">报告期 <span className="font-mono">{latestPeriod}</span></span>
               {latestDate && (
-                <span className="text-muted">· {dateLabel} {latestDate}</span>
+                <span className="whitespace-nowrap text-muted">· {dateLabel} {latestDate}</span>
               )}
             </div>
           )}
@@ -218,7 +237,7 @@ export function StockFinancialDetail({ symbol, name }: Props) {
             <button
               key={t.key}
               onClick={() => setTab(t.key)}
-              className={`inline-flex items-center gap-1.5 px-3 py-2 text-xs font-medium border-b-2 -mb-px transition-colors ${
+              className={`shrink-0 whitespace-nowrap inline-flex items-center gap-1.5 px-3 py-2 text-xs font-medium border-b-2 -mb-px transition-colors ${
                 isActive
                   ? 'border-accent text-accent'
                   : 'border-transparent text-muted hover:text-secondary'
@@ -233,6 +252,8 @@ export function StockFinancialDetail({ symbol, name }: Props) {
 
       {/* 表格内容 */}
       <div className="p-4">
+        {fetchError && <p role="alert" className="mb-3 text-xs text-danger">{fetchError}</p>}
+        {current.isError && <p role="alert" className="mb-3 text-xs text-danger">{current.error.message}</p>}
         {current.isLoading ? (
           <div className="space-y-2">
             {Array.from({ length: 6 }).map((_, i) => (
@@ -244,7 +265,17 @@ export function StockFinancialDetail({ symbol, name }: Props) {
           </div>
         ) : rows.length === 0 ? (
           <div className="py-10 text-center text-xs text-muted">
-            暂无{TABS.find(t => t.key === tab)?.label}数据 — 后台尚未采集该项财务数据
+            <p>暂无{TABS.find(t => t.key === tab)?.label}数据</p>
+            {collection.isLoading ? <p className="mt-3">正在检查数据源…</p>
+              : collection.isError ? <p role="alert" className="mt-3 text-warning">采集服务暂不可用。<button type="button" onClick={() => void collection.refetch()} className="ml-1 text-accent">重试连接</button></p>
+              : canFetch ? <>
+                <button type="button" onClick={collect} disabled={fetch.isPending}
+                  className="mt-3 inline-flex items-center gap-1.5 rounded-btn bg-accent px-3 py-2 text-white disabled:opacity-50">
+                  {fetching && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+                  {fetching ? '正在获取并保存…' : `获取该股${TABS.find(t => t.key === tab)?.label}`}
+                </button>
+                <p className="mt-2">默认获取近 2 年，保存后可继续向前采集，每次增加 1 年。</p>
+              </> : <p className="mt-3">当前数据源不支持此项获取，请在设置中配置可用的财务数据源。</p>}
           </div>
         ) : (
           <div className="space-y-5">
@@ -275,6 +306,19 @@ export function StockFinancialDetail({ symbol, name }: Props) {
                 </div>
               </div>
             ))}
+            {canFetch && historyStart && (
+              <div className="border-t border-border/60 pt-4 flex flex-col items-center gap-2">
+                <p className="text-[11px] text-muted">已检查至 {historyStart} · 每次向前补充 1 年</p>
+                <button type="button" onClick={collectMore} disabled={fetch.isPending || current.isFetching}
+                  className="inline-flex items-center gap-1.5 rounded-btn border border-border bg-elevated px-4 py-2 text-xs text-secondary hover:text-foreground hover:border-accent/40 transition-colors disabled:opacity-50">
+                  {fetchingMore ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ChevronDown className="h-3.5 w-3.5" />}
+                  {fetchingMore ? '正在采集前 1 年…' : '采集更多（前 1 年）'}
+                </button>
+                {pendingHere && fetch.isSuccess && fetch.variables?.before && fetch.data?.rows === 0 && (
+                  <p role="status" className="text-[11px] text-muted">该年度未返回财务数据，可继续向前查询。</p>
+                )}
+              </div>
+            )}
           </div>
         )}
       </div>

@@ -23,7 +23,6 @@ from app.backtest.factor import (
     FactorBatchConfig,
 )
 from app.backtest.fundamentals import (
-    FUNDAMENTAL_FACTOR_NAMES,
     attach_fundamental_factors,
     load_fundamental_snapshot,
 )
@@ -352,11 +351,8 @@ def _load_compact_factor_panel(
     if raw.is_empty():
         return raw
 
-    fundamental_names = [
-        str(name)
-        for name in factor_names
-        if str(name) in FUNDAMENTAL_FACTOR_NAMES
-    ]
+    from app.services.financial_demand import financial_factors
+    fundamental_names = sorted(financial_factors(factor_names))
     if fundamental_names:
         data_dir = getattr(
             getattr(getattr(factor_service.engine, "repo", None), "store", None),

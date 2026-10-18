@@ -92,6 +92,8 @@ def trial_formula(req: FormulaTrialRequest, request: Request) -> dict:
     # 复用检验引擎同一条补算路径 (compute_indicators + 虚拟因子物化), 禁止第二套计算逻辑
     from app.backtest.factor import FactorBacktestService
 
+    panel = _prepare_financial_inputs(request, panel, compiled, req.asset_type)
+
     physical = set(panel.columns)
     to_compute = set(compiled.referenced_factors) | {
         dep for dep in compiled.dependencies if dep not in physical
@@ -245,6 +247,7 @@ def _trial_nonempty(request: Request, formula: str, asset_type: str = "stock") -
     panel = engine.load_panel(None, cn_today() - timedelta(days=calendar_days), cn_today(), columns=base_columns, asset_type=asset_type)
     if panel.is_empty():
         raise HTTPException(status_code=400, detail="当前无历史数据, 无法完成保存前试算 (fail-closed)")
+    panel = _prepare_financial_inputs(request, panel, compiled, asset_type)
     physical = set(panel.columns)
     to_compute = set(compiled.referenced_factors) | {d for d in compiled.dependencies if d not in physical}
     if to_compute:
@@ -252,6 +255,23 @@ def _trial_nonempty(request: Request, formula: str, asset_type: str = "stock") -
     prepared = compiled.frame_transform(panel) if compiled.frame_transform else None
     if prepared is None or prepared[FACTOR_COLUMN].is_not_null().sum() == 0:
         raise HTTPException(status_code=400, detail="公式在最近 40 个交易日输出全为空, 拒绝保存")
+
+
+def _prepare_financial_inputs(request, panel, compiled, asset_type):
+    if asset_type != "stock":
+        return panel
+    from app.data_providers.base import ProviderRateLimitError
+    from app.services.financial_demand import financial_factors, prepare_factor_frame
+    names = compiled.referenced_factors | compiled.dependencies
+    if not financial_factors(names):
+        return panel
+    try:
+        return prepare_factor_frame(request.app.state.repo.store.data_dir, panel,
+                                    names)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except ProviderRateLimitError as exc:
+        raise HTTPException(429, "财务数据源限流，请稍后重试") from exc
 
 
 @router.post("/custom")

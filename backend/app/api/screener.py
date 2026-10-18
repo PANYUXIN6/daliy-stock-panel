@@ -464,6 +464,7 @@ def run_preset(req: PresetRequest, request: Request):
             timeframe=req.timeframe,
             params_map={req.strategy_id: params},
             overrides_map={req.strategy_id: overrides or {}},
+            prepare_financials=True, pool=req.pool,
         )
         result = engine.run(
             req.strategy_id,
@@ -699,6 +700,11 @@ def _run_all_progressive(
     )
 
     def job(handle: strategy_run_queue.StrategyRunHandle) -> None:
+        from app.services.financial_demand import strategy_requirements
+        financial_ids = {
+            sid for sid in ordered_ids
+            if asset_type == "stock" and any(strategy_requirements(engine, [sid], overrides_map, params_map))
+        }
         context = svc.build_strategy_context(
             engine,
             as_of,
@@ -715,7 +721,7 @@ def _run_all_progressive(
             if callable(build_matrix):
                 matrix = build_matrix(
                     context,
-                    [(sid, engine.get(sid)) for sid in ordered_ids],
+                    [(sid, engine.get(sid)) for sid in ordered_ids if sid not in financial_ids],
                     params_map,
                     overrides_map,
                 )
@@ -728,8 +734,15 @@ def _run_all_progressive(
             # 逐策略隔离: 单个策略崩溃 (如自定义代码的数据类型错误) 只记
             # 错误跳过, 不让整批剩余策略陪葬 — 其余策略照常算完落缓存。
             try:
+                single_context = context
+                if sid in financial_ids:
+                    # 财务准备失败只影响依赖该数据的策略，技术策略继续返回。
+                    single_context = svc.build_strategy_context(
+                        engine, as_of, [sid], timeframe=timeframe, params_map=params_map,
+                        overrides_map=overrides_map, current=context.current, prepare_financials=True,
+                    )
                 single = engine.run_all(
-                    context,
+                    single_context,
                     params_map=params_map,
                     overrides_map=overrides_map,
                     strategy_ids=[sid],
@@ -889,6 +902,7 @@ def run_all(request: Request, body: dict | None = None):
             timeframe=timeframe,
             params_map=params_map,
             overrides_map=overrides_map,
+            prepare_financials=True,
         )
         engine_results = engine.run_all(
             context,

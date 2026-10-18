@@ -677,6 +677,7 @@ def _run_strategy(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
     overrides = load_override(ctx.data_dir, strategy_id) or {} if ctx.data_dir else {}
     context = svc.build_strategy_context(
         ctx.engine, as_of, [strategy_id], overrides_map={strategy_id: overrides},
+        prepare_financials=True,
     )
     result = ctx.engine.run(strategy_id, context, overrides=overrides or None)
     rows = [_clean_obj(r) for r in (getattr(result, "rows", None) or [])][:30]

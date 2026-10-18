@@ -111,16 +111,18 @@ export interface CapabilitiesResponse {
 }
 
 // ===== Financials =====
+export type FinancialTable = 'metrics' | 'income' | 'balance_sheet' | 'cash_flow' | 'shares'
+
+export interface FinancialTableData<T> {
+  data: T[]
+  /** 当前数据源已检查的最早报告期边界，用于向前补一年。 */
+  history_start?: string | null
+}
+
 export interface FinancialStatus {
   /** 本地是否已有可展示的财务数据；采集能力单独由能力矩阵判断。 */
   available: boolean
   tables: Record<string, { rows: number; symbols: number }>
-}
-
-export interface FinancialExecutionStatus {
-  active_job_id: string | null
-  last_sync: Record<string, string>
-  syncing: boolean
 }
 
 export interface FinancialVersionRecord {
@@ -3545,38 +3547,37 @@ export const api = {
   financialStatus: () =>
     request<FinancialStatus>('/api/financials/status'),
 
-  financialExecutionStatus: () =>
-    request<FinancialExecutionStatus>('/api/financials/execution-status'),
+  financialCollectionOptions: () =>
+    request<{ tables: FinancialTable[] }>('/api/financials/collection-options'),
+
+  financialFetch: (symbol: string, table: FinancialTable, before?: string) =>
+    request<{ symbol: string; table: FinancialTable; rows: number; reused: boolean; start_date: string; end_date: string }>('/api/financials/fetch', {
+      method: 'POST', body: JSON.stringify({ symbol, table, before }), timeoutMs: COMPUTE_REQUEST_TIMEOUT_MS,
+    }),
 
   financialMetrics: (symbol?: string) =>
-    request<{ data: FinancialMetricRecord[] }>(
+    request<FinancialTableData<FinancialMetricRecord>>(
       `/api/financials/metrics${symbol ? `?symbol=${encodeURIComponent(symbol)}` : ''}`,
     ),
 
   financialIncome: (symbol?: string) =>
-    request<{ data: FinancialIncomeRecord[] }>(
+    request<FinancialTableData<FinancialIncomeRecord>>(
       `/api/financials/income${symbol ? `?symbol=${encodeURIComponent(symbol)}` : ''}`,
     ),
 
   financialBalanceSheet: (symbol?: string) =>
-    request<{ data: FinancialBalanceSheetRecord[] }>(
+    request<FinancialTableData<FinancialBalanceSheetRecord>>(
       `/api/financials/balance-sheet${symbol ? `?symbol=${encodeURIComponent(symbol)}` : ''}`,
     ),
 
   financialCashFlow: (symbol?: string) =>
-    request<{ data: FinancialCashFlowRecord[] }>(
+    request<FinancialTableData<FinancialCashFlowRecord>>(
       `/api/financials/cash-flow${symbol ? `?symbol=${encodeURIComponent(symbol)}` : ''}`,
     ),
 
   financialShares: (symbol?: string) =>
-    request<{ data: FinancialSharesRecord[] }>(
+    request<FinancialTableData<FinancialSharesRecord>>(
       `/api/financials/shares${symbol ? `?symbol=${encodeURIComponent(symbol)}` : ''}`,
-    ),
-
-  /** 触发财务数据同步(后台异步执行,接口立即返回 started 状态) */
-  financialSync: (table: string) =>
-    request<{ status: string; job_id: string; synced: { started: boolean; reason?: string } }>(
-      `/api/financials/sync/${table}`, { method: 'POST' },
     ),
 
   /** AI 分析报告 CRUD */

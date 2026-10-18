@@ -1,9 +1,9 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { api } from '@/lib/api'
+import { api, type FinancialTable } from '@/lib/api'
 
 export const FINANCIAL_QK = {
   status: ['financials', 'status'],
-  executionStatus: ['financials', 'execution-status'],
+  collectionOptions: ['financials', 'collection-options'],
   metrics: (symbol?: string) => ['financials', 'metrics', symbol],
   income: (symbol?: string) => ['financials', 'income', symbol],
   balanceSheet: (symbol?: string) => ['financials', 'balance-sheet', symbol],
@@ -11,21 +11,33 @@ export const FINANCIAL_QK = {
   shares: (symbol?: string) => ['financials', 'shares', symbol],
 }
 
+export function useFinancialCollectionOptions() {
+  return useQuery({ queryKey: FINANCIAL_QK.collectionOptions, queryFn: api.financialCollectionOptions, staleTime: 30_000 })
+}
+
+export function useFinancialFetch() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({ symbol, table, before }: { symbol: string; table: FinancialTable; before?: string }) =>
+      before ? api.financialFetch(symbol, table, before) : api.financialFetch(symbol, table),
+    onSuccess: (_result, { symbol, table }) => {
+      const key = {
+        metrics: FINANCIAL_QK.metrics, income: FINANCIAL_QK.income,
+        balance_sheet: FINANCIAL_QK.balanceSheet, cash_flow: FINANCIAL_QK.cashFlow, shares: FINANCIAL_QK.shares,
+      }[table](symbol)
+      return Promise.all([
+        qc.invalidateQueries({ queryKey: key }),
+        qc.invalidateQueries({ queryKey: FINANCIAL_QK.status }),
+      ])
+    },
+  })
+}
+
 export function useFinancialStatus() {
   return useQuery({
     queryKey: FINANCIAL_QK.status,
     queryFn: () => api.financialStatus(),
     staleTime: 60_000,
-  })
-}
-
-export function useFinancialExecutionStatus() {
-  return useQuery({
-    queryKey: FINANCIAL_QK.executionStatus,
-    queryFn: () => api.financialExecutionStatus(),
-    staleTime: 60_000,
-    // 活动任务状态属于采集服务，离线不会影响本地画像查询。
-    refetchInterval: (query) => (query.state.data?.syncing ? 3_000 : false),
   })
 }
 
@@ -74,21 +86,5 @@ export function useFinancialShares(symbol?: string) {
     queryFn: () => api.financialShares(symbol),
     enabled: !!symbol,
     staleTime: 300_000,
-  })
-}
-
-export function useFinancialSync() {
-  const qc = useQueryClient()
-  return useMutation({
-    mutationFn: (table: string) => api.financialSync(table),
-    // 点击瞬间立即刷新 status: 让后端 is_syncing=True 马上反映到 UI,
-    // 避免 mutation 阻塞(全量同步需数分钟)期间界面无变化。
-    onMutate: () => {
-      qc.invalidateQueries({ queryKey: FINANCIAL_QK.executionStatus })
-    },
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: FINANCIAL_QK.executionStatus })
-      qc.invalidateQueries({ queryKey: ['financials'] })
-    },
   })
 }

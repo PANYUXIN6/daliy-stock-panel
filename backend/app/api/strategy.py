@@ -393,6 +393,7 @@ def run_strategy(req: RunRequest, request: Request):
             timeframe=req.timeframe,
             params_map={req.strategy_id: params},
             overrides_map={req.strategy_id: overrides or {}},
+            prepare_financials=True, pool=req.pool,
         )
         result = engine.run(
             req.strategy_id,
@@ -441,6 +442,7 @@ def run_all(req: RunAllRequest, request: Request):
         timeframe=req.timeframe,
         params_map=params_map,
         overrides_map={sid: all_overrides.get(sid, {}) for sid in strategy_ids},
+        prepare_financials=True,
     )
     results: dict[str, dict] = {}
     for sid, result in engine.run_all(

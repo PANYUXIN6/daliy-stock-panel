@@ -125,10 +125,6 @@ export function Data() {
     mutationFn: (days: number) => api.syncMinute(days, false),
     onSuccess: trackModuleJob,
   })
-  const syncFinancials = useMutation({
-    mutationFn: () => api.financialSync('all'),
-    onSuccess: trackModuleJob,
-  })
   const syncClassifications = useMutation({
     mutationFn: () => api.extDataPresetsSync(),
     onSuccess: trackModuleJob,
@@ -383,7 +379,7 @@ export function Data() {
   const s = status.data
   const isLoading = status.isLoading
   const isRunning = !!activeJobId && (!job.data || job.data.status === 'running' || job.data.status === 'pending')
-  const isStarting = startSync.isPending || syncMinuteHistory.isPending || syncFinancials.isPending || syncClassifications.isPending || pipelineConfirmation.busy
+  const isStarting = startSync.isPending || syncMinuteHistory.isPending || syncClassifications.isPending || pipelineConfirmation.busy
   const collectionBusy = isRunning || isStarting || !!history.data?.active_id || syncIndexDaily.isPending || indexConfirmation.busy || refreshQuotes.isPending || quoteConfirmation.busy || updateDepth.isPending || depthConfirmation.busy
   const financialRunning = isRunning && job.data?.request_key?.startsWith('financial:') === true
   const minuteHistoryDays = prefs.data?.minute_sync_days ?? 5
@@ -812,7 +808,7 @@ export function Data() {
         <div>
           <SectionTitle icon={RefreshCw}>模块同步</SectionTitle>
           <p className="mt-2 text-[11px] leading-relaxed text-muted">按业务模块更新本地数据，模块内各项由后台按依赖关系执行。配置和单项维护保留在设置中。</p>
-          <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4">
+          <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-4">
             {[
               {
                 title: '行情与基础数据',
@@ -833,16 +829,6 @@ export function Data() {
                 settings: 'minute',
                 action: () => pipelineConfirmation.run({ kind: 'minute_batch', days: minuteHistoryDays }, () => syncMinuteHistory.mutate(minuteHistoryDays)),
                 error: syncMinuteHistory.error?.message,
-              },
-              {
-                title: '财务数据',
-                description: '仅更新利润表，保留历史版本，供业绩断层和利润相关因子使用。',
-                detail: '财务采集范围：利润表',
-                available: routeCapUsable(matrix.data, 'financial') === true,
-                pending: syncFinancials.isPending,
-                settings: 'financials',
-                action: () => pipelineConfirmation.run({ kind: 'financial', table: 'all' }, () => syncFinancials.mutate()),
-                error: syncFinancials.error?.message,
               },
               {
                 title: '板块分类',
@@ -1232,12 +1218,8 @@ export function Data() {
 
       <AnimatePresence>
         {openSettings === 'financials' && (
-          <SettingsModal title="财务数据 · 同步与计算" onClose={() => setOpenSettings(null)}>
-            <FinancialSyncPanel
-              hasCap={routeCapUsable(matrix.data, 'financial') === true}
-              disabled={collectionBusy}
-              onJobStart={setActiveJobId}
-            />
+          <SettingsModal title="财务数据 · 按需获取与计算" onClose={() => setOpenSettings(null)}>
+            <FinancialSyncPanel />
             <div className="mt-5 pt-4 border-t border-border">
               <EnrichedRebuildPanel
                 isRunning={!!activeJobId}

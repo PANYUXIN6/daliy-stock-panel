@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import logging
+from datetime import date
+from typing import Literal
 
 import polars as pl
 from fastapi import APIRouter, HTTPException, Request
@@ -17,6 +19,39 @@ from app.tickflow.capabilities import Cap
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/financials", tags=["financials"])
+
+
+class FetchRequest(BaseModel):
+    symbol: str
+    table: Literal["metrics", "income", "balance_sheet", "cash_flow", "shares"]
+    before: date | None = None
+
+
+@router.get("/collection-options")
+def collection_options(request: Request):
+    from app.services.financial_demand import supported_tables
+    return {"tables": supported_tables(request.app.state.capabilities)}
+
+
+@router.post("/fetch")
+def fetch_financials(request: Request, req: FetchRequest):
+    """所有登录用户均可请求一股一表；不允许传入任意路径、股票池或源。"""
+    from app.data_providers.base import ProviderRateLimitError
+    from app.services.auth import AuthError, require_current_session
+    from app.services.financial_demand import fetch_stock_history
+    require_current_session()
+    try:
+        return fetch_stock_history(request.app.state.repo.store.data_dir, request.app.state.capabilities,
+                                   req.symbol, req.table, before=req.before, before_write=require_current_session)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except ProviderRateLimitError as exc:
+        raise HTTPException(429, "财务数据源限流，请稍后重试") from exc
+    except AuthError:
+        raise
+    except Exception as exc:
+        logger.exception("单股财务获取失败")
+        raise HTTPException(502, "财务数据获取失败，请稍后重试") from exc
 
 
 def _financial_allowed(capset) -> bool:
@@ -76,56 +111,46 @@ def financial_execution_status(request: Request):
 @router.get("/metrics")
 def get_metrics(request: Request, symbol: str | None = None):
     """查询核心财务指标。"""
-    df = get_financial_df(request.app.state.repo.store.data_dir, "metrics")
-    if df.is_empty():
-        return {"data": []}
-    if symbol:
-        df = df.filter(pl.col("symbol") == symbol)
-    return {"data": df.to_dicts()}
+    return _table_data(request, "metrics", symbol)
 
 
 @router.get("/income")
 def get_income(request: Request, symbol: str | None = None):
     """查询利润表。"""
-    df = get_financial_df(request.app.state.repo.store.data_dir, "income")
-    if df.is_empty():
-        return {"data": []}
-    if symbol:
-        df = df.filter(pl.col("symbol") == symbol)
-    return {"data": df.to_dicts()}
+    return _table_data(request, "income", symbol)
 
 
 @router.get("/balance-sheet")
 def get_balance_sheet(request: Request, symbol: str | None = None):
     """查询资产负债表。"""
-    df = get_financial_df(request.app.state.repo.store.data_dir, "balance_sheet")
-    if df.is_empty():
-        return {"data": []}
-    if symbol:
-        df = df.filter(pl.col("symbol") == symbol)
-    return {"data": df.to_dicts()}
+    return _table_data(request, "balance_sheet", symbol)
 
 
 @router.get("/cash-flow")
 def get_cash_flow(request: Request, symbol: str | None = None):
     """查询现金流量表。"""
-    df = get_financial_df(request.app.state.repo.store.data_dir, "cash_flow")
-    if df.is_empty():
-        return {"data": []}
-    if symbol:
-        df = df.filter(pl.col("symbol") == symbol)
-    return {"data": df.to_dicts()}
+    return _table_data(request, "cash_flow", symbol)
 
 
 @router.get("/shares")
 def get_shares(request: Request, symbol: str | None = None):
     """查询历史股本表。"""
-    df = get_financial_df(request.app.state.repo.store.data_dir, "shares")
-    if df.is_empty():
-        return {"data": []}
-    if symbol:
+    return _table_data(request, "shares", symbol)
+
+
+def _table_data(request: Request, table: str, symbol: str | None) -> dict:
+    from app.services.financial_demand import history_start
+    data_dir = request.app.state.repo.store.data_dir
+    df = get_financial_df(data_dir, table)
+    if not df.is_empty() and symbol:
         df = df.filter(pl.col("symbol") == symbol)
-    return {"data": df.to_dicts()}
+    result = {"data": df.to_dicts()}
+    if symbol:
+        try:
+            result["history_start"] = history_start(data_dir, table, symbol, df)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+    return result
 
 
 def _active_financial_job() -> str | None:
@@ -206,11 +231,8 @@ async def trigger_financial_sync(repo, capset, scheduler, table: str = "all", qu
 
 @router.post("/sync/{table}")
 async def sync_table(request: Request, table: str):
-    scheduler = getattr(request.app.state, "financial_scheduler", None)
-    if scheduler is None:
-        raise HTTPException(503, "FinancialScheduler not available")
-    return await trigger_financial_sync(request.app.state.repo, request.app.state.capabilities,
-                                        scheduler, table, getattr(request.app.state, "quote_service", None))
+    _require_financial(request.app.state.capabilities)
+    raise HTTPException(410, "财务数据已改为按需获取，请在个股财务页或运行策略、因子时获取")
 
 
 class AnalyzeRequest(BaseModel):

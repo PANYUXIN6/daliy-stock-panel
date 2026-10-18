@@ -105,8 +105,8 @@ export function EarningsGapVerification({ verification, job, submitting, canVeri
       {verification?.status === 'failed' && !taskError && <p role="alert" className="text-xs text-danger">上次核验未完成，可重新点击策略卡片重试。</p>}
       {showCompleted && verification?.checked_at && <p className="text-[11px] text-muted">完成时间（北京时间）：{formatCheckedAt(verification.checked_at)}</p>}
       {historical
-        ? <p className="text-[11px] text-muted">历史日期仅使用本地数据回放，点击策略卡片不会更新财务，也不会用后来取得的数据补认历史信号。</p>
-        : !canVerify && <p className="text-[11px] text-muted">财务更新需管理员操作，当前可查看本地核验结果。</p>}
+        ? <p className="text-[11px] text-muted">历史结果按财报版本可用时间回放，无法证明当时可用的数据不会用于确认信号。</p>
+        : !canVerify && <p className="text-[11px] text-muted">运行策略时按需准备财务数据，保存后共享复用。</p>}
       {!verification && !submitting && !job.running && !historical && <p className="text-xs text-secondary">点击策略卡片，核验当日业绩断层跳空。</p>}
     </div>
   )

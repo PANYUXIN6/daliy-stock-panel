@@ -248,10 +248,6 @@ async def test_cancelled_or_revoked_verification_cannot_publish_late_financial_w
     entered, release = Event(), Event()
     written = []
     store = auth.get_store(env.root)
-    if stop == "demote":
-        backup = store.create_user("backupadmin", "backup-initial-password", "admin", actor_id=env.owner.id)
-        backup_token, _ = store.login("backupadmin", "backup-initial-password", "test", "")
-        store.change_password(backup_token, "backup-initial-password", "backup-permanent-password")
 
     def sync(symbols, root, capset, on_progress=None, *, cancel_event=None, before_write=None):
         entered.set()
@@ -270,7 +266,9 @@ async def test_cancelled_or_revoked_verification_cannot_publish_late_financial_w
         elif stop == "revoke":
             store.revoke_session(env.owner.session_token)
         else:
-            store.update_user(env.owner.id, {"role": "guest"}, actor_id=backup["id"])
+            # Simulate a maintenance change; account management protects admin.
+            with store._connection(True) as db:
+                db.execute("UPDATE users SET role='guest' WHERE id=?", (env.owner.id,))
     finally:
         release.set()
         await asyncio.gather(*list(pipeline._tasks))

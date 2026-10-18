@@ -28,6 +28,7 @@ async function selectRole(value: string) { const role = host.querySelector<HTMLS
 it('creates a guest with a temporary password and clears modal data after success', async () => {
   await render(); await click('创建用户')
   expect(host.querySelector<HTMLSelectElement>('select[aria-label="角色"]')!.value).toBe('guest')
+  expect([...host.querySelectorAll('select[aria-label="角色"] option')].map(option => option.getAttribute('value'))).toEqual(['guest', 'pro'])
   await fill('用户名', 'new-guest'); await fill('临时密码', 'temp-password')
   await submit()
   expect(mocks.create).toHaveBeenCalledWith({ username: 'new-guest', password: 'temp-password', role: 'guest', pro_expires_on: null })
@@ -38,6 +39,7 @@ it('creates a guest with a temporary password and clears modal data after succes
 it('requires a pro expiry date and submits the selected date unchanged', async () => {
   await render(); await click('编辑权限')
   const role = host.querySelector<HTMLSelectElement>('select[aria-label="角色"]')!
+  expect([...role.options].map(option => option.value)).toEqual(['guest', 'pro'])
   await act(async () => { role.value = 'pro'; role.dispatchEvent(new Event('change', { bubbles: true })) })
   const date = host.querySelector<HTMLInputElement>('input[aria-label="Pro 到期日"]')!
   expect(date.required).toBe(true); expect(date.checkValidity()).toBe(false)
@@ -107,4 +109,18 @@ it('preserves a manually selected expiry when switching roles and resets new for
   await act(async () => document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })))
   await click('创建用户'); await selectRole('pro')
   expect(host.querySelector<HTMLInputElement>('input[aria-label="Pro 到期日"]')!.value).toBe('2026-11-17')
+})
+it('only allows viewing login history for the admin account', async () => {
+  const admin = { ...alice, id: 'admin-id', username: 'custom-admin', role: 'admin' }
+  mocks.list.mockResolvedValue({ users: [admin, alice], total: 2 })
+  await render()
+  const rows = [...host.querySelectorAll('tbody tr')]
+  const adminRow = rows.find(row => row.textContent?.includes('custom-admin'))!
+  const guestRow = rows.find(row => row.textContent?.includes('alice'))!
+  expect([...adminRow.querySelectorAll('button')].map(button => button.textContent)).toEqual(['登录记录'])
+  expect(adminRow.textContent).toContain('管理员账号受保护')
+  expect([...guestRow.querySelectorAll('button')].map(button => button.textContent)).toEqual(['编辑权限', '禁用', '重置密码', '强制下线', '登录记录'])
+  await act(async () => adminRow.querySelector<HTMLButtonElement>('button')!.click())
+  await settle()
+  expect(mocks.events).toHaveBeenLastCalledWith('admin-id', 0)
 })

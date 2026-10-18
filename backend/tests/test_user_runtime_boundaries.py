@@ -476,14 +476,15 @@ def test_delayed_notification_rechecks_admin_role(tmp_path):
     from app.services.auth import AuthStore
     from app.services.external_notifications import submit
     store = AuthStore(tmp_path)
-    first = store.bootstrap('admin', 'long-initial-password')
-    second = store.create_user('second', 'long-second-password', role='admin', actor_id=first['id'])
+    admin = store.bootstrap('admin', 'long-initial-password')
     queued = []
     delivered = []
     executor = SimpleNamespace(submit=lambda fn: queued.append(fn))
-    with user_scope(UserContext(second['id'], 'admin', tmp_path)):
+    with user_scope(UserContext(admin['id'], 'admin', tmp_path)):
         submit(executor, delivered.append, 'private-alert')
-    store.update_user(second['id'], {'role': 'guest'}, actor_id=first['id'])
+    # Simulate a maintenance change after enqueueing; account management protects admin.
+    with store._connection(True) as db:
+        db.execute("UPDATE users SET role='guest' WHERE id=?", (admin['id'],))
     queued[0]()
     assert delivered == []
 

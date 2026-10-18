@@ -247,21 +247,95 @@ def test_ordinary_user_cannot_read_secrets_or_change_shared_monitor_config(tmp_p
         )
 
 
-def test_concurrent_admin_demotion_protects_last_admin(tmp_path):
+@pytest.mark.parametrize("operation", ["create", "promote", "role", "expiry", "disable", "reset", "revoke"])
+def test_unique_admin_is_protected_without_account_or_session_changes(tmp_path, operation):
     store = AuthStore(tmp_path)
-    first = store.bootstrap("admin", "initial-secret")
-    second = store.create_user("admin2", "temporary-secret", "admin")
+    admin = store.bootstrap("custom-admin", "initial-secret")
+    guest = store.create_user("guest", "temporary-secret")
+    token, _ = store.login("custom-admin", "initial-secret", "ip", "")
+    before = store.list_users()
+    actions = {
+        "create": lambda: store.create_user("admin2", "temporary-secret", "admin", actor_id=admin["id"]),
+        "promote": lambda: store.update_user(guest["id"], {"role": "admin"}, actor_id=admin["id"]),
+        "role": lambda: store.update_user(admin["id"], {"role": "guest"}, actor_id=admin["id"]),
+        "expiry": lambda: store.update_user(admin["id"], {"pro_expires_on": "2099-12-31"}, actor_id=admin["id"]),
+        "disable": lambda: store.update_user(admin["id"], {"is_active": False}, actor_id=admin["id"]),
+        "reset": lambda: store.reset_password(admin["id"], "reset-secret", actor_id=admin["id"]),
+        "revoke": lambda: store.revoke_user_session(admin["id"], actor_id=admin["id"]),
+    }
+    with pytest.raises(AuthError) as error:
+        actions[operation]()
+    assert error.value.status == 409
+    assert store.list_users() == before
+    assert store.session(token)["user"]["id"] == admin["id"]
+    assert store.login("custom-admin", "initial-secret", "ip", "")[1]["authenticated"]
 
-    def demote(uid):
+
+@pytest.mark.parametrize("method,path,payload", [
+    ("POST", "/api/users", {"username": "admin2", "password": "temporary-secret", "role": "admin"}),
+    ("PATCH", "/api/users/{guest}", {"role": "admin"}),
+    ("PATCH", "/api/users/{admin}", {"role": "pro", "pro_expires_on": "2099-12-31"}),
+    ("PATCH", "/api/users/{admin}", {"is_active": False}),
+    ("POST", "/api/users/{admin}/reset-password", {"password": "reset-secret"}),
+    ("POST", "/api/users/{admin}/revoke-session", {}),
+])
+def test_http_rejects_admin_management_and_preserves_login(tmp_path, method, path, payload):
+    from app.api import auth, users
+    from app.services.auth_access import install_auth_middleware
+
+    store = AuthStore(tmp_path)
+    admin = store.bootstrap("custom-admin", "initial-secret")
+    guest = store.create_user("guest", "temporary-secret")
+    app = FastAPI()
+    app.state.auth_store = store
+    app.include_router(auth.router)
+    app.include_router(users.router)
+    install_auth_middleware(app)
+    with TestClient(app) as client:
+        client.post("/api/auth/login", json={"username": "custom-admin", "password": "initial-secret"})
+        token = client.cookies.get("tf_session")
+        before = store.list_users()
+        response = client.request(method, path.format(admin=admin["id"], guest=guest["id"]), json=payload)
+        assert response.status_code == 409
+        assert store.list_users() == before
+        assert store.session(token)["user"]["id"] == admin["id"]
+        assert client.get("/api/users").status_code == 200
+        assert client.get("/api/users/login-events", params={"user_id": admin["id"]}).json()["total"] == 1
+
+
+def test_concurrent_admin_promotions_cannot_add_an_admin(tmp_path):
+    store = AuthStore(tmp_path)
+    admin = store.bootstrap("admin", "initial-secret")
+    guests = [store.create_user(f"guest{i}", "temporary-secret") for i in range(2)]
+
+    def promote(uid):
         try:
-            AuthStore(tmp_path).update_user(uid, {"role": "guest"})
+            AuthStore(tmp_path).update_user(uid, {"role": "admin"}, actor_id=admin["id"])
             return True
         except AuthError:
             return False
 
     with ThreadPoolExecutor(max_workers=2) as pool:
-        assert sorted(pool.map(demote, [first["id"], second["id"]])) == [False, True]
+        assert list(pool.map(promote, [guest["id"] for guest in guests])) == [False, False]
     assert len([u for u in store.list_active_users() if u["role"] == "admin"]) == 1
+
+
+def test_admin_can_manage_ordinary_users_and_change_own_password(tmp_path):
+    store = AuthStore(tmp_path)
+    admin = store.bootstrap("admin", "initial-secret")
+    guest = store.create_user("guest", "temporary-secret", actor_id=admin["id"])
+    user = store.update_user(guest["id"], {"role": "pro", "pro_expires_on": "2099-12-31"}, actor_id=admin["id"])
+    assert user["role"] == "pro"
+    guest_token, _ = store.login("guest", "temporary-secret", "ip", "")
+    store.revoke_user_session(guest["id"], actor_id=admin["id"])
+    assert store.session(guest_token) is None
+    token, _ = store.login("admin", "initial-secret", "ip", "")
+    new_token, status = store.change_password(token, "initial-secret", "changed-secret")
+    assert status["user"]["role"] == "admin"
+    assert store.session(token) is None
+    assert store.session(new_token)["user"]["id"] == admin["id"]
+    store.revoke_session(new_token)
+    assert store.session(new_token) is None
 
 
 @pytest.mark.parametrize('path', [

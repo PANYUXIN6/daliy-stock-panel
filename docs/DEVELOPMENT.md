@@ -9,6 +9,17 @@
 3. [架构说明](ARCHITECTURE.md)：数据流、状态归属、运行与扩展边界。
 4. 目标模块、调用方和现有测试；涉及二开时阅读 [secondary-development.md](secondary-development.md)，并核对接口是否真实存在。
 
+## 分支与环境
+
+| 分支 | 对应环境 | 用途 |
+| --- | --- | --- |
+| `develop` | 本地与测试 | 日常开发、回归验证和数据实验 |
+| `main` | 服务器预发 | 接收已验证的改动，作为服务器发布版本来源 |
+
+正常流程为 `develop` 开发与验证 → 合入 `main` → GitHub CI 检查 → 自动发布同版本的 web 与 collector。现有 CI 对两个分支的 push 和目标分支为它们的 PR 运行后端测试与前端构建；只有 `push main` 且两个检查均成功时才运行预发部署。PR 与 `develop` 不部署；合并 PR 会产生 `main` 的 push，直接推送 `main` 同样触发发布。Docker 镜像发布工作流独立保留，服务器部署不依赖 `latest`。
+
+两个环境分别持有自己的 `DATA_DIR` 和配置。账号、会话、自选、个人策略、通知、研究产物、数据源与 AI 配置均独立；即使初始迁移时内容相同，后续修改也不互相同步。公共行情、财报、交易日历只在功能发布需要配套数据时，按选定数据集从本地同步到服务器，常规采集继续由服务器独立运行。具体发布边界见 [部署指南](deployment.md#本项目的环境与发布约定)。
+
 ## 环境与启动
 
 后端要求 Python 3.11 以上，使用 `uv`；当前 CI 使用 Python 3.12。前端使用 Node 20 和 pnpm 9，`package.json` 声明 pnpm 9.10.0。依赖来源为各子项目 manifest 与锁文件，完整配置见 [configuration.md](configuration.md)。
@@ -104,6 +115,7 @@ Ruff 规则定义在 `backend/pyproject.toml`。后端源码扩展和助手已�
 - [examples/open-api/README.md](../examples/open-api/README.md) 为历史接口示例；当前 Bearer Token、Token 管理与开放事件票据入口均停用，不可据此绕过账号认证。
 - `backend/scripts/stress_polars_concurrency.py`：Polars 并发专项验证；`probe_tickflow_pro.py`：供应商能力探针，`--live` 会发真实请求。它们服务特定问题，不能替代定向测试。
 - [scripts/upgrade_check.py](../scripts/upgrade_check.py)：源码二开升级的只读 Git 预检，目标 ref 须已在本地可解析，未提交修改不参与预演；详情见二开指南。
+- [scripts/ci_deploy.sh](../scripts/ci_deploy.sh) 为 GitHub runner 的预发发布入口；[scripts/deploy_preproduction.sh](../scripts/deploy_preproduction.sh) 在服务器构建、切换及验收，失败时尝试恢复旧双服务。连接信息保存在 GitHub `preproduction` 环境，设置与管理入口见[部署指南](deployment.md#github-自动发布预发)。发布脚本回归测试为 `backend/tests/test_ci_deploy.py` 与 `backend/tests/test_preproduction_deploy.py`，使用临时目录及命令替身，不访问真实服务器。
 
 多用户回归入口：`uv run pytest tests/test_multiuser_auth.py tests/test_multiuser_ai.py tests/test_user_private_stores.py tests/test_user_runtime_boundaries.py tests/test_research_ownership.py -q`。这些测试使用独立临时目录；不要指向实际用户数据执行迁移或写入测试。旧开放接口契约文件保留用于历史维护，不代表当前认证入口已开放。
 

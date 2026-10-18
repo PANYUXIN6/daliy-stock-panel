@@ -171,6 +171,8 @@ AI 助手由 `frontend/src/custom/assistant/` 和 `backend/app/custom/assistant/
 
 ## 外部系统与核对范围
 
+预发部署由 GitHub CI 连接服务器 SSH 执行：`develop` 用于本地测试，`main` 的后端和前端检查成功后，CI 将明确提交的源码交给远端发布脚本。远端运行根目录持有独立的 `data/`、`.env`、`tiers.yaml` 和部署覆盖配置，版本源码位于 `releases/<SHA>/`；构建及服务验收完成后更新 `current`。这条发布链只传输代码，公共金融数据的跨环境同步仍按发布需要单独处理。凭据归属 GitHub `preproduction` Environment，服务器健康失败时尝试恢复旧版本双服务，不能据此推断运行数据已恢复。入口与验证见 [仓库地图](REPO_MAP.md#关键调用链) 和[部署指南](deployment.md#github-自动发布预发)。
+
 外部依赖包括行情供应商或用户 HTTP 源、模型 API 与通知通道。本地 Codex CLI 和旧 Token 开放通道已停用；stocksdk 插件另有 Node 桥接，OCR 涉及 Tesseract 等机器能力，详情在对应模块与配置文档。
 
 本文基于入口、代表性调用链、存储与类型定义及现有测试源码核对，没有验证真实行情源、模型服务、通知投递或全部平台运行行为。具体性能数值、第三方可用性和业务正确性需要对应任务的实际验证；后续修改入口、职责、数据流或缓存归属时应同步相关段落。

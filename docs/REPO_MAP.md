@@ -85,6 +85,8 @@ authority_status: observed
 
 ## 关键调用链
 
+预发自动发布入口（2026-10-18）：`.github/workflows/ci.yml` 在 `push main` 的后端测试与前端构建成功后调用 `scripts/ci_deploy.sh`，上传指定提交源码并通过 SSH 执行 `scripts/deploy_preproduction.sh`。后者在远端 `releases/<SHA>/` 构建镜像，保留运行根目录的数据与配置，完成双服务健康验收或尝试恢复旧版本；`scripts/preproduction_compose.sh` 管理当前已发布版本。回归入口为 `backend/tests/test_ci_deploy.py` 和 `backend/tests/test_preproduction_deploy.py`，操作说明见 [部署指南](deployment.md#github-自动发布预发)。
+
 ```text
 盘后同步：web api/pipeline → collector_proxy → collector pipeline_jobs → daily_pipeline.run_now
           → instrument_sync / kline_sync → Parquet

@@ -10,7 +10,7 @@ from pydantic import BaseModel
 
 from app.services import ai_reports
 from app.services.financial_analyzer import analyze_financials_stream
-from app.services.financial_sync import FINANCIAL_TABLES, get_financial_df
+from app.services.financial_sync import FINANCIAL_SYNC_TABLES, FINANCIAL_TABLES, get_financial_df
 from app.services.ndjson_heartbeat import with_heartbeat
 from app.tickflow.capabilities import Cap
 
@@ -140,9 +140,19 @@ async def trigger_financial_sync(repo, capset, scheduler, table: str = "all", qu
     from app.api.pipeline import _submit_job
 
     _require_financial(capset)
-    if table not in {*FINANCIAL_TABLES, "all"}:
-        raise HTTPException(400, f"invalid table: {table}")
-    tables = list(FINANCIAL_TABLES) if table == "all" else [table]
+    if table not in {*FINANCIAL_SYNC_TABLES, "all", "unfinished"}:
+        raise HTTPException(400, "当前财务采集仅支持利润表")
+    if table == "unfinished":
+        from app.services.financial_sync import unfinished_financial_tables
+
+        try:
+            tables = unfinished_financial_tables(repo.store.data_dir)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        if not tables:
+            raise HTTPException(400, "利润表已完成，更新数据请使用更新利润表")
+    else:
+        tables = list(FINANCIAL_SYNC_TABLES) if table == "all" else [table]
     labels = {"metrics": "核心指标", "income": "利润表", "balance_sheet": "资产负债表",
               "cash_flow": "现金流量表", "shares": "历史股本"}
 
@@ -154,11 +164,24 @@ async def trigger_financial_sync(repo, capset, scheduler, table: str = "all", qu
             errors = []
             for index, name in enumerate(tables):
                 progress("financials", int(index * 100 / len(tables)), f"同步财务 {name}…")
+                rate_limits = 0
                 try:
-                    result.update(scheduler.run_now(name, on_progress=lambda done, total, index=index, name=name: progress(
-                        "financials", int((index + done / max(total, 1)) * 95 / len(tables)),
-                        f"财务 {name} {done}/{total}",
-                    ), cancel_event=cancel_event))
+                    while True:
+                        try:
+                            result.update(scheduler.run_now(name, on_progress=lambda done, total, index=index, name=name: progress(
+                                "financials", int((index + done / max(total, 1)) * 95 / len(tables)),
+                                f"财务 {name} {done}/{total}",
+                            ), cancel_event=cancel_event))
+                            break
+                        except ProviderRateLimitError:
+                            from app.services.financial_sync import wait_financial_rate_limit
+
+                            rate_limits += 1
+                            if not wait_financial_rate_limit(rate_limits, lambda remaining, index=index, name=name: progress(
+                                "financials", int(index * 95 / len(tables)),
+                                f"{labels[name]}限流冷却，{remaining}秒后从已保存批次继续",
+                            ), cancel_event):
+                                raise
                 except ProviderRateLimitError:
                     raise
                 except Exception as exc:  # noqa: BLE001
@@ -177,7 +200,7 @@ async def trigger_financial_sync(repo, capset, scheduler, table: str = "all", qu
 
     result = await _submit_job(repo, quote_service, make_run,
                                request_key=f"financial:{table}", datasets=["financials"],
-                               with_cancel_event=True)
+                               with_cancel_event=True, pause_quotes=False)
     return {"status": "ok", "synced": {"started": not result["reused"]}, **result}
 
 

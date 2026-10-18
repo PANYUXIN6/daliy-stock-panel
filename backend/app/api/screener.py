@@ -46,6 +46,134 @@ class PresetRequest(BaseModel):
     timeframe: str = "1d"
 
 
+class EarningsGapVerifyRequest(BaseModel):
+    as_of: date | None = None
+    pool: list[str] | None = None
+
+
+@router.post("/earnings-gap/verify")
+async def verify_earnings_gap(req: EarningsGapVerifyRequest, request: Request):
+    """显式候选核验命令；GET、普通策略重算与回测均不触发采集。"""
+    from datetime import UTC
+
+    from fastapi.encoders import jsonable_encoder
+
+    from app.api.pipeline import _submit_job
+    from app.services import financial_sync, preferences
+    from app.services.auth import require_current_session
+    from app.services.earnings_gap_review import STRATEGY_ID, find_gap_candidates, review_candidates
+    from app.services.pipeline_jobs import JobCancelledError
+    from app.services.user_context import current_user, user_scope
+
+    owner = current_user()
+
+    def authorize():
+        actor = require_current_session()
+        if actor["role"] != "admin":
+            raise HTTPException(403, "候选财务更新需要管理员权限")
+
+    authorize()
+    if preferences.get_financial_provider() != "fuyao":
+        raise HTTPException(400, "候选财务核验当前仅支持扶摇，请先选择扶摇财务数据源")
+    repo = request.app.state.repo
+    svc = ScreenerService(repo)
+    latest = svc.latest_date()
+    as_of = req.as_of or latest
+    if as_of is None:
+        raise HTTPException(400, "没有可用日线，请先更新行情")
+    if as_of != latest:
+        raise HTTPException(400, "历史日期仅回放本地版本，请切换最新交易日后更新候选财务")
+    engine = getattr(runtime_for(request), "strategy_engine", None)
+    if engine is None:
+        raise HTTPException(503, "策略引擎未初始化")
+    job_ref: dict[str, str] = {}
+
+    def persist(payload, current):
+        authorize()
+        # 财务确认只说明信号依据成立；正式结果仍走个人策略的完整执行契约。
+        confirmed = {
+            row["symbol"]: row for row in payload["verification"]["candidates"]
+            if row["verification_status"] == "confirmed"
+        }
+        rows = []
+        if confirmed:
+            overrides = strategy_config.load_override(repo.store.data_dir, STRATEGY_ID)
+            params = dict(overrides.get("params") or {})
+            context = svc.build_strategy_context(
+                engine, as_of, [STRATEGY_ID], current=current,
+                params_map={STRATEGY_ID: params}, overrides_map={STRATEGY_ID: overrides},
+            )
+            result = engine.run(
+                STRATEGY_ID, context, pool=list(confirmed), params=params, overrides=overrides,
+            )
+            rows = [{**confirmed[row["symbol"]], **row} for row in result.rows]
+            payload["elapsed_ms"] = result.elapsed_ms
+        payload.update(rows=rows, total=len(rows))
+        authorize()
+        strategy_cache.write_cache(repo.store.data_dir, str(as_of), {STRATEGY_ID: payload})
+
+    def make_run(progress, cancel_event):
+        def run():
+            with user_scope(owner):
+                authorize()
+                if cancel_event is not None and cancel_event.is_set():
+                    raise JobCancelledError("earnings_candidates")
+                progress("earnings_candidates", 2, "先扫描当日完整向上跳空缺口")
+                frame = svc._load_enriched_for_date(as_of)
+                candidates = find_gap_candidates(repo, frame, as_of, req.pool)
+                job_id = job_ref.get("id")
+                payload = review_candidates(repo, candidates, as_of, status="running", job_id=job_id)
+                persist(payload, frame)
+                try:
+                    symbols = candidates["symbol"].to_list() if not candidates.is_empty() else []
+                    progress("financials", 10, f"发现 {len(symbols)} 只缺口候选，仅更新这些股票的利润表")
+
+                    def financial_progress(done, total):
+                        authorize()
+                        progress("financials", 10 + int(80 * done / max(total, 1)),
+                                 f"候选利润表 {done}/{total}")
+
+                    updated = financial_sync.sync_candidate_income(
+                        symbols, repo.store.data_dir, request.app.state.capabilities,
+                        financial_progress, cancel_event=cancel_event, before_write=authorize,
+                    ) if symbols else {"errors": {}}
+                    if cancel_event is not None and cancel_event.is_set():
+                        raise JobCancelledError("earnings_candidates")
+                    payload = review_candidates(
+                        repo, candidates, as_of, status="completed",
+                        checked_at=datetime.now(UTC).isoformat(), errors=updated["errors"], job_id=job_id,
+                    )
+                    persist(payload, frame)
+                    verified = payload["verification"]
+                    progress("done", 100, f"核验完成：已确认 {verified['confirmed_count']}，待核验 {verified['pending_count']}")
+                    return jsonable_encoder(payload)
+                except Exception:
+                    # 失败/取消仍保留已发现候选；会话失效时不再迟到写个人结果。
+                    payload["verification"]["status"] = "failed"
+                    try:
+                        persist(payload, frame)
+                    except Exception:  # noqa: BLE001 - 会话撤销或存储失败不覆盖原始异常。
+                        logger.warning("候选核验未能保存失败快照", exc_info=True)
+                    raise
+        return run
+
+    def finalize():
+        from app.services.shared_runtime import publish_data_update
+
+        # 候选任务只写独立财务表，不重建整市场行情指标缓存。
+        with repo._lock:
+            repo.store._register_views()
+        publish_data_update(repo.store.data_dir, ["financials"])
+
+    result = await _submit_job(
+        repo, getattr(request.app.state, "quote_service", None), make_run,
+        request_key=f"financial:earnings-gap:{owner.id}:{as_of}:{','.join(sorted(set(req.pool or [])))}",
+        datasets=["financials"], finalize=finalize, with_cancel_event=True, pause_quotes=False,
+    )
+    job_ref["id"] = result["job_id"]
+    return result
+
+
 def _safe(result_dict: dict) -> dict:
     """sanitize for JSON(NaN / Inf → None)."""
     rows = result_dict.get("rows", [])
@@ -422,6 +550,9 @@ def get_cached_summary(request: Request):
             # 渐进式 run_all 写入的计算时间戳; 监控实时叠加/旧缓存无此字段 → None,
             # 前端视为新鲜 (有值即为最新一轮实时结果)
             "computed_at": result.get("computed_at"),
+            **({"verification": {key: value for key, value in result["verification"].items()
+                                  if key != "candidates"}}
+               if isinstance(result.get("verification"), dict) else {}),
         }
         for sid, result in results.items()
         if isinstance(result, dict)
@@ -471,6 +602,8 @@ def get_cached_result(
         "rows": _rows_with_ext(raw_result.get("rows") or [], ext_values),
         "total": int(raw_result.get("total") or 0),
         "elapsed_ms": 0.0,
+        **({"verification": raw_result["verification"]}
+           if isinstance(raw_result.get("verification"), dict) else {}),
     }
 
     ever_rows = None

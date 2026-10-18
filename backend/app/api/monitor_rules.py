@@ -289,6 +289,8 @@ def save_rule(req: RuleModel, request: Request):
             raise HTTPException(status_code=503, detail="策略引擎未初始化")
         try:
             strategy = strategy_engine.get(str(rule.get("strategy_id")))
+            if strategy.meta.get("realtime_supported") is False:
+                raise ValueError("该策略仅支持手动日线筛选，不能开启实时监控")
             strategy_engine.validate_context(
                 strategy,
                 StrategyDataContext(

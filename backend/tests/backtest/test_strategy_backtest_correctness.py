@@ -165,6 +165,31 @@ def test_basic_filter_only_limits_entries_not_panel_rows():
     }
 
 
+def test_missing_financial_input_blocks_entries_but_preserves_exit_and_price_rows():
+    start = date(2024, 1, 1)
+    panel = pl.DataFrame({
+        "symbol": ["A"] * 3, "name": ["A"] * 3,
+        "date": [start + timedelta(days=i) for i in range(3)],
+        "open": [10.] * 3, "high": [11.] * 3, "low": [9.] * 3,
+        "close": [10.] * 3, "volume": [1000.] * 3, "amount": [1000.] * 3,
+        "roe_latest": [12., None, 12.], "signal_ma_dead_5_20": [False, True, False],
+        "signal_limit_up": [False] * 3, "signal_limit_down": [False] * 3,
+    })
+    strategy = _strategy(exit_signals=["signal_ma_dead_5_20"])
+    strategy.meta["scoring"] = {"roe_latest": 1.}
+    engine = _EngineStub(panel)
+    service = StrategyBacktestService(engine=engine, strategy_engine=_StrategyEngineStub(strategy))
+    result = service.run(StrategyBacktestConfig(
+        strategy_id="test", symbols=None, start=start, end=start + timedelta(days=2),
+        matching="close_t", mode="position",
+    ))
+    assert result.error is None
+    assert engine.sim_matrix.shape == (3, 1)
+    assert engine.sim_matrix.entry[:, 0].tolist() == [1, 0, 1]
+    assert engine.sim_matrix.exit[:, 0].tolist() == [0, 1, 0]
+    assert np.isfinite(engine.sim_matrix.close).all()
+
+
 def test_non_matrix_strategy_applies_regime_filter_and_reports_config(tmp_path):
     start = date(2024, 1, 1)
     panel = pl.DataFrame([
@@ -690,3 +715,87 @@ def test_full_mode_reports_factor_attribution():
     assert attribution["n_win"] == 1 and attribution["n_lose"] == 0
     assert attribution["factors"][0]["factor"] == "factor"
     assert attribution["factors"][0]["win_mean"] == 5.0
+
+
+def test_overlay_scan_backtest_and_monitor_share_saved_candidates_and_clear(tmp_path, monkeypatch, private_owner):
+    from app.api import strategy as strategy_api
+    from app.strategy import config, monitor_rules
+    from app.strategy.engine import StrategyDataContext, StrategyEngine
+    from app.strategy.monitor import MonitorRuleEngine
+
+    start = date(2026, 1, 5)
+    monkeypatch.setattr('app.strategy.monitor.cn_today', lambda: start)
+    panel = pl.DataFrame([{'symbol': symbol, 'name': symbol, 'date': start + timedelta(days=i),
+                          'open': price, 'high': price, 'low': price, 'close': price,
+                          'volume': 1000., 'amount': 1000.,
+                          'signal_ma_dead_5_20': symbol == 'A',
+                          'signal_limit_up': False, 'signal_limit_down': False}
+                         for i in range(3) for symbol, price in [('A', 5.), ('B', 15.), ('C', 20.)]])
+
+    class NativeStrategy:
+        def required_fields(self):
+            return frozenset({'close'})
+
+        def required_warmup_bars(self, params):
+            return 1
+
+        def compute_signals(self, market, params):
+            exits = np.zeros(market.shape, dtype=np.uint8)
+            exits[:, 0] = 1
+            return make_signal_matrix(market.shape, entry=np.ones(market.shape, dtype=np.uint8), exit=exits)
+
+    for backend in ['polars_expr', 'matrix_native']:
+        strategy = _strategy(execution_backend=backend, matrix_strategy=NativeStrategy() if backend == 'matrix_native' else None,
+                             exit_signals=['signal_ma_dead_5_20'])
+        strategy.meta['scoring'] = {'close': 1.}
+        strategy.meta['order_by'] = 'score'
+        strategy_engine = StrategyEngine(strategy_dirs=[])
+        strategy_engine._strategies['test'] = strategy
+        engine = _EngineStub(panel)
+        service = StrategyBacktestService(engine=engine, strategy_engine=strategy_engine)
+        monitor = MonitorRuleEngine()
+        monitor.set_strategy_engine(strategy_engine)
+        monitor.set_data_dir(tmp_path)
+        monitor.set_history_loader(lambda day, bars: panel.filter(pl.col('date') <= day))
+        monitor.set_rules([monitor_rules.normalize(dict(
+            id='overlay_consistency', name='叠加条件一致性', type='strategy',
+            asset_type='stock', scope='all', strategy_id='test', notify_events=['buy_signal', 'sell_signal']))])
+        runtime = SimpleNamespace(strategy_engine=strategy_engine, monitor_engine=monitor)
+        request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(
+            repo=SimpleNamespace(store=SimpleNamespace(data_dir=tmp_path)),
+            user_runtimes=SimpleNamespace(get=lambda owner, runtime=runtime: runtime))))
+        cases = [
+            ([{'left': 'close', 'op': '>', 'right': '10'}], ['C', 'B'], [0, 1, 1], {'B': 0., 'C': 100.}),
+            ([{'left': 'close', 'op': '>', 'right': '999999'}], [], [0, 0, 0], {}),
+            ([], ['C', 'B', 'A'], [1, 1, 1], {'A': 0., 'B': 200 / 3, 'C': 100.}),
+        ]
+        for conditions, expected_symbols, expected_entry, expected_scores in cases:
+            strategy_api.save_config(strategy_api.SaveConfigRequest(
+                strategy_id='test', overrides={'overlay_filter': conditions}), request)
+            overrides = config.load_override(tmp_path, 'test')
+            assert overrides['overlay_filter'] == conditions
+            assert monitor.latest_strategy_results() == {}
+            engine.sim_matrix = None
+            result = service.run(StrategyBacktestConfig(strategy_id='test', symbols=None, start=start,
+                end=start + timedelta(days=2), matching='close_t', mode='position', overrides=overrides))
+            if expected_symbols:
+                assert result.error is None
+                assert engine.sim_matrix.entry.tolist() == [expected_entry] * 3
+                assert engine.sim_matrix.exit.tolist() == [[1, 0, 0]] * 3
+            else:
+                assert result.error == '在指定区间内未产生买入信号'
+                assert engine.sim_matrix is None
+            context = StrategyDataContext(asset_type='stock', timeframe='1d', as_of=start,
+                current=panel.filter(pl.col('date') == start), history=panel.filter(pl.col('date') <= start))
+            selected = strategy_engine.run('test', context, overrides=overrides)
+            assert [row['symbol'] for row in selected.rows] == expected_symbols
+            assert set(selected.scores or {}) == set(expected_scores)
+            for symbol, score in expected_scores.items():
+                np.testing.assert_allclose(selected.scores[symbol], score)
+                np.testing.assert_allclose(engine.sim_matrix.score[:, ['A', 'B', 'C'].index(symbol)], score)
+            assert [hit['symbol'] for hit in selected.exit_signal_hits] == ['A']
+            monitor.evaluate(context.current)
+            monitored = monitor.latest_strategy_results()['test']
+            assert [row['symbol'] for row in monitored['rows']] == expected_symbols
+            for row in monitored['rows']:
+                np.testing.assert_allclose(row['score'], expected_scores[row['symbol']])

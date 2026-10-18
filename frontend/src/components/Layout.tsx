@@ -222,7 +222,7 @@ export function Layout() {
   const { data: versionData } = useVersion()
   // 更新检查 (单例 store): 启动静默查一次 GitHub Releases, 供左下角版本号徽标
   const update = useUpdateCheck()
-  const hasUpdate = update.status === 'found'
+  const hasUpdate = user?.role === 'admin' && update.status === 'found'
   const { data: prefs } = usePreferences()
   // 数据源列表 (用于实时行情状态显示当前数据源名称)
   const { data: dataSources } = useQuery({

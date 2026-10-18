@@ -17,6 +17,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from app.config import settings
+from app.market_time import cn_today
 from app.services.auth import AuthError, require_current_session
 from app.services.backtest import (
     BacktestConfig,
@@ -101,7 +102,7 @@ def run(req: BacktestRequest, request: Request):
     """信号回测 — 现有接口，向后兼容。"""
     repo = request.app.state.repo
     svc = BacktestService(repo)
-    end = req.end or date.today()
+    end = req.end or cn_today()
     start = req.start or (end - timedelta(days=365 * 3))
 
     cfg = BacktestConfig(
@@ -164,7 +165,7 @@ def factor_run(req: FactorBacktestRequest, request: Request):
     engine = _get_engine(request)
     svc = FactorBacktestService(engine)
 
-    end = req.end or date.today()
+    end = req.end or cn_today()
     start = _resolve_start(req, end, FACTOR_DEFAULT_DAYS)
     _guard_server_backtest_range(start, end)
     symbols = req.symbols if req.symbols else None
@@ -218,7 +219,7 @@ def factor_batch(req: FactorBatchRequest, request: Request):
     if invalid:
         raise HTTPException(status_code=400, detail=f"不支持的因子: {', '.join(invalid)}")
 
-    end = req.end or date.today()
+    end = req.end or cn_today()
     start = _resolve_start(req, end, FACTOR_DEFAULT_DAYS)
     _guard_server_backtest_range(start, end)
     symbols = req.symbols if req.symbols else None
@@ -386,7 +387,7 @@ def strategy_run(req: StrategyBacktestRequest, request: Request):
     from app.backtest.strategy import StrategyBacktestConfig
     from app.backtest.worker import make_worker_task, run_worker_task
 
-    end = req.end or date.today()
+    end = req.end or cn_today()
     start = _resolve_start(req, end, FACTOR_DEFAULT_DAYS)
     _guard_server_backtest_range(start, end)
     _guard_minute_strategy_backtest(request, req.strategy_id, start, req.asset_type)
@@ -531,7 +532,7 @@ async def strategy_stream(
     from app.backtest.worker import make_worker_task, run_worker_task
 
     try:
-        end_date = date.fromisoformat(end) if end else date.today()
+        end_date = date.fromisoformat(end) if end else cn_today()
         start_date = date.fromisoformat(start) if start else None
     except ValueError as e:
         raise HTTPException(status_code=400, detail=f"日期格式错误: {e}") from e
@@ -836,7 +837,7 @@ async def optimize_stream(
     from app.backtest.worker import make_worker_task, run_worker_task
 
     try:
-        end_date = date.fromisoformat(end) if end else date.today()
+        end_date = date.fromisoformat(end) if end else cn_today()
         start_date = date.fromisoformat(start) if start else None
     except ValueError as e:
         raise HTTPException(status_code=400, detail=f"日期格式错误: {e}") from e
@@ -1065,7 +1066,7 @@ async def walkforward_stream(
     direction = direction or None
 
     try:
-        end_date = date.fromisoformat(end) if end else date.today()
+        end_date = date.fromisoformat(end) if end else cn_today()
         start_date = date.fromisoformat(start) if start else None
     except ValueError as e:
         raise HTTPException(status_code=400, detail=f"日期格式错误: {e}") from e

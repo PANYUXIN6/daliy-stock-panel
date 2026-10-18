@@ -35,6 +35,14 @@ def sync_calendar(data_dir: Path | None = None) -> dict:
         "end": max(now.date(), max(days)).isoformat(),
         "updated_at": now.isoformat(),
     }
+    previous = calendar_status(data_dir)
+    # 供应商滚动一年窗口不能删掉已经确认的事件交易日；只合并重叠覆盖，
+    # 长期停采形成的未知区间不据此假装连续已知。
+    if (previous and payload["start"] <= previous["end"]
+            and previous["start"] <= payload["end"]):
+        payload["days"] = sorted(set(previous["days"]) | set(payload["days"]))
+        payload["start"] = min(previous["start"], payload["start"])
+        payload["end"] = max(previous["end"], payload["end"])
     path = _path(data_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".tmp")

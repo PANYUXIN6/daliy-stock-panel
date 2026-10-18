@@ -488,3 +488,22 @@ def test_cjk_string_field_end_to_end(data_dir):
     assert col in frame.columns
     out = custom_signals.inject(frame, custom_signals.build_expressions([sig]))
     assert out["csg_robot"].to_list() == [True]
+
+
+def test_overlay_ext_timeseries_agrees_with_matrix_and_rejects_snapshot(data_dir):
+    from app.backtest.matrix import build_market_data_matrix
+    from app.strategy import overlay
+    cfg = _mk_config(data_dir)
+    write_ext_parquet(pl.DataFrame({
+        'symbol': ['A'], 'hot': [5.], 'cnt': [1], 'name': ['AI'],
+    }), cfg, data_dir, snapshot_date=date(2026, 1, 5))
+    cond = [{'left': COL, 'op': '>', 'right': '1'}]
+    overlay.resolve({'overlay_filter': cond})
+    frame = pl.DataFrame({'symbol': ['A', 'A'], 'date': [date(2026, 1, 2), date(2026, 1, 5)],
+                          'open': [10., 10.], 'high': [10., 10.], 'low': [10., 10.],
+                          'close': [10., 10.], 'volume': [100., 100.]})
+    assert overlay.mask(frame, cond).to_list() == [False, True]
+    assert overlay.matrix_mask(build_market_data_matrix(frame), cond).tolist() == [[False], [True]]
+    _mk_config(data_dir, mode='snapshot')
+    with pytest.raises(ValueError, match='最新快照'):
+        overlay.resolve({'overlay_filter': cond})

@@ -11,7 +11,7 @@ from pydantic import BaseModel, Field, model_validator
 
 from app.market_time import CN_TZ, cn_now
 from app.services import preferences, trading_day
-from app.services.financial_sync import FINANCIAL_TABLES
+from app.services.financial_sync import FINANCIAL_SYNC_TABLES
 
 
 class CollectionSyncRequest(BaseModel):
@@ -23,8 +23,8 @@ class CollectionSyncRequest(BaseModel):
 
     @model_validator(mode="after")
     def validate_scope(self):
-        if self.kind == "financial" and self.table not in (*FINANCIAL_TABLES, "all"):
-            raise ValueError("请选择有效的财务表")
+        if self.kind == "financial" and self.table not in (*FINANCIAL_SYNC_TABLES, "all", "unfinished"):
+            raise ValueError("当前财务采集仅支持利润表")
         if self.kind == "index_daily" and (self.days is None or self.days < 30):
             raise ValueError("指数天数必须在 30 到 5000 之间")
         if self.kind == "minute" and (not self.symbol or not self.symbol.strip() or self.days is None or self.days > 30):
@@ -68,7 +68,7 @@ def collection_context(request_key: str | None, repo) -> dict | None:
         earliest = repo.earliest_daily_date()
         return {"provider": preferences.get_adj_factor_provider(), "start_date": str(earliest) if earliest else None}
     if kind == "financial":
-        return {"provider": preferences.get_financial_provider()}
+        return {"provider": preferences.get_financial_provider(), "tables": list(FINANCIAL_SYNC_TABLES)}
     if kind == "index_daily":
         return {"provider": "tickflow", "symbols": preferences.get_pipeline_index_symbols()}
     if kind == "minute":
@@ -184,7 +184,7 @@ def check_collection_sync(request: CollectionSyncRequest, repo, *, quote_service
         return _response()
 
     if request.kind == "financial":
-        tables = FINANCIAL_TABLES if request.table == "all" else (request.table,)
+        tables = FINANCIAL_SYNC_TABLES if request.table == "all" else (request.table,)
         if request.table == "all" and not all(table in result for table in tables):
             return _response()
         available = [table for table in tables
@@ -195,8 +195,8 @@ def check_collection_sync(request: CollectionSyncRequest, repo, *, quote_service
         if len(available) != len(tables):
             labels = {"metrics": "核心指标", "income": "利润表", "balance_sheet": "资产负债表",
                       "cash_flow": "现金流量表", "shares": "历史股本"}
-            available_names = "、".join(labels[table] for table in available)
-            unavailable_names = "、".join(labels[table] for table in tables if table not in available)
+            available_names = "、".join(labels[table] for table in labels if table in available)
+            unavailable_names = "、".join(labels[table] for table in labels if table in tables and table not in available)
             message = (f"所选五张财务表今天已执行过同源同步任务。当前有本地可用结果：{available_names}；"
                        f"本次任务未确认有可用结果：{unavailable_names}。财务公告仍可能新增或修订，是否重新拉取？")
     elif request.kind == "adj_factor":

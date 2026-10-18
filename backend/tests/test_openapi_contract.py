@@ -45,6 +45,8 @@ EXPECTED_OPEN_ENDPOINTS: set[str] = {
     "GET /api/kline/minute-range",
     "GET /api/overview/market",
     "GET /api/paper/account",
+    "DELETE /api/paper/account",
+    "GET /api/paper/rounds",
     "POST /api/paper/account",
     "GET /api/paper/accounts",
     "POST /api/paper/arena/batch_create",

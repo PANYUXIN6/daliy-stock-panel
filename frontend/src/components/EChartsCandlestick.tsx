@@ -3,6 +3,7 @@ import { chartTheme, getTheme, useTheme } from '@/lib/theme'
 import { fmtPct } from '@/lib/format'
 import * as echarts from 'echarts'
 import type { ECharts, EChartsOption } from 'echarts'
+import type { PriceGap } from '@/lib/api'
 
 export interface OHLC {
   date: string
@@ -15,6 +16,7 @@ export interface OHLC {
   ma10?: number | null
   ma20?: number | null
   ma60?: number | null
+  bull_bear_line?: number | null
   macd_dif?: number | null
   macd_dea?: number | null
   macd_hist?: number | null
@@ -32,10 +34,14 @@ export interface ChartMarker {
   date: string
   kind: 'buy' | 'sell' | 'neutral'
   label?: string
+  /** 标记的悬浮说明，纯文本，支持换行。 */
+  description?: string
   /** 若为 true，标记放在蜡烛上方（如涨停连板标签）。 */
   above?: boolean
   /** 自定义标签颜色，覆盖默认的 kind 对应色。 */
   color?: string
+  symbol?: 'arrow' | 'diamond'
+  offset?: number
 }
 
 export interface ChartRange {
@@ -317,6 +323,7 @@ export const INDICATORS = SUB_CHARTS.filter(s => s.key !== 'vol')
 /** 主图叠加指标 (画在 K 线上方, 不占副图空间) */
 export const OVERLAY_INDICATORS: { key: string; label: string }[] = [
   { key: 'boll', label: 'BOLL' },
+  { key: 'bull_bear_line', label: '多空线' },
 ]
 
 interface Props {
@@ -324,6 +331,7 @@ interface Props {
   markers?: ChartMarker[]
   ranges?: ChartRange[]
   priceLines?: ChartPriceLine[]
+  priceGaps?: PriceGap[]
   height?: number
   showMA?: boolean
   showInfoBar?: boolean
@@ -365,6 +373,17 @@ const COMPACT_THRESHOLD = 60
 
 /** 加入自选日竖线颜色 (蓝色虚线, 与同花顺的标注观感一致) */
 const ADDED_DATE_COLOR = '#3B82F6'
+
+const BULL_BEAR_UP = '#FF0000'
+const BULL_BEAR_DOWN = '#08FF16'
+
+function bullBearInfoHTML(data: OHLC[], index: number): string {
+  const value = data[index]?.bull_bear_line
+  const previous = data[index - 1]?.bull_bear_line
+  const color = value != null && previous != null && value < previous ? BULL_BEAR_DOWN : BULL_BEAR_UP
+  const label = value != null && Number.isFinite(value) ? value.toFixed(2) : '—'
+  return `<span style="color:${color}">多空线:${label}</span>`
+}
 
 /** 子图上方信息栏高度 (px) */
 const INFO_BAR_H = 16
@@ -465,6 +484,19 @@ function buildSubInfoGraphics(
   return graphics
 }
 
+function markerTooltip(description?: string) {
+  if (!description) return undefined
+  return {
+    trigger: 'item' as const,
+    confine: true,
+    backgroundColor: CT().tooltipBg,
+    borderColor: CT().border,
+    borderWidth: 1,
+    textStyle: { color: CT().tooltipText, fontSize: 12, lineHeight: 20 },
+    formatter: () => echarts.format.encodeHTML(description).replace(/\n/g, '<br/>'),
+  }
+}
+
 function buildOption(
   data: OHLC[],
   dates: string[],
@@ -480,6 +512,7 @@ function buildOption(
   linkedPrice: number | null | undefined,
   volumeCompare: VolumeCompareConfig,
   addedDate: string | null | undefined,
+  priceGaps: PriceGap[] | undefined,
 ): EChartsOption {
   const candleData = data.map(d => [d.open, d.close, d.low, d.high])
 
@@ -493,19 +526,20 @@ function buildOption(
       const d = data[idx]
       const isBuy = m.kind === 'buy'
       const isSell = m.kind === 'sell'
+      const tooltip = markerTooltip(m.description)
 
       if (m.above) {
         const dotColor = m.color ?? (isBuy ? '#FACC15' : CT().text)
         if (compact) {
           markPointData.push({
-            name: m.date, coord: [m.date, d.high],
+            name: m.date, coord: [m.date, d.high], tooltip,
             symbol: 'circle', symbolSize: 4, symbolOffset: [0, -10],
             itemStyle: { color: dotColor, cursor: 'pointer' },
             label: { show: false }, z: 100, zlevel: 10,
           })
         } else {
           markPointData.push({
-            name: m.date, coord: [m.date, d.high],
+            name: m.date, coord: [m.date, d.high], tooltip,
             symbol: 'circle', symbolSize: 12, symbolOffset: [0, -2],
             itemStyle: { color: 'transparent' },
             label: {
@@ -518,12 +552,12 @@ function buildOption(
         }
       } else {
         markPointData.push({
-          name: m.label ?? '',
+          name: m.date, tooltip,
           coord: [m.date, isBuy ? d.low : d.high],
-          symbol: 'arrow', symbolSize: 12,
+          symbol: m.symbol ?? 'arrow', symbolSize: 12,
           symbolRotate: isBuy ? 0 : 180,
-          symbolOffset: isBuy ? [0, '60%'] : [0, '-60%'],
-          itemStyle: { color: isBuy ? THEME.bull : isSell ? THEME.bear : CT().text },
+          symbolOffset: [0, m.offset ?? (isBuy ? '60%' : '-60%')],
+          itemStyle: { color: m.color ?? (isBuy ? THEME.bull : isSell ? THEME.bear : CT().text) },
           label: {
             show: !!m.label, formatter: m.label ?? '',
             position: isBuy ? 'bottom' : 'top', distance: 8,
@@ -686,6 +720,28 @@ function buildOption(
     markLine: markLineData.length > 0 ? { silent: true, symbol: 'none', data: markLineData, animation: false } : undefined,
   })
 
+  const gapAreas = (priceGaps ?? []).filter(gap => gap.date <= dates[dates.length - 1] && gap.upper > gap.lower).map(gap => {
+    const up = gap.direction === 'up'
+    const label = up ? '向上缺口' : '向下缺口'
+    const precision = gap.lower.toFixed(2) === gap.upper.toFixed(2) ? 4 : 2
+    const range = `${gap.lower.toFixed(precision)}–${gap.upper.toFixed(precision)}`
+    const color = up ? (getTheme() === 'dark' ? '#FACC15' : '#D97706') : (getTheme() === 'dark' ? '#38BDF8' : '#0284C7')
+    const description = `${label}\n形成日期：${gap.date}\n未回补区间：${range}\n原始区间：${gap.original_lower.toFixed(precision)}–${gap.original_upper.toFixed(precision)}\n部分回补收窄，完全回补后隐藏；按日线最高/最低价判断。`
+    return [{
+      name: `${label} ${range}`,
+      xAxis: gap.date < dates[0] ? dates[0] : gap.date, yAxis: gap.lower,
+      itemStyle: {
+        color: up ? 'rgba(250,204,21,0.12)' : 'rgba(56,189,248,0.12)',
+        borderColor: color, borderWidth: 1, borderType: 'dashed',
+      },
+      label: { show: false }, tooltip: markerTooltip(description),
+    }, { xAxis: 'max', yAxis: gap.upper }]
+  })
+  if (gapAreas.length) series.push({
+    name: '缺口区域', type: 'line', data: [], animation: false, symbol: 'none',
+    markArea: { silent: false, data: gapAreas, animation: false },
+  })
+
   if (hasMA) {
     const maLine = (key: keyof OHLC, color: string, name: string) => ({
       name, type: 'line',
@@ -698,6 +754,32 @@ function buildOption(
     series.push(maLine('ma10', THEME.ma10, 'MA10'))
     series.push(maLine('ma20', THEME.ma20, 'MA20'))
     series.push(maLine('ma60', THEME.ma60, 'MA60'))
+  }
+
+  if (activeIndicators.includes('bull_bear_line')) {
+    const segments: number[][] = []
+    for (let index = 1; index < data.length; index++) {
+      const value = data[index].bull_bear_line
+      const previous = data[index - 1].bull_bear_line
+      if (value == null || previous == null || !Number.isFinite(value) || !Number.isFinite(previous)) continue
+      segments.push([index - 1, previous, index, value, value < previous ? 1 : 0])
+    }
+    // 逐段着色，孤立的一根下跌也能显示绿色；缺值时不跨空档连接。
+    series.push({
+      name: '多空线', type: 'custom', data: segments,
+      dimensions: ['start', 'previous', 'end', 'value', 'falling'],
+      encode: { x: [0, 2], y: [1, 3] },
+      silent: true, animation: false, clip: true, z: 3,
+      renderItem: (_params: any, api: any) => {
+        const start = api.coord([api.value(0), api.value(1)])
+        const end = api.coord([api.value(2), api.value(3)])
+        return {
+          type: 'line',
+          shape: { x1: start[0], y1: start[1], x2: end[0], y2: end[1] },
+          style: { stroke: api.value(4) ? BULL_BEAR_DOWN : BULL_BEAR_UP, lineWidth: 3 },
+        }
+      },
+    })
   }
 
   // 加入自选日标注: 蓝色竖虚线从该根K线的下沿连到主图底端的「自选」标签。
@@ -873,6 +955,7 @@ export function EChartsCandlestick({
   markers,
   ranges,
   priceLines,
+  priceGaps,
   height = 480,
   showMA = true,
   showInfoBar = true,
@@ -1026,16 +1109,19 @@ export function EChartsCandlestick({
     }
     html += `</div>`
 
-    // 第二行: MA + BOLL
-    if (showMA) {
+    // 第二行: 均线与主图指标
+    if (showMA || activeIndicators.includes('bull_bear_line')) {
       html += `<div style="display:flex;align-items:center;gap:10px;padding:0 8px;font:11px 'JetBrains Mono',monospace;select:none;min-height:20px;flex-wrap:wrap">`
-      if (d.ma5 != null) html += `<span style="color:${THEME.ma5}">MA5:${Number(d.ma5).toFixed(2)}</span>`
-      if (d.ma10 != null) html += `<span style="color:${THEME.ma10}">MA10:${Number(d.ma10).toFixed(2)}</span>`
-      if (d.ma20 != null) html += `<span style="color:${THEME.ma20}">MA20:${Number(d.ma20).toFixed(2)}</span>`
-      if (d.ma60 != null) html += `<span style="color:${THEME.ma60}">MA60:${Number(d.ma60).toFixed(2)}</span>`
-      if (d.boll_upper != null && activeIndicators.includes('boll')) {
-        html += `<span style="color:#E879F9">BOLL:${Number(d.boll_upper).toFixed(2)}/${Number(d.ma20).toFixed(2)}/${Number(d.boll_lower).toFixed(2)}</span>`
+      if (showMA) {
+        if (d.ma5 != null) html += `<span style="color:${THEME.ma5}">MA5:${Number(d.ma5).toFixed(2)}</span>`
+        if (d.ma10 != null) html += `<span style="color:${THEME.ma10}">MA10:${Number(d.ma10).toFixed(2)}</span>`
+        if (d.ma20 != null) html += `<span style="color:${THEME.ma20}">MA20:${Number(d.ma20).toFixed(2)}</span>`
+        if (d.ma60 != null) html += `<span style="color:${THEME.ma60}">MA60:${Number(d.ma60).toFixed(2)}</span>`
+        if (d.boll_upper != null && activeIndicators.includes('boll')) {
+          html += `<span style="color:#E879F9">BOLL:${Number(d.boll_upper).toFixed(2)}/${Number(d.ma20).toFixed(2)}/${Number(d.boll_lower).toFixed(2)}</span>`
+        }
       }
+      if (activeIndicators.includes('bull_bear_line')) html += bullBearInfoHTML(data, idx)
       html += `</div>`
     }
 
@@ -1184,18 +1270,19 @@ export function EChartsCandlestick({
       const d = data[idx]
       const isBuy = m.kind === 'buy'
       const isSell = m.kind === 'sell'
+      const tooltip = markerTooltip(m.description)
       if (m.above) {
         const dotColor = m.color ?? (isBuy ? '#FACC15' : CT().text)
         if (compact) {
           markPointData.push({
-            name: m.date, coord: [m.date, d.high],
+            name: m.date, coord: [m.date, d.high], tooltip,
             symbol: 'circle', symbolSize: 4, symbolOffset: [0, -10],
             itemStyle: { color: dotColor, cursor: 'pointer' },
             label: { show: false }, z: 100, zlevel: 10,
           })
         } else {
           markPointData.push({
-            name: m.date, coord: [m.date, d.high],
+            name: m.date, coord: [m.date, d.high], tooltip,
             symbol: 'circle', symbolSize: 12, symbolOffset: [0, -2],
             itemStyle: { color: 'transparent' },
             label: {
@@ -1208,12 +1295,12 @@ export function EChartsCandlestick({
         }
       } else {
         markPointData.push({
-          name: m.label ?? '',
+          name: m.date, tooltip,
           coord: [m.date, isBuy ? d.low : d.high],
-          symbol: 'arrow', symbolSize: 12,
+          symbol: m.symbol ?? 'arrow', symbolSize: 12,
           symbolRotate: isBuy ? 0 : 180,
-          symbolOffset: isBuy ? [0, '60%'] : [0, '-60%'],
-          itemStyle: { color: isBuy ? THEME.bull : isSell ? THEME.bear : CT().text },
+          symbolOffset: [0, m.offset ?? (isBuy ? '60%' : '-60%')],
+          itemStyle: { color: m.color ?? (isBuy ? THEME.bull : isSell ? THEME.bear : CT().text) },
           label: {
             show: !!m.label, formatter: m.label ?? '',
             position: isBuy ? 'bottom' : 'top', distance: 8,
@@ -1255,6 +1342,7 @@ export function EChartsCandlestick({
       linkedPrice,
       volumeCompare,
       addedDate,
+      priceGaps,
     )
 
     chart.setOption(option, true)
@@ -1272,7 +1360,7 @@ export function EChartsCandlestick({
     if (infoEl) {
       infoEl.innerHTML = getInfoBarHTML()
     }
-  }, [data, markers, ranges, priceLines, linkedPrice, showMA, showMarkersProp, activeIndicators, volumeCompare, addedDate, chartHeight, dates, dateIndexMap, initialZoom, getInfoBarHTML, theme])
+  }, [data, markers, ranges, priceLines, priceGaps, linkedPrice, showMA, showMarkersProp, activeIndicators, volumeCompare, addedDate, chartHeight, dates, dateIndexMap, initialZoom, getInfoBarHTML, theme])
 
   // 渲染信息栏容器 (内容由 JS 直接写入)
   const initialHTML = useMemo(() => {
@@ -1303,15 +1391,18 @@ export function EChartsCandlestick({
       html += `<span style="color:${CT().text}">${turnoverRate.toFixed(2)}%</span>`
     }
     html += `</div>`
-    if (showMA) {
+    if (showMA || activeIndicators.includes('bull_bear_line')) {
       html += `<div style="display:flex;align-items:center;gap:10px;padding:0 8px;font:11px 'JetBrains Mono',monospace;min-height:20px;flex-wrap:wrap">`
-      if (d.ma5 != null) html += `<span style="color:${THEME.ma5}">MA5:${Number(d.ma5).toFixed(2)}</span>`
-      if (d.ma10 != null) html += `<span style="color:${THEME.ma10}">MA10:${Number(d.ma10).toFixed(2)}</span>`
-      if (d.ma20 != null) html += `<span style="color:${THEME.ma20}">MA20:${Number(d.ma20).toFixed(2)}</span>`
-      if (d.ma60 != null) html += `<span style="color:${THEME.ma60}">MA60:${Number(d.ma60).toFixed(2)}</span>`
-      if (d.boll_upper != null && activeIndicators.includes('boll')) {
-        html += `<span style="color:#E879F9">BOLL:${Number(d.boll_upper).toFixed(2)}/${Number(d.ma20).toFixed(2)}/${Number(d.boll_lower).toFixed(2)}</span>`
+      if (showMA) {
+        if (d.ma5 != null) html += `<span style="color:${THEME.ma5}">MA5:${Number(d.ma5).toFixed(2)}</span>`
+        if (d.ma10 != null) html += `<span style="color:${THEME.ma10}">MA10:${Number(d.ma10).toFixed(2)}</span>`
+        if (d.ma20 != null) html += `<span style="color:${THEME.ma20}">MA20:${Number(d.ma20).toFixed(2)}</span>`
+        if (d.ma60 != null) html += `<span style="color:${THEME.ma60}">MA60:${Number(d.ma60).toFixed(2)}</span>`
+        if (d.boll_upper != null && activeIndicators.includes('boll')) {
+          html += `<span style="color:#E879F9">BOLL:${Number(d.boll_upper).toFixed(2)}/${Number(d.ma20).toFixed(2)}/${Number(d.boll_lower).toFixed(2)}</span>`
+        }
       }
+      if (activeIndicators.includes('bull_bear_line')) html += bullBearInfoHTML(data, idx)
       html += `</div>`
     }
     return html

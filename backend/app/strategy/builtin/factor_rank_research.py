@@ -131,7 +131,7 @@ class FactorRankResearchMatrixStrategy:
             market.shape,
             entry=entry.astype(np.uint8),
             exit=exit_.astype(np.uint8),
-            score=score,
+            score=np.where(np.isfinite(score), score, np.float32(0.0)),
             entry_signal_code=np.where(entry, 0, -1).astype(np.int16),
             exit_signal_code=np.where(exit_, 0, -1).astype(np.int16),
             entry_signal_ids=("signal_factor_rank_entry",),

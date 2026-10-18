@@ -25,12 +25,14 @@ import numpy as np
 import polars as pl
 
 from app.config import settings
+from app.strategy import overlay
 from app.strategy.scoring import (
     SCORING_DIRECTION_LOW,
     effective_scoring,
     effective_scoring_directions,
     materialize_scoring_columns,
     scoring_dependencies,
+    scoring_valid_expr,
     scoring_value_expr,
     scoring_warmup_bars,
 )
@@ -405,13 +407,13 @@ class StrategyEngine:
                         "types",
                         "typing",
                     }),
-                    extra_allowed_calls=frozenset({"vars"}),
                 )
         except ValueError:
             raise
-        except Exception:  # noqa: BLE001
-            # 文件读不到/语法错等: 不阻断, 让下方 exec_module 抛原样错误
-            pass
+        except SyntaxError as e:
+            raise ValueError(f"策略语法错误: 第 {e.lineno} 行, {e.msg}") from e
+        except (OSError, UnicodeDecodeError) as e:
+            raise ValueError(f"策略安全校验失败: {e}") from e
 
         spec = importlib.util.spec_from_file_location(path.stem, path)
         if spec is None or spec.loader is None:
@@ -773,6 +775,8 @@ class StrategyEngine:
         for strategy_id in strategy_ids:
             strategy = self.get(strategy_id)
             overrides = overrides_map.get(strategy_id) or {}
+            conditions = overlay.resolve(overrides, strategy.execution_backend)
+            required = max(required, overlay.history_bars(conditions))
             scoring = effective_scoring(strategy.meta.get("scoring"), overrides)
             required = max(required, scoring_warmup_bars(scoring))
             if strategy.execution_backend == "matrix_native":
@@ -790,10 +794,17 @@ class StrategyEngine:
                 # 子策略已通过加载期校验(非嵌套叶子), 这里展开一层即可。
                 if strategy.composite is None:
                     continue
-                child_ids = [c.strategy_id for c in strategy.composite.children]
+                children = strategy.composite.children
+                if overrides.get("children"):
+                    children = _parse_composite_children(overrides["children"]).children
+                child_ids = [c.strategy_id for c in children]
+                child_overrides = {
+                    cid: (self._override_loader(cid) or {}) if self._override_loader else {}
+                    for cid in child_ids
+                }
                 required = max(
                     required,
-                    self.required_history_bars(child_ids, params_map=params_map),
+                    self.required_history_bars(child_ids, params_map=params_map, overrides_map=child_overrides),
                 )
             elif strategy.filter_history_fn:
                 # lookback_days 优先取自解析后的参数(默认值/保存覆盖/本次调用),
@@ -847,6 +858,7 @@ class StrategyEngine:
             matrix_ids.append(strategy_id)
             max_warmup = max(
                 max_warmup,
+                overlay.history_bars(overlay.resolve(overrides_map.get(strategy_id), strategy.execution_backend)),
                 int(strategy.matrix_strategy.required_warmup_bars(params)) + 1,
                 scoring_warmup_bars(
                     effective_scoring(
@@ -979,6 +991,7 @@ class StrategyEngine:
         params = self.resolve_params(s, params, overrides)
         entry_signals = self._effective_signals(overrides, "entry_signals", s.entry_signals)
         exit_signals = self._effective_signals(overrides, "exit_signals", s.exit_signals)
+        conditions = overlay.resolve(overrides, s.execution_backend)
 
         if s.execution_backend == "matrix_native":
             return self._run_matrix_strategy(
@@ -1118,6 +1131,17 @@ class StrategyEngine:
         if s.filter_fn:
             expr = s.filter_fn(df, params)
             df = df.filter(expr)
+
+        # 先在完整数据窗口求值，再交集候选；不能截断 shift 或因子暖机所需历史。
+        if conditions:
+            if overlay.history_bars(conditions) > 1 and history is None:
+                raise ValueError("叠加条件需要历史数据窗口")
+            source = history if history is not None else current
+            source = source.filter(pl.col("date") <= as_of) if "date" in source.columns else source
+            allowed = source.filter(overlay.mask(source, conditions))
+            if "date" in allowed.columns:
+                allowed = allowed.filter(pl.col("date") == as_of)
+            df = df.filter(pl.col("symbol").is_in(allowed["symbol"].implode()))
 
         # Stage 3: 评分
         df = self._apply_scoring(df, scoring, scoring_directions)
@@ -1359,6 +1383,7 @@ class StrategyEngine:
                 fields.add(field_name)
         scoring = effective_scoring(strategy.meta.get("scoring"), overrides)
         fields.update(scoring_dependencies(scoring))
+        fields.update(overlay.dependencies(overlay.resolve(overrides, "matrix_native")))
         order_by = strategy.meta.get("order_by")
         if order_by and order_by != "score":
             fields.add(str(order_by))
@@ -1428,6 +1453,7 @@ class StrategyEngine:
                 order_by=strategy.meta.get("order_by"),
                 descending=bool(strategy.meta.get("descending", True)),
                 asset_mask=asset_mask,
+                overlay_filter=overlay.resolve(overrides, strategy.execution_backend),
             ),
         )
         target_ids = [
@@ -1788,6 +1814,7 @@ class StrategyEngine:
             for col, weight in weights.items()
             if weight and (value := scoring_value_expr(df.columns, str(col))) is not None
         ]
+        df = df.filter(scoring_valid_expr(df.columns, weights))
         total_weight = sum(weight for _, _, weight in executable)
         if total_weight <= 0:
             return df

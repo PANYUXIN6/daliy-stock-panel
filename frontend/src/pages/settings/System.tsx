@@ -19,9 +19,11 @@ import {
 } from '@/lib/voiceBroadcast'
 import { loadStockExternalTemplate, saveStockExternalTemplate } from '@/lib/stock-external-link'
 import { useUpdateCheck } from '@/lib/updateCheck'
+import { useCurrentUser } from '@/lib/auth'
 import { ZOOM_MIN, ZOOM_MAX, ZOOM_STEP, getPageZoom, setPageZoom } from '@/lib/pageZoom'
 
 export function SettingsSystemPanel() {
+  const isAdmin = useCurrentUser()?.role === 'admin'
   const qc = useQueryClient()
   const { data: prefs } = usePreferences()
   const { data: versionData } = useVersion()
@@ -49,13 +51,13 @@ export function SettingsSystemPanel() {
   const updateRowRef = useRef<HTMLDivElement>(null)
   const currentVersion = (versionData?.version ?? '').trim()
   useEffect(() => {
-    if (!currentVersion || searchParams.get('autoupdate') !== '1') return
+    if (!isAdmin || !currentVersion || searchParams.get('autoupdate') !== '1') return
     updateRowRef.current?.scrollIntoView({ block: 'center', behavior: 'smooth' })
     checkUpdate()
     const next = new URLSearchParams(searchParams)
     next.delete('autoupdate')
     setSearchParams(next, { replace: true })
-  }, [currentVersion, searchParams, checkUpdate, setSearchParams])
+  }, [currentVersion, isAdmin, searchParams, checkUpdate, setSearchParams])
   const [toastEnabled, setToastEnabled] = useState(() => {
     try { return accountStorage.getItem('alert_toast_enabled') !== '0' } catch { return true }
   })
@@ -440,7 +442,7 @@ export function SettingsSystemPanel() {
           </span>
         </div>
 
-        <div ref={updateRowRef} className="flex scroll-mt-24 items-center justify-between gap-4 py-2">
+        {isAdmin && <div ref={updateRowRef} className="flex scroll-mt-24 items-center justify-between gap-4 py-2">
           <div className="min-w-0">
             <div className="text-sm text-foreground">检查更新</div>
             {updateState === 'found' && updateInfo ? (
@@ -500,7 +502,7 @@ export function SettingsSystemPanel() {
               {updateState === 'checking' ? '检查中…' : updateState === 'latest' ? '已检查' : '检查更新'}
             </button>
           </div>
-        </div>
+        </div>}
       </section>
     </>
   )

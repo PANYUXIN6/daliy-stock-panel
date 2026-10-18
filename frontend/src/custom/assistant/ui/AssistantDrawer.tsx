@@ -1,3 +1,4 @@
+import { getPageScale } from '@/lib/pageZoom'
 import { useCurrentUser } from '@/lib/auth'
 import { accountStorage } from '@/lib/sessionRuntime'
 /**
@@ -72,7 +73,7 @@ function saveWidth(width: number) {
 
 function clampWidth(width: number): number {
   // 右缘贴齐, 至少给页面主体留 64px 上下文。
-  const maxWidth = Math.max(MIN_WIDTH, window.innerWidth - 64)
+  const maxWidth = Math.max(MIN_WIDTH, window.innerWidth / getPageScale() - 64)
   return Math.min(Math.max(width, MIN_WIDTH), maxWidth)
 }
 
@@ -87,7 +88,8 @@ export function AssistantDrawer() {
         <DrawerPanel key="assistant-drawer" sending={sending} messages={messages} />
       )}
     </AnimatePresence>,
-    document.body,
+    // #root (缩放层): 抽屉随界面缩放, 且与 Modal 同层叠上下文保持 z 序设计。
+    document.getElementById('root') ?? document.body,
   )
 }
 
@@ -130,12 +132,12 @@ function DrawerPanel({
   const onHandlePointerMove = (event: React.PointerEvent<HTMLDivElement>) => {
     if (!draggingRef.current) return
     const el = panelRef.current
-    if (el) el.style.width = `${clampWidth(window.innerWidth - event.clientX)}px`
+    if (el) el.style.width = `${clampWidth((window.innerWidth - event.clientX) / getPageScale())}px`
   }
   const onHandlePointerEnd = (event: React.PointerEvent<HTMLDivElement>) => {
     if (!draggingRef.current) return
     draggingRef.current = false
-    const finalWidth = clampWidth(window.innerWidth - event.clientX)
+    const finalWidth = clampWidth((window.innerWidth - event.clientX) / getPageScale())
     setWidth(finalWidth)
     saveWidth(finalWidth)
   }

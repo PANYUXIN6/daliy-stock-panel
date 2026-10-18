@@ -8,7 +8,7 @@ import {
   useFinancialCashFlow,
   useFinancialShares,
 } from '@/lib/useFinancials'
-import { fmtPrice, fmtBigNum, fmtDate } from '@/lib/format'
+import { cnDateFromUtc, fmtPrice, fmtBigNum } from '@/lib/format'
 import { Skeleton } from '@/components/data/Skeleton'
 import { startAnalysis, findLatestHistoryReport, openHistoryReport } from '@/lib/aiReportStore'
 import { toast } from '@/components/Toast'
@@ -165,7 +165,7 @@ export function StockFinancialDetail({ symbol, name }: Props) {
   } as const
 
   const current = queryMap[tab]
-  // 按 period_end 降序(最新在前);同步默认 latest_only,通常只有1期
+  // 浏览表每报告期保留最新完整记录。
   const rows = (current.data?.data ?? []).slice().sort((a, b) =>
     (b.period_end ?? '').localeCompare(a.period_end ?? '')
   )
@@ -173,7 +173,11 @@ export function StockFinancialDetail({ symbol, name }: Props) {
 
   // 头部报告期信息取最新一期(优先用当前 tab,兜底用 metrics)
   const latestPeriod = rows[0]?.period_end ?? metrics.data?.data?.[0]?.period_end ?? null
-  const latestAnnounce = rows[0]?.announce_date ?? metrics.data?.data?.[0]?.announce_date ?? null
+  const latestRecord = rows[0] ?? metrics.data?.data?.[0]
+  const latestDate = latestRecord?.date_basis === 'observed'
+    ? cnDateFromUtc(latestRecord.observed_at)
+    : (latestRecord?.source_update_date ?? latestRecord?.announce_date)?.slice(0, 10)
+  const dateLabel = latestRecord?.date_basis === 'observed' ? '采集' : latestRecord?.date_basis === 'source_update' ? '更新' : '源日期'
 
   return (
     <div className="rounded-card border border-border bg-surface overflow-hidden">
@@ -197,8 +201,8 @@ export function StockFinancialDetail({ symbol, name }: Props) {
             <div className="flex items-center gap-1.5 text-xs text-secondary">
               <CalendarDays className="h-3.5 w-3.5" />
               <span>报告期 <span className="font-mono">{latestPeriod}</span></span>
-              {latestAnnounce && (
-                <span className="text-muted">· 披露 {fmtDate(latestAnnounce)}</span>
+              {latestDate && (
+                <span className="text-muted">· {dateLabel} {latestDate}</span>
               )}
             </div>
           )}
@@ -261,7 +265,7 @@ export function StockFinancialDetail({ symbol, name }: Props) {
                         key={def.key}
                         className="flex items-baseline justify-between gap-3 py-2 border-b border-border/40"
                       >
-                        <span className="text-xs text-secondary shrink-0">{def.label}</span>
+                        <span className="text-xs text-secondary shrink-0">{def.key === 'bps' && row.bps_basis === 'valuation_snapshot' ? '每股净资产 BPS（估算）' : def.label}</span>
                         <span className="text-sm font-mono tabular-nums text-foreground text-right">
                           {formatValue(val, def.fmt)}
                         </span>

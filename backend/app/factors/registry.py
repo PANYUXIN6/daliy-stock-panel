@@ -26,6 +26,8 @@ Stability = Literal["stable", "experimental", "deprecated"]
 
 _ALL_ASSETS = frozenset({"stock", "etf"})
 _STOCK_ONLY = frozenset({"stock"})
+# 已下线但旧策略评分仍可能引用；缺列时必须保持不可计算，不能悄悄重分权重。
+RETIRED_FINANCIAL_FACTORS = frozenset({"pb_latest", "roe_latest", "debt_ratio_latest"})
 
 
 @dataclass(frozen=True)
@@ -71,7 +73,7 @@ def _virtual(fid: str, label: str, group: str, desc: str, deps: frozenset[str], 
 def _financial(fid: str, label: str, desc: str) -> FactorSpec:
     return FactorSpec(
         id=fid, label=label, group="财务", formula_text=desc,
-        kind="base", pit=True, pit_source="financial_announce", asset_types=_STOCK_ONLY,
+        kind="base", version=2, pit=True, pit_source="financial_announce", asset_types=_STOCK_ONLY,
     )
 
 
@@ -211,13 +213,10 @@ _CATALOG: tuple[FactorSpec, ...] = (
         deps=frozenset({"consecutive_limit_ups"}), warmup_bars=61,
     ),
     # --- 财务 (点时, 仅股票) ---
-    _financial("pb_latest", "市净率(最新公告)", "收盘价 / 最新已公告每股净资产; 无财务数据或公告前为空"),
-    _financial("roe_latest", "ROE(最新公告)", "最新已公告净资产收益率(%); 无财务数据或公告前为空"),
-    _financial("gross_margin_latest", "毛利率(最新公告)", "最新已公告销售毛利率(%)"),
-    _financial("net_margin_latest", "净利率(最新公告)", "最新已公告销售净利率(%)"),
-    _financial("revenue_yoy_latest", "营收增速(最新公告)", "最新已公告营业收入同比(%)"),
-    _financial("net_income_yoy_latest", "净利增速(最新公告)", "最新已公告归母净利润同比(%)"),
-    _financial("debt_ratio_latest", "资产负债率(最新公告)", "最新已公告资产负债率(%)"),
+    _financial("gross_margin_latest", "毛利率(最新公告)", "最新可用报告期 (营业收入-营业成本) / 营业收入 × 100；按版本可用日门控"),
+    _financial("net_margin_latest", "净利率(最新公告)", "最新可用报告期净利润 / 营业收入 × 100；按版本可用日门控"),
+    _financial("revenue_yoy_latest", "营收增速(最新公告)", "最新可用营业收入与上年同期的同比(%)；两期输入均可用后计算"),
+    _financial("net_income_yoy_latest", "净利增速(最新公告)", "最新可用归母净利润与上年同期的同比(%)；两期输入均可用后计算"),
     # --- 扩充批次 (2026-09-05): 规模/收益分解/长窗口/下行风险/量能潮/换手水平 ---
     _virtual(
         "log_float_mv", "流通市值对数", "规模",

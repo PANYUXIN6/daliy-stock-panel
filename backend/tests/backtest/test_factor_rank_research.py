@@ -187,6 +187,48 @@ def test_strategy_direction_changes_score_without_dynamic_formula_execution():
         )
 
 
+@pytest.mark.parametrize("entry_score", [0., 70.])
+def test_missing_factor_never_generates_entry_or_score_exit(entry_score):
+    from dataclasses import replace
+    from types import MappingProxyType
+
+    strategy = StrategyEngine._load_file(STRATEGY_PATH).matrix_strategy
+    market = _market()
+    values = np.full(market.shape, np.nan, dtype=np.float32)
+    values[:, 1:] = [10., 20., 30.]
+    market = replace(market, fields=MappingProxyType({**market.fields, "roe_latest": values}))
+    signals = strategy.compute_signals(market, {
+        "scoring": {"roe_latest": 1.}, "entry_score": entry_score,
+        "exit_score": 0. if entry_score == 0 else 40., "top_rank": 4,
+    })
+    assert not signals.entry[:, 0].any()
+    assert not signals.exit[:, 0].any()
+
+
+def test_polars_scoring_drops_missing_and_infinite_inputs_before_ranking():
+    frame = pl.DataFrame({"symbol": ["a", "b", "c", "d"], "roe_latest": [None, 10., 20., float("inf")]})
+    scored = StrategyEngine._apply_scoring(frame, {"roe_latest": 1.})
+    assert scored["symbol"].to_list() == ["b", "c"]
+    assert scored["score"].to_list() == [0., 100.]
+    assert StrategyEngine._apply_scoring(frame, {"roe_latest": 1., "pb_latest": 1.}).is_empty()
+
+
+def test_missing_matrix_score_is_nan_and_cannot_distort_other_candidates():
+    from dataclasses import replace
+    from types import MappingProxyType
+
+    from app.backtest.matrix import build_matrix_score
+
+    market = _market()
+    roe = np.array([[np.nan, 10., 20., 30.]] * 2, dtype=np.float32)
+    market = replace(market, fields=MappingProxyType({**market.fields, "roe_latest": roe}))
+    score = build_matrix_score(market, np.ones(market.shape, dtype=bool),
+                               {"roe_latest": 1., "amount": 1.}, "score", True,
+                               fallback=np.zeros(market.shape, dtype=np.float32))
+    assert np.isnan(score[:, 0]).all()
+    np.testing.assert_allclose(score[0, 1:], [0., 50., 100.])
+
+
 @pytest.mark.parametrize(
     ("params", "message"),
     [

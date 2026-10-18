@@ -194,11 +194,13 @@ def _strategy_detail(
         "tags": s.meta.get("tags", []),
         "source": s.source,
         "research_only": s.meta.get("research_only", False),
+        "realtime_supported": s.meta.get("realtime_supported", True),
         "execution_backend": s.execution_backend,
         "asset_types": s.meta.get("asset_types", ["stock"]),
         "timeframes": s.meta.get("timeframes", ["1d"]),
         "version": s.meta.get("version", "1.0.0"),
         "basic_filter": bf,
+        "overlay_filter": (overrides or {}).get("overlay_filter", []),
         "params": s.meta.get("params", []),
         "params_defaults": params_defaults,
         "scoring": scoring,
@@ -460,6 +462,7 @@ def save_config(req: SaveConfigRequest, request: Request):
     engine = _get_engine(request)
     _get_public_strategy(engine, req.strategy_id)
 
+    _validate_overlay_config(req.overrides, engine.get(req.strategy_id))
     _validate_scoring_config(req.overrides)
     # 剥离与策略默认值相同的字段，只保存用户真正修改过的值
     overrides = _strip_defaults(req.strategy_id, req.overrides, engine)
@@ -476,6 +479,7 @@ def patch_config(req: SaveConfigRequest, request: Request):
     data_dir = _data_dir(request)
     overrides = strategy_config.load_override(data_dir, req.strategy_id)
     overrides.update(req.overrides)
+    _validate_overlay_config(overrides, engine.get(req.strategy_id))
     _validate_scoring_config(overrides)
     strategy_config.save_override(
         data_dir,
@@ -484,6 +488,14 @@ def patch_config(req: SaveConfigRequest, request: Request):
     )
     _invalidate_strategy_runtime(request, req.strategy_id)
     return {"ok": True}
+
+
+def _validate_overlay_config(overrides: dict, strategy: StrategyDef) -> None:
+    from app.strategy.overlay import resolve
+    try:
+        resolve(overrides, strategy.execution_backend)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 def _validate_scoring_config(overrides: dict) -> None:

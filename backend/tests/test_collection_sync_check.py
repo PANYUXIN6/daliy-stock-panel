@@ -138,33 +138,19 @@ def test_financial_positive_result_and_selected_tables_are_required(local):
     assert "已完成过同源同步任务，本地已有结果" in result["message"]
     assert not check_collection_sync(scope, local, job_store=completed(local, scope, {"income": 0}))["requires_confirmation"]
     all_scope = CollectionSyncRequest(kind="financial", table="all")
-    assert not check_collection_sync(all_scope, local, job_store=completed(local, all_scope, {"income": 1}))["requires_confirmation"]
+    assert check_collection_sync(all_scope, local, job_store=completed(local, all_scope, {"income": 1}))["requires_confirmation"]
 
 
-@pytest.mark.parametrize("unavailable", ["zero_result", "zero_result_existing_file", "missing_file", "empty_file"])
-def test_financial_all_repeat_describes_currently_available_tables(local, unavailable):
-    scope = CollectionSyncRequest(kind="financial", table="all")
-    result = dict.fromkeys(collection_status.FINANCIAL_TABLES, 1)
-    for table in collection_status.FINANCIAL_TABLES:
-        if table == "shares":
-            if unavailable.startswith("zero_result"):
-                result[table] = 0
-            if unavailable in {"zero_result", "missing_file"}:
-                continue
-        write_rows(local, f"financials/{table}/part.parquet",
-                   rows=0 if table == "shares" and unavailable == "empty_file" else 1)
-    response = check_collection_sync(scope, local, job_store=completed(local, scope, result))
-    assert response["requires_confirmation"]
-    assert "今天已执行过同源同步任务" in response["message"]
-    assert "当前有本地可用结果：核心指标、利润表、资产负债表、现金流量表" in response["message"]
-    assert "本次任务未确认有可用结果：历史股本" in response["message"]
-    assert "财务公告仍可能新增或修订" in response["message"]
+@pytest.mark.parametrize("retired", ["metrics", "balance_sheet", "cash_flow", "shares"])
+def test_disabled_financial_scopes_are_rejected(retired):
+    with pytest.raises(ValueError, match="仅支持利润表"):
+        CollectionSyncRequest(kind="financial", table=retired)
 
 
 def test_financial_all_complete_results_keep_existing_message(local):
     scope = CollectionSyncRequest(kind="financial", table="all")
-    result = dict.fromkeys(collection_status.FINANCIAL_TABLES, 1)
-    for table in collection_status.FINANCIAL_TABLES:
+    result = dict.fromkeys(collection_status.FINANCIAL_SYNC_TABLES, 1)
+    for table in collection_status.FINANCIAL_SYNC_TABLES:
         write_rows(local, f"financials/{table}/part.parquet")
     response = check_collection_sync(scope, local, job_store=completed(local, scope, result))
     assert response["requires_confirmation"]
@@ -174,11 +160,11 @@ def test_financial_all_complete_results_keep_existing_message(local):
 @pytest.mark.parametrize("evidence", ["zero_results", "missing_files", "incomplete_record"])
 def test_financial_all_needs_complete_record_and_some_available_result(local, evidence):
     scope = CollectionSyncRequest(kind="financial", table="all")
-    result = dict.fromkeys(collection_status.FINANCIAL_TABLES, 0 if evidence == "zero_results" else 1)
+    result = dict.fromkeys(collection_status.FINANCIAL_SYNC_TABLES, 0 if evidence == "zero_results" else 1)
     if evidence == "incomplete_record":
-        result.pop("shares")
+        result.pop("income")
     if evidence != "missing_files":
-        for table in collection_status.FINANCIAL_TABLES:
+        for table in collection_status.FINANCIAL_SYNC_TABLES:
             write_rows(local, f"financials/{table}/part.parquet")
     assert not check_collection_sync(scope, local, job_store=completed(local, scope, result))["requires_confirmation"]
 

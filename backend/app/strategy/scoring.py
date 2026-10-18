@@ -7,6 +7,9 @@ from typing import Any
 import polars as pl
 
 from app.factors.registry import (
+    RETIRED_FINANCIAL_FACTORS,
+)
+from app.factors.registry import (
     factor_dependencies as _registry_factor_dependencies,
 )
 from app.factors.registry import get_factor as _registry_get_factor
@@ -73,6 +76,29 @@ def scoring_dependencies(scoring: Mapping[str, Any]) -> set[str]:
             continue
         dependencies.update(_registry_factor_dependencies([str(name)]))
     return dependencies
+
+
+def scoring_valid_expr(columns: Collection[str], weights: Mapping[str, Any]) -> pl.Expr:
+    """保留旧技术指标缺列的重权兼容，财务输入缺列则明确不可计算。
+
+    已存在的评分列必须全部为有限值，归一化的候选集合也只包含这些行。
+    """
+    valid = []
+    for name, weight in weights.items():
+        if not weight:
+            continue
+        value = scoring_value_expr(columns, str(name))
+        if value is None:
+            if any(
+                dependency in RETIRED_FINANCIAL_FACTORS
+                or ((spec := _registry_get_factor(dependency)) is not None
+                    and spec.pit_source == "financial_announce")
+                for dependency in scoring_dependencies({str(name): weight})
+            ):
+                return pl.lit(False)
+        else:
+            valid.append(value.cast(pl.Float64, strict=False).is_finite().fill_null(False))
+    return pl.all_horizontal(valid) if valid else pl.lit(True)
 
 
 def _composite_value_expr(available: set[str], name: str) -> pl.Expr | None:

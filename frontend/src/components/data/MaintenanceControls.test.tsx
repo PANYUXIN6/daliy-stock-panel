@@ -110,19 +110,19 @@ it('在数据维护中恢复已有财务任务，可取消且不会另启同步'
   mocks.financialExecutionStatus.mockResolvedValue({ last_sync: {}, syncing: true, active_job_id: 'existing-financial' })
   await render(<FinancialSyncPanel hasCap onJobStart={vi.fn()} />)
   expect(host.textContent).toContain('40%')
-  expect(button('全部同步').disabled).toBe(true)
+  expect(button('更新利润表').disabled).toBe(true)
   await act(async () => button('取消任务').click())
   expect(mocks.pipelineJobCancel).toHaveBeenCalledWith('existing-financial')
   expect(mocks.financialSync).not.toHaveBeenCalled()
 })
 
-it.each([['全部同步', 'all'], ['同步利润表', 'income']])('财务入口 %s 保持对应采集范围', async (label, table) => {
+it.each([['更新利润表', 'income'], ['继续未完成', 'unfinished']])('财务入口 %s 只更新利润表范围', async (label, table) => {
   const onJobStart = vi.fn()
   await render(<FinancialSyncPanel hasCap onJobStart={onJobStart} />)
-  expect(host.querySelector('[aria-label="同步利润表"]')).toBeNull()
-  if (table !== 'all') await act(async () => button('单表维护').click())
-  const target = table === 'all' ? button(label) : host.querySelector<HTMLButtonElement>(`[aria-label="${label}"]`)!
-  await act(async () => target.click())
+  expect(host.textContent).not.toContain('核心指标')
+  expect(host.textContent).not.toContain('资产负债表')
+  expect(host.textContent).not.toContain('现金流量表')
+  await act(async () => button(label).click())
   await settle()
   expect(mocks.financialSync).toHaveBeenCalledWith(table)
   expect(mocks.collectionSyncCheck).toHaveBeenCalledWith({ kind: 'financial', table })
@@ -134,9 +134,7 @@ it('财务采集能力不可用时仍展示本地画像，并禁用采集', asyn
   mocks.financialStatus.mockResolvedValue({ tables: { income: { rows: 12, symbols: 1 } }, syncing: false, active_job_id: null })
   await render(<FinancialSyncPanel hasCap={false} onJobStart={vi.fn()} />)
   expect(host.textContent).toContain('12 条')
-  expect(button('全部同步').disabled).toBe(true)
-  await act(async () => button('单表维护').click())
-  expect(host.querySelector<HTMLButtonElement>('[aria-label="同步利润表"]')!.disabled).toBe(true)
+  expect(button('更新利润表').disabled).toBe(true)
   expect(mocks.financialSync).not.toHaveBeenCalled()
 })
 
@@ -268,6 +266,15 @@ it('数据页使用后台行情暂停状态禁用手动获取', async () => {
   await render(<Data />)
   expect(button('手动获取行情').disabled).toBe(true)
   expect(host.textContent).toContain('数据同步期间暂停行情采集')
+})
+
+it.each([['financial:all', false], ['pipeline', true]])('后台任务 %s 的行情暂停状态与实际采集边界一致', async (requestKey, paused) => {
+  qc.setQueryData(QK.pipelineJobs, { active_id: 'active', jobs: [] })
+  mocks.pipelineJob.mockResolvedValue({ id: 'active', status: 'running', request_key: requestKey,
+    progress: 10, log: [{ msg: '后台采集中' }] })
+  await render(<Data />)
+  expect(button('手动获取行情').disabled).toBe(paused)
+  expect(host.textContent?.includes('数据同步期间暂停行情采集')).toBe(paused)
 })
 
 it('数据页保留盘前自动更新时间和状态，盘后数据由行情模块手动启动', async () => {
@@ -504,7 +511,7 @@ it.each(['financial_data_provider', 'adj_factor_provider', 'minute_data_provider
         ? <AdjFactorSyncConfig hasCap providerDisplay="测试源" />
         : <MinuteSyncConfig hasCap />)
     if (!financial && !adj) await input(host.querySelector<HTMLInputElement>('input[placeholder="600000.SH"]')!, '600000.SH')
-    const label = financial ? '全部同步' : adj ? '全历史同步除权因子' : '获取单标的'
+    const label = financial ? '更新利润表' : adj ? '全历史同步除权因子' : '获取单标的'
     const collect = financial ? mocks.financialSync : adj ? mocks.pipelineAdjFactorRun : mocks.syncMinuteSingle
     await act(async () => button(label).click())
     await settle()
@@ -527,8 +534,7 @@ it.each(['financial_data_provider', 'adj_factor_provider', 'minute_data_provider
 it('财务重复同步取消不提交，确认仍只更新所选财务表', async () => {
   mocks.collectionSyncCheck.mockResolvedValue(duplicate)
   await render(<FinancialSyncPanel hasCap onJobStart={vi.fn()} />)
-  await act(async () => button('单表维护').click())
-  const income = host.querySelector<HTMLButtonElement>('[aria-label="同步利润表"]')!
+  const income = button('更新利润表')
   await act(async () => income.click())
   await settle()
   expect(income.disabled).toBe(true)
@@ -706,9 +712,7 @@ it('财务执行状态离线时保留本地画像，明确提示且禁止提交�
   await render(<FinancialSyncPanel hasCap onJobStart={vi.fn()} />)
   expect(host.textContent).toContain('24 条')
   expect(host.textContent).toContain('采集执行状态不可用')
-  expect(button('全部同步').disabled).toBe(true)
-  await act(async () => button('单表维护').click())
-  expect(host.querySelector<HTMLButtonElement>('[aria-label="同步利润表"]')!.disabled).toBe(true)
+  expect(button('更新利润表').disabled).toBe(true)
   expect(mocks.financialSync).not.toHaveBeenCalled()
 })
 

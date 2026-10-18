@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { accountStorage, activateSession, sessionFetch, lockSession, migrateInitialAdminStorage, sessionEventSource } from './sessionRuntime'
+import { accountStorage, applyAccountAppearance, activateSession, sessionFetch, lockSession, migrateInitialAdminStorage, sessionEventSource } from './sessionRuntime'
 
 describe('account session boundary', () => {
   beforeEach(() => { localStorage.clear(); vi.restoreAllMocks(); vi.unstubAllGlobals() })
@@ -121,4 +121,28 @@ it('requires an identity for auth mutations while login and status remain usable
   await fresh.sessionFetch('/api/auth/login', { method: 'POST' })
   expect(fetchMock).toHaveBeenCalledOnce()
   expect(new Headers(fetchMock.mock.calls[0][1]?.headers).has('X-Expected-User')).toBe(false)
+})
+
+it('restores account zoom once and resets it when switching to an account without preferences', async () => {
+  document.body.innerHTML = '<div id="root"></div>'
+  localStorage.clear()
+  activateSession('zoom-a')
+  accountStorage.setItem('tf-page-zoom', '0.9')
+  document.documentElement.style.zoom = '0.9'
+  applyAccountAppearance()
+  const root = document.getElementById('root')!
+  expect(document.documentElement.style.zoom).toBe('')
+  expect(root.style.transform).toBe('scale(0.9)')
+  const resize = vi.fn()
+  window.addEventListener('resize', resize)
+  applyAccountAppearance()
+  expect(resize).not.toHaveBeenCalled()
+  activateSession('zoom-b')
+  applyAccountAppearance()
+  expect(root.style.transform).toBe('')
+  expect(root.style.width).toBe('')
+  activateSession('zoom-a')
+  applyAccountAppearance()
+  expect(root.style.transform).toBe('scale(0.9)')
+  window.removeEventListener('resize', resize)
 })

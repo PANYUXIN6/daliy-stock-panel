@@ -44,6 +44,7 @@ def _daily_panel(start: date, days: int, symbols: tuple[str, ...]) -> pl.DataFra
                 "high": 10.5,
                 "low": 9.5,
                 "close": 10.0 + offset * 0.1,
+                "raw_close": 20.0 + offset * 0.2,
                 "volume": 1000.0,
             })
     return pl.DataFrame(rows).sort(["symbol", "date"])
@@ -67,10 +68,10 @@ def test_attach_gates_on_announce_date_strictly():
     other = attached.filter(pl.col("symbol") == "000001.SZ")["roe_latest"]
     assert other.null_count() == other.len()
 
-    # pb = close / bps, 公告前 null
+    # PB 必须使用不复权价，公告前 null。
     pb = values["pb_latest"].to_list()
     assert pb[:5] == [None] * 5
-    close_6 = values.filter(pl.col("date") == date(2026, 4, 6))["close"].item()
+    close_6 = values.filter(pl.col("date") == date(2026, 4, 6))["raw_close"].item()
     assert abs(pb[5] - close_6 / 4.0) < 1e-12
 
 
@@ -104,7 +105,7 @@ def test_matrix_field_matches_polars_attach():
         {"symbol": "000001.SZ", "announce": "2026-04-08", "roe": -5.0, "bps": -1.0},
     ])
     attached = attach_fundamental_factors(panel, snapshot, ["roe_latest", "pb_latest"])
-    market = build_market_data_matrix(panel)
+    market = build_market_data_matrix(panel, field_columns={"raw_close"})
     matrices = build_fundamental_matrices(market, snapshot, ["roe_latest", "pb_latest"])
     symbols = {s: i for i, s in enumerate(market.symbols)}
     dates = {str(d): t for t, d in enumerate(
@@ -129,7 +130,7 @@ def test_matrix_field_matches_polars_attach_across_two_announcements():
         {"symbol": "600000.SH", "announce": "2026-04-15", "roe": 33.0},
     ])
     attached = attach_fundamental_factors(panel, snapshot, ["roe_latest"]).sort("date")
-    market = build_market_data_matrix(panel)
+    market = build_market_data_matrix(panel, field_columns={"raw_close"})
     matrix = build_fundamental_matrices(market, snapshot, ["roe_latest"])["roe_latest"]
     column = market.symbols.index("600000.SH")
     for row_index, value in enumerate(attached["roe_latest"].to_list()):
@@ -153,7 +154,7 @@ def test_matrix_field_clears_value_when_newer_report_lacks_metric():
         {"symbol": "600000.SH", "announce": "2026-04-15", "roe": None, "bps": 6.0},
     ])
     attached = attach_fundamental_factors(panel, snapshot, ["roe_latest", "pb_latest"]).sort("date")
-    market = build_market_data_matrix(panel)
+    market = build_market_data_matrix(panel, field_columns={"raw_close"})
     matrices = build_fundamental_matrices(market, snapshot, ["roe_latest", "pb_latest"])
     column = market.symbols.index("600000.SH")
 
@@ -206,7 +207,7 @@ def test_fundamental_factor_names_are_catalogued():
     from app.backtest.factor import FACTOR_COLUMNS
 
     catalog_ids = {item["id"] for item in FACTOR_COLUMNS}
-    assert catalog_ids >= FUNDAMENTAL_FACTOR_NAMES
+    assert FUNDAMENTAL_FACTOR_NAMES - catalog_ids == {"pb_latest", "roe_latest", "debt_ratio_latest"}  # 旧计算口径保留，三项已退出可选目录
 
 
 def test_financial_sync_merges_history(tmp_path: Path):

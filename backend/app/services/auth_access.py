@@ -57,6 +57,7 @@ def admin_required(path: str, method: str) -> bool:
             "/api/kline/instruments/names", "/api/kline/daily-batch", "/api/kline/minute-batch",
         }
     if (path in {"/api/index/sync_instruments", "/api/index/sync_daily", "/api/intraday/refresh"}
+            or path == "/api/screener/earnings-gap/verify"
             or path.startswith("/api/financials/sync/")
             or path == "/api/analysis-menus" or path.startswith("/api/analysis-menus/")):
         return True

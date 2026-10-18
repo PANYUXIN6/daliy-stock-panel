@@ -263,19 +263,26 @@ class ScreenerService:
         """
         # 优先级 1: repo 级预计算缓存 (启动时 _refresh_enriched 已计算完整历史; 仅 stock)
         t0 = time.perf_counter()
+        cached = None
+        short_symbols = []
         if self.asset_type == "stock":
             cached = self.repo.get_enriched_history(target_date, lookback_days)
             if cached is not None and not cached.is_empty():
+                short_symbols = (
+                    cached.group_by("symbol").len()
+                    .filter(pl.col("len") < lookback_days + 1)["symbol"].to_list()
+                )
                 # JOIN instruments (repo 缓存不含 name 等列)
                 instruments = self.repo.get_instruments_asset(self.asset_type)
                 if instruments is not None and not instruments.is_empty() and "name" not in cached.columns:
                     inst_cols = [c for c in ["symbol", "name", "total_shares", "float_shares"]
                                  if c in instruments.columns]
                     cached = cached.join(instruments.select(inst_cols), on="symbol", how="left")
-                elapsed = (time.perf_counter() - t0) * 1000
-                logger.info("_load_enriched_history(%s, %d): repo cache hit, %.1fms, %d rows",
-                            target_date, lookback_days, elapsed, len(cached))
-                return cached
+                if not short_symbols:
+                    elapsed = (time.perf_counter() - t0) * 1000
+                    logger.info("_load_enriched_history(%s, %d): repo cache hit, %.1fms, %d rows",
+                                target_date, lookback_days, elapsed, len(cached))
+                    return cached
 
         # 优先级 2: 进程级 history_cache (之前的 TTL 缓存)
         cache_key = (self.asset_type, target_date, lookback_days)
@@ -298,7 +305,8 @@ class ScreenerService:
         )
 
         warmup = 60
-        start = target_date - timedelta(days=min((lookback_days + warmup) * 2, 180))
+        # 叠加条件可引用长周期因子及前 N 日值；180 自然日上限会截断其暖机。
+        start = target_date - timedelta(days=(lookback_days + warmup) * 2)
 
         enriched_dir = self.repo.store.data_dir / self._enriched_dirname
         # 同 _compute_enriched_full: turnover_rate 存储列随行透传 (#187)
@@ -306,19 +314,50 @@ class ScreenerService:
                      "amount", "raw_close", "raw_high", "raw_low", "turnover_rate"]
 
         try:
-            lf = (
-                scan_enriched_parquet(str(enriched_dir / "**" / "*.parquet"))
-                .filter((pl.col("date") >= start) & (pl.col("date") <= target_date))
-                .sort(["symbol", "date"])
-            )
+            lf = scan_enriched_parquet(str(enriched_dir / "**" / "*.parquet"))
             available = [c for c in read_cols if c in lf.collect_schema().names()]
-            df_hist = lf.select(available).collect()
+            lf = lf.filter(pl.col("date") <= target_date).select(available)
+            if cached is not None and not cached.is_empty():
+                # 只补缺行标的，普通缓存命中不扫描磁盘；新股耗尽历史后沿用 TTL 缓存。
+                df_hist = (
+                    lf.filter(pl.col("symbol").is_in(short_symbols))
+                    .sort(["symbol", "date"])
+                    .group_by("symbol", maintain_order=True).tail(lookback_days + warmup + 1)
+                    .collect()
+                )
+                # 同日内存行情可能新于落盘行；补历史时仍以缓存已有的行情为准。
+                cached_rows = cached.filter(pl.col("symbol").is_in(short_symbols)).select(
+                    [col for col in available if col in cached.columns],
+                )
+                df_hist = (
+                    pl.concat([df_hist, cached_rows], how="diagonal_relaxed")
+                    .unique(subset=["symbol", "date"], keep="last")
+                    .sort(["symbol", "date"])
+                    .group_by("symbol", maintain_order=True).tail(lookback_days + warmup + 1)
+                )
+            else:
+                df_hist = lf.filter(pl.col("date") >= start).sort(["symbol", "date"]).collect()
+                short_symbols = (
+                    df_hist.group_by("symbol").len()
+                    .filter(pl.col("len") < lookback_days + warmup + 1)["symbol"].to_list()
+                ) if not df_hist.is_empty() else []
+                if short_symbols:
+                    # 停牌可能跨越自然日读取边界；只为缺行标的读取有界交易行（含暖机）。
+                    prior = (
+                        lf.filter(pl.col("symbol").is_in(short_symbols))
+                        .sort(["symbol", "date"])
+                        .group_by("symbol", maintain_order=True).tail(lookback_days + warmup + 1)
+                        .collect()
+                    )
+                    df_hist = pl.concat([
+                        df_hist.filter(~pl.col("symbol").is_in(short_symbols)), prior,
+                    ]).sort(["symbol", "date"])
         except Exception as e:  # noqa: BLE001
             logger.warning("load_enriched_history failed: %s", e)
-            return pl.DataFrame()
+            return cached if cached is not None else pl.DataFrame()
 
         if df_hist.is_empty():
-            return pl.DataFrame()
+            return cached if cached is not None else pl.DataFrame()
 
         df_full = compute_indicators(df_hist)
         df_full = compute_signals(df_full)
@@ -336,18 +375,16 @@ class ScreenerService:
             if "name" not in df_full.columns:
                 df_full = df_full.join(instruments.select(inst_cols), on="symbol", how="left")
 
-        # 裁剪掉 warmup 部分, 只保留 lookback 范围 (减少 group_by 开销)。
-        # 按交易日计数: 从数据里实际存在的交易日序列取最后 lookback_days 个交易日,
-        # 不能用 timedelta(days=N) (自然日), 否则周末/节假日会让窗口偏少, 与回测不一致。
-        if "date" in df_full.columns:
-            trading_dates = df_full["date"].unique().sort()
-            if len(trading_dates) > lookback_days:
-                lookback_start = trading_dates[-(lookback_days + 1)]
-            else:
-                lookback_start = trading_dates[0]
-            df_full = df_full.filter(pl.col("date") >= lookback_start)
+        if cached is not None and not cached.is_empty():
+            df_full = pl.concat([
+                cached.filter(~pl.col("symbol").is_in(short_symbols)), df_full,
+            ], how="diagonal_relaxed")
 
-        df_full = df_full.sort(["symbol", "date"])
+        # 各标的独立裁掉暖机行，返回大小只随标的数和所需偏移增长。
+        df_full = (
+            df_full.sort(["symbol", "date"])
+            .group_by("symbol", maintain_order=True).tail(lookback_days + 1)
+        )
 
         elapsed = (time.perf_counter() - t0) * 1000
         logger.info("_load_enriched_history(%s, %d): computed in %.1fms, %d rows",
@@ -479,6 +516,15 @@ class ScreenerService:
         history = None
         if history_bars > 1:
             history = self._load_enriched_history(as_of, history_bars)
+            # 历史缓存可能尚未包含最新日K；当前快照是本次筛选的同日行情依据。
+            if not current.is_empty() and "date" in current.columns:
+                latest = current.filter(pl.col("date") == as_of)
+                if not latest.is_empty():
+                    history = pl.concat([
+                        history.join(latest.select("symbol", "date"),
+                                     on=["symbol", "date"], how="anti") if not history.is_empty() else history,
+                        latest,
+                    ], how="diagonal_relaxed").sort(["symbol", "date"])
         return StrategyDataContext(
             asset_type=self.asset_type,
             timeframe=timeframe,

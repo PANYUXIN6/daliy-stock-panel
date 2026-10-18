@@ -3498,6 +3498,7 @@ class MatrixPipelineConfig:
     scoring_directions: dict[str, str] = field(default_factory=dict)
     asset_mask: np.ndarray | None = None
     protect_strategy_cache: bool = False
+    overlay_filter: list[dict] = field(default_factory=list)
 
 
 class MatrixStrategyPipeline:
@@ -3553,6 +3554,9 @@ class MatrixStrategyPipeline:
         )
         with cache_scope:
             basic_mask = build_pipeline_filter_mask(market, config)
+            if config.overlay_filter:
+                from app.strategy.overlay import matrix_mask
+                basic_mask = basic_mask & matrix_mask(market, config.overlay_filter)
             entry = (signals.entry.astype(bool) & basic_mask).astype(np.uint8)
             score = build_matrix_score(
                 market,
@@ -3563,6 +3567,9 @@ class MatrixStrategyPipeline:
                 fallback=signals.score,
                 directions=config.scoring_directions,
             )
+            entry &= np.isfinite(score).astype(np.uint8)
+            # SignalMatrix 需要有限的执行缓冲区；缺失已从候选掩码排除，零仅为无信号填充。
+            score = np.where(np.isfinite(score), score, np.float32(0.0))
             entry_codes = np.where(entry != 0, signals.entry_signal_code, -1).astype(np.int16)
             exit_codes = np.where(signals.exit != 0, signals.exit_signal_code, -1).astype(np.int16)
         if timing_ms is not None:
@@ -3683,9 +3690,16 @@ def build_matrix_score(
     fallback: np.ndarray,
     directions: Mapping[str, str] | None = None,
 ) -> np.ndarray:
+    """完整输入才参与截面归一化；候选中缺少输入的分数为 NaN。"""
     weights = {name: float(weight) for name, weight in scoring.items() if float(weight) != 0.0}
     total_weight = sum(weights.values())
     if weights and total_weight > 0:
+        values_by_name = {name: matrix_feature(market, name) for name in weights}
+        valid = universe.copy()
+        for values in values_by_name.values():
+            valid &= np.isfinite(values)
+        missing = universe & ~valid
+        universe = valid
         score = np.zeros(market.shape, dtype=np.float32)
         all_finite = universe.copy()
         row_count, asset_count = market.shape
@@ -3694,7 +3708,7 @@ def build_matrix_score(
         work_mask = np.empty((row_count, chunk_size), dtype=bool)
         value_scratch = np.empty((row_count, chunk_size), dtype=np.float32)
         for name, weight in weights.items():
-            values = matrix_feature(market, name)
+            values = values_by_name[name]
             row_min = np.full(row_count, np.inf, dtype=np.float32)
             row_max = np.full(row_count, -np.inf, dtype=np.float32)
             for start in range(0, asset_count, chunk_size):
@@ -3739,6 +3753,7 @@ def build_matrix_score(
                 score[:, start:stop] += scratch
         score *= np.float32(100.0)
         score[~universe | ~all_finite] = 0.0
+        score[missing] = np.nan
         return score
 
     if order_by and order_by != "score":
@@ -3755,6 +3770,7 @@ def build_matrix_score(
                 out=result[:, start:stop],
                 where=valid,
             )
+        result[universe & ~np.isfinite(values)] = np.nan
         return result
     result = np.zeros(market.shape, dtype=np.float32)
     np.copyto(result, fallback, where=universe)

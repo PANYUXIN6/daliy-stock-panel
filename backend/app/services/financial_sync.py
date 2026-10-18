@@ -10,12 +10,15 @@ import inspect
 import json
 import logging
 import threading
+import time
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 
 import polars as pl
 
-from app.data_providers.base import ProviderRateLimitError
+from app.data_providers.base import ProviderFinancialDataUnavailableError, ProviderRateLimitError
+from app.services.financial_versions import read_versions, record_versions
 from app.services.fs_utils import atomic_write_parquet, atomic_write_text
 from app.tickflow.capabilities import Cap, CapabilitySet
 
@@ -25,7 +28,10 @@ logger = logging.getLogger(__name__)
 _BATCH_SIZE = 100
 
 # 财务报表 + 历史股本表
-FINANCIAL_TABLES = ("metrics", "income", "balance_sheet", "cash_flow", "shares")
+FINANCIAL_TABLES = ("balance_sheet", "cash_flow", "metrics", "income", "shares")
+# 当前采集范围；其余表保留只读协议，不能被旧的全表或单表入口重新采集。
+FINANCIAL_SYNC_TABLES = ("income",)
+_RATE_LIMIT_COOLDOWN_S = 600
 
 
 # ================================================================
@@ -113,7 +119,8 @@ def _fetch_table(
         from app.services import preferences
 
         try:
-            provider = custom_sources.get_provider(preferences.get_financial_provider())
+            source = preferences.get_financial_provider()
+            provider = custom_sources.get_provider(source)
             parameters = inspect.signature(provider.get_financials).parameters
             cancel_kwargs = ({"cancel_event": cancel_event}
                              if cancel_event is not None and "cancel_event" in parameters else {})
@@ -135,6 +142,10 @@ def _fetch_table(
                     if on_progress:
                         on_progress(batch_num, total_batches)
                 df = pl.concat(frames, how="diagonal_relaxed") if frames else pl.DataFrame()
+        except ProviderFinancialDataUnavailableError as exc:
+            if not exc.data.is_empty():
+                exc.data = exc.data.with_columns(pl.lit(source).alias("source"))
+            raise
         except ProviderRateLimitError:
             raise
         except Exception as e:
@@ -142,7 +153,7 @@ def _fetch_table(
             raise
         if df.is_empty() or "symbol" not in df.columns:
             return pl.DataFrame()
-        return df
+        return df.with_columns(pl.lit(source).alias("source"))
 
     from app.tickflow.client import get_client
     tf = get_client()
@@ -193,7 +204,7 @@ def _fetch_table(
     df = pl.DataFrame(all_records)
     if df.is_empty() or "symbol" not in df.columns:
         return pl.DataFrame()
-    return df
+    return df.with_columns(pl.lit("tickflow").alias("source"))
 
 
 def _write_table(table: str, df: pl.DataFrame, data_dir: Path) -> int:
@@ -223,24 +234,28 @@ def _sync_table(
     *, cancel_event: threading.Event | None = None,
 ) -> int:
     """同步单张财务表。返回写入的行数。"""
-    return _write_table(
-        table,
-        _fetch_table(table, symbols, capset, latest_only=latest_only,
-                     **({"on_progress": on_progress} if on_progress else {}),
-                     **({"cancel_event": cancel_event} if cancel_event is not None else {})),
-        data_dir,
-    )
+    fetched = _fetch_table(table, symbols, capset, latest_only=latest_only,
+                           **({"on_progress": on_progress} if on_progress else {}),
+                           **({"cancel_event": cancel_event} if cancel_event is not None else {}))
+    captured = _record_table(table, fetched, data_dir)
+    return _write_table(table, captured, data_dir)
+
+
+def _record_table(table: str, frame: pl.DataFrame, data_dir: Path) -> pl.DataFrame:
+    from app.services import preferences
+
+    if frame.is_empty():
+        return frame
+    # 取数后路由配置可能已变化，版本归属以实际执行请求的源为准。
+    sources = frame["source"].drop_nulls().unique().to_list() if "source" in frame.columns else []
+    if len(sources) > 1:
+        raise ValueError("同一财务采集不能混合多个数据源")
+    source = sources[0] if sources else preferences.get_financial_provider()
+    return record_versions(data_dir, table, frame, source, datetime.now(UTC))
 
 
 def _merge_report_history(*frames: pl.DataFrame) -> pl.DataFrame:
-    """按 (symbol, period_end) 合并各报告期, 同期多行逐列取最新非空值。
-
-    语义(区分"覆盖"与"填空"): 每列独立取 announce_date 最新的非空值 —
-    新同步行有值则覆盖旧值, 新行缺的列(如 fuyao 不提供的字段)由旧行补齐,
-    实现多数据源并集共存。历史报告期不可变, 合并不会引入过期数据。
-    无 announce_date 的帧按输入顺序, 后写优先(与旧行为 keep="last" 一致);
-    公告日为空视为最旧, 不得压过带公告日的行。
-    """
+    """浏览表每期取完整最新记录，不再跨版本或数据源逐列拼接。"""
     valid = [
         frame
         for frame in frames
@@ -252,19 +267,229 @@ def _merge_report_history(*frames: pl.DataFrame) -> pl.DataFrame:
         pl.concat(valid, how="diagonal_relaxed")
         .filter(pl.col("symbol").is_not_null() & pl.col("period_end").is_not_null())
     )
-    sort_keys = ["symbol", "period_end"] + (
+    keys = ["symbol", "period_end"]
+    if "disclosure_type" in merged.columns:
+        # 历史浏览表未标注类型，但该五表契约属于正式财务数据。
+        merged = merged.with_columns(pl.col("disclosure_type").fill_null("formal"))
+        keys.append("disclosure_type")
+    sort_keys = keys + (
         ["announce_date"] if "announce_date" in merged.columns else []
     )
-    # 公告日为空排在最前: 排到最后会让"公告日未知"的旧行在逐列 last() 时胜出,
-    # 产出 announce_date 是新公告、数值却是旧值的自相矛盾行。symbol/period_end
-    # 已在上面过滤掉空值, 不受该参数影响。
+    if "observed_at" in merged.columns:
+        sort_keys = [*keys, "observed_at"]
     merged = merged.sort(sort_keys, nulls_last=False)
-    value_cols = [c for c in merged.columns if c not in ("symbol", "period_end")]
-    return (
-        merged.group_by("symbol", "period_end")
-        .agg([pl.col(c).drop_nulls().last() for c in value_cols])
-        .sort(["symbol", "period_end"])
-    )
+    return merged.unique(subset=keys, keep="last", maintain_order=True).sort(keys)
+
+
+def _financial_batch_policy() -> tuple[str, int, int] | None:
+    """仅声明可分批保存的源启用恢复，旧插件保持整表提交契约。"""
+    if not _financial_is_custom():
+        return None
+    from app.data_providers import custom as sources
+    from app.services import preferences
+
+    source = preferences.get_financial_provider()
+    provider = sources.get_provider(source)
+    size = getattr(provider, "financial_sync_batch_size", 0)
+    periods = getattr(provider, "financial_history_periods", 0)
+    return (source, int(size), int(periods)) if size > 0 else None
+
+
+def unfinished_financial_tables(data_dir: Path) -> list[str]:
+    """恢复同源同窗口的未完成财报与指标，完整结束的表不重新观察。"""
+    policy = _financial_batch_policy()
+    if policy is None:
+        raise ValueError("当前财务数据源不支持断点续采，请使用全部同步")
+    source, _size, periods = policy
+    tables = []
+    for table in FINANCIAL_SYNC_TABLES:
+        path = data_dir / "financials" / "sync_progress" / f"{table}.json"
+        state = json.loads(path.read_text()) if path.exists() else {}
+        if (state.get("status") != "completed" or state.get("source") != source
+                or state.get("history_periods") != periods):
+            tables.append(table)
+    return tables
+
+
+def wait_financial_rate_limit(attempt: int, on_wait, cancel_event=None) -> bool:
+    """有恢复能力的后台任务冷却后续跑；客户端本身不重试限流响应。"""
+    if _financial_batch_policy() is None:
+        return False
+    from app.services.pipeline_jobs import JobCancelledError
+
+    seconds = min(_RATE_LIMIT_COOLDOWN_S * 2 ** min(attempt - 1, 2), 1800)
+    deadline = time.monotonic() + seconds
+    while True:
+        remaining = max(0, int(deadline - time.monotonic()))
+        on_wait(remaining)
+        if cancel_event is not None and cancel_event.is_set():
+            raise JobCancelledError("financial")
+        if remaining == 0:
+            return True
+        if cancel_event is not None:
+            cancel_event.wait(min(30, remaining))
+        else:
+            time.sleep(min(30, remaining))
+
+
+def sync_candidate_income(
+    symbols: list[str], data_dir: Path, capset: CapabilitySet, on_progress=None,
+    *, cancel_event: threading.Event | None = None,
+    before_write: Callable[[], None] | None = None,
+) -> dict:
+    """在采集任务唯一写入槽内更新候选股，不改全市场断点或同步完成时间。
+
+    逐股保存完整利润表窗口；单股取数失败仍继续其他候选。版本时间由既有
+    record_versions 确定，不能把本次才观察到的记录提前至缺口形成日。
+    before_write 在版本与浏览表分别写入前复核延迟操作的授权。
+    """
+    from app.services import preferences
+    from app.services.pipeline_jobs import JobCancelledError
+
+    if preferences.get_financial_provider() != "fuyao" or not _financial_is_custom():
+        raise ValueError("候选股利润核验需要启用可用的扶摇财务数据源")
+    symbols = list(dict.fromkeys(symbol.strip() for symbol in symbols if symbol.strip()))
+    total = len(symbols)
+    result = {"requested": total, "updated_symbols": [], "errors": {}}
+    if not symbols:
+        return result
+
+    def progress(done):
+        if on_progress:
+            on_progress(done, total)
+        if cancel_event is not None and cancel_event.is_set():
+            raise JobCancelledError("financial_candidates")
+
+    progress(0)
+    # 局部更新不能把损坏的全市场文件当空表再覆盖；开始请求前严格核实两份文件。
+    path = data_dir / "financials" / "income" / "part.parquet"
+    existing = pl.read_parquet(path) if path.exists() else pl.DataFrame()
+    read_versions(data_dir, "income")
+    for index, symbol in enumerate(symbols):
+        attempts = 0
+        while True:
+            progress(index)
+            if preferences.get_financial_provider() != "fuyao" or not _financial_is_custom():
+                raise ValueError("财务数据源已改变，停止候选股利润核验")
+            try:
+                fetched = _fetch_table(
+                    "income", [symbol], capset, latest_only=False,
+                    on_progress=lambda *_, done=index: progress(done), cancel_event=cancel_event,
+                )
+            except ProviderRateLimitError:
+                attempts += 1
+                if wait_financial_rate_limit(attempts, lambda _, done=index: progress(done), cancel_event):
+                    continue
+                result["errors"][symbol] = "利润表接口限流，本次未完成核验"
+                break
+            except JobCancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 — 单股取数失败留痕，不阻断其他候选
+                progress(index)
+                result["errors"][symbol] = f"利润表获取失败：{exc}"
+                break
+
+            progress(index)
+            if fetched.is_empty():
+                result["errors"][symbol] = "未获取到可用利润表数据"
+            elif not {"symbol", "period_end"} <= set(fetched.columns):
+                result["errors"][symbol] = "利润表缺少股票代码或报告期"
+            elif set(fetched["symbol"].to_list()) - {symbol}:
+                result["errors"][symbol] = "利润表返回了请求范围以外的股票，已拒绝保存"
+            elif "source" not in fetched.columns or set(fetched["source"].to_list()) != {"fuyao"}:
+                result["errors"][symbol] = "利润表数据源与扶摇核验范围不一致，已拒绝保存"
+            else:
+                if before_write:
+                    before_write()
+                try:
+                    captured = _record_table("income", fetched, data_dir)
+                except ValueError as exc:
+                    result["errors"][symbol] = f"利润表记录无效：{exc}"
+                else:
+                    existing = _merge_report_history(existing, captured)
+                    if before_write:
+                        before_write()
+                    _write_table("income", existing, data_dir)
+                    result["updated_symbols"].append(symbol)
+            break
+        progress(index + 1)
+    return result
+
+
+def _sync_financial_batches(table, symbols, data_dir, capset, existing, policy,
+                            on_progress=None, cancel_event=None) -> int:
+    """完整批次先保存版本和浏览表，再记录进度；失败批次不标记完成。"""
+    from app.services import preferences
+    from app.services.pipeline_jobs import JobCancelledError
+
+    source, size, periods = policy
+    path = data_dir / "financials" / "sync_progress" / f"{table}.json"
+    checkpoint = json.loads(path.read_text()) if path.exists() else {}
+    if (checkpoint.get("status") != "running" or checkpoint.get("source") != source
+            or checkpoint.get("history_periods") != periods):
+        checkpoint = {"source": source, "table": table, "history_periods": periods,
+                      "symbols": symbols, "completed_symbols": [], "status": "running",
+                      "started_at": datetime.now(UTC).isoformat(), "rows_captured": 0}
+    # 股票池重排、新增或移除不改变已采集代码的版本事实；只补当前范围的未完成代码。
+    checkpoint["symbols"] = symbols
+    completed = set(checkpoint["completed_symbols"]) & set(symbols)
+    # 本轮经人工确认的例外单独留痕，不能伪装成取数成功或成为永久黑名单。
+    skipped = {symbol: reason for symbol, reason in checkpoint.get("skipped_symbols", {}).items()
+               if symbol in symbols and symbol not in completed}
+    checkpoint["skipped_symbols"] = skipped
+    pending = [symbol for symbol in symbols if symbol not in completed and symbol not in skipped]
+    if skipped:
+        logger.warning("财务 %s 本轮已有跳过记录 %d 只: %s", table, len(skipped), skipped)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    def save_progress():
+        checkpoint["completed_symbols"] = sorted(completed)
+        checkpoint["updated_at"] = datetime.now(UTC).isoformat()
+        atomic_write_text(path, json.dumps(checkpoint, ensure_ascii=False))
+
+    def progress(done=0, total=1, *, base=0, count=0):
+        if on_progress:
+            on_progress(len(skipped) + base + int(count * done / max(total, 1)), len(symbols))
+        if cancel_event is not None and cancel_event.is_set():
+            raise JobCancelledError("financial")
+
+    save_progress()
+    progress(base=len(completed))
+    for index in range(0, len(pending), size):
+        if preferences.get_financial_provider() != source:
+            raise RuntimeError("财务数据源已改变，停止当前恢复任务")
+        chunk = pending[index:index + size]
+        count = len(chunk)
+        base = len(completed)
+        missing_symbols = {}
+        try:
+            fetched = _fetch_table(
+                table, chunk, capset, latest_only=False,
+                on_progress=lambda done, total, base=base, count=count: progress(done, total, base=base, count=count),
+                **({"cancel_event": cancel_event} if cancel_event is not None else {}),
+            )
+        except ProviderFinancialDataUnavailableError as exc:
+            if table != "metrics":
+                raise
+            missing_symbols = exc.missing_symbols
+            fetched = exc.data
+            if (not missing_symbols or not set(missing_symbols) <= set(chunk)
+                    or (not fetched.is_empty() and set(fetched["symbol"]) & set(missing_symbols))):
+                raise ValueError("财务缺数记录与本批次成功数据不一致") from exc
+        if not fetched.is_empty():
+            captured = _record_table(table, fetched, data_dir)
+            existing = _merge_report_history(existing, captured)
+            _write_table(table, existing, data_dir)
+            checkpoint["rows_captured"] += captured.height
+        skipped.update(missing_symbols)
+        completed.update(symbol for symbol in chunk if symbol not in missing_symbols)
+        if missing_symbols:
+            logger.warning("财务 %s 本轮确认缺数跳过: %s", table, missing_symbols)
+        save_progress()
+        progress(base=len(completed))
+    checkpoint["status"] = "completed"
+    save_progress()
+    return existing.height if checkpoint["rows_captured"] else 0
 
 
 def _sync_history_table_for_symbols(
@@ -275,15 +500,21 @@ def _sync_history_table_for_symbols(
     on_progress=None,
     *, cancel_event: threading.Event | None = None,
 ) -> int:
-    """历史累积同步: 保留已有各期记录, 仅拉最新期 + 为新标的补全量历史。
-
-    与 shares 同一模式。若改为 latest_only 全量覆盖, 历史各期会在每次同步时
-    被冲掉, 财务因子将永远只有单期快照, 任何回测都是未来函数。
-    """
+    """财报每轮重新观察源可返回的历史窗口，以捕获旧期更新；股本沿用增量。"""
     existing = get_financial_df(data_dir, table)
+    policy = _financial_batch_policy() if table != "shares" else None
+    if policy is not None:
+        return _sync_financial_batches(table, symbols, data_dir, capset, existing, policy,
+                                      on_progress, cancel_event)
     fetch_kwargs = {"on_progress": on_progress} if on_progress else {}
     if cancel_event is not None:
         fetch_kwargs["cancel_event"] = cancel_event
+    if table != "shares":
+        fetched = _fetch_table(table, symbols, capset, latest_only=False, **fetch_kwargs)
+        if fetched.is_empty():
+            return 0
+        captured = _record_table(table, fetched, data_dir)
+        return _write_table(table, _merge_report_history(existing, captured), data_dir)
     if existing.is_empty() or not {"symbol", "period_end"} <= set(existing.columns):
         return _sync_table(table, symbols, data_dir, capset, latest_only=False, **fetch_kwargs)
 
@@ -299,7 +530,8 @@ def _sync_history_table_for_symbols(
     # 历史行只用于合并，不能充当本次成功取数的证据或改写旧文件时间。
     if missing_history.is_empty() and latest.is_empty():
         return 0
-    merged = _merge_report_history(existing, missing_history, latest)
+    captured = _record_table(table, pl.concat([missing_history, latest], how="diagonal_relaxed"), data_dir)
+    merged = _merge_report_history(existing, captured)
     return _write_table(table, merged, data_dir)
 
 
@@ -341,7 +573,7 @@ def sync_all(data_dir: Path, capset: CapabilitySet) -> dict[str, int]:
 
     symbols = _get_symbols(data_dir)
     results: dict[str, int] = {}
-    for table in FINANCIAL_TABLES:
+    for table in FINANCIAL_SYNC_TABLES:
         results[table] = _sync_history_table_for_symbols(
             table, symbols, data_dir, capset
         )
@@ -408,7 +640,7 @@ class FinancialScheduler:
 
         auto_schedule=False (默认): 仅初始化 (设置数据目录/能力 + 恢复 last_sync),
             供 /api/financials/sync/* 手动同步使用, 不启动自动调度。
-        auto_schedule=True: 额外启动每周一次的 metrics 自动同步 (启动后 60s 首跑)。
+        auto_schedule=True: 额外启动每周一次的利润表自动同步 (启动后 60s 首跑)。
         """
         # 先记录 data_dir/capset, 即使当前无 FINANCIAL 也保留引用:
         # 用户稍后在「设置」页升级到 Expert Key 时, update_capabilities() 会把新 capset
@@ -422,18 +654,9 @@ class FinancialScheduler:
         # 从持久化恢复上次同步时间: 重启后前端仍能显示真实最后同步时间,而非"尚未同步"
         try:
             from app.services import preferences
-            restored = dict(preferences.get_financial_sync_times())
-            # 老用户迁移兜底: 若某表在 preferences 无记录但 parquet 已存在(升级前同步过),
-            # 用 parquet 文件的修改时间作为同步时间并补写持久化。
-            for table in FINANCIAL_TABLES:
-                if table in restored:
-                    continue
-                parquet = data_dir / "financials" / table / "part.parquet"
-                if parquet.exists():
-                    mtime = datetime.fromtimestamp(parquet.stat().st_mtime, tz=UTC).isoformat()
-                    restored[table] = mtime
-                    preferences.set_financial_sync_time(table, mtime)
-                    logger.info("FinancialScheduler backfilled last_sync for %s from parquet mtime", table)
+            restored = {table: timestamp for table, timestamp in preferences.get_financial_sync_times().items()
+                        if table in FINANCIAL_SYNC_TABLES}
+            # 浏览表也会被候选股局部更新；文件修改时间不能证明全市场同步完成。
             self._last_sync = restored
             if self._last_sync:
                 logger.info("FinancialScheduler restored last_sync: %s", list(self._last_sync.keys()))
@@ -496,14 +719,14 @@ class FinancialScheduler:
                 if not self._running:
                     break
 
-                # 每周: 只同步 metrics
+                # 沿用可选调度的周期，但只同步当前启用的利润表。
                 try:
-                    rows = sync_metrics(self._data_dir, self._capset)
+                    rows = sync_income(self._data_dir, self._capset)
                     if rows > 0:
-                        self._record_sync("metrics")
-                    logger.info("FinancialScheduler: metrics synced, %d rows", rows)
+                        self._record_sync("income")
+                    logger.info("FinancialScheduler: income synced, %d rows", rows)
                 except Exception as e:  # noqa: BLE001 — 独立定时财务任务失败留痕，继续调度而不阻断采集服务
-                    logger.warning("FinancialScheduler: metrics sync failed: %s", e, exc_info=True)
+                    logger.warning("FinancialScheduler: income sync failed: %s", e, exc_info=True)
 
                 # 等待下一次 (7天)
                 for _ in range(7 * 24 * 60):  # 每分钟检查一次 _running
@@ -518,9 +741,11 @@ class FinancialScheduler:
                   cancel_event: threading.Event | None = None) -> dict[str, int]:
         """同步逻辑本体(不加锁,假设调用方已持有 _is_syncing)。
 
-        table=None 同步全部财务表;否则只同步指定表。
+        table=None 同步当前启用的利润表；旧非利润表请求明确拒绝。
         每张表完成立即更新 last_sync,让前端轮询 /status 能看到进度递增。
         """
+        if table is not None and table not in FINANCIAL_SYNC_TABLES:
+            raise ValueError("当前财务采集仅支持利润表")
         if table and on_progress:
             rows = _sync_history_table_for_symbols(table, _get_symbols(self._data_dir), self._data_dir,
                                                    self._capset, on_progress, cancel_event=cancel_event)
@@ -545,7 +770,7 @@ class FinancialScheduler:
         # 全部同步
         symbols = _get_symbols(self._data_dir)
         result: dict[str, int] = {}
-        for t in FINANCIAL_TABLES:
+        for t in FINANCIAL_SYNC_TABLES:
             result[t] = _sync_history_table_for_symbols(
                 t, symbols, self._data_dir, self._capset
             )

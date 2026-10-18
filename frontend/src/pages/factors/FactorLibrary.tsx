@@ -210,7 +210,7 @@ function FactorDetailModal({
     ['公式', item.formula],
     ['版本', `v${item.version}`],
     ['预热', item.warmup_bars > 1 ? `${item.warmup_bars} 个交易日` : '无需滚动窗口'],
-    ['点时数据', item.pit ? '是（按公告日口径，不泄露未公告数据）' : '否'],
+    ['点时数据', item.pit ? (item.group === '财务' ? '按更新日或首次观察日生效；旧版本缺失时为空' : '按数据可用时间对齐') : '否'],
     ['适用资产', item.asset_types.join(' / ')],
     ['跨标的可比', item.scale_free ? '是（可直接截面排序）' : '否（原值受价格尺度影响）'],
     ['依赖列', item.dependencies.length > 0 ? item.dependencies.join(', ') : '已物化列'],

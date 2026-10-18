@@ -84,7 +84,10 @@ def test_sync_preserves_out_of_scope_history_and_adds_provider_only_stock(tmp_pa
     assert financial_sync.sync_income(tmp_path, CapabilitySet()) == 3
     assert requested == ['600000.SH', '001381.SZ']
     saved = pl.read_parquet(history)
-    assert saved.filter(pl.col('symbol') == '600005.SH').row(0, named=True) == {
+    legacy = saved.filter(pl.col('symbol') == '600005.SH')
+    assert legacy.select('symbol', 'period_end', 'net_income').row(0, named=True) == {
         'symbol': '600005.SH', 'period_end': '2016-12-31', 'net_income': 12.,
     }
+    assert legacy['observed_at'].item() is None  # 不给旧文件伪造观察证据
+    assert legacy['source'].item() is None
     assert saved.filter(pl.col('symbol') == '001381.SZ')['net_income'].item() == 25.

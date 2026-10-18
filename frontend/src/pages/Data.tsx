@@ -380,6 +380,7 @@ export function Data() {
   const isRunning = !!activeJobId && (!job.data || job.data.status === 'running' || job.data.status === 'pending')
   const isStarting = startSync.isPending || syncMinuteHistory.isPending || syncFinancials.isPending || syncClassifications.isPending || pipelineConfirmation.busy
   const collectionBusy = isRunning || isStarting || !!history.data?.active_id || syncIndexDaily.isPending || indexConfirmation.busy || refreshQuotes.isPending || quoteConfirmation.busy || updateDepth.isPending || depthConfirmation.busy
+  const financialRunning = isRunning && job.data?.request_key?.startsWith('financial:') === true
   const minuteHistoryDays = prefs.data?.minute_sync_days ?? 5
   const hasData = !!(s?.instruments?.rows || s?.daily?.rows)
   // none 档(无 key / 无效 key) → 禁用立即同步 (同步依赖付费档的批量端点)
@@ -612,17 +613,16 @@ export function Data() {
           />
         )
       case 'financials': {
-        const historicalShareRows = s?.financials?.tables?.shares?.rows ?? 0
         return (
           <StatCard
             title="财务数据"
-            hint="财报 / 指标 / 历史股本"
+            hint="利润表 / 历史版本"
             stats={s?.financials ? { rows: s.financials.rows } : null}
             loading={isLoading}
             tierKey="financials"
             capLimits={mergedCaps}
             customProvider={routeProviderDisplay(matrix.data, 'financial')}
-            subLabel={`历史股本 · ${historicalShareRows.toLocaleString()} 条`}
+            subLabel="仅采集利润表"
             onSettings={() => setOpenSettings(v => v === 'financials' ? null : 'financials')}
             settingsOpen={openSettings === 'financials'}
           />
@@ -829,8 +829,8 @@ export function Data() {
               },
               {
                 title: '财务数据',
-                description: '统一更新核心指标、利润表、资产负债表、现金流量表和历史股本。',
-                detail: '五张表由后台统一执行',
+                description: '仅更新利润表，保留历史版本，供业绩断层和利润相关因子使用。',
+                detail: '财务采集范围：利润表',
                 available: routeCapUsable(matrix.data, 'financial') === true,
                 pending: syncFinancials.isPending,
                 settings: 'financials',
@@ -878,7 +878,7 @@ export function Data() {
           <QuoteConfigCard
             enabled={realtimeEnabled}
             running={quoteStatus.data?.running ?? false}
-            paused={!!quoteStatus.data?.paused || collectionBusy}
+            paused={!!quoteStatus.data?.paused || (collectionBusy && !financialRunning)}
             isTrading={quoteStatus.data?.is_trading_hours ?? false}
             lastFetchMs={quoteStatus.data?.last_fetch_ms ?? null}
             intervalS={quoteInterval.data?.interval ?? quoteStatus.data?.interval_s ?? 30}

@@ -1229,6 +1229,9 @@ class MonitorRuleEngine:
             return []
         if s is None:
             return []
+        if getattr(s, "meta", {}).get("realtime_supported") is False:
+            # 完整财务与前序行情核验只在显式筛选时执行，不能放入行情轮询热路径。
+            return []
 
         # 运行策略选股: 复用当前 enriched DataFrame 跳过数据加载
         overrides = {}

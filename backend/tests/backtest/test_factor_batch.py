@@ -145,10 +145,10 @@ def test_factor_catalog_covers_normalized_indicator_families():
         "vol_trend_5_60",
         "limit_up_count_20d",
         "limit_up_count_60d",
-        "pb_latest",
-        "roe_latest",
+        "gross_margin_latest",
+        "net_margin_latest",
         "revenue_yoy_latest",
-        "debt_ratio_latest",
+        "net_income_yoy_latest",
     } <= set(factor_ids)
     assert set(DERIVED_FACTOR_DEPENDENCIES) <= set(factor_ids)
 

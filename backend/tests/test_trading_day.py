@@ -86,3 +86,13 @@ def test_fuyao_provider_trading_days_conversion(monkeypatch):
     monkeypatch.setattr(fp, "get_api_key", lambda: "test-key")
     days = FuyaoProvider().trading_days()
     assert days == {date(2026, 9, 4), date(2026, 9, 7)}
+
+
+def test_calendar_disjoint_refresh_does_not_invent_unknown_coverage(calendar, monkeypatch):
+    root, provider = calendar
+    trading_day.sync_calendar(root)
+    provider.trading_days.return_value = {date(2028, 9, 29), date(2028, 10, 9)}
+    monkeypatch.setattr(trading_day, 'cn_now', lambda: datetime(2028, 10, 10, 8, tzinfo=CN_TZ))
+    trading_day.sync_calendar(root)
+    assert trading_day.is_trading_day(datetime(2027, 10, 9, 10, tzinfo=CN_TZ), data_dir=root) is None
+    assert trading_day.is_trading_day(datetime(2028, 10, 9, 10, tzinfo=CN_TZ), data_dir=root) is True

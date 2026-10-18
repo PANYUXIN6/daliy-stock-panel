@@ -16,7 +16,18 @@
  *   非编辑状态下布局意外写回)。
  */
 import { useCallback, useMemo, type ReactNode } from 'react'
-import GridLayout, { useContainerWidth, type Layout } from 'react-grid-layout'
+import GridLayout, { useContainerWidth, setTransform, type Layout } from 'react-grid-layout'
+import { getPageScale } from '@/lib/pageZoom'
+
+/** 提供根节点缩放比例，拖拽起点沿用 RGL 的父容器相对坐标计算，
+ *  同时保留父容器滚动补偿；视口坐标不能直接作为网格内的布局坐标。 */
+function scaledStrategy(scale: number) {
+  return {
+    type: 'transform' as const,
+    scale,
+    calcStyle: (pos: Parameters<typeof setTransform>[0]) => setTransform(pos),
+  }
+}
 import 'react-grid-layout/css/styles.css'
 import './grid.css'
 import { X } from 'lucide-react'
@@ -93,6 +104,7 @@ export function DashboardGrid({ ctx, items, onItemsChange, editing }: DashboardG
         <GridLayout
           width={width}
           layout={rglLayout}
+          positionStrategy={scaledStrategy(getPageScale())}
           gridConfig={{ cols: GRID_COLS, rowHeight: GRID_ROW_HEIGHT, margin: [GRID_MARGIN, GRID_MARGIN], containerPadding: null, maxRows: Infinity }}
           dragConfig={{
             enabled: editing,

@@ -1,7 +1,7 @@
 """fuyao 财务适配测试 (不依赖真实网络)。
 
 覆盖: 三大报表字段映射 (canonical 列名 + 扩展列透传 + ISO 日期口径)、
-latest_only 分档 (limit 1 vs 8)、metrics 组装 (eps_basic 顺带 / bps 估值反推 /
+latest_only 分档 (limit 1 vs 20)、metrics 组装 (eps_basic 顺带 / bps 估值反推 /
 指标 index_id 映射与未知 id 透传 / 成功响应缺指标不弃行)、shares 恒空、
 报告期合并写入的逐列填空语义 (并集共存, 新行缺列不覆盖旧值)。
 """
@@ -85,6 +85,9 @@ def test_income_mapping_canonical_columns(monkeypatch):
     assert row["symbol"] == "600519.SH"
     assert row["period_end"] == "2026-06-30"
     assert row["announce_date"] == "2026-08-15"
+    assert row["source_update_date"] == "2026-08-15"
+    assert row["date_basis"] == "source_update"
+    assert row["disclosure_type"] == "formal"
     assert row["revenue"] == pytest.approx(_INCOME_ROW["operating_income"])
     assert row["net_income"] == pytest.approx(_INCOME_ROW["net_profit"])
     assert row["net_income_attributable"] == pytest.approx(
@@ -104,7 +107,7 @@ def test_statements_limit_latest_vs_history(monkeypatch):
     provider.get_financials("income", ["600519.SH"], latest_only=True)
     assert fake.stmt_calls == [("income", "600519.SH", 1)]
     provider.get_financials("income", ["600519.SH"], latest_only=False)
-    assert fake.stmt_calls[-1] == ("income", "600519.SH", fp._FINANCIAL_HISTORY_PERIODS)
+    assert fake.stmt_calls[-1] == ("income", "600519.SH", 20)
 
 
 def test_balance_and_cashflow_mapping(monkeypatch):
@@ -205,6 +208,9 @@ def test_metrics_assembly(monkeypatch):
     assert row["announce_date"] == "2026-08-15"
     assert row["eps_basic"] == 35.57  # 顺带取自利润表
     assert row["bps"] == pytest.approx(1297.4 / 6.455055)  # 估值反推
+    assert row["date_basis"] == "observed"
+    assert row["bps_basis"] == "valuation_snapshot"
+    assert row["roe_basis"] == "weighted_average"
     assert row["roe"] == pytest.approx(16.75)  # 字符串 → float
     assert row["gross_margin"] == pytest.approx(89.5552)
     assert row["fixed_asset_invest_expansion_ratio"] == pytest.approx(2.125873)
@@ -239,8 +245,8 @@ def test_shares_returns_empty(monkeypatch):
     assert provider.get_financials("shares", ["600519.SH"]).is_empty()
 
 
-def test_merge_fills_missing_cells_from_old_rows():
-    """逐列填空: 同报告期新行缺的列由旧行补齐, 有值则覆盖 (并集共存语义)。"""
+def test_merge_keeps_complete_rows_instead_of_mixing_versions():
+    """最新记录缺少的字段保持空，不借用另一源或版本的数值。"""
     old = pl.DataFrame({
         "symbol": ["600519.SH", "600519.SH"],
         "period_end": ["2026-03-31", "2026-06-30"],
@@ -253,14 +259,14 @@ def test_merge_fills_missing_cells_from_old_rows():
         "period_end": ["2026-06-30"],
         "announce_date": ["2026-08-15"],   # 更晚公告 → 该期以新行为基准
         "net_income": [461.5],             # 修正值覆盖
-        # diluted_eps 缺失 → 由旧行 70.2 补齐
+        # diluted_eps 缺失，不能从旧版本补齐。
         "bps": [200.99],                   # fuyao 扩展列, 旧行没有
     })
     merged = _merge_report_history(old, new).to_dicts()
     assert len(merged) == 2
     q2 = next(r for r in merged if r["period_end"] == "2026-06-30")
     assert q2["net_income"] == pytest.approx(461.5)   # 新值覆盖
-    assert q2["diluted_eps"] == pytest.approx(70.2)   # 旧行补齐
+    assert q2["diluted_eps"] is None
     assert q2["bps"] == pytest.approx(200.99)         # 扩展列并入
     q1 = next(r for r in merged if r["period_end"] == "2026-03-31")
     assert q1["diluted_eps"] == pytest.approx(68.1)   # 未触碰期原样保留

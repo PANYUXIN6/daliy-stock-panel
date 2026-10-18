@@ -68,8 +68,8 @@ html.dark {
 /* 默认 1px 细分隔线(暗色用边框区分层次,不用 shadow) */
 * { border-color: hsl(var(--border)); }
 
-/* 页面缩放 (设置→系统→界面缩放) 用 CSS zoom 作用于 <html>:
- * vh 单位不随 zoom 缩放 (zoom<1 底部露底 / zoom>1 溢出), 百分比高度链才会 —
+/* 页面缩放在 #root 使用 transform scale，宽高按倒数补偿。
+ * 账号认证后再应用个人缩放，根链路使用百分比高度 —
  * 根链路统一 % 高度, 主布局与加载占位用 h-full/min-h-full 而非 h-screen。 */
 html, body, #root { height: 100%; }
 
@@ -96,4 +96,10 @@ body {
 }
 .animate-breath {
   animation: breath-glow 2.8s ease-in-out infinite;
+}
+
+/* 模拟盘策略联想下拉。 */
+@keyframes sg-drop-in {
+  from { opacity: 0; transform: translateY(-2px) scale(0.995); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
 }

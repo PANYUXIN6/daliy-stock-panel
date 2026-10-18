@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import httpx
 import polars as pl
 import pytest
+from fastapi import HTTPException
 
 from app.api import financials, pipeline
 from app.data_providers import custom
@@ -129,22 +130,14 @@ async def test_old_financial_history_does_not_turn_empty_or_failed_round_into_su
 
 
 @pytest.mark.asyncio
-async def test_supported_tables_sync_without_claiming_old_unsupported_shares(local, monkeypatch):
+async def test_all_syncs_only_income_and_preserves_other_historical_tables(local, monkeypatch):
     data_dir, jobs, scheduler, repo = local
     originals = _old_tables(data_dir)
 
     class Client:
-        def financial_statements(self, *args, **kwargs):
+        def financial_statements(self, table, *args, **kwargs):
+            assert table == "income"
             return [dict(_INCOME)]
-
-        def financial_indicators(self, *args, **kwargs):
-            return []
-
-        def valuations_snapshot(self, *args, **kwargs):
-            return []
-
-        def price_snapshot_batch(self, *args, **kwargs):
-            return []
 
     _install(monkeypatch, Client())
     response = await financials.trigger_financial_sync(repo, CapabilitySet(), scheduler)
@@ -152,50 +145,36 @@ async def test_supported_tables_sync_without_claiming_old_unsupported_shares(loc
     job = jobs.get(response["job_id"])
 
     assert job["status"] == "succeeded"
-    assert job["result"]["shares"] == 0
-    assert scheduler.last_sync["shares"] == "2026-01-01T00:00:00+00:00"
-    assert (data_dir / "financials" / "shares" / "part.parquet").read_bytes() == originals["shares"]
-    assert all(job["result"][table] > 0 for table in financial_sync.FINANCIAL_TABLES if table != "shares")
+    assert job["result"] == {
+        "income": 2,
+        "collection_context": {"provider": "fuyao", "tables": ["income"]},
+    }
+    assert scheduler.last_sync["income"] != "2026-01-01T00:00:00+00:00"
+    for table in ("balance_sheet", "cash_flow", "metrics", "shares"):
+        assert scheduler.last_sync[table] == "2026-01-01T00:00:00+00:00"
+        assert (data_dir / "financials" / table / "part.parquet").read_bytes() == originals[table]
     confirmation = collection_status.check_collection_sync(
         CollectionSyncRequest(kind="financial", table="all"), repo, job_store=jobs,
     )
     assert confirmation["requires_confirmation"]
-    assert "本次任务未确认有可用结果：历史股本" in confirmation["message"]
 
 
 @pytest.mark.asyncio
-async def test_failed_table_keeps_old_timestamp_while_completed_table_is_saved(local, monkeypatch):
+@pytest.mark.parametrize("table", ["metrics", "balance_sheet", "cash_flow", "shares"])
+async def test_non_income_sync_is_rejected_without_changing_history_or_timestamps(local, monkeypatch, table):
     data_dir, jobs, scheduler, repo = local
     originals = _old_tables(data_dir)
 
-    class Client:
-        def financial_statements(self, table, *args, **kwargs):
-            if table == "balance_sheet":
-                raise fc.FuyaoError("资产负债表取数失败")
-            return [dict(_INCOME)]
+    _install(monkeypatch, SimpleNamespace())
+    with pytest.raises(HTTPException, match="仅支持利润表") as caught:
+        await financials.trigger_financial_sync(repo, CapabilitySet(), scheduler, table)
 
-        def financial_indicators(self, *args, **kwargs):
-            return []
-
-        def valuations_snapshot(self, *args, **kwargs):
-            return []
-
-        def price_snapshot_batch(self, *args, **kwargs):
-            return []
-
-    _install(monkeypatch, Client())
-    response = await financials.trigger_financial_sync(repo, CapabilitySet(), scheduler)
-    await asyncio.gather(*list(pipeline._tasks))
-    job = jobs.get(response["job_id"])
-
-    assert job["status"] == "failed" and "资产负债表取数失败" in job["error"]
-    assert scheduler.last_sync["balance_sheet"] == "2026-01-01T00:00:00+00:00"
-    assert scheduler.last_sync["metrics"] != "2026-01-01T00:00:00+00:00"
-    assert financial_sync.get_financial_df(data_dir, "metrics").height == 2
-    assert (data_dir / "financials" / "balance_sheet" / "part.parquet").read_bytes() == originals["balance_sheet"]
-    assert not collection_status.check_collection_sync(
-        CollectionSyncRequest(kind="financial", table="all"), repo, job_store=jobs,
-    )["requires_confirmation"]
+    assert caught.value.status_code == 400
+    assert jobs.active_id() is None
+    assert not scheduler.is_syncing
+    assert scheduler.last_sync == dict.fromkeys(financial_sync.FINANCIAL_TABLES, "2026-01-01T00:00:00+00:00")
+    assert all((data_dir / "financials" / name / "part.parquet").read_bytes() == old
+               for name, old in originals.items())
 
 
 @pytest.mark.asyncio
@@ -215,7 +194,7 @@ async def test_provider_worker_error_does_not_forge_job_cancellation(local, monk
             return []
 
     _install(monkeypatch, Client())
-    response = await financials.trigger_financial_sync(repo, CapabilitySet(), scheduler, "metrics")
+    response = await financials.trigger_financial_sync(repo, CapabilitySet(), scheduler, "income")
     await asyncio.gather(*list(pipeline._tasks))
     job = jobs.get(response["job_id"])
 
@@ -225,9 +204,7 @@ async def test_provider_worker_error_does_not_forge_job_cancellation(local, monk
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("endpoint", ["/api/a-share/valuations/snapshot", "/api/a-share/prices/snapshot"])
-async def test_cancelling_metrics_at_bps_gate_does_not_send_waiting_request(local, monkeypatch, endpoint):
-    data_dir, jobs, scheduler, repo = local
-    originals = _old_tables(data_dir)
+async def test_provider_cancelling_metrics_at_bps_gate_does_not_send_waiting_request(monkeypatch, endpoint):
     waiting, release = Event(), Event()
     wire = []
     gate_calls = 0
@@ -249,21 +226,26 @@ async def test_cancelling_metrics_at_bps_gate_does_not_send_waiting_request(loca
     client._http.close()
     client._http = httpx.Client(base_url=fc.BASE_URL, transport=httpx.MockTransport(respond))
     monkeypatch.setattr(fc, "_wait_request_slot", wait_slot)
-    _install(monkeypatch, client)
+    monkeypatch.setattr(fc, "_wait_financial_request_slot", lambda cancel_event=None: None)
+    provider = FuyaoProvider()
+    provider._client = client
+    cancel = Event()
+    task = asyncio.create_task(asyncio.to_thread(
+        provider.get_financials, "metrics", ["600519.SH"], cancel_event=cancel,
+    ))
     try:
-        response = await financials.trigger_financial_sync(repo, CapabilitySet(), scheduler, "metrics")
         assert await asyncio.to_thread(waiting.wait, 2)
-        jobs.terminate(response["job_id"], "用户取消")
+        cancel.set()
         release.set()
-        await asyncio.gather(*list(pipeline._tasks))
+        with pytest.raises(asyncio.CancelledError):
+            await task
     finally:
+        cancel.set()
         release.set()
+        await asyncio.gather(task, return_exceptions=True)
         client.close()
 
     assert endpoint not in wire
-    assert jobs.get(response["job_id"])["status"] == "failed"
-    assert not scheduler.is_syncing
-    assert (data_dir / "financials" / "metrics" / "part.parquet").read_bytes() == originals["metrics"]
 
 
 _PARTIAL_SYMBOLS = ["600000.SH", "600519.SH"]
@@ -326,7 +308,7 @@ def test_partial_financial_network_failure_does_not_return_complete_table(monkey
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("table,stage", _PARTIAL_STAGES)
+@pytest.mark.parametrize("table,stage", [("income", "statement")])
 async def test_partial_financial_failure_keeps_history_time_and_repeat_evidence(
     local, monkeypatch, table, stage,
 ):

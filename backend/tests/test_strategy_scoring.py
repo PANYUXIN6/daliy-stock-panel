@@ -40,6 +40,22 @@ def test_scoring_reweights_only_available_fields():
     assert scored["score"].to_list() == pytest.approx([100.0, 0.0])
 
 
+def test_backtest_missing_financial_score_keeps_price_rows_but_not_candidates():
+    frame = _candidates().with_columns(pl.Series("roe_latest", [None, 12.]))
+    strategy = SimpleNamespace(meta={"scoring": {"roe_latest": 1.}, "order_by": "score"})
+    scored = StrategyBacktestService._apply_score(frame, strategy, None,
+                                                 universe_mask=pl.Series([True, True]))
+    assert scored.height == 2  # 估值、止损与已有卖出信号仍需这些行情行。
+    assert scored["score"].to_list() == [None, 50.]
+    assert scored["score"].is_finite().fill_null(False).to_list() == [False, True]
+
+
+def test_backtest_cannot_reweight_away_absent_financial_factor():
+    strategy = SimpleNamespace(meta={"scoring": {"roe_latest": 1., "vol_ratio_5d": 1.}})
+    scored = StrategyBacktestService._apply_score(_candidates(), strategy, None)
+    assert scored["score"].null_count() == scored.height
+
+
 def test_scoring_can_prefer_lower_factor_values():
     scored = StrategyEngine._apply_scoring(
         _candidates(),

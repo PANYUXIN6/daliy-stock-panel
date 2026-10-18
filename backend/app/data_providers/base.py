@@ -20,6 +20,15 @@ class ProviderRateLimitError(RuntimeError):
     """上游要求停止取数；同步任务必须失败，不能把限流当作无数据。"""
 
 
+class ProviderFinancialDataUnavailableError(RuntimeError):
+    """已复核的单股财务缺数，携带同批成功数据与缺数原因供断点同步留痕。"""
+
+    def __init__(self, data: pl.DataFrame, missing_symbols: dict[str, str]) -> None:
+        super().__init__("财务数据确认缺失：" + "、".join(missing_symbols))
+        self.data = data
+        self.missing_symbols = missing_symbols
+
+
 @dataclass(frozen=True)
 class ProviderCapabilities:
     instruments: bool = False

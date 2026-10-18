@@ -177,6 +177,13 @@ def _write_cache_locked(
     old_ever_rows: dict[str, dict[str, dict]] = old.get("today_ever_rows", {}) if old else {}
 
     merged_results = {**(old.get("results") or {}), **results} if old_as_of == as_of else results
+    if old_as_of == as_of:
+        # 普通只读重算不会重新更新候选财务；保留上次显式核验快照与时间。
+        # 待核验只存在 verification，不进入下面的 rows/曾命中并集。
+        for sid, result in results.items():
+            previous = (old.get("results") or {}).get(sid) or {}
+            if "verification" not in result and "verification" in previous:
+                merged_results[sid] = {**result, "verification": previous["verification"]}
 
     # 当前命中的行数据 → symbol 映射
     current_row_maps: dict[str, dict[str, dict]] = {}

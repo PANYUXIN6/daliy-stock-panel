@@ -13,6 +13,7 @@ from typing import Annotated, Any
 import polars as pl
 from fastapi import APIRouter, Query, Request
 
+from app.market_time import cn_today
 from app.services import regime_builder
 
 logger = logging.getLogger(__name__)
@@ -151,7 +152,7 @@ def regime_recompute(request: Request, start: date | None = None, end: date | No
     """
     repo = request.app.state.repo
     data_dir = _data_dir(request)
-    end = end or date.today()
+    end = end or cn_today()
     if start is None:
         # 全量: 从 enriched 最早日强制重算到今天
         earliest = regime_builder.earliest_enriched_date(repo)
@@ -309,7 +310,7 @@ def mainline_recompute(request: Request):
     rows = 0
     for kind in ("concept", "industry"):
         computed = market_mainline.compute_mainline_range(
-            repo, data_dir, earliest, date.today(), kind=kind
+            repo, data_dir, earliest, cn_today(), kind=kind
         )
         if not computed.is_empty():
             market_mainline.upsert_mainline_history(data_dir, computed)

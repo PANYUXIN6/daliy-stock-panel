@@ -319,11 +319,14 @@ def test_builtin_matrix_strategies_use_their_declared_formula_modules():
         path for path in strategy_dir.glob("*.py") if path.name != "__init__.py"
     )
 
-    # 分钟形态策略 (minute_red_streak) 已迁至自定义策略目录, 内置策略全部 matrix 后端
-    assert len(strategy_files) == 26
+    matrix_strategies = []
     for strategy_path in strategy_files:
         strategy = StrategyEngine._load_file(strategy_path)
-        assert strategy.execution_backend == "matrix_native"
+        if strategy.execution_backend == "matrix_native":
+            matrix_strategies.append((strategy_path, strategy))
+
+    assert matrix_strategies
+    for strategy_path, strategy in matrix_strategies:
         assert strategy.matrix_strategy is not None
         assert strategy.matrix_strategy.__class__.__module__ == strategy_path.stem
         assert strategy.filter_fn is None
@@ -787,11 +790,11 @@ def test_registered_builtin_matrix_strategies_share_one_cache_profile():
     profile = build_matrix_cache_profile(engine, "stock")
     strategies = tuple(
         s for s in engine.strategy_definitions()
-        if s.execution_backend != "minute_filter"
+        if s.execution_backend == "matrix_native"
     )
 
-    assert len(strategies) == 26
-    assert all(strategy.execution_backend == "matrix_native" for strategy in strategies)
+    assert not engine.load_errors()
+    assert strategies
     assert profile.warmup_bars > 0
     assert profile.forward_bars == max(int(strategy.max_hold_days or 0) for strategy in strategies)
     assert {"open", "high", "low", "close", "volume"}.issubset(profile.field_columns)

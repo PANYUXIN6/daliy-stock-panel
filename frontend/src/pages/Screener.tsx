@@ -26,6 +26,7 @@ import { StrategyPoolDialog } from '@/components/screener/StrategyPoolDialog'
 import { StrategyBuilderDialog } from '@/components/screener/StrategyBuilderDialog'
 import { StrategyStoreDialog } from '@/components/screener/StrategyStoreDialog'
 import { CompositeStrategyDialog } from '@/components/screener/CompositeStrategyDialog'
+import { EarningsGapVerification, EARNINGS_GAP_STRATEGY_ID, useEarningsGapVerification } from '@/components/screener/EarningsGapVerification'
 import { ListColumnCustomizer } from '@/components/ListColumnCustomizer'
 import { useTableSort } from '@/components/stock-table/useTableSort'
 import { resolveCandleConfig } from '@/lib/list-columns'
@@ -194,6 +195,18 @@ export function Screener() {
   })
 
   const dataStatus = useDataStatus({ staleTime: 0 })
+
+  const gapResult = result?.strategy === EARNINGS_GAP_STRATEGY_ID && result.as_of === asOf
+    ? result
+    : singleCachedQuery.data?.result?.strategy === EARNINGS_GAP_STRATEGY_ID && singleCachedQuery.data.result.as_of === asOf
+      ? singleCachedQuery.data.result
+      : null
+  const gapSummary = summaryQuery.data?.results[EARNINGS_GAP_STRATEGY_ID]
+  const gapVerification = gapResult?.verification ?? (gapSummary?.as_of === asOf ? gapSummary.verification : undefined)
+  const gapControl = useEarningsGapVerification({
+    asOf, latestDate: dataStatus.data?.enriched?.latest_date ?? null,
+    assetType, verification: gapVerification,
+  })
 
   // 默认日期 = enriched 最新日期（始终跟随最新）
   useEffect(() => {
@@ -620,6 +633,12 @@ export function Screener() {
     setShowAll(false)
     if (result?.strategy !== s.id || result.as_of !== asOf) setResult(null)
     const tf = s.timeframes?.includes('1m') ? '1m' as const : '1d' as const
+    // 只有管理员显式点击此卡片才核验候选；自动批量计算和缓存读取仍只用本地数据。
+    if (s.id === EARNINGS_GAP_STRATEGY_ID && gapControl.canVerify) {
+      run.reset()
+      gapControl.start()
+      return
+    }
     // ETF 模式无股票盘后缓存、分钟策略走本地分钟分区 → 始终实时单跑。
     // 传空日期让后端用自身的最新交易日 (ETF 与分钟分区跟股票 enriched 可能不同日)。
     if (assetType !== 'stock' || tf === '1m') {
@@ -937,14 +956,14 @@ export function Screener() {
                   count={hitCounts[id]}
                   expiredCount={expiredCounts[id]}
                   loading={runAll.isPending}
-                  computing={pendingRunIds.has(id) || selfRunning || minuteRunning}
+                  computing={pendingRunIds.has(id) || selfRunning || minuteRunning || (s.id === EARNINGS_GAP_STRATEGY_ID && gapControl.busy)}
                   awaitRun={hitCounts[id] == null && isMinute && !selfRunning && !minuteRunning}
                   cardSize={cardSize}
                   onRun={() => handleRun(s)}
-                  disabled={run.isPending && activeStrategy === s.id}
+                  disabled={(run.isPending && activeStrategy === s.id) || (s.id === EARNINGS_GAP_STRATEGY_ID && gapControl.busy)}
                   onSettings={() => setSettingsStrategyId(s.id)}
                   monitored={strategyMonitorMap.has(`${assetType}:${s.id}`)}
-                  onToggleMonitor={() => toggleStrategyMonitor(s.id, s.name)}
+                  onToggleMonitor={s.realtime_supported !== false ? () => toggleStrategyMonitor(s.id, s.name) : undefined}
                   timeframeBadge={isMinute ? '分钟' : undefined}
                 />
               )
@@ -955,6 +974,12 @@ export function Screener() {
 
         {/* 结果 */}
         <section>
+          {!showAll && assetType === 'stock' && activeStrategy === EARNINGS_GAP_STRATEGY_ID && (
+            <div className="mb-4">
+              <EarningsGapVerification verification={gapVerification} job={gapControl.job}
+                submitting={gapControl.busy} canVerify={gapControl.canVerify} historical={gapControl.historical} error={gapControl.error} />
+            </div>
+          )}
           {run.isError && (
             <div className="text-sm text-danger bg-danger/10 border border-danger/30 rounded-btn px-3 py-2">
               {String((run.error as any).message)}
@@ -1096,10 +1121,13 @@ export function Screener() {
               {displayRows.length === 0 ? (
                 <EmptyState
                   icon={ScanSearch}
-                  title={filterActive(filter) ? '筛选后无命中' : '今日无命中'}
+                  title={filterActive(filter) ? '筛选后无命中'
+                    : !showAll && activeStrategy === EARNINGS_GAP_STRATEGY_ID ? '当日没有已确认的业绩断层跳空' : '今日无命中'}
                   hint={filterActive(filter)
                     ? '当前筛选条件过严, 试试放宽或重置筛选。'
-                    : '可能数据未跑盘后管道,或策略条件过于严苛。试试 POST /api/pipeline/run。'}
+                    : !showAll && activeStrategy === EARNINGS_GAP_STRATEGY_ID
+                      ? '未发现同时满足财报时间、利润条件和完整向上跳空的股票。'
+                      : '可能数据未跑盘后管道,或策略条件过于严苛。试试 POST /api/pipeline/run。'}
                 />
               ) : (
                 <>
@@ -1134,7 +1162,7 @@ export function Screener() {
             </motion.div>
           )}
 
-          {!showAll && !result && !run.isPending && (
+          {!showAll && !result && !run.isPending && !(activeStrategy === EARNINGS_GAP_STRATEGY_ID && gapControl.busy) && (
             <div className="flex flex-col items-center justify-center py-16 gap-4">
               <div className="w-16 h-16 rounded-2xl bg-accent/5 border border-border flex items-center justify-center">
                 <ScanSearch className="h-7 w-7 text-accent/40" />

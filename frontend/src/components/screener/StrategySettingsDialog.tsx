@@ -1,4 +1,8 @@
-﻿import { useState, useEffect, useCallback } from 'react'
+import { OverlayFilterEditor } from '@/components/signals/OverlayFilterEditor'
+import type { CustomSignalCondition } from '@/lib/api'
+import { groupParams, visibleParams } from '@/lib/strategyParams'
+import { toast } from '@/components/Toast'
+import { useState, useEffect, useCallback, memo } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { X, Settings2, RotateCcw, Save, ChevronDown, Filter, Star, TrendingUp, Download, Layers, Plus, Trash2 } from 'lucide-react'
 import { api, type StrategyDetail, type StrategyParamDef, type CompositeChildInfo, type ScoringDirection } from '@/lib/api'
@@ -115,10 +119,11 @@ export function RangeField({ label, minVal, maxVal, onMinChange, onMaxChange, un
 export const ALL_BOARDS = ['沪主板', '深主板', '创业板', '科创板', '北交所']
 
 // 策略参数字段
-function ParamField({ def, value, onChange }: {
+const ParamField = memo(function ParamField({ def, value, onChange, onApplyValues }: {
   def: StrategyParamDef
   value: any
-  onChange: (v: any) => void
+  onChange: (pid: string, v: any) => void
+  onApplyValues: (values: Record<string, any>) => void
 }) {
   if (def.type === 'bool') {
     const checked = value === true || value === 'true' || value === 'True'
@@ -127,7 +132,7 @@ function ParamField({ def, value, onChange }: {
         <span className="text-[11px] text-secondary w-16 shrink-0 text-right">{def.label}</span>
         <button
           type="button"
-          onClick={() => onChange(!checked)}
+          onClick={() => onChange(def.id, !checked)}
           className={`relative inline-flex h-4 w-7 items-center rounded-full transition-colors duration-200 cursor-pointer ${
             checked ? 'bg-accent' : 'bg-elevated'
           }`}
@@ -146,7 +151,14 @@ function ParamField({ def, value, onChange }: {
         <span className="text-[11px] text-secondary w-16 shrink-0 text-right">{def.label}</span>
         <select
           value={value ?? def.default}
-          onChange={e => onChange(e.target.value)}
+          onChange={e => {
+            const v = e.target.value
+            const applies = def.option_applies?.[v]
+            if (applies) {
+              onApplyValues({ [def.id]: v, ...applies })
+              toast(`已应用预设「${v}」，覆盖 ${Object.keys(applies).length} 个参数`, 'success')
+            } else onChange(def.id, v)
+          }}
           className="w-24 px-1.5 py-0.5 rounded bg-base border border-border text-[11px] font-mono text-foreground focus:outline-none focus:border-accent/50"
         >
           {def.options.map(o => <option key={o} value={o}>{o}</option>)}
@@ -161,7 +173,7 @@ function ParamField({ def, value, onChange }: {
         <input
           type="text"
           value={value ?? def.default ?? ''}
-          onChange={e => onChange(e.target.value)}
+          onChange={e => onChange(def.id, e.target.value)}
           className="flex-1 min-w-0 px-1.5 py-0.5 rounded bg-base border border-border text-[11px] font-mono text-foreground focus:outline-none focus:border-accent/50"
         />
       </div>
@@ -175,7 +187,7 @@ function ParamField({ def, value, onChange }: {
       <input
         type="number"
         value={value ?? def.default}
-        onChange={e => onChange(e.target.value === '' ? def.default : Number(e.target.value))}
+        onChange={e => onChange(def.id, e.target.value === '' ? def.default : Number(e.target.value))}
         step={def.step ?? 0.1}
         min={def.min}
         max={def.max}
@@ -186,7 +198,7 @@ function ParamField({ def, value, onChange }: {
       )}
     </div>
   )
-}
+})
 
 export function StrategySettingsDialog({ strategyId, onClose, onSaved, onDeleted }: Props) {
   const [detail, setDetail] = useState<StrategyDetail | null>(null)
@@ -199,11 +211,16 @@ export function StrategySettingsDialog({ strategyId, onClose, onSaved, onDeleted
   const [strategyDesc, setStrategyDesc] = useState('')
   const [basicFilter, setBasicFilter] = useState<Record<string, any>>({})
   const [params, setParams] = useState<Record<string, any>>({})
+  const handleApplyValues = useCallback((values: Record<string, any>) => setParams(prev => ({ ...prev, ...values })), [])
+  // 稳定回调: 配合 memo(ParamField), 单参数修改只重渲对应行
+  const handleParamChange = useCallback((pid: string, v: any) => setParams(prev => ({ ...prev, [pid]: v })), [])
   const [scoring, setScoring] = useState<Record<string, number>>({})
   const [scoringDirections, setScoringDirections] = useState<Record<string, ScoringDirection>>({})
   const [stopLoss, setStopLoss] = useState<number | null>(null)
   const [maxHoldDays, setMaxHoldDays] = useState<number | null>(null)
   const [entrySignals, setEntrySignals] = useState<string[]>([])
+  const [overlayFilter, setOverlayFilter] = useState<CustomSignalCondition[]>([])
+  const [saveError, setSaveError] = useState('')
   const [exitSignals, setExitSignals] = useState<string[]>([])
   const [displayLimit, setDisplayLimit] = useState<number | null>(null)
   const [basicFilterEnabled, setBasicFilterEnabled] = useState(true)
@@ -228,6 +245,7 @@ export function StrategySettingsDialog({ strategyId, onClose, onSaved, onDeleted
     if (!strategyId) return
     setEditingChildId(null)
     setLoading(true)
+    setSaveError('')
     api.strategyGet(strategyId)
       .then(d => {
         setDetail(d)
@@ -244,6 +262,7 @@ export function StrategySettingsDialog({ strategyId, onClose, onSaved, onDeleted
         setMaxHoldDays(d.max_hold_days)
         setEntrySignals(d.entry_signals ?? [])
         setExitSignals(d.exit_signals ?? [])
+        setOverlayFilter((d.overlay_filter ?? []).map(c => ({ ...c })))
         setDisplayLimit(d.display_limit ?? null)
         setBasicFilterEnabled(d.basic_filter?.enabled !== false)
         setCompositeChildren((() => {
@@ -278,11 +297,13 @@ export function StrategySettingsDialog({ strategyId, onClose, onSaved, onDeleted
   const handleSave = async () => {
     if (!strategyId) return
     setSaving(true)
+    setSaveError('')
     try {
       await api.strategySaveConfig(strategyId, {
         name: strategyName,
         description: strategyDesc,
         basic_filter: { ...basicFilter, enabled: basicFilterEnabled },
+        overlay_filter: overlayFilter,
         params,
         ...(detail?.source !== 'composite' ? {
           scoring,
@@ -305,6 +326,8 @@ export function StrategySettingsDialog({ strategyId, onClose, onSaved, onDeleted
       })
       onSaved?.(displayLimit)
       onClose()
+    } catch (error) {
+      setSaveError(error instanceof Error ? error.message : String(error))
     } finally {
       setSaving(false)
     }
@@ -314,6 +337,7 @@ export function StrategySettingsDialog({ strategyId, onClose, onSaved, onDeleted
   const handleReset = async () => {
     if (!strategyId) return
     setResetting(true)
+    setSaveError('')
     try {
       await api.strategyResetConfig(strategyId)
       // 重新加载默认值
@@ -331,6 +355,7 @@ export function StrategySettingsDialog({ strategyId, onClose, onSaved, onDeleted
       setMaxHoldDays(d.max_hold_days)
       setEntrySignals(d.entry_signals ?? [])
       setExitSignals(d.exit_signals ?? [])
+      setOverlayFilter((d.overlay_filter ?? []).map(c => ({ ...c })))
       setDisplayLimit(d.display_limit ?? null)
       setBasicFilterEnabled(d.basic_filter?.enabled !== false)
       setCompositeChildren(d.composite_children ?? [])
@@ -380,7 +405,7 @@ export function StrategySettingsDialog({ strategyId, onClose, onSaved, onDeleted
       }}
       labelledBy="strategy-settings-title"
       overlayClassName="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm"
-      panelClassName="w-[1200px] max-w-[95vw] max-h-[88vh] bg-surface/95 backdrop-blur-xl border border-border/50 rounded-2xl shadow-2xl flex flex-col overflow-hidden"
+      panelClassName="w-[1200px] max-w-[95vw] max-h-[88vh] bg-surface/95 border border-border/50 rounded-2xl shadow-2xl flex flex-col overflow-hidden"
     >
           {/* 标题 */}
           <div className="flex items-center justify-between px-5 py-3 border-b border-border/50">
@@ -528,7 +553,13 @@ export function StrategySettingsDialog({ strategyId, onClose, onSaved, onDeleted
                   )
                 })()
                 : (
-                <div className="grid grid-cols-3 gap-5 items-start">
+                <div className="grid grid-cols-1 lg:grid-cols-3 gap-5 items-start">
+                  <div className="lg:col-span-3">
+                    <Section icon={Filter} title="叠加条件" accent="text-sky-400">
+                      <OverlayFilterEditor conditions={overlayFilter} onChange={setOverlayFilter} backend={detail.execution_backend} />
+                    </Section>
+                    {saveError && <p role="alert" className="text-xs text-danger mt-2">{saveError}</p>}
+                  </div>
                   {/* 列1：选股条件 */}
                     <Section icon={Filter} title="基础参数" accent="text-sky-400">
                       <div className="flex items-center justify-between mb-1">
@@ -571,7 +602,12 @@ export function StrategySettingsDialog({ strategyId, onClose, onSaved, onDeleted
                     {detail.params.length > 0 ? (
                       <Section icon={Settings2} title="策略参数" accent="text-muted">
                         <div className="space-y-1.5">
-                          {detail.params.map(p => <ParamField key={p.id} def={p} value={params[p.id]} onChange={v => setParams({ ...params, [p.id]: v })} />)}
+                          {groupParams(visibleParams(detail.params, params)).map((g, gi) => (
+                      <div key={gi} className="space-y-2">
+                        {g.name && <div className="text-xs text-secondary">{g.name}</div>}
+                        {g.items.map(p => <ParamField key={p.id} def={p} value={params[p.id]} onChange={handleParamChange} onApplyValues={handleApplyValues} />)}
+                      </div>
+                    ))}
                         </div>
                       </Section>
                     ) : (

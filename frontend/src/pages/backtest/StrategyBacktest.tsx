@@ -1,4 +1,5 @@
-import { useState, useMemo, useEffect, useRef, type ReactNode } from 'react'
+import { OverlayFilterEditor } from '@/components/signals/OverlayFilterEditor'
+import { useState, useMemo, useEffect, useRef, useCallback, memo, type ReactNode } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { motion, AnimatePresence } from 'framer-motion'
 import { Play, FlaskConical, Clock, Loader2, Square, Search, Plus, X, SlidersHorizontal, BarChart3, Gauge, Zap, ListPlus, HelpCircle, ChevronRight, AlertTriangle, Layers, BookmarkPlus, Download } from 'lucide-react'
@@ -14,6 +15,7 @@ import {
   REGIME_STATE_COLORS,
 } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
+import { groupParams, visibleParams } from '@/lib/strategyParams'
 import { storage } from '@/lib/storage'
 import { fmtPct, fmtPrice, priceColorClass } from '@/lib/format'
 import { boardTag } from '@/lib/board'
@@ -307,6 +309,7 @@ const normalizeStrategyOverrides = (detail: StrategyDetail, values?: Record<stri
 }
 const buildDefaultOverrides = (detail: StrategyDetail) => normalizeStrategyOverrides(detail, {
   basic_filter: { ...detail.basic_filter },
+  overlay_filter: (detail.overlay_filter ?? []).map(c => ({ ...c })),
   entry_signals: detail.entry_signals.map(toSignalId),
   exit_signals: detail.exit_signals.map(toSignalId),
   scoring: { ...detail.scoring },
@@ -325,6 +328,7 @@ const buildDefaultOverrides = (detail: StrategyDetail) => normalizeStrategyOverr
 const strategyBacktestConfigSignature = (detail: StrategyDetail) => JSON.stringify({
   execution_backend: detail.execution_backend,
   basic_filter: detail.basic_filter,
+  overlay_filter: detail.overlay_filter,
   params: detail.params,
   params_defaults: detail.params_defaults,
   scoring: detail.scoring,
@@ -696,10 +700,13 @@ function ConfigSection({ title, hint, actions, children }: { title: string; hint
 }
 
 
-function StrategyParamInput({ param, value, onChange }: {
+// memo: 单参数修改只重渲本行 (父组件需传稳定回调, 否则 memo 失效)
+const StrategyParamInput = memo(function StrategyParamInput({ param, value, onChange, onApplyValues }: {
   param: StrategyParamDef
   value: any
-  onChange: (value: any) => void
+  onChange: (pid: string, value: any) => void
+  /** select 带 option_applies 时, 选中某选项需批量应用一组参数值 (如标的池预设) */
+  onApplyValues?: (values: Record<string, any>) => void
 }) {
   if (param.type === 'bool') {
     const checked = value === true || value === 'true' || value === 'True' || value === true
@@ -708,7 +715,7 @@ function StrategyParamInput({ param, value, onChange }: {
         <span className="mb-1 block text-[11px] text-secondary">{param.label}</span>
         <button
           type="button"
-          onClick={() => onChange(!checked)}
+          onClick={() => onChange(param.id, !checked)}
           className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors duration-200 cursor-pointer ${
             checked ? 'bg-accent shadow-[0_0_6px_rgba(59,130,246,0.3)]' : 'bg-elevated'
           }`}
@@ -725,7 +732,19 @@ function StrategyParamInput({ param, value, onChange }: {
     return (
       <label className="block">
         <span className="mb-1 block text-[11px] text-secondary">{param.label}</span>
-        <select value={value ?? param.default} onChange={e => onChange(e.target.value)} className={INPUT_CLS}>
+        <select
+          value={value ?? param.default}
+          onChange={e => {
+            const v = e.target.value
+            const applies = param.option_applies?.[v]
+            if (applies && onApplyValues) {
+              onApplyValues({ [param.id]: v, ...applies })
+              // 预设会覆盖其他参数的当前值, 显式提示避免静默改动
+              toast(`已应用预设「${v}」，覆盖 ${Object.keys(applies).length} 个参数`, 'success')
+            } else onChange(param.id, v)
+          }}
+          className={INPUT_CLS}
+        >
           {(param.options ?? []).map(opt => <option key={opt} value={opt}>{opt}</option>)}
         </select>
       </label>
@@ -738,7 +757,7 @@ function StrategyParamInput({ param, value, onChange }: {
         <input
           type="text"
           value={value ?? param.default ?? ''}
-          onChange={e => onChange(e.target.value)}
+          onChange={e => onChange(param.id, e.target.value)}
           className={INPUT_CLS}
         />
       </label>
@@ -752,12 +771,12 @@ function StrategyParamInput({ param, value, onChange }: {
         min={param.min}
         max={param.max}
         step={param.step ?? (param.type === 'int' ? 1 : 0.01)}
-        onChange={n => onChange(n == null ? '' : (param.type === 'int' ? Math.round(n) : n))}
+        onChange={n => onChange(param.id, n == null ? '' : (param.type === 'int' ? Math.round(n) : n))}
         className={INPUT_CLS}
       />
     </label>
   )
-}
+})
 
 function StockPoolPicker({ value, onChange, assetType = 'stock' }: { value: string; onChange: (value: string) => void; assetType?: 'stock' | 'etf' }) {
   const symbols = useMemo(() => value.split(',').map(s => s.trim()).filter(Boolean), [value])
@@ -974,6 +993,8 @@ export function StrategyBacktest({ loadCandidate, onLoadConsumed }: {
   const [quickRanges, setQuickRanges] = useState(loadQuickRanges)
   const [settingsTab, setSettingsTab] = useState<AdvancedSettingsTab>('params')
   const [strategyParams, setStrategyParams] = useState<Record<string, any>>(saved?.params ?? {})
+  const handleStrategyParamChange = useCallback((pid: string, v: any) => setStrategyParams(prev => ({ ...prev, [pid]: v })), [])
+  const handleApplyValues = useCallback((values: Record<string, any>) => setStrategyParams(prev => ({ ...prev, ...values })), [])
   const [overrides, setOverrides] = useState<Record<string, any>>(saved?.overrides ?? {})
   // result 不从 localStorage 恢复:它是运行产物(净值/交易),大且易过时,
   // 跨会话/拉新代码后自动渲染一个可能对应已失效策略的旧结果会造成困惑
@@ -2721,7 +2742,7 @@ export function StrategyBacktest({ loadCandidate, onLoadConsumed }: {
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             onClick={() => setSettingsOpen(false)}
-            className="fixed inset-0 z-50 bg-black/45 backdrop-blur-[1px]"
+            className="fixed inset-0 z-50 bg-black/45"
           />
           <motion.aside
             initial={{ x: 32, opacity: 0 }}
@@ -2803,14 +2824,22 @@ export function StrategyBacktest({ loadCandidate, onLoadConsumed }: {
               {settingsTab === 'params' && (
                 <ConfigSection title="策略参数" hint="自动限制 min/max">
                   {detail.params.length > 0 ? (
-                    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                      {detail.params.map(param => (
-                        <StrategyParamInput
-                          key={param.id}
-                          param={param}
-                          value={strategyParams[param.id]}
-                          onChange={value => setStrategyParams(prev => ({ ...prev, [param.id]: value }))}
-                        />
+                    <div className="space-y-4">
+                      {groupParams(visibleParams(detail.params, strategyParams)).map((g, gi) => (
+                        <div key={gi} className="space-y-3">
+                          {g.name && <div className="text-xs text-secondary">{g.name}</div>}
+                          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                            {g.items.map(param => (
+                              <StrategyParamInput
+                                key={param.id}
+                                param={param}
+                                value={strategyParams[param.id]}
+                                onChange={handleStrategyParamChange}
+                                onApplyValues={handleApplyValues}
+                              />
+                            ))}
+                          </div>
+                        </div>
                       ))}
                     </div>
                   ) : (
@@ -2820,7 +2849,8 @@ export function StrategyBacktest({ loadCandidate, onLoadConsumed }: {
               )}
 
               {settingsTab === 'filter' && (
-                <ConfigSection title="基础过滤" hint="用于候选池">
+                <ConfigSection title="基础过滤与叠加条件" hint="用于候选池">
+                  <OverlayFilterEditor conditions={overrides.overlay_filter ?? []} onChange={value => updateOverride('overlay_filter', value)} backend={detail?.execution_backend} />
                   <label className="flex items-center gap-2 text-xs text-secondary">
                     <input
                       type="checkbox"

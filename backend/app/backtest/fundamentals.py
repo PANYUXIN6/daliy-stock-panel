@@ -1,22 +1,14 @@
-"""财务因子: 基于本地财务快照的点时 (point-in-time) 无未来函数接入。
+"""共享财务时间口径：版本生效日后首个交易日可用，缺失保持 null/NaN。
 
-数据契约:
-- 输入为 data/financials/metrics/part.parquet, 每行一份报告期指标;
-- ``announce_date`` 是公告日。因子只在 **严格晚于公告日的交易日** 才有值
-  (公告多在盘后发布, 保守取 T+1 生效), 此前保持 null;
-- 财报历史按 (symbol, period_end) 累积 (见 services/financial_sync.py),
-  同一期以最新公告为准;
-- 无财务数据的标的/日期一律为 null, 绝不填 0 (填 0 会污染截面排名,
-  例如资产负债率 0 会被当成最优杠杆)。下游 IC/分层/评分对 null 自动剔除。
-
-性能:
-- 财务表约数千行, join_asof 按 symbol 分组回填, 对百万行面板的代价是
-  毫秒级; 矩阵路径每个因子只物化一张 float32 TxN 矩阵 (T~900, N~5500
-  约 20MB), 且仅在策略/挖掘请求该因子时才构建。
+首次回填按源更新日保守门控，持续观察后按本地观察日与更新日的较晚者门控。
+仅使用版本库；浏览表的旧数据没有历史版本证据。派生指标从同源、当时可用的
+完整报表计算，比较期修订也只能影响修订生效后的因子。最新报告期优先于更新日。
 """
 from __future__ import annotations
 
 import logging
+import math
+from itertools import groupby
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any
@@ -24,10 +16,12 @@ from typing import Any
 import numpy as np
 import polars as pl
 
+from app.services.financial_versions import read_versions
+
 logger = logging.getLogger(__name__)
 
 # 财务因子名 -> (metrics 表列名, 是否需要除以收盘价)
-# pb_latest 单列声明为 bps 倒数口径: 因子值 = close / bps。
+# pb_latest 使用不复权价格 / 财报 BPS，估值快照反推值不满足该口径。
 FUNDAMENTAL_FACTORS: dict[str, dict[str, Any]] = {
     "pb_latest": {"column": "bps", "price_ratio": True},
     "roe_latest": {"column": "roe", "price_ratio": False},
@@ -42,40 +36,100 @@ FUNDAMENTAL_FACTOR_NAMES = frozenset(FUNDAMENTAL_FACTORS)
 
 
 def load_fundamental_snapshot(data_dir: Path | None) -> pl.DataFrame | None:
-    """读取财务指标快照; 文件缺失或无有效行时返回 None。
-
-    返回列: symbol, _announce (Date), 以及各因子对应的 metrics 列。
-    """
+    """重建按版本生效的指标事件，不从旧浏览文件或 mtime 推断可用时间。"""
     if data_dir is None:
         return None
-    path = data_dir / "financials" / "metrics" / "part.parquet"
-    if not path.exists():
-        return None
     try:
-        frame = pl.read_parquet(path)
+        events = []
+        needed = {spec["column"] for spec in FUNDAMENTAL_FACTORS.values()} | {
+            "symbol", "source", "period_end", "available_date", "observed_at",
+            "availability_basis", "disclosure_type", "bps_basis", "revenue", "operating_cost",
+            "net_income", "net_income_attributable", "total_assets", "total_liabilities",
+        }
+        for table in ("metrics", "income", "balance_sheet"):
+            frame = read_versions(data_dir, table, needed)
+            for row in frame.iter_rows(named=True):
+                if (row.get("available_date") and row.get("symbol") and row.get("period_end")
+                        and row.get("disclosure_type") in {"formal", "unknown"}):
+                    events.append({**row, "_table": table})
     except (OSError, pl.exceptions.PolarsError) as exc:
-        logger.warning("读取财务指标快照失败: %s", exc, exc_info=True)
+        logger.warning("读取财务版本失败: %s", exc, exc_info=True)
         return None
-    needed = {"symbol", "announce_date"} | {
-        spec["column"] for spec in FUNDAMENTAL_FACTORS.values()
-    }
-    if not needed.issubset(frame.columns):
-        logger.warning("财务指标快照缺少列: %s", sorted(needed - set(frame.columns)))
+    rows = []
+    events.sort(key=lambda r: (r["symbol"], r["source"], r["available_date"],
+                               r["observed_at"], r["period_end"], r["_table"]))
+    for (symbol, source), source_events in groupby(events, lambda r: (r["symbol"], r["source"])):
+        state = {table: {} for table in ("metrics", "income", "balance_sheet")}
+        for available, daily in groupby(source_events, lambda r: r["available_date"]):
+            for event in daily:
+                state[event["_table"]][event["period_end"]] = event
+            period = max(p for periods in state.values() for p in periods)
+            metrics = state["metrics"].get(period, {})
+            income = state["income"].get(period, {})
+            balance = state["balance_sheet"].get(period, {})
+            previous = state["income"].get(f"{int(period[:4]) - 1}{period[4:]}", {})
+            basis = {r["availability_basis"] for r in (metrics, income, balance, previous) if r}
+            values = {spec["column"]: _number(metrics.get(spec["column"]))
+                      for spec in FUNDAMENTAL_FACTORS.values()}
+            if metrics.get("bps_basis") == "valuation_snapshot":
+                values["bps"] = None
+            derived = {
+                "gross_margin": _margin(income.get("revenue"), income.get("operating_cost")),
+                "net_margin": _ratio(income.get("net_income"), income.get("revenue")),
+                "revenue_yoy": _growth(income.get("revenue"), previous.get("revenue")),
+                "net_income_yoy": _growth(income.get("net_income_attributable"),
+                                           previous.get("net_income_attributable")),
+                "debt_to_asset_ratio": _ratio(balance.get("total_liabilities"), balance.get("total_assets")),
+            }
+            for column, value in derived.items():
+                dependency = balance if column == "debt_to_asset_ratio" else income
+                if dependency:
+                    values[column] = value
+            rows.append({"symbol": symbol, "source": source, "period_end": period,
+                         "announce_date": available, "availability_basis": ",".join(sorted(basis)), **values})
+    return _report_events(pl.DataFrame(rows, infer_schema_length=None)) if rows else None
+
+
+def _number(value) -> float | None:
+    if value is None:
         return None
-    snapshot = (
-        frame.select(sorted(needed))
-        .filter(
-            pl.col("symbol").is_not_null()
-            & pl.col("announce_date").is_not_null()
-        )
-        .with_columns(
-            pl.col("announce_date").cast(pl.Utf8).str.slice(0, 10).str.to_date().alias("_announce")
-        )
-        .sort(["symbol", "_announce"])
-    )
-    if snapshot.is_empty():
+    number = float(value)
+    return number if math.isfinite(number) else None
+
+
+def _ratio(numerator, denominator) -> float | None:
+    numerator, denominator = _number(numerator), _number(denominator)
+    if numerator is None or denominator is None or denominator <= 0:
         return None
-    return snapshot
+    return 100 * numerator / denominator
+
+
+def _margin(revenue, cost) -> float | None:
+    revenue, cost = _number(revenue), _number(cost)
+    return _ratio(revenue - cost, revenue) if revenue is not None and cost is not None else None
+
+
+def _growth(current, previous) -> float | None:
+    current, previous = _number(current), _number(previous)
+    if current is None or previous is None or previous == 0:
+        return None
+    return 100 * (current - previous) / abs(previous)
+
+
+def _report_events(snapshot: pl.DataFrame) -> pl.DataFrame:
+    """先按生效时间过滤版本，再选择最新报告期；旧季度晚更新不能倒退报告期。"""
+    columns = {spec["column"] for spec in FUNDAMENTAL_FACTORS.values()}
+    frame = snapshot.with_columns([
+        pl.lit(None, dtype=pl.Float64).alias(c) for c in columns - set(snapshot.columns)
+    ])
+    frame = frame.with_columns(
+        pl.col("announce_date").cast(pl.String).str.slice(0, 10).str.to_date(strict=False).alias("_announce"),
+        pl.col("period_end").cast(pl.String).str.slice(0, 10).str.to_date(strict=False).alias("_period"),
+    ).filter(pl.col("_announce").is_not_null() & pl.col("_period").is_not_null())
+    frame = frame.sort(["symbol", "_announce", "period_end"], maintain_order=True).with_columns(
+        pl.col("_period").cum_max().over("symbol").alias("_latest_period")
+    ).filter(pl.col("_period") == pl.col("_latest_period"))
+    return frame.unique(subset=["symbol", "_announce"], keep="last", maintain_order=True).drop("_latest_period", "_period")
 
 
 def attach_fundamental_factors(
@@ -99,6 +153,8 @@ def attach_fundamental_factors(
             pl.lit(None, dtype=pl.Float64).alias(name)
             for name in missing_columns
         ])
+
+    snapshot = _report_events(snapshot)
 
     columns = sorted(
         {FUNDAMENTAL_FACTORS[name]["column"] for name in missing_columns}
@@ -127,7 +183,7 @@ def attach_fundamental_factors(
         if spec["price_ratio"]:
             value = (
                 pl.when(source > 0)
-                .then(pl.col("close") / source)
+                .then((pl.col("raw_close") if "raw_close" in panel.columns else pl.lit(None, dtype=pl.Float64)) / source)
                 .otherwise(None)
             )
         else:
@@ -146,7 +202,7 @@ def build_fundamental_matrices(
     """为 MarketDataMatrix 构建财务因子 TxN float32 字段。
 
     与 attach_fundamental_factors 同一口径: 公告日次一交易日起前向填充,
-    无数据为 NaN。pb 类因子在矩阵侧用 close / bps 现算。
+    无数据为 NaN。PB 使用 raw_close / 财报 BPS。
     """
     requested = [str(name) for name in names if str(name) in FUNDAMENTAL_FACTOR_NAMES]
     if not requested:
@@ -158,6 +214,8 @@ def build_fundamental_matrices(
         for name in requested:
             result[name] = np.full(shape, np.nan, dtype=np.float32)
         return result
+
+    snapshot = _report_events(snapshot)
 
     asset_index = {symbol: index for index, symbol in enumerate(market.symbols)}
     labels = market.timestamp_labels
@@ -192,7 +250,8 @@ def build_fundamental_matrices(
         source = raw_columns[spec["column"]]
         if spec["price_ratio"]:
             with np.errstate(divide="ignore", invalid="ignore"):
-                matrix = (market.close / source).astype(np.float32)
+                price = market.fields.get("raw_close")
+                matrix = (price / source).astype(np.float32) if price is not None else np.full(shape, np.nan, dtype=np.float32)
             matrix[~(source > 0)] = np.nan
             matrix[np.isinf(matrix)] = np.nan
         else:

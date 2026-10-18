@@ -32,10 +32,14 @@ _PAGE_INTERVAL_S = 0.15  # 页间隔, 降低触发限频 (code=4001) 的概率
 
 # 官方仅说明动态限流，没有固定 QPS：沿用项目请求间隔，并让所有入口共用。
 # 预算限于当前采集进程，不代表供应商的账户级额度。
-_REQUEST_INTERVAL_S = 0.12
+# 全市场长批次曾在 0.12 秒间隔下触发动态限流，降低持续请求频率。
+_REQUEST_INTERVAL_S = 0.5
 _REQUEST_SLOTS = threading.BoundedSemaphore(2)
 _request_lock = threading.Lock()
 _next_request_at = 0.0
+_FINANCIAL_REQUEST_INTERVAL_S = 2.0
+_financial_request_lock = threading.Lock()
+_next_financial_request_at = 0.0
 
 
 def _wait_request_slot(cancel_event: threading.Event | None = None) -> None:
@@ -50,12 +54,29 @@ def _wait_request_slot(cancel_event: threading.Event | None = None) -> None:
         _next_request_at = time.monotonic() + _REQUEST_INTERVAL_S
 
 
+def _wait_financial_request_slot(cancel_event: threading.Event | None = None) -> None:
+    """财务长批次独立降频；其他行情请求仍沿用原共享间距。"""
+    global _next_financial_request_at
+    with _financial_request_lock:
+        delay = _next_financial_request_at - time.monotonic()
+        if delay > 0:
+            if cancel_event is None:
+                time.sleep(delay)
+            elif cancel_event.wait(delay):
+                raise CancelledError("扶摇财务取数已取消")
+        _next_financial_request_at = time.monotonic() + _FINANCIAL_REQUEST_INTERVAL_S
+
+
 class FuyaoError(Exception):
     """扶摇接口错误(配置缺失 / 网络失败 / 信封 code != 0)。"""
 
 
 class FuyaoRateLimitError(FuyaoError, ProviderRateLimitError):
     """HTTP 429 / code=4001：结束当前同步，不重试。"""
+
+
+class FuyaoDataUnavailableError(FuyaoError):
+    """供应商明确返回 code=5003、Data source unavailable。"""
 
 
 class FuyaoClient:
@@ -78,12 +99,31 @@ class FuyaoClient:
     def _get(self, path: str, params: dict, *, cancel_event: threading.Event | None = None) -> dict:
         """GET + 信封解包。code != 0 时抛 FuyaoError(含 code 与 message)。"""
         with _REQUEST_SLOTS:
-            if cancel_event is not None and cancel_event.is_set():
-                raise CancelledError("扶摇取数已取消")
-            _wait_request_slot(cancel_event)
-            if cancel_event is not None and cancel_event.is_set():
-                raise CancelledError("扶摇取数已取消")
-            return self._request(path, params)
+            # 全市场逐股采集会遇到偶发断流；只重试幂等 GET 的传输错误，
+            # 每次仍经过共享限速。HTTP/业务限流及数据错误直接传播。
+            attempt = 0
+            while True:
+                if cancel_event is not None and cancel_event.is_set():
+                    raise CancelledError("扶摇取数已取消")
+                _wait_request_slot(cancel_event)
+                if path.startswith("/api/a-share/financials/"):
+                    _wait_financial_request_slot(cancel_event)
+                if cancel_event is not None and cancel_event.is_set():
+                    raise CancelledError("扶摇取数已取消")
+                try:
+                    return self._request(path, params)
+                except FuyaoError as exc:
+                    if (attempt >= 2 or not isinstance(exc.__cause__, (
+                            httpx.NetworkError, httpx.TimeoutException, httpx.RemoteProtocolError))):
+                        raise
+                    attempt += 1
+                    logger.warning("扶摇传输中断，重试 %d/2: %s", attempt, path)
+                    delay = 0.5 * attempt
+                    if cancel_event is not None:
+                        if cancel_event.wait(delay):
+                            raise CancelledError("扶摇取数已取消") from exc
+                    else:
+                        time.sleep(delay)
 
     def _request(self, path: str, params: dict) -> dict:
         try:
@@ -101,6 +141,8 @@ class FuyaoClient:
         code = payload.get("code")
         if code in (4001, "4001"):
             raise FuyaoRateLimitError(f"扶摇限流 code={code}: {path}")
+        if code in (5003, "5003") and payload.get("message") == "Data source unavailable":
+            raise FuyaoDataUnavailableError(f"扶摇接口错误 code={code}: Data source unavailable ({path})")
         if code not in (0, "0", None):
             raise FuyaoError(f"扶摇接口错误 code={code}: {payload.get('message', '')} ({path})")
         return payload.get("data") or {}

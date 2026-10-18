@@ -1037,7 +1037,6 @@ class QuoteService:
         return out
 
     @staticmethod
-    @staticmethod
     def _build_daily(records: list[dict]) -> pl.DataFrame:
         """将 API records 转为日K格式 DataFrame (OHLCV + quote_ts, 写 kline_daily 用)。"""
         if not records:

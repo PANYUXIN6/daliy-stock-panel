@@ -9,6 +9,7 @@ export const toSignalId = (sig: string) =>
 export function buildDefaultOverrides(detail: StrategyDetail): Record<string, any> {
   return {
     basic_filter: { ...detail.basic_filter },
+    overlay_filter: (detail.overlay_filter ?? []).map(c => ({ ...c })),
     entry_signals: detail.entry_signals.map(toSignalId),
     exit_signals: detail.exit_signals.map(toSignalId),
     scoring: { ...detail.scoring },

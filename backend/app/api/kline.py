@@ -537,7 +537,7 @@ def _latest_live_candle(
         "change_pct": q.get("change_pct"),
         "is_live": True,
     }
-    for key in ("ma5", "ma10", "ma20", "ma30", "ma60",
+    for key in ("ma5", "ma10", "ma20", "ma30", "ma60", "bull_bear_line",
                 "macd_dif", "macd_dea", "macd_hist",
                 "kdj_k", "kdj_d", "kdj_j",
                 "boll_upper", "boll_lower",
@@ -574,6 +574,51 @@ def _maybe_inject_live_candle(
         rows.append(live_row)
 
     return rows
+
+
+@router.get("/gaps")
+def get_price_gaps(
+    request: Request,
+    symbol: Annotated[str, Query(pattern=r"^\d{6}\.(SH|SZ|BJ)$")],
+    end_date: date,
+):
+    """按指定截止日返回全部本地未回补价格缺口，包含实时尾部。"""
+    import polars as pl
+
+    from app.services.price_gaps import get_price_gaps as build
+    repo = request.app.state.repo
+    asset = repo.resolve_asset_type(symbol)
+    live = _latest_live_candle(request, symbol, asset, refresh_asset=False) if end_date >= cn_today() else None
+    try:
+        return build(repo, symbol, min(end_date, cn_today()), live_row=live)
+    except (OSError, pl.exceptions.PolarsError, ValueError) as exc:
+        logger.warning("缺口区域本地日线读取失败: %s", symbol, exc_info=True)
+        raise HTTPException(503, "缺口区域日线读取失败，请检查已保存数据") from exc
+
+
+@router.get("/earnings-breakout")
+def get_earnings_breakout(
+    request: Request,
+    symbol: Annotated[str, Query(pattern=r"^\d{6}\.(SH|SZ|BJ)$")],
+    start_date: date,
+    end_date: date,
+):
+    """正式财报版主图指标，只读已保存版本与本地行情。"""
+    import polars as pl
+
+    from app.services.earnings_breakout import get_earnings_breakout as build
+    repo = request.app.state.repo
+    if start_date > end_date:
+        raise HTTPException(400, "起始日期不能晚于截止日期")
+    if repo.resolve_asset_type(symbol) != "stock":
+        return {"symbol": symbol, "source": "", "status": "unsupported", "reports": 0,
+                "eligible_reports": 0, "events": [], "markers": []}
+    live = _latest_live_candle(request, symbol, "stock", refresh_asset=False) if end_date >= cn_today() else None
+    try:
+        return build(repo, symbol, start_date, min(end_date, cn_today()), live_row=live)
+    except (OSError, pl.exceptions.PolarsError, ValueError) as exc:
+        logger.warning("业绩断层本地数据读取失败: %s", symbol, exc_info=True)
+        raise HTTPException(503, "财务版本或交易日历读取失败，请检查已保存数据") from exc
 
 
 @router.get("/daily/latest")
@@ -1209,7 +1254,7 @@ async def repair_daily(request: Request):
         except ValueError as exc:
             raise HTTPException(status_code=400, detail="start_date 格式错误 (应为 YYYY-MM-DD)") from exc
 
-        if start_date > _date.today():
+        if start_date > cn_today():
             raise HTTPException(status_code=400, detail="起始日期不能晚于今天")
 
         repo = request.app.state.repo

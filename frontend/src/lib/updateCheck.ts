@@ -11,6 +11,7 @@ import { accountStorage } from '@/lib/sessionRuntime'
  */
 import { useCallback, useEffect, useSyncExternalStore } from 'react'
 import { useVersion } from '@/lib/useSharedQueries'
+import { useCurrentUser } from '@/lib/auth'
 
 // 检查更新的目标仓库 (Release 清单来源) — 仓库已由 tickflow-stock-panel 改名,
 // 用当前名可少依赖一次 GitHub 的改名重定向
@@ -166,7 +167,8 @@ export async function checkForUpdate(
 }
 
 let silentStarted = false
-let hourlyStarted = false
+let hourlySubscribers = 0
+let hourlyTimer: ReturnType<typeof setInterval> | undefined
 
 /** 每小时静默复检间隔 (ms)。 */
 const HOURLY_MS = 60 * 60 * 1000
@@ -183,25 +185,37 @@ export function useUpdateCheck(): {
   checkedAt: number
   check: () => void
 } {
+  const isAdmin = useCurrentUser()?.role === 'admin'
   const s = useSyncExternalStore(subscribe, getUpdateState)
   const { data: versionData } = useVersion()
   const current = (versionData?.version ?? '').trim()
   useEffect(() => {
-    if (!current || silentStarted) return
+    if (!isAdmin || !current || silentStarted) return
     silentStarted = true
     void checkForUpdate(current)
-  }, [current])
+  }, [current, isAdmin])
   // 每小时复检: 模块级单例 (Layout 常驻持有; 多消费者不重复起定时器)
   useEffect(() => {
-    if (!current || hourlyStarted) return
-    hourlyStarted = true
-    const id = setInterval(() => {
-      void checkForUpdate(current, { force: true, silent: true })
-    }, HOURLY_MS)
-    return () => clearInterval(id)
-  }, [current])
+    if (!isAdmin || !current) return
+    hourlySubscribers += 1
+    if (hourlyTimer === undefined) {
+      hourlyTimer = setInterval(() => {
+        void checkForUpdate(current, { force: true, silent: true })
+      }, HOURLY_MS)
+    }
+    return () => {
+      hourlySubscribers -= 1
+      if (hourlySubscribers === 0) {
+        clearInterval(hourlyTimer)
+        hourlyTimer = undefined
+        silentStarted = false
+      }
+    }
+  }, [current, isAdmin])
   const check = useCallback(() => {
-    void checkForUpdate(current, { force: true })
-  }, [current])
-  return { status: s.status, info: s.info, checkedAt: s.checkedAt, check }
+    if (isAdmin) void checkForUpdate(current, { force: true })
+  }, [current, isAdmin])
+  return isAdmin
+    ? { status: s.status, info: s.info, checkedAt: s.checkedAt, check }
+    : { status: 'idle', info: null, checkedAt: 0, check }
 }

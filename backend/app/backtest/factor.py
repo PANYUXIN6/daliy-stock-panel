@@ -192,7 +192,7 @@ class FactorBacktestService:
         if config.factor_name in FUNDAMENTAL_FACTOR_NAMES and self._fundamentals_missing():
             return self._error_result(
                 config, run_id, t0,
-                "本地没有财务数据: 请先在数据页同步财务数据后再使用财务因子",
+                "本地没有可用于回测的财务版本: 请在数据页重新同步财务数据建立版本记录",
             )
 
         trading_dates = self._global_trading_dates(config)
@@ -297,7 +297,7 @@ class FactorBacktestService:
                     label=str(meta.get("label", factor_name)),
                     group=str(meta.get("group", "")),
                     elapsed_ms=round((time.perf_counter() - item_t0) * 1000, 1),
-                    error="本地没有财务数据: 请先在数据页同步财务数据后再使用财务因子",
+                    error="本地没有可用于回测的财务版本: 请在数据页重新同步财务数据建立版本记录",
                 ))
                 continue
             try:
@@ -404,6 +404,8 @@ class FactorBacktestService:
             "symbol", "date", "open", "high", "low", "close", "volume", "amount",
             "turnover_rate",
         ]
+        if "pb_latest" in factor_names:
+            panel_columns.append("raw_close")
         if any(
             name in ("limit_up_count_20d", "limit_up_count_60d")
             for name in factor_names

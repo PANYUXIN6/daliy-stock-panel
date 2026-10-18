@@ -83,6 +83,8 @@ export const QK = {
   // Kline
   kline:                (symbol: string, start: string, end: string, extColumns?: string) =>
                            ['kline', symbol, start, end, extColumns ?? ''] as const,
+  earningsBreakout:      (symbol: string, start: string, end: string) => ['earnings-breakout', symbol, start, end] as const,
+  klineGaps:             (symbol: string, end: string) => ['kline-gaps', symbol, end] as const,
   klineLatest:          (symbol: string) => ['kline-latest', symbol] as const,
   stockLevels:          (symbol: string, days?: number) => ['stock-levels', symbol, days ?? 120] as const,
   klineMinute:          (symbol: string, date: string) =>
@@ -117,6 +119,7 @@ export const QK = {
   paperTrades:          (acc: string) => ['paper', 'trades', acc] as const,
   paperNav:             (acc: string) => ['paper', 'nav', acc] as const,
   paperStats:           (acc: string) => ['paper', 'stats', acc] as const,
+  paperRounds:          (acc: string) => ['paper', 'rounds', acc] as const,
   paperCompare:         ['paper', 'compare'] as const,
   paperAutoRules:       (acc: string) => ['paper', 'auto-rules', acc] as const,
   alerts:               (source?: string) => ['alerts', source ?? ''] as const,
@@ -171,9 +174,9 @@ export const SSE_INVALIDATE_PREFIXES = [
 
 // 后台落盘事件不受实时行情显示开关影响；仅失效受影响的数据集。
 export const DATASET_QUERY_PREFIXES: Record<string, readonly string[]> = {
-  daily: ['kline', 'kline-latest', 'kline-batch', 'index-daily', 'index-quotes', 'screener-kline-batch', 'watchlist-enriched', 'overview-market', 'limit-ladder', 'market-snapshot', 'stock-levels', 'lots-kline', 'sector-rotation-index-daily', 'screener-cached', 'regime-history', 'regime-latest', 'regime-states', 'regime-coverage', 'regime-phases', 'regime-mainline', 'rps-rotation'],
+  daily: ['kline-gaps', 'earnings-breakout', 'kline', 'kline-latest', 'kline-batch', 'index-daily', 'index-quotes', 'screener-kline-batch', 'watchlist-enriched', 'overview-market', 'limit-ladder', 'market-snapshot', 'stock-levels', 'lots-kline', 'sector-rotation-index-daily', 'screener-cached', 'regime-history', 'regime-latest', 'regime-states', 'regime-coverage', 'regime-phases', 'regime-mainline', 'rps-rotation'],
   minute: ['kline-minute', 'kline-minute-range', 'index-minute', 'minute-batch', 'sector-rotation', 'sector-rotation-index-minute', 'dimension-intraday'],
-  financials: ['financials'],
+  financials: ['financials', 'earnings-breakout'],
   regime: ['regime-history', 'regime-latest', 'regime-states', 'regime-coverage', 'regime-phases', 'regime-mainline'],
   mainline: ['regime-mainline', 'regime-phases'],
   ext_data: ['ext-data', 'ext-data-rows', 'ext-data-schema-all', 'ext-schema-all', 'dimension-members', 'dimension-intraday', 'market-snapshot', 'watchlist-enriched', 'kline', 'kline-latest', 'kline-batch', 'screener-kline-batch', 'screener-cached', 'rps-rotation', 'sector-rotation'],

@@ -118,6 +118,7 @@ ENRICHED_COLUMNS: dict[str, dict[str, str]] = {
     # ── 指数均线 EMA ─────────────────────────────────────
     "ema5":                    "5日指数均线",
     "ema10":                   "10日指数均线",
+    "bull_bear_line":          "多空线:典型价格(CLOSE+HIGH+LOW)/3的10周期EMA",
     "ema20":                   "20日指数均线",
     "ema30":                   "30日指数均线",
     "ema60":                   "60日指数均线",
@@ -315,6 +316,7 @@ _INDICATOR_DEPS: dict[str, set[str]] = {
 _ALL_INDICATOR_COLS: frozenset[str] = frozenset({
     "prev_close", "ma5", "ma10", "ma20", "ma30", "ma60",
     "ema5", "ema10", "ema20", "ema30", "ema60", "_ema12", "_ema26",
+    "bull_bear_line",
     "_boll_std", "_kdj_ln", "_kdj_hn", "_tr", "vol_ma5", "vol_ma10",
     "_vol_ma5", "high_60d", "low_60d",
     "macd_dif", "boll_upper", "boll_lower", "macd_dea", "macd_hist",
@@ -388,6 +390,11 @@ def compute_indicators(
         _p1.append(pl.col("close").ewm_mean(alpha=_ema_alpha(5), adjust=False).over("symbol").alias("ema5"))
     if "ema10" in want:
         _p1.append(pl.col("close").ewm_mean(alpha=_ema_alpha(10), adjust=False).over("symbol").alias("ema10"))
+    if "bull_bear_line" in want:
+        _p1.append(
+            ((pl.col("close") + pl.col("high") + pl.col("low")) / 3)
+            .ewm_mean(alpha=_ema_alpha(10), adjust=False).over("symbol").alias("bull_bear_line")
+        )
     if "ema20" in want:
         _p1.append(pl.col("close").ewm_mean(alpha=_ema_alpha(20), adjust=False).over("symbol").alias("ema20"))
     if "ema30" in want:
@@ -2012,6 +2019,14 @@ def compute_enriched_today(
         )
 
     # ---- EMA (递推) ----
+    typical_price = (pl.col("close") + pl.col("high") + pl.col("low")) / 3
+    previous_line = pl.col("bull_bear_line") if "bull_bear_line" in df.columns else pl.lit(None)
+    df = df.with_columns(
+        pl.when(has_history_state)
+        .then(alpha(10) * typical_price + (1 - alpha(10)) * previous_line)
+        .otherwise(typical_price)
+        .alias("bull_bear_line")
+    )
     df = df.with_columns([
         (alpha(5)  * pl.col("close") + (1 - alpha(5))  * pl.col("ema5")).alias("ema5"),
         (alpha(10) * pl.col("close") + (1 - alpha(10)) * pl.col("ema10")).alias("ema10"),

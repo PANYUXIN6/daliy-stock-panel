@@ -54,7 +54,7 @@ async def trigger_pipeline_job(repo, capset, quote_service=None) -> dict:
 
 async def _submit_job(repo, quote_service, make_run, *, request_key=None, datasets=None,
                       finalize: Callable[[], None] | None = None,
-                      with_cancel_event: bool = False) -> dict:
+                      with_cancel_event: bool = False, pause_quotes: bool = True) -> dict:
     """任务化执行公共机制: 单飞 create → 重任务槽 → 行情暂停 → 缓存失效。
 
     make_run(progress) 返回实际执行闭包(阻塞 IO + CPU, 在 executor 里跑)。
@@ -63,6 +63,7 @@ async def _submit_job(repo, quote_service, make_run, *, request_key=None, datase
     finalize 用于板块聚合任务: 执行体退出时统一刷新并发布实际写入,
     包括部分失败/取消, 替代默认缓存刷新及成功发布。
     with_cancel_event 将既有任务信号作为 make_run 的第二参传入，供待发请求停止。
+    pause_quotes=False 用于只写独立财务表的长任务，避免盘中行情整轮停采。
     """
     # 检测卡死的 running job (如 reload 后孤儿 task / 网络读无限阻塞)。
     # reap_stale 会在 /run 和 /jobs/{id} 轮询端点都调用,保证卡死后能自愈。
@@ -101,7 +102,7 @@ async def _submit_job(repo, quote_service, make_run, *, request_key=None, datase
 
             def _run() -> dict:
                 try:
-                    if qs:
+                    if qs and pause_quotes:
                         with qs.paused():
                             return run()
                     return run()

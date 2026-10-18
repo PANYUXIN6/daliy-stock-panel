@@ -75,13 +75,10 @@ GOLDEN_COLUMNS: list[dict] = [
     {"id": "vol_trend_5_60", "label": "量能趋势(5/60)", "group": "量价", "desc": "5日平均成交量 / 60日平均成交量 - 1"},
     {"id": "limit_up_count_20d", "label": "涨停基因(20日)", "group": "涨停基因", "desc": "近20个交易日涨停次数"},
     {"id": "limit_up_count_60d", "label": "涨停基因(60日)", "group": "涨停基因", "desc": "近60个交易日涨停次数"},
-    {"id": "pb_latest", "label": "市净率(最新公告)", "group": "财务", "desc": "收盘价 / 最新已公告每股净资产; 无财务数据或公告前为空"},
-    {"id": "roe_latest", "label": "ROE(最新公告)", "group": "财务", "desc": "最新已公告净资产收益率(%); 无财务数据或公告前为空"},
-    {"id": "gross_margin_latest", "label": "毛利率(最新公告)", "group": "财务", "desc": "最新已公告销售毛利率(%)"},
-    {"id": "net_margin_latest", "label": "净利率(最新公告)", "group": "财务", "desc": "最新已公告销售净利率(%)"},
-    {"id": "revenue_yoy_latest", "label": "营收增速(最新公告)", "group": "财务", "desc": "最新已公告营业收入同比(%)"},
-    {"id": "net_income_yoy_latest", "label": "净利增速(最新公告)", "group": "财务", "desc": "最新已公告归母净利润同比(%)"},
-    {"id": "debt_ratio_latest", "label": "资产负债率(最新公告)", "group": "财务", "desc": "最新已公告资产负债率(%)"},
+    {"id": "gross_margin_latest", "label": "毛利率(最新公告)", "group": "财务", "desc": "最新可用报告期 (营业收入-营业成本) / 营业收入 × 100；按版本可用日门控"},
+    {"id": "net_margin_latest", "label": "净利率(最新公告)", "group": "财务", "desc": "最新可用报告期净利润 / 营业收入 × 100；按版本可用日门控"},
+    {"id": "revenue_yoy_latest", "label": "营收增速(最新公告)", "group": "财务", "desc": "最新可用营业收入与上年同期的同比(%)；两期输入均可用后计算"},
+    {"id": "net_income_yoy_latest", "label": "净利增速(最新公告)", "group": "财务", "desc": "最新可用归母净利润与上年同期的同比(%)；两期输入均可用后计算"},
     # --- 扩充批次 (2026-09-05): 追加于目录尾部, 前 48 项挖掘调度顺序不变 ---
     {"id": "log_float_mv", "label": "流通市值对数", "group": "规模", "desc": "ln(收盘价 x 当日成交量 / 换手率), 由换手率反推流通股本, 高值代表大盘"},
     {"id": "momentum_120d", "label": "120日动量", "group": "动量", "desc": "120个交易日累计收益率 (中期动量, 与短窗口互补)"},
@@ -230,14 +227,21 @@ def test_scoring_warmup_snapshot() -> None:
 
 def test_catalog_counts_and_kinds() -> None:
     specs = all_factors()
-    assert len(specs) == 77
-    assert len({spec.id for spec in specs}) == 77  # id 唯一
+    assert len(specs) == 74
+    assert len({spec.id for spec in specs}) == 74  # id 唯一
     virtual = [spec for spec in specs if spec.kind == "virtual"]
     assert len(virtual) == 52  # ma/ema 10 + 原有 26 + 扩充批次 16
     financial = [spec for spec in specs if spec.pit]
-    assert len(financial) == 7
+    assert len(financial) == 4
     assert all(spec.pit_source == "financial_announce" for spec in financial)
     assert all(spec.asset_types == frozenset({"stock"}) for spec in financial)
+
+
+def test_active_financial_catalog_only_contains_income_factors() -> None:
+    active = {spec.id for spec in all_factors() if spec.pit_source == 'financial_announce'}
+    assert active == {'gross_margin_latest', 'net_margin_latest', 'revenue_yoy_latest', 'net_income_yoy_latest'}
+    for retired in ('pb_latest', 'roe_latest', 'debt_ratio_latest'):
+        assert get_factor(retired) is None
 
 
 def test_mining_schedule_order_prefix_unchanged() -> None:
@@ -261,8 +265,8 @@ def test_get_factor_and_dependencies() -> None:
 def test_asset_type_filter() -> None:
     stock = all_factors(asset_type="stock")
     etf = all_factors(asset_type="etf")
-    assert len(stock) == 77
-    assert len(etf) == 70  # 财务 7 项仅股票
+    assert len(stock) == 74
+    assert len(etf) == 70  # 财务 4 项仅股票
 
 
 def test_register_factor_rejects_duplicate() -> None:
@@ -309,7 +313,7 @@ def test_factors_api_contract() -> None:
     assert response.status_code == 200
     payload = response.json()
     factors = payload["factors"]
-    assert len(factors) == 77
+    assert len(factors) == 74
     first = factors[0]
     assert first["id"] == "momentum_5d"
     assert first["kind"] == "base"
@@ -318,9 +322,9 @@ def test_factors_api_contract() -> None:
     ma20 = next(item for item in factors if item["id"] == "ma20_bias")
     assert ma20["kind"] == "virtual"
     assert ma20["dependencies"] == ["close", "ma20"]
-    pb = next(item for item in factors if item["id"] == "pb_latest")
-    assert pb["pit"] is True
-    assert pb["asset_types"] == ["stock"]
+    income = next(item for item in factors if item["id"] == "net_margin_latest")
+    assert income["pit"] is True
+    assert income["asset_types"] == ["stock"]
     mv = next(item for item in factors if item["id"] == "log_float_mv")
     assert mv["kind"] == "virtual"
     assert mv["scale_free"] is False

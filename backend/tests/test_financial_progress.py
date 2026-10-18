@@ -99,6 +99,17 @@ def test_empty_custom_table_stays_empty(custom):
     assert [len(call.args[1]) for call in fetch.call_args_list] == [100, 100, 5]
 
 
+def test_version_source_tracks_request_even_if_route_changes(custom, monkeypatch, tmp_path):
+    def fetch(table, symbols, latest_only):
+        monkeypatch.setattr(preferences, "get_financial_provider", lambda: "other")
+        return pl.DataFrame({"symbol": symbols, "period_end": ["2026-06-30"], "roe": [12.]})
+    custom(SimpleNamespace(get_financials=fetch))
+    frame = financial_sync._fetch_table("metrics", ["600519.SH"], CapabilitySet())
+    captured = financial_sync._record_table("metrics", frame, tmp_path)
+    assert captured["source"].item() == "test"
+    assert pl.read_parquet(tmp_path / "financials/versions/metrics/part.parquet")["source"].item() == "test"
+
+
 def test_failed_batch_does_not_overwrite_table_with_partial_results(custom, tmp_path):
     path = tmp_path / "financials" / "income" / "part.parquet"
     path.parent.mkdir(parents=True)

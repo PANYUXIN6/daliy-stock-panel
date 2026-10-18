@@ -1,3 +1,5 @@
+import { applyPageScale } from './pageScale'
+
 /** 当前页面只承载一个身份；身份变化后重载，销毁后台任务与模块级缓存。 */
 let owner: string | null = null
 let blocked = false
@@ -92,5 +94,5 @@ export function applyAccountAppearance() {
   document.documentElement.classList.toggle('dark', accountStorage.getItem('tf-theme') !== 'light')
   let zoom = 1
   try { const value = JSON.parse(accountStorage.getItem('tf-page-zoom') || '1'); if (typeof value === 'number' && value >= 0.8 && value <= 1.5) zoom = value } catch { /* 默认缩放 */ }
-  document.documentElement.style.zoom = String(zoom)
+  applyPageScale(zoom)
 }

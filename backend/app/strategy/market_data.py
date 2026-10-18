@@ -133,3 +133,20 @@ def list_index_symbols() -> list[dict]:
         {"symbol": row["symbol"], "name": row.get("name")}
         for row in df.select(cols).iter_rows(named=True)
     ]
+
+
+def get_earnings_breakout_signals(frame: pl.DataFrame) -> pl.DataFrame:
+    """只读本地财务版本和完整前序日K，返回输入日期内的业绩断层回踩行。
+
+    与图表共用财报事件及价格算法；损坏的数据向调用方报错，不伪装成未命中。
+    """
+    from app.services.earnings_breakout import filter_pullback_signals
+
+    return filter_pullback_signals(_get_repo(), frame)
+
+
+def get_earnings_gap_signals(frame: pl.DataFrame) -> pl.DataFrame:
+    """只读本地财报版本与日K，返回输入日期内首次形成业绩断层的行。"""
+    from app.services.earnings_breakout import filter_gap_signals
+
+    return filter_gap_signals(_get_repo(), frame)

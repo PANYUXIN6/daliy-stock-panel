@@ -52,6 +52,7 @@ from app.indicators.pipeline import (
     LIMIT_SIGNAL_OUTPUTS,
     get_signal_dependencies,
 )
+from app.strategy import overlay
 from app.strategy.engine import StrategyDataContext, StrategyDef, StrategyEngine
 from app.strategy.scoring import (
     SCORING_DIRECTION_LOW,
@@ -59,6 +60,7 @@ from app.strategy.scoring import (
     effective_scoring_directions,
     materialize_scoring_columns,
     scoring_dependencies,
+    scoring_valid_expr,
     scoring_value_expr,
     scoring_warmup_bars,
 )
@@ -141,6 +143,7 @@ class StrategyDependencyResolver:
         asset_type: str = "stock",
     ) -> ResolvedFeaturePlan:
         overrides = overrides or {}
+        overlay.resolve(overrides, strategy.execution_backend)
         basic_filter = _basic_filter_for_asset(basic_filter, asset_type)
         if strategy.execution_backend == "matrix_native":
             return self._resolve_matrix_native(
@@ -160,6 +163,7 @@ class StrategyDependencyResolver:
 
         scoring = effective_scoring(strategy.meta.get("scoring"), overrides)
         required_features.update(scoring_dependencies(scoring))
+        required_features.update(overlay.dependencies(overlay.resolve(overrides, strategy.execution_backend)))
         order_by = strategy.meta.get("order_by")
         if order_by and order_by != "score":
             required_features.add(str(order_by))
@@ -202,6 +206,8 @@ class StrategyDependencyResolver:
 
         indicator_columns = frozenset(required_features & set(INDICATOR_COLUMNS))
         base_columns = _resolve_base_columns(required_features | set(_EXECUTION_COLUMNS))
+        if "pb_latest" in required_features:
+            base_columns = frozenset(set(base_columns) | {"raw_close"})
         if required_signals & set(LIMIT_SIGNAL_OUTPUTS):
             base_columns = frozenset(set(base_columns) | set(_LIMIT_BASE_COLUMNS))
 
@@ -216,7 +222,7 @@ class StrategyDependencyResolver:
         plan = FeaturePlan(
             required_features=frozenset(required_features),
             required_signals=frozenset(required_signals),
-            warmup_bars=max(60, int(strategy.lookback_days or 1), scoring_warmup_bars(scoring)),
+            warmup_bars=max(60, int(strategy.lookback_days or 1), scoring_warmup_bars(scoring), overlay.history_bars(overlay.resolve(overrides))),
         )
         return ResolvedFeaturePlan(
             base_columns=base_columns,
@@ -264,6 +270,7 @@ class StrategyDependencyResolver:
         required_features.update(_basic_filter_dependencies(basic_filter))
         scoring = effective_scoring(strategy.meta.get("scoring"), overrides)
         required_features.update(scoring_dependencies(scoring))
+        required_features.update(overlay.dependencies(overlay.resolve(overrides, strategy.execution_backend)))
         order_by = strategy.meta.get("order_by")
         if order_by and order_by != "score":
             required_features.add(str(order_by))
@@ -277,6 +284,7 @@ class StrategyDependencyResolver:
             int(strategy.matrix_strategy.required_warmup_bars(params)),
             scoring_warmup_bars(scoring),
             scoring_warmup_bars(parameter_scoring),
+            overlay.history_bars(overlay.resolve(overrides)),
         )
         matrix_columns = set(base_columns) | set(instrument_columns) | {
             "signal_limit_up",
@@ -822,6 +830,7 @@ class StrategyBacktestService:
             child_pipeline_cfg = MatrixPipelineConfig(
                 basic_filter=basic_filter,
                 scoring=child_scoring,
+                overlay_filter=overlay.resolve(child_override, child_def.execution_backend),
                 scoring_directions=effective_scoring_directions(child_override),
                 order_by=child_def.meta.get("order_by"),
                 descending=bool(child_def.meta.get("descending", True)),
@@ -1098,6 +1107,10 @@ class StrategyBacktestService:
 
         params = self._normalize_params(config.params or {}, s)
         overrides = config.overrides or {}
+        try:
+            overlay.resolve(overrides, s.execution_backend)
+        except ValueError as exc:
+            return _err(str(exc))
         # 同回测 run 路径: 挖掘运行期也要按资产类型中和股票专属过滤键 (#215)
         basic_filter = _basic_filter_for_asset(
             self._effective_basic_filter(s, overrides), config.asset_type
@@ -1508,6 +1521,7 @@ class StrategyBacktestService:
                     order_by=s.meta.get("order_by"),
                     descending=bool(s.meta.get("descending", True)),
                     protect_strategy_cache=prepared is not None,
+                    overlay_filter=overlay.resolve(overrides, s.execution_backend),
                 )
                 if prepared is None:
                     signal_matrix = MatrixStrategyPipeline().run(
@@ -1575,8 +1589,14 @@ class StrategyBacktestService:
                         return _err(f"基础过滤计算失败: {e}")
 
             candidate_filter_mask = self._build_candidate_filter_mask(panel, s, params)
-            candidate_mask = basic_mask & candidate_filter_mask
+            try:
+                overlay_mask = overlay.mask(panel, overlay.resolve(overrides, s.execution_backend))
+            except ValueError as exc:
+                return _err(str(exc))
+            candidate_mask = basic_mask & candidate_filter_mask & overlay_mask
             panel = self._apply_score(panel, s, overrides, universe_mask=candidate_mask, factor_snapshot=factor_snapshot)
+            if "score" in panel.columns:
+                candidate_mask = candidate_mask & panel["score"].is_finite().fill_null(False)
             formal_candidate_mask = candidate_mask & formal_range
             entry_mask = self._build_entry_mask_from_candidate(panel, candidate_mask, s, entry_signals)
             entry_mask = entry_mask & formal_range
@@ -2557,6 +2577,7 @@ class StrategyBacktestService:
         has_universe = universe_mask is not None and len(universe_mask) == len(panel)
         if has_universe:
             work = work.with_columns(universe_mask.rename("_score_universe"))
+        work = work.with_columns(scoring_valid_expr(work.columns, scoring).alias("_score_valid"))
 
         # 因子归因快照: 在临时因子列被 _finish 丢弃前, 截取候选行的
         # (symbol, date, 因子值)。与评分共用同一份物化结果, 无第二次计算。
@@ -2565,20 +2586,21 @@ class StrategyBacktestService:
                 name for name in scoring if name in work.columns
             ]
             if len(snapshot_cols) > 2:
-                frame = work
+                frame = work.filter(pl.col("_score_valid"))
                 if has_universe:
                     frame = frame.filter(pl.col("_score_universe"))
                 factor_snapshot["frame"] = frame.select(snapshot_cols)
 
         def _value_in_universe(value: pl.Expr) -> pl.Expr:
+            valid = pl.col("_score_valid")
             if has_universe:
-                return pl.when(pl.col("_score_universe")).then(value).otherwise(None)
-            return value
+                valid = valid & pl.col("_score_universe")
+            return pl.when(valid).then(value).otherwise(None)
 
         def _finish(df: pl.DataFrame) -> pl.DataFrame:
             temporary = [
                 name
-                for name in ["_score_universe", *temporary_scoring_columns]
+                for name in ["_score_universe", "_score_valid", *temporary_scoring_columns]
                 if name in df.columns
             ]
             return df.drop(temporary) if temporary else df
@@ -2610,13 +2632,17 @@ class StrategyBacktestService:
                     score_expr = score_parts[0]
                     for part in score_parts[1:]:
                         score_expr = score_expr + part
-                    return _finish(work.with_columns((score_expr * 100).fill_null(0).alias("score")))
+                    return _finish(work.with_columns(
+                        pl.when(pl.col("_score_valid")).then(score_expr * 100).otherwise(None).alias("score")
+                    ))
 
         order_by = s.meta.get("order_by")
         if order_by and order_by != "score" and order_by in work.columns:
             direction = 1 if s.meta.get("descending", True) else -1
-            score_expr = pl.col(order_by).fill_null(0) * direction
+            score_expr = pl.when(pl.col(order_by).is_finite()).then(pl.col(order_by) * direction).otherwise(None)
             if has_universe:
                 score_expr = pl.when(pl.col("_score_universe")).then(score_expr).otherwise(0.0)
             return _finish(work.with_columns(score_expr.alias("score")))
-        return _finish(work.with_columns(pl.lit(0.0).alias("score")))
+        return _finish(work.with_columns(
+            pl.when(pl.col("_score_valid")).then(0.0).otherwise(None).alias("score")
+        ))

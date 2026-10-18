@@ -43,10 +43,16 @@ from typing import ClassVar
 import polars as pl
 import pyarrow.parquet as pq
 
+from app.data_providers.base import ProviderFinancialDataUnavailableError
 from app.data_providers.normalizer import DAILY_COLS, normalize_daily
 from app.indicators.pipeline import filter_halt_days
 from app.plugins.fuyao import client as fuyao_client
-from app.plugins.fuyao.client import FuyaoClient, FuyaoError, FuyaoRateLimitError
+from app.plugins.fuyao.client import (
+    FuyaoClient,
+    FuyaoDataUnavailableError,
+    FuyaoError,
+    FuyaoRateLimitError,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -60,7 +66,7 @@ SECRETS_FIELD = "fuyao_api_key"  # UI 配置的 Key 存 secrets.json, 优先级�
 _SH_MS = 28_800_000
 _HIST_MAX_SPAN_MS = 3650 * 86_400_000  # historical 单次窗口上限 10 年, 超出由本层分片
 _HIST_INTERVAL_S = 0.12  # 单标的请求节流(实测 200+ 连发未触发 4001 限频)
-_FINANCIAL_HISTORY_PERIODS = 8  # 财务首装全量历史: 最近 8 期季报(约 2 年)
+_FINANCIAL_HISTORY_PERIODS = 20  # 每轮重新观察最近 20 期，捕获旧报告期更新
 _FINANCIAL_WORKERS = 2
 _VALUATION_BATCH = 100  # 估值/价格快照端点单次上限 100 只
 # 项目财务表名 → 扶摇报表端点名
@@ -334,6 +340,9 @@ class FuyaoProvider:
     """扶摇数据源。realtime = A 股全市场快照(quote_service 全市场模式轮询调用)。"""
 
     name = "fuyao"
+    # 服务按完整股票批次保存版本与恢复进度，避免限流丢掉整张表的取数结果。
+    financial_sync_batch_size = 20
+    financial_history_periods = _FINANCIAL_HISTORY_PERIODS
     builtin = True
 
     def __init__(self) -> None:
@@ -1001,7 +1010,7 @@ class FuyaoProvider:
     ) -> pl.DataFrame:
         """拉取财务数据, 映射为 canonical 列(symbol/period_end/announce_date/指标)。
 
-        - 三大报表: 单股单请求, latest_only 决定最近 1 期还是 8 期季报;
+        - 三大报表: 单股单请求, latest_only 决定最近 1 期还是 20 期季报;
         - metrics: 指标接口为单股单期, 恒只拉最新一期(bps 由估值快照 pb_mrq 反推,
           eps_basic 顺带取自利润表); 历史各期建议切回 TickFlow 同步补齐 —
           报告期合并写入会让两源数据共存, 互不覆盖;
@@ -1046,6 +1055,10 @@ class FuyaoProvider:
                     "symbol": sym,
                     "period_end": _iso_of_ms(r.get("period_end_ms")),
                     "announce_date": _iso_of_ms(r.get("report_date_ms")),
+                    # 实测对应当前数值的更新日期，不是首次披露日期。
+                    "source_update_date": _iso_of_ms(r.get("report_date_ms")),
+                    "date_basis": "source_update",
+                    "disclosure_type": "formal",
                 }
                 for src, dst in field_map.items():
                     row[dst] = _to_float(r.get(src))
@@ -1096,14 +1109,24 @@ class FuyaoProvider:
             cancel_event=cancel_event,
         )
         progress(2 * len(symbols))
+        missing_symbols: dict[str, str] = {}
 
         def fetch_indicators(sym: str, cancel_event: Event) -> list[dict]:
             r = latest[sym]
             quarter = _report_quarter(r.get("fiscal_period"))
             if not quarter:
                 return []
-            return client.financial_indicators(sym, f"{r.get('fiscal_year')}-{quarter}",
-                                                cancel_event=cancel_event)
+            report = f"{r.get('fiscal_year')}-{quarter}"
+            for attempt in range(2):
+                try:
+                    return client.financial_indicators(sym, report, cancel_event=cancel_event)
+                except FuyaoDataUnavailableError as exc:
+                    if attempt == 0:
+                        logger.warning("扶摇指标 %s %s 返回缺数，复核一次", sym, report)
+                        continue
+                    missing_symbols[sym] = f"报告期 {report} 连续两次确认缺数：{exc}"
+                    logger.warning("扶摇指标 %s 确认缺数，跳过本轮: %s", sym, missing_symbols[sym])
+            return []
 
         abilities_by_sym = self._financial_rows(
             fetch_indicators, list(latest),
@@ -1112,12 +1135,19 @@ class FuyaoProvider:
         )
         rows_out: list[dict] = []
         for (sym, r), abilities in zip(latest.items(), abilities_by_sym, strict=True):
+            if sym in missing_symbols:
+                continue
             row: dict = {
                 "symbol": sym,
                 "period_end": _iso_of_ms(r.get("period_end_ms")),
                 "announce_date": _iso_of_ms(r.get("report_date_ms")),
                 "eps_basic": _to_float(r.get("basic_eps")),
                 "bps": bps_by_sym.get(sym),
+                # 指标接口不提供版本日期，不能借用单独查询的利润表日期。
+                "date_basis": "observed",
+                "disclosure_type": "formal",
+                "bps_basis": "valuation_snapshot",
+                "roe_basis": "weighted_average",
             }
             for ability in abilities:
                 for ind in ability.get("indicators") or []:
@@ -1129,7 +1159,10 @@ class FuyaoProvider:
                         row[self._METRICS_FIELD_MAP.get(index_id, index_id)] = value
             rows_out.append(row)
         progress(total)
-        return pl.DataFrame(rows_out, infer_schema_length=None) if rows_out else pl.DataFrame()
+        frame = pl.DataFrame(rows_out, infer_schema_length=None) if rows_out else pl.DataFrame()
+        if missing_symbols:
+            raise ProviderFinancialDataUnavailableError(frame, missing_symbols)
+        return frame
 
     def trading_days(self) -> set:
         """近一年交易日集合 (供交易日探针)。失败抛 FuyaoError, 由探针兜为未知。"""
@@ -1162,10 +1195,9 @@ class FuyaoProvider:
         on_chunk_done: Callable[[int, int], None] | None = None,
         *, cancel_event: Event | None = None,
     ) -> dict[str, float]:
-        """估值快照 pb_mrq 与行情快照最新价同源同刻 → bps = price / pb_mrq。
+        """估值与行情分开请求，price / pb_mrq 仅作浏览用近似值。
 
-        与财报口径 bps 可能差几个百分点(上游权益基准不完全透明), 用于补齐
-        metrics.bps 使回测 pb_latest 因子可用。成功响应缺字段时保留空值,
+        权益基准不透明，也不保证同刻，不能作历史财报 BPS。成功响应缺字段时保留空值,
         请求失败则整张指标表未完成, 不返回部分结果。
         """
         client = self._get_client()

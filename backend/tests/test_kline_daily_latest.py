@@ -67,6 +67,7 @@ def _live_frame() -> pl.DataFrame:
         "volume": [123_456.0],
         "amount": [1_234_560.0],
         "ma5": [10.2],
+        "bull_bear_line": [10.3],
         "signal_limit_up": [False],
     })
 
@@ -94,6 +95,7 @@ def test_daily_latest_returns_only_current_memory_row(monkeypatch) -> None:
         "amount": 1_234_560.0,
         "change_pct": None,
         "ma5": 10.2,
+        "bull_bear_line": 10.3,
         "is_live": True,
     }
     assert repo.latest_asset_calls == 0

@@ -1,6 +1,7 @@
 """扶摇并行采集的发包限速、数据一致性和取消边界。"""
 from __future__ import annotations
 
+import json
 import time
 from concurrent.futures import ThreadPoolExecutor
 from itertools import pairwise
@@ -26,6 +27,12 @@ _INCOME = {
     "basic_eps": 2.5,
     "net_profit": -12.5,
 }
+
+
+@pytest.fixture(autouse=True)
+def fast_financial_gate(monkeypatch):
+    monkeypatch.setattr(fc, "_FINANCIAL_REQUEST_INTERVAL_S", 0)
+    monkeypatch.setattr(fc, "_next_financial_request_at", 0.)
 
 
 def _http_client(handler):
@@ -59,6 +66,79 @@ def _old_table(tmp_path, table):
         "net_income": [100.] * len(_SYMBOLS),
     }).write_parquet(path)
     return path, path.read_bytes()
+
+
+@pytest.mark.parametrize("missing_attempts", [1, 2])
+def test_confirmed_missing_metrics_are_recorded_and_other_batches_continue(monkeypatch, tmp_path, missing_attempts):
+    monkeypatch.setattr(fc, "_REQUEST_INTERVAL_S", 0)
+    symbols = ["600817.SH", "600000.SH", "600001.SH"]
+    requests = []
+
+    def respond(request):
+        symbol = request.url.params.get("thscode")
+        if request.url.path.endswith("income-statements"):
+            return httpx.Response(200, json={"code": 0, "data": {"item": [dict(_INCOME)]}})
+        if request.url.path.endswith("indicators"):
+            requests.append(symbol)
+            if symbol == symbols[0] and requests.count(symbol) <= missing_attempts:
+                return httpx.Response(200, json={"code": 5003, "message": "Data source unavailable"})
+            return httpx.Response(200, json={"code": 0, "data": {"abilities": [
+                {"indicators": [{"index_id": "index_weighted_avg_roe", "value": "12.5"}]},
+            ]}})
+        return httpx.Response(200, json={"code": 0, "data": {"list": []}})
+
+    client = _http_client(respond)
+    provider = _provider(monkeypatch, client)
+    provider.financial_sync_batch_size = 2
+    _install_financial_provider(monkeypatch, provider)
+    try:
+        financial_sync._sync_history_table_for_symbols("metrics", symbols, tmp_path, CapabilitySet())
+    finally:
+        client.close()
+    state = json.loads((tmp_path / "financials/sync_progress/metrics.json").read_text())
+    saved = pl.read_parquet(tmp_path / "financials/versions/metrics/part.parquet")
+    assert state["status"] == "completed"
+    assert requests.count(symbols[0]) == 2
+    assert saved["source"].unique().to_list() == ["fuyao"]
+    assert saved["roe"].to_list() == [12.5] * saved.height
+    if missing_attempts == 2:
+        assert set(saved["symbol"]) == set(symbols[1:])
+        assert set(state["completed_symbols"]) == set(symbols[1:])
+        assert list(state["skipped_symbols"]) == [symbols[0]]
+        assert "5003" in state["skipped_symbols"][symbols[0]]
+    else:
+        assert set(saved["symbol"]) == set(symbols)
+        assert not state["skipped_symbols"]
+
+
+@pytest.mark.parametrize("status,code,message", [
+    (502, 0, "Bad gateway"),
+    (200, 5003, "Unexpected internal error"),
+    (200, 4001, "rate limited"),
+])
+def test_other_metric_errors_do_not_become_missing_data_skips(monkeypatch, tmp_path, status, code, message):
+    monkeypatch.setattr(fc, "_REQUEST_INTERVAL_S", 0)
+
+    def respond(request):
+        if request.url.path.endswith("income-statements"):
+            return httpx.Response(200, json={"code": 0, "data": {"item": [dict(_INCOME)]}})
+        if request.url.path.endswith("indicators"):
+            return httpx.Response(status, json={"code": code, "message": message})
+        return httpx.Response(200, json={"code": 0, "data": {"list": []}})
+
+    client = _http_client(respond)
+    _install_financial_provider(monkeypatch, _provider(monkeypatch, client))
+    try:
+        with pytest.raises(fc.FuyaoError):
+            financial_sync._sync_history_table_for_symbols(
+                "metrics", ["600817.SH"], tmp_path, CapabilitySet(),
+            )
+    finally:
+        client.close()
+    state = json.loads((tmp_path / "financials/sync_progress/metrics.json").read_text())
+    assert not state.get("skipped_symbols")
+    assert not state["completed_symbols"]
+    assert not (tmp_path / "financials/versions/metrics/part.parquet").exists()
 
 
 def test_request_spacing_is_shared_across_concurrent_clients(monkeypatch):
@@ -97,6 +177,24 @@ def test_request_spacing_is_shared_across_concurrent_clients(monkeypatch):
     assert all(b - a >= interval * .75 for a, b in pairwise(starts))
 
 
+def test_financial_spacing_is_shared_without_slowing_other_endpoint_policy(monkeypatch):
+    monkeypatch.setattr(fc, "_REQUEST_INTERVAL_S", 0)
+    monkeypatch.setattr(fc, "_FINANCIAL_REQUEST_INTERVAL_S", .02)
+    lock, starts = Lock(), []
+    def respond(request):
+        with lock:
+            starts.append(time.monotonic())
+        return httpx.Response(200, json={"code": 0, "data": {"item": []}})
+    clients = [_http_client(respond), _http_client(respond)]
+    try:
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            list(executor.map(lambda i: clients[i % 2].financial_statements("income", _SYMBOLS[i]), range(4)))
+    finally:
+        for client in clients:
+            client.close()
+    assert all(b - a >= .015 for a, b in pairwise(sorted(starts)))
+
+
 @pytest.mark.parametrize("status,code", [(429, 0), (200, 4001), (200, "4001")])
 def test_rate_limit_is_distinguishable_and_does_not_retry(monkeypatch, status, code):
     monkeypatch.setattr(fc, "_REQUEST_INTERVAL_S", 0, raising=False)
@@ -127,7 +225,7 @@ def test_income_overlaps_two_requests_and_preserves_normalized_results(monkeypat
     class Client:
         def financial_statements(self, table, symbol, limit, *, cancel_event=None):
             nonlocal active, peak
-            assert table == "income" and limit == 8
+            assert table == "income" and limit == 20
             with lock:
                 active += 1
                 peak = max(peak, active)

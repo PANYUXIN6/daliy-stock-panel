@@ -123,13 +123,25 @@ export interface FinancialExecutionStatus {
   syncing: boolean
 }
 
-export interface FinancialMetricRecord {
+export interface FinancialVersionRecord {
+  source?: string | null
+  source_update_date?: string | null
+  date_basis?: 'source_update' | 'observed' | null
+  disclosure_type?: 'formal' | 'forecast' | 'express' | 'unknown' | null
+  observed_at?: string | null
+  available_date?: string | null
+  availability_basis?: 'source_update_conservative' | 'observed' | null
+}
+
+export interface FinancialMetricRecord extends FinancialVersionRecord {
   symbol?: string
   period_end: string
   announce_date?: string | null
   eps_basic?: number | null
   eps_diluted?: number | null
   bps?: number | null
+  bps_basis?: string | null
+  roe_basis?: string | null
   ocfps?: number | null
   roe?: number | null
   roe_diluted?: number | null
@@ -144,7 +156,7 @@ export interface FinancialMetricRecord {
   [key: string]: any
 }
 
-export interface FinancialIncomeRecord {
+export interface FinancialIncomeRecord extends FinancialVersionRecord {
   symbol?: string
   period_end: string
   announce_date?: string | null
@@ -159,7 +171,7 @@ export interface FinancialIncomeRecord {
   [key: string]: any
 }
 
-export interface FinancialBalanceSheetRecord {
+export interface FinancialBalanceSheetRecord extends FinancialVersionRecord {
   symbol?: string
   period_end: string
   announce_date?: string | null
@@ -172,7 +184,7 @@ export interface FinancialBalanceSheetRecord {
   [key: string]: any
 }
 
-export interface FinancialCashFlowRecord {
+export interface FinancialCashFlowRecord extends FinancialVersionRecord {
   symbol?: string
   period_end: string
   announce_date?: string | null
@@ -184,7 +196,7 @@ export interface FinancialCashFlowRecord {
   [key: string]: any
 }
 
-export interface FinancialSharesRecord {
+export interface FinancialSharesRecord extends FinancialVersionRecord {
   symbol?: string
   period_end: string
   announce_date?: string | null
@@ -288,12 +300,41 @@ export interface KlineRow {
   ma5?: number | null
   ma20?: number | null
   ma60?: number | null
+  bull_bear_line?: number | null
   macd_dif?: number | null
   macd_dea?: number | null
   macd_hist?: number | null
   rsi_14?: number | null
   vol_ratio_5d?: number | null
   [key: string]: any
+}
+
+export interface PriceGap {
+  date: string
+  direction: 'up' | 'down'
+  lower: number
+  upper: number
+  original_lower: number
+  original_upper: number
+}
+
+export interface PriceGapsResponse {
+  symbol: string
+  status: 'ready' | 'no_prices'
+  history_start: string | null
+  as_of: string | null
+  gaps: PriceGap[]
+}
+
+export interface EarningsBreakoutResponse {
+  symbol: string
+  source: string
+  status: 'ready' | 'no_versions' | 'data_insufficient' | 'no_calendar' | 'no_prices' | 'unsupported'
+  reports: number
+  eligible_reports: number
+  events: { date: string; period_end: string; available_date: string; observed_at: string;
+    comparison_observed_at: string; availability_basis: string; net_income: number; net_income_yoy: number }[]
+  markers: { date: string; icon: 9 | 42; event_date: string }[]
 }
 
 export interface KlineDailyResponse {
@@ -398,6 +439,7 @@ export interface ScreenerStrategy {
   source?: string
   /** 支持的周期, 如 ['1d'] / ['1m'] (分钟策略) */
   timeframes?: string[]
+  realtime_supported?: boolean
 }
 
 export interface StrategyLoadError {
@@ -411,6 +453,29 @@ export interface ScreenerResult {
   rows: any[]
   total: number
   elapsed_ms: number
+  verification?: EarningsGapVerification
+}
+
+export interface EarningsGapCandidate extends Record<string, any> {
+  symbol: string
+  date: string
+  name?: string | null
+  verification_status: 'pending' | 'confirmed' | 'excluded'
+  verification_reason: string
+}
+
+export interface EarningsGapVerificationSummary {
+  status: 'not_checked' | 'running' | 'completed' | 'failed'
+  job_id?: string | null
+  candidate_count: number
+  confirmed_count: number
+  pending_count: number
+  excluded_count: number
+  checked_at?: string | null
+}
+
+export interface EarningsGapVerification extends EarningsGapVerificationSummary {
+  candidates: EarningsGapCandidate[]
 }
 
 export interface ScreenerResultSummary {
@@ -418,6 +483,7 @@ export interface ScreenerResultSummary {
   as_of: string
   /** 渐进式 run_all 写入的计算时间戳 (Unix ms); 监控实时叠加等来源无此字段 */
   computed_at?: number | null
+  verification?: EarningsGapVerificationSummary
 }
 
 export interface ScreenerCachedSummary {
@@ -768,7 +834,17 @@ export interface AuctionBenchmarkPayload {
 }
 
 // ===== Strategy Engine =====
+export interface ParamVisibleIf {
+  param?: string
+  in?: (number | string | boolean)[]
+  all?: ParamVisibleIf[]
+  any?: ParamVisibleIf[]
+}
+
 export interface StrategyParamDef {
+  group?: string
+  visible_if?: ParamVisibleIf
+  option_applies?: Record<string, Record<string, number | string | boolean>>
   id: string
   label: string
   type: 'float' | 'int' | 'select' | 'bool' | 'string'
@@ -787,12 +863,14 @@ export interface CompositeChildInfo {
 }
 
 export interface StrategyDetail {
+  overlay_filter?: CustomSignalCondition[]
   id: string
   name: string
   description: string
   tags: string[]
   source: 'builtin' | 'custom' | 'ai' | 'composite'
   research_only?: boolean
+  realtime_supported?: boolean
   execution_backend: 'polars_expr' | 'matrix_native' | 'python_history_legacy' | 'composite' | 'minute_filter'
   asset_types: string[]
   timeframes: string[]
@@ -1099,8 +1177,23 @@ export interface PaperCompareRow {
   last_nav_date?: string | null
   /** 最近两个定版净值的涨跌 (百分数值, 1.5 = +1.5%) */
   day_change_pct?: number | null
-  auto_rules?: Array<{ name: string; match_kind: string; match_id: string; side: 'buy' | 'sell'; enabled: boolean }>
+  auto_rules?: Array<{ name: string; match_kind: string; match_id: string; side: 'buy' | 'sell' | 'auto'; enabled: boolean }>
   auto_enabled?: number
+  /** 盘中实时估算 (后端增量, 当日快照就绪才有): live_* 为快照价口径 */
+  live_total?: number | null
+  live_pnl_pct?: number | null
+  estimating?: boolean
+}
+
+/** FIFO 配对回合 (GET /api/paper/rounds): 开仓成本含买入费, 平仓净额扣卖出费 */
+export interface PaperRound {
+  symbol: string
+  open_date: string
+  close_date: string
+  qty: number
+  pnl: number
+  pnl_pct: number
+  holding_days: number
 }
 
 /** 对比批量创建的单个来源 (POST /api/paper/arena/batch_create) */
@@ -1108,11 +1201,13 @@ export interface PaperArenaSource {
   name?: string
   match_kind: 'strategy' | 'rule'
   match_id: string
-  side?: 'buy' | 'sell'
+  side?: 'buy' | 'sell' | 'auto'
   size_mode?: 'fixed_amount' | 'pct_equity'
   size_value?: number
   order_type?: 'market' | 'next_open' | 'close'
   cooldown_days?: number
+  /** 最大同时持仓标的数 (0 = 不限); 对齐回测 max_positions 口径 */
+  max_positions?: number
 }
 
 export interface PaperHolding {
@@ -1174,11 +1269,14 @@ export interface PaperAutoRule {
   name: string
   match_kind: 'strategy' | 'rule'
   match_id: string
-  side: 'buy' | 'sell'
+  /** auto = 跟随策略信号方向 (入场/进池买入, 出场/移出全平); 仅 match_kind=strategy 支持 */
+  side: 'buy' | 'sell' | 'auto'
   size_mode: 'fixed_amount' | 'pct_equity'
   size_value: number
   order_type: 'market' | 'next_open' | 'close'
   cooldown_days: number
+  /** 最大同时持仓标的数 (仅约束买入开新仓, 0 = 不限); 对齐回测 max_positions 口径 */
+  max_positions?: number
   enabled: boolean
   created_at: string
 }
@@ -2616,6 +2714,10 @@ export const api = {
         : `/api/kline/daily?symbol=${encodeURIComponent(symbol)}&days=${days}`)
       + (extColumns ? `&ext_columns=${encodeURIComponent(extColumns)}` : ''),
     ),
+  klineEarningsBreakout: (symbol: string, range: { start: string; end: string }) =>
+    request<EarningsBreakoutResponse>(`/api/kline/earnings-breakout?symbol=${encodeURIComponent(symbol)}&start_date=${range.start}&end_date=${range.end}`),
+  klineGaps: (symbol: string, end: string) =>
+    request<PriceGapsResponse>(`/api/kline/gaps?symbol=${encodeURIComponent(symbol)}&end_date=${end}`),
   klineDailyLatest: (symbol: string) =>
     request<KlineDailyLatestResponse>(
       `/api/kline/daily/latest?symbol=${encodeURIComponent(symbol)}`,
@@ -2857,6 +2959,11 @@ export const api = {
       method: 'POST',
       timeoutMs: COMPUTE_REQUEST_TIMEOUT_MS,
       body: JSON.stringify({ strategy_id, pool, as_of: asOf ?? null, ext_columns: extColumns || null, asset_type: assetType, timeframe }),
+    }),
+  screenerVerifyEarningsGap: (asOf?: string, pool?: string[]) =>
+    request<{ job_id: string; reused: boolean }>('/api/screener/earnings-gap/verify', {
+      method: 'POST',
+      body: JSON.stringify({ as_of: asOf ?? null, ...(pool ? { pool } : {}) }),
     }),
   screenerRunCustom: (conditions: string[], orderBy?: string, limit = 30, pool?: string[], extColumns?: string, assetType: 'stock' | 'etf' = 'stock') =>
     request<ScreenerResult>('/api/screener/run', {
@@ -3904,11 +4011,18 @@ export const api = {
   paperStats: (account?: string) =>
     request<{ rounds: number; win_rate: number; profit_loss_ratio: number | null; avg_holding_days: number; realized_pnl: number; max_drawdown: number | null }>(accUrl('/api/paper/stats', account)),
 
+  paperRounds: (account?: string) =>
+    request<{ rounds: PaperRound[] }>(accUrl('/api/paper/rounds', account)),
+
   paperCompare: () =>
     request<{ accounts: PaperCompareRow[] }>('/api/paper/compare'),
 
   paperFreeze: (frozen: boolean, account?: string) =>
     request<{ account: PaperAccount }>(accUrl('/api/paper/freeze?frozen=' + frozen, account), { method: 'POST' }),
+
+  /** 删除账户及其全部数据 (不可恢复); 有持仓/待成交订单时后端拒绝, force=true 强删 */
+  paperDeleteAccount: (force: boolean, account?: string) =>
+    request<{ ok: boolean; deleted: string; holdings?: number; pending_orders?: number }>(accUrl(`/api/paper/account?force=${force}`, account), { method: 'DELETE' }),
 
   paperAutoRules: (account?: string) =>
     request<{ rules: PaperAutoRule[] }>(accUrl('/api/paper/auto_rules', account)),

@@ -54,10 +54,9 @@ async function toggle() {
   await act(async () => button!.click())
 }
 
-it('主图开关显示 API 指标，切股和实时更新使用当前数据，旧响应允许缺字段', async () => {
+it('多空线默认选中且可关闭，切股和实时更新使用当前数据，旧响应允许缺字段', async () => {
   mocks.daily.mockResolvedValue(response('600000.SH', 10.25))
   await render()
-  await toggle()
   expect(host.querySelector('[data-chart]')?.textContent).toBe('多空线:10.25')
   mocks.daily.mockResolvedValue(response('000001.SZ', 20.5))
   await render('000001.SZ')

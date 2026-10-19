@@ -1,8 +1,8 @@
-"""标的池(Universe)定义(§6.3)。
+"""标的池(Universe)定义。
 
-Phase 1 实现:
-  - 常用指数成份(沪深 300 / 中证 500 / 上证 50)用 TickFlow `quote.pool` 端点拉取并缓存
-  - 全 A 通过 instruments.batch 获取
+数据来源:
+  - 指数成份与全 A 池经 universes.list 匹配，再用 quotes.get_by_universes 获取并缓存
+  - 全 A 池不可用时尝试聚合申万一级行业，覆盖度较低
   - 自选池 = 用户的 watchlist
 """
 from __future__ import annotations

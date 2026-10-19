@@ -1,8 +1,7 @@
-"""API Token 域 + 开放网关测试矩阵 (open-platform-plan §4)。
+"""保留的 API Token 存储与网关逻辑测试。
 
-域模块: 创建/校验/吊销/哈希不落明文/scope 校验。
-网关 (端到端, 挂真实中间件链): 401 无效 Token / 403 scope 不足 / 403 未开放端点 /
-429 限流 + Retry-After / 放行响应带 X-RateLimit 头 / UI 密码路径不受 Token 桶影响。
+网关测试使用本文件构造的中间件，不代表主应用当前开放 Token 认证。
+覆盖 Token 生命周期、哈希存储、scope 校验及限流响应。
 """
 from __future__ import annotations
 

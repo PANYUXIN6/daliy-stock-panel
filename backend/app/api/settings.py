@@ -1880,9 +1880,7 @@ def update_review_push(req: ReviewPushIn) -> dict:
 
 
 # ================================================================
-# API Token 管理 (open-platform-plan §4) — 仅 UI 会话可达
-# (挂在 /api/settings 前缀下, 受访问密码保护; Token 通道无对应 scope,
-#  网关规则表里没有本组端点, Bearer 调用会被 403 拒绝)
+# 保留的 API Token 管理端点；当前 auth_access 统一拒绝访问。
 # ================================================================
 class ApiTokenCreateIn(BaseModel):
     name: str

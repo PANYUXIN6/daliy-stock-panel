@@ -42,10 +42,9 @@ _REQUIRED = {
     "financial": {"symbol"},
 }
 
-# 小数制下 change_pct 的物理上限: A股最大涨跌停 30% (+容差)。
-# 中位数口径下小数制批次不可能超过该值, 百分制批次(典型中位数 0.5~3)必然超过。
-# 仅对 change_pct 有效——amplitude/turnover_rate 的两种单位在数值区间上重叠
-# (百分制 0.05 = 0.05% 与小数制 0.05 = 5%), 无物理依据可判。
+# 未声明 change_pct 单位时沿用的兼容阈值，不是涨跌幅物理上限。
+# 无涨跌停限制的交易日可能合法超出此值，低波动百分数也可能低于此值；
+# 数据源应显式声明 pct_unit，避免启发式误判。
 _PCT_FRACTION_MAX = 0.31
 
 _PCT_COLUMNS = ("change_pct", "amplitude", "turnover_rate")
@@ -57,12 +56,12 @@ def _normalize_pct_units(
     transformed_cols: frozenset[str] = frozenset(),
 ) -> pl.DataFrame:
     """比例字段单位归一为契约小数制 (change_pct/amplitude/turnover_rate,
-    0.0366 = 3.66%, CONTRIBUTING §3.1)。单位只认显式声明, 不靠数值猜:
+    0.0366 = 3.66%, CONTRIBUTING §3.1)。显式声明优先:
 
       - pct_unit="percent"  → 三列无条件 /100 (声明即契约, 即使数值看着像小数制);
       - pct_unit="decimal"  → 原样透传 (即使数值看着像百分制也不动);
-      - 未声明 → change_pct 保留截面中位数判定(涨跌停 30% 上限使其物理可判:
-        样本 >= 5 用 |值| 中位数, 小样本退用最大值, 整批同除 100);
+      - 未声明 → change_pct 沿用兼容启发式: 样本 >= 5 用 |值| 中位数,
+        小样本用最大值, 超过阈值则整批同除 100；此推断可能误判。
         amplitude/turnover_rate 置 None 交下游重算(enriched 管道按
         high/low/prev_close 与股本口径重算), 除非该列已被 transforms 显式
         处理过(视为用户已接管单位, 原样透传)。

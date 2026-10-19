@@ -1,14 +1,7 @@
-"""SSE 短期票据 — EventSource 无法携带 Authorization 头的替代通道。
+"""保留的一次性 SSE 票据实现；当前认证入口已停用事件票据通道。
 
-流程 (docs/open-platform-plan.md §6 V2):
-  1. POST /api/events/ticket (Bearer Token, 任意 scope) → 一次性票据 (tse_ 前缀)
-  2. GET /api/events?ticket=... (EventSource) → 校验+消费票据 → 按票据
-     继承的 scope 过滤事件流
-  3. 票据 60 秒过期 / 消费即作废; 重连需重新走第 1 步换新票据
-
-安全边界: 票据只继承 Token 已有 scope, 不放大权限; 存活窗口短,
-即使泄漏也只能订阅事件流, 不能调用任何 REST 端点。
-进程内存储 (单进程 uvicorn 场景), 重启清零无害。
+票据只继承已有 scope，60 秒过期且消费即作废。
+票据保存在进程内存中，重启后失效。
 """
 from __future__ import annotations
 

@@ -1,0 +1,46 @@
+# Applied after the server override: replace old public HTTP bindings instead of merging them.
+# Requires Docker Compose 2.24.4+ for !override.
+services:
+  web:
+    ports: !override
+      - "127.0.0.1:${HTTPS_BACKEND_PORT:-3018}:3018"
+    environment:
+      AUTH_COOKIE_SECURE: "true"
+      AUTH_TRUSTED_PROXIES: "${HTTPS_PROXY_IP:-172.30.255.2}/32"
+    networks:
+      default: {}
+      https_proxy: {}
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on:
+      web:
+        condition: service_healthy
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    networks:
+      https_proxy:
+        ipv4_address: ${HTTPS_PROXY_IP:-172.30.255.2}
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:2019/config/"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 10s
+
+networks:
+  https_proxy:
+    ipam:
+      config:
+        - subnet: ${HTTPS_PROXY_SUBNET:-172.30.255.0/24}
+          ip_range: ${HTTPS_PROXY_RANGE:-172.30.255.128/25}
+
+volumes:
+  caddy_data:
+  caddy_config:

@@ -28,7 +28,6 @@ type View = 'batch' | 'single'
 type SortKey = 'ic' | 'ir' | 'return' | 't_nw' | 'win_rate' | 'drawdown'
 type Verdict = 'valid' | 'edge' | 'invalid' | 'error'
 
-// P0 判读为客户端经验规则, metrics_v2 (服务端显著性) 落地后切换为服务端 verdict
 const VERDICT_META: Record<Verdict, { label: string; cls: string }> = {
   valid: { label: '有效', cls: 'bg-bull/10 text-bull' },
   edge: { label: '边缘', cls: 'bg-amber-400/10 text-amber-500' },
@@ -36,7 +35,7 @@ const VERDICT_META: Record<Verdict, { label: string; cls: string }> = {
   error: { label: '失败', cls: 'bg-danger/10 text-danger' },
 }
 
-// 服务端判读优先 (metrics_v2: NW t ≥ 2 显著 且 BH q ≤ 0.1), 缺失时降级 P0 经验规则
+// 有服务端统计量时按 NW t 与 BH q 判定显著性，缺失时回退 IC/IR 经验规则。
 const verdictOf = (item: FactorBatchItem): Verdict => {
   if (item.error) return 'error'
   const ic = Math.abs(item.ic_mean ?? 0)

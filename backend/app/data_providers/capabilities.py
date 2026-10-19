@@ -41,8 +41,7 @@ CAPABILITY_REGISTRY: list[dict] = [
         "field": "adj_factor_provider",
         "default": "tickflow",
         "tf_tier": "starter",
-        # 独立路由 (曾经的「跟随日K」特殊值已下线: 每个能力单独配置,
-        # 复权口径一致性改由未来的一致性警示保障, 不做路由耦合)
+        # 除权因子与日 K 独立路由，不再支持「跟随日 K」特殊值。
     },
     {
         "id": "realtime",

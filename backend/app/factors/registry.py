@@ -1,16 +1,12 @@
-"""因子注册表 (L-REG) — 因子元数据的单一权威来源。
+"""因子注册表：目录元数据、依赖声明、预热窗口与动态注册。
 
-P1 收口范围: 目录元数据 (id/label/group/公式)、虚拟因子依赖声明、评分预热窗口。
-三处历史清单在此合一:
+以下模块通过本注册表生成兼容视图：
   - backtest/factor.py FACTOR_COLUMNS (由 factor_columns_view() 生成兼容别名)
   - strategy/scoring.py VIRTUAL_SCORING_DEPENDENCIES (由 virtual_dependencies() 生成)
   - strategy/scoring.py _ROLLING_SCORING_WARMUP (由 scoring_warmups() 生成)
 
-P1 边界 (诚实声明):
-  - scoring_value_expr 的表达式分发仍留在 scoring.py, 注册表不含计算逻辑;
-    复合/自定义因子 (composite/custom) 与 DSL 在 P2/P3 接入后再收口。
-  - unit 字段 P1 统一 "none": 单位口径涉及金融数据契约 (CONTRIBUTING §3),
-    未经逐因子核对禁止猜测填充; 前端 P1 也不按 unit 格式化。
+表达式计算由 scoring.py 与 DSL 编译器负责。unit 未经逐因子核对时保留
+"none"，避免根据名称猜测金融数据单位。
 """
 from __future__ import annotations
 
@@ -40,7 +36,7 @@ class FactorSpec:
     version: int = 1
     # base: 空集合 = 已物化列自身; virtual: 展开到 enriched base 列
     dependencies: frozenset[str] = field(default_factory=frozenset)
-    direction: Direction = "none"  # P1 不预填: 方向以最近检验 IC 符号为准 (见平台方案 §3.6)
+    direction: Direction = "none"  # 默认不预设方向，以检验结果和策略配置为准。
     unit: Unit = "none"
     warmup_bars: int = 1
     pit: bool = False

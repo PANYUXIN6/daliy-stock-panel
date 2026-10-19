@@ -75,7 +75,7 @@ jobs:
     timeout-minutes: 45
     environment:
       name: preproduction
-      url: ${{ vars.DEPLOY_URL }}
+      url: ${{ vars.DEPLOY_URL || 'https://shuaihub.cn' }}
     concurrency:
       group: deploy-preproduction
       cancel-in-progress: false
@@ -94,5 +94,5 @@ jobs:
           DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
           DEPLOY_PORT: ${{ vars.DEPLOY_PORT || '22' }}
           DEPLOY_DIR: ${{ vars.DEPLOY_DIR || '/opt/stock-panel' }}
-          DEPLOY_URL: ${{ vars.DEPLOY_URL }}
+          DEPLOY_URL: ${{ vars.DEPLOY_URL || 'https://shuaihub.cn' }}
         run: bash scripts/ci_deploy.sh

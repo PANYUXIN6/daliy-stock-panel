@@ -88,7 +88,7 @@ TickFlow 是内置默认数据源;同时支持插件化接入第三方数据源(
 
 ## AI(可选)
 
-用于自然语言生成策略。**所有配置留空即跳过**,不影响核心功能。支持任意 OpenAI 兼容接口。
+用于声明式条件生成、数据问答、分析与复盘。未配置时跳过对应 AI 功能；支持 OpenAI 兼容的模型接口。
 
 ```ini
 AI_PROVIDER=openai_compat              # openai_compat | ollama
@@ -108,7 +108,7 @@ AI_DAILY_TOKEN_BUDGET=500000           # 每日 token 预算上限
 
 在后端 `.env` 配置 `AI_API_KEY`，重启网页与采集服务后生效。AI 页面保留模型、接口地址等非密钥选项与连通测试；原密钥写入和清空接口返回 403。旧客户端读取的 `tickflow_api_key_masked`、`ai_api_key_masked` 字段保留为空字符串。
 
-接入示例见 [strategy.md](./strategy.md) 的「AI 生成策略」章节。
+条件信号和受信任策略的使用边界见 [策略指南](strategy.md)；网页 Python 策略代码入口已关闭。
 
 ---
 
@@ -134,7 +134,7 @@ DATA_DIR=./data       # Parquet / DuckDB 数据存储目录
 
 整个 `data/` 目录都不纳入 git —— 行情 K线、财务、自选、回测、监控记录,乃至概念/行业扩展数据,全部是程序运行时生成/拉取的用户数据。
 
-如需迁移数据,直接拷贝整个 `data/` 目录即可。详见 [deployment.md → 更新代码](./deployment.md#更新代码已部署用户必读)。
+同一环境的整站备份与恢复见 [部署指南](deployment.md#备份与恢复)。本地向预发只按 [公共数据同步约定](deployment.md#按发布需要同步公共数据) 处理选定数据集，账号、个人数据和配置由各环境独立维护。
 
 ---
 

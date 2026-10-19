@@ -4,11 +4,23 @@ set -Eeuo pipefail
 umask 077
 
 die() { echo "$*" >&2; exit 1; }
-if [[ $# -ne 3 || ! $2 =~ ^[0-9a-f]{40}$ || $3 != /* || ! -d $3 ]]; then
-  die "Usage: bash deploy_preproduction.sh ARCHIVE FULL_LOWERCASE_COMMIT_SHA ABSOLUTE_RUNTIME_DIR"
+if [[ $# -lt 3 || $# -gt 4 || ! $2 =~ ^[0-9a-f]{40}$ || $3 != /* || ! -d $3 ]]; then
+  die "Usage: bash deploy_preproduction.sh ARCHIVE FULL_LOWERCASE_COMMIT_SHA ABSOLUTE_RUNTIME_DIR [HTTPS_DOMAIN]"
 fi
 archive=$1
 sha=$2
+domain=${4:-}
+if [[ -n $domain ]]; then
+  python3 - "$domain" <<'PY'
+import re, sys
+domain = sys.argv[1]
+labels = domain.split(".")
+if not (len(domain) <= 253 and len(labels) >= 2
+        and any(char.isalpha() for char in labels[-1])
+        and all(re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", label) for label in labels)):
+    sys.exit("Invalid HTTPS domain")
+PY
+fi
 runtime=$(cd -- "$3" && pwd -P)
 [[ $runtime != / && -f $archive ]] || die "Invalid runtime directory or source archive"
 for file in .env tiers.yaml docker-compose.yml docker-compose.override.yml; do
@@ -23,6 +35,8 @@ releases="$runtime/releases"
 mkdir -p -- "$releases"
 release="$releases/$sha"
 old_release=
+old_domain=
+old_caddy_image=
 old_files=(-f "$runtime/docker-compose.yml")
 if [[ -e "$runtime/current" || -L "$runtime/current" ]]; then
   [[ -L "$runtime/current" ]] || die "current must be a release symlink"
@@ -37,6 +51,11 @@ if [[ -e "$runtime/current" || -L "$runtime/current" ]]; then
 fi
 old_files+=(-f "$runtime/docker-compose.override.yml")
 [[ -z $old_release ]] || old_files+=(-f "$old_release/.deploy-image.yml")
+if [[ -n $old_release && -f "$old_release/.deploy-https.json" ]]; then
+  old_files+=(-f "$old_release/docker-compose.https.yml" -f "$old_release/.deploy-https.json")
+  old_domain=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["services"]["caddy"]["environment"]["SITE_DOMAIN"])' "$old_release/.deploy-https.json")
+  domain=${domain:-$old_domain}
+fi
 compose=(docker compose --project-directory "$runtime" --env-file "$runtime/.env" -p stock-panel)
 old_web=$("${compose[@]}" "${old_files[@]}" ps -q web)
 old_collector=$("${compose[@]}" "${old_files[@]}" ps -q collector)
@@ -46,6 +65,12 @@ old_web_image=$(docker inspect --format '{{.Image}}' "$old_web")
 old_collector_image=$(docker inspect --format '{{.Image}}' "$old_collector")
 [[ $old_web_image =~ ^sha256:[0-9a-f]{64}$ && $old_collector_image =~ ^sha256:[0-9a-f]{64}$ ]] \
   || die "Cannot identify the existing container images"
+if [[ -n $old_domain ]]; then
+  old_caddy=$("${compose[@]}" "${old_files[@]}" ps -q caddy)
+  [[ -n $old_caddy && $old_caddy != *$'\n'* ]] || die "Exactly one existing Caddy container is required"
+  old_caddy_image=$(docker inspect --format '{{.Image}}' "$old_caddy")
+  [[ $old_caddy_image =~ ^sha256:[0-9a-f]{64}$ ]] || die "Cannot identify the existing Caddy image"
+fi
 old_commit=
 if [[ -e "$runtime/.deployed-commit" ]]; then
   old_commit=$(cat "$runtime/.deployed-commit")
@@ -62,39 +87,81 @@ services:
   collector:
     image: $old_collector_image
 YAML
+if [[ -n $old_caddy_image ]]; then
+  cat >>"$rollback_file" <<YAML
+  caddy:
+    image: $old_caddy_image
+YAML
+fi
 
 health() {
-  local expected_web=$1 expected_collector=$2 web collector
-  shift 2
+  local expected_web=$1 expected_collector=$2 expected_caddy=$3 site=$4 allow_public=$5 web collector
+  shift 5
   web=$("${compose[@]}" "$@" ps -q web)
   collector=$("${compose[@]}" "$@" ps -q collector)
-  docker inspect "$web" "$collector" | python3 -c '
+  local containers=("$web" "$collector")
+  if [[ -n $site ]]; then
+    containers+=("$("${compose[@]}" "$@" ps -q caddy)")
+  fi
+  docker inspect "${containers[@]}" | python3 -c '
 # stock-panel-deployment-health
-import json, sys, time, urllib.error, urllib.request
-web, collector = json.load(sys.stdin)
-for container in (web, collector):
+import http.client, json, socket, ssl, sys, time, urllib.error, urllib.request
+containers = json.load(sys.stdin)
+web, collector = containers[:2]
+for container in containers:
     if not container["State"]["Running"] or container["State"].get("Health", {}).get("Status") != "healthy":
         sys.exit("A deployment container is not healthy")
 if any(collector["NetworkSettings"]["Ports"].values()):
     sys.exit("Collector must not publish host ports")
 if web["Image"] != sys.argv[1] or collector["Image"] != sys.argv[2]:
     sys.exit("Deployment containers do not use the expected images")
+site = sys.argv[4]
+if site and (len(containers) != 3 or containers[2]["Image"] != sys.argv[3]):
+    sys.exit("Caddy does not use the expected image")
 bindings = web["NetworkSettings"]["Ports"].get("3018/tcp") or []
-if len(bindings) != 1 or bindings[0]["HostIp"] != "127.0.0.1":
+allowed_ips = {"127.0.0.1"} if sys.argv[5] == "0" else {"127.0.0.1", "0.0.0.0", "::"}
+if (not bindings or any(binding["HostIp"] not in allowed_ips for binding in bindings)
+        or len({binding["HostPort"] for binding in bindings}) != 1
+        or (sys.argv[5] == "0" and len(bindings) != 1)):
     sys.exit("Web must publish exactly one loopback HTTP port")
 url = "http://127.0.0.1:" + str(int(bindings[0]["HostPort"])) + "/health"
+
+class LocalHTTPSConnection(http.client.HTTPSConnection):
+    def connect(self):
+        self.sock = socket.create_connection(("127.0.0.1", 443), self.timeout)
+        self.sock = self._context.wrap_socket(self.sock, server_hostname=self.host)
+
 for attempt in range(30):
     try:
         with urllib.request.urlopen(url, timeout=3) as response:
             status = json.load(response)
         if status.get("status") == "ok" and status.get("service_role") == "web" and status.get("collector_connected") is True:
-            sys.exit(0)
+            break
     except (urllib.error.URLError, TimeoutError, OSError, ValueError):
         pass
     if attempt < 29:
         time.sleep(2)
-sys.exit("Web failed to reconnect to collector")
-' "$expected_web" "$expected_collector"
+else:
+    sys.exit("Web failed to reconnect to collector")
+if site:
+    for attempt in range(60):
+        connection = LocalHTTPSConnection(site, context=ssl.create_default_context(), timeout=5)
+        try:
+            connection.request("GET", "/health")
+            response = connection.getresponse()
+            status = json.load(response)
+            if (response.status == 200 and status.get("status") == "ok"
+                    and status.get("service_role") == "web" and status.get("collector_connected") is True):
+                break
+        except (OSError, ValueError, http.client.HTTPException):
+            pass
+        finally:
+            connection.close()
+        if attempt < 59:
+            time.sleep(3)
+    else:
+        sys.exit("Caddy HTTPS certificate or upstream health check failed")
+' "$expected_web" "$expected_collector" "$expected_caddy" "$site" "$allow_public"
 }
 
 finish() {
@@ -102,8 +169,15 @@ finish() {
   trap - EXIT INT TERM
   if [[ $result -ne 0 && $rollback_armed == 1 ]]; then
     echo "Deployment failed; restoring previous web and collector images" >&2
+    if [[ -n $domain ]]; then
+      "${compose[@]}" "${new_files[@]}" logs --tail 50 caddy >&2 || true
+    fi
+    # Release the new proxy ports before restoring a first-time HTTP deployment.
+    if [[ -n $domain && -z $old_domain ]]; then
+      "${compose[@]}" "${new_files[@]}" stop caddy || true
+    fi
     if "${compose[@]}" "${old_files[@]}" -f "$rollback_file" up -d --no-build --wait --wait-timeout 240 \
-      && health "$old_web_image" "$old_collector_image" "${old_files[@]}" -f "$rollback_file"; then
+      && health "$old_web_image" "$old_collector_image" "$old_caddy_image" "$old_domain" 1 "${old_files[@]}" -f "$rollback_file"; then
       echo "Previous deployment restored" >&2
     else
       echo "ROLLBACK FAILED: inspect the server before retrying" >&2
@@ -194,6 +268,43 @@ services:
     image: $new_image
 YAML
 new_files=(-f "$release/docker-compose.yml" -f "$runtime/docker-compose.override.yml" -f "$release/.deploy-image.yml")
+new_caddy_image=
+if [[ -n $domain ]]; then
+  [[ -f "$release/docker-compose.https.yml" && -f "$release/deploy/Caddyfile" ]] \
+    || die "Source archive lacks HTTPS deployment files"
+  if [[ ! -f "$release/.deploy-https.json" ]]; then
+    docker pull caddy:2-alpine
+    new_caddy_image=$(docker image inspect --format '{{.Id}}' caddy:2-alpine)
+    [[ $new_caddy_image =~ ^sha256:[0-9a-f]{64}$ ]] || die "Cannot identify the Caddy image"
+    python3 - "$release" "$domain" "$new_caddy_image" <<'PY'
+import json, os, pathlib, sys, tempfile
+
+release, domain, image = pathlib.Path(sys.argv[1]), sys.argv[2], sys.argv[3]
+config = {"services": {"caddy": {
+    "image": image,
+    "environment": {"SITE_DOMAIN": domain},
+    "volumes": [{"type": "bind", "source": str(release / "deploy" / "Caddyfile"),
+                 "target": "/etc/caddy/Caddyfile", "read_only": True}],
+}}}
+descriptor, temporary = tempfile.mkstemp(prefix=".https-", dir=release)
+with os.fdopen(descriptor, "w") as output:
+    json.dump(config, output)
+os.replace(temporary, release / ".deploy-https.json")
+PY
+  else
+    # A rerun must keep the same proxy image/configuration that this release recorded.
+    new_caddy_image=$(python3 - "$release/.deploy-https.json" "$domain" <<'PY'
+import json, sys
+config = json.load(open(sys.argv[1]))["services"]["caddy"]
+if config["environment"]["SITE_DOMAIN"] != sys.argv[2]:
+    sys.exit("A domain change requires a new release; existing HTTPS release remains unchanged")
+print(config["image"])
+PY
+)
+    [[ $new_caddy_image =~ ^sha256:[0-9a-f]{64}$ ]] || die "Invalid recorded Caddy image"
+  fi
+  new_files+=(-f "$release/docker-compose.https.yml" -f "$release/.deploy-https.json")
+fi
 "${compose[@]}" "${new_files[@]}" config --quiet
 
 # Inspect only persisted status fields; importing application stores would mutate them.
@@ -238,7 +349,7 @@ for command in sys.stdin:
 '
 rollback_armed=1
 "${compose[@]}" "${new_files[@]}" up -d --no-build --wait --wait-timeout 240
-health "$new_image" "$new_image" "${new_files[@]}"
+health "$new_image" "$new_image" "$new_caddy_image" "$domain" 0 "${new_files[@]}"
 
 # current is the authoritative management entry; replace it only after health succeeds.
 python3 - "$runtime" "$release" "$sha" <<'PY'

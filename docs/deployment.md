@@ -1,6 +1,6 @@
 # 部署指南
 
-本项目的几种运行方式，按推荐程度排序。配置项详解见 [configuration.md](./configuration.md)。
+本地开发、Docker 与服务器预发的运行和恢复方式。配置项详解见 [configuration.md](./configuration.md)。
 
 ## 本项目的环境与发布约定
 
@@ -25,7 +25,7 @@
 | `DEPLOY_SSH_KEY` | 该服务器部署专用私钥 |
 | `DEPLOY_KNOWN_HOSTS` | 通过可信连接核验后的 SSH 主机公钥记录，严格校验，不在运行时自动接受新指纹 |
 
-同一 Environment 的 Variables 为 `DEPLOY_DIR`（默认 `/opt/stock-panel`）、`DEPLOY_PORT`（默认 `22`）、`DEPLOY_URL`（公网 HTTPS 地址，用于额外健康检查）。目标机需已完成双服务初始化，并具备 Bash、Python 3.12、OpenSSH、Docker Compose 和 `flock`；运行根目录必须已有 `.env`、`tiers.yaml`、`docker-compose.yml`、`docker-compose.override.yml` 与运行数据。密钥须能以非交互方式登录，服务器需启用公钥认证。
+同一 Environment 的 Variables 为 `DEPLOY_DIR`（默认 `/opt/stock-panel`）、`DEPLOY_PORT`（默认 `22`）、`DEPLOY_URL`（默认 `https://shuaihub.cn`，同时用于配置 Caddy 域名与公网健康检查）。`DEPLOY_URL` 只接受 HTTPS 根域名地址，可有末尾 `/` 或显式 `:443`，不支持子路径、其他端口、账号密码、查询或片段。目标机需已完成双服务初始化，并具备 Bash、Python 3.12、OpenSSH、Docker Compose 2.24.4+ 和 `flock`；运行根目录必须已有 `.env`、`tiers.yaml`、`docker-compose.yml`、`docker-compose.override.yml` 与运行数据。密钥须能以非交互方式登录，服务器需启用公钥认证。
 
 [CI 入口](../scripts/ci_deploy.sh) 只上传 `git archive` 生成的本次提交源码。[服务器入口](../scripts/deploy_preproduction.sh) 将其放入运行根目录的 `releases/<SHA>/`，先构建新镜像，再用该版本的 Compose 定义、远端已有覆盖配置和精确镜像版本启动双服务。数据目录、环境文件及挂载配置始终从远端运行根解析，镜像版本覆盖不会改写原部署配置。首次自动发布可接管现有手动部署；后续版本通过 `current` 指向已验收的源码目录。发布不会上传金融数据或个人数据。
 
@@ -33,7 +33,7 @@
 
 服务器文件锁覆盖发布和恢复过程。切换前若检测到未完成的持久化采集／挖掘任务，或仍运行的独立策略计算 worker，发布会失败，待任务结束后重跑 GitHub 工作流。进程内的信号／因子回测及尚未启动 worker 的排队任务不在这项检查范围内，发布前应结束这些任务；状态检查与实际切换之间也存在短暂竞态。若需要在持续运行研究任务时发布，应增加 collector 的维护准入机制，当前脚本不提供这项能力。
 
-更新涉及两服务重建，会有短暂不可用，不提供零停机保证。健康验收要求两个容器正常、镜像正确、collector 未暴露宿主端口，并且 web 的 `/health` 显示已连接 collector；失败时尝试按旧版本 Compose 和旧镜像恢复双服务。成功后才更新 `current` 和 `.deployed-commit`。镜像恢复不回滚运行数据，涉及持久化格式变更的版本应单独安排兼容迁移与备份。
+更新涉及服务重建，会有短暂不可用，不提供零停机保证。健康验收要求应用与 Caddy 容器正常、镜像正确、collector 未暴露宿主端口，web 的 `/health` 已连接 collector，并通过域名 SNI 与可信证书校验的本机 HTTPS 请求；失败时尝试按旧版本 Compose、镜像与代理配置恢复。成功后才更新 `current` 和 `.deployed-commit`，runner 再从公网检查 HTTPS。镜像恢复不回滚运行数据，涉及持久化格式变更的版本应单独安排兼容迁移与备份。
 
 首次自动发布成功后，使用当前版本的管理入口，避免根目录旧 Compose 定义把服务切回最初镜像：
 
@@ -44,6 +44,41 @@ bash /opt/stock-panel/current/scripts/preproduction_compose.sh /opt/stock-panel 
 ```
 
 发布失败可在 GitHub Actions 中查看失败步骤；修复后重新运行时仍会检查 `main` 当前提交，历史任务不能覆盖新版本。服务验收与命令替身测试不替代第一次 GitHub runner 到服务器的真实发布验收。
+
+### Docker HTTPS 与 Caddy
+
+自动发布将 `DEPLOY_URL` 的域名交给 Caddy，无需手动申请腾讯云证书或配置 DNS API 密钥。以当前默认域名为例，部署验收成功后访问 `https://shuaihub.cn`，HTTP 自动跳转到 HTTPS。
+
+发布前确认：
+
+- 域名 A 记录指向服务器公网 IPv4；若存在 AAAA 记录，也须指向这台服务器可用的 IPv6。
+- 服务器安全组和系统防火墙允许公网 TCP 80、443，且没有其他程序占用这些端口。旧 `web` 的 80 端口映射会由发布流程接管。
+- 服务器可访问镜像仓库和 ACME 证书服务。首次证书签发可能需要等待数分钟；签发失败不会被当作健康发布。
+
+[docker-compose.https.yml](../docker-compose.https.yml) 在服务器覆盖文件之后加载，用 `!override` 替换旧公网 HTTP 端口，而非叠加映射。Caddy 对外提供 80/443；`web` 仅保留 `127.0.0.1:3018` 的本机健康入口，`collector` 继续只在内部网络可达。日常本地开发仍使用原 `docker-compose.yml`，不会启动 Caddy。
+
+Caddy 与 `web` 使用专用代理网络；默认子网 `172.30.255.0/24`、Caddy 地址 `172.30.255.2`，自动分配池限制为 `172.30.255.128/25`，避免 web 先占用代理地址。HTTPS 覆盖层为 `web` 设置 `AUTH_COOKIE_SECURE=true`，并只信任该代理的 `/32`，因此登录、同源写请求、真实访问者 IP 和 SSE 可沿原有实现工作，不需要放宽允许来源。
+
+若现有服务器网络或端口冲突，可在服务器已有 `.env` 中单独调整下列配置。自动分配池须包含于所选子网，代理 IP 须处于该子网内、自动分配池外：
+
+```ini
+HTTPS_PROXY_SUBNET=172.30.255.0/24
+HTTPS_PROXY_IP=172.30.255.2
+HTTPS_PROXY_RANGE=172.30.255.128/25
+HTTPS_BACKEND_PORT=3018
+```
+
+证书与 ACME 账号保存在 Compose 项目 `stock-panel` 的 `caddy_data` 持久卷，运行配置保存在 `caddy_config` 卷，正常发版和回滚均保留。Caddyfile 来自本次 release 的 [deploy/Caddyfile](../deploy/Caddyfile)；发布生成 `.deploy-https.json`，记录域名、实际 Caddy 镜像 ID 和该版本配置的绝对挂载路径，不改写服务器 `.env` 或原有覆盖文件。同一提交重跑复用已记录的代理版本；调整域名时使用下一次发布提交。
+
+首次 HTTPS 发布失败时，脚本先停止新增 Caddy 释放端口，再恢复旧 HTTP 服务；已有 HTTPS 发布失败时恢复旧代理版本、旧 Caddyfile 和应用镜像。公网二次检查发生在服务器事务完成后，其失败会使 CI 失败，但不会自动回滚已通过本机 TLS 验收的版本，应继续检查公网 DNS、防火墙和链路。
+
+发布后查看代理日志：
+
+```bash
+bash /opt/stock-panel/current/scripts/preproduction_compose.sh /opt/stock-panel logs --tail 100 caddy
+```
+
+直接执行服务器发布脚本时，原有三参数调用仍支持无代理 HTTP 部署；可增加第四参数域名启用 HTTPS。已有 HTTPS 版本的三参数更新会沿用原域名，不会降级为 HTTP。
 
 ### 按发布需要同步公共数据
 
@@ -63,10 +98,6 @@ bash /opt/stock-panel/current/scripts/preproduction_compose.sh /opt/stock-panel 
 执行顺序为：确定发布提交和所需数据集 → 检查口径与合并差异 → 备份远端将改动的数据 → 在维护窗口内停止相关读写服务并完成安装及必要重算 → 启动双服务 → 核对数据覆盖、服务健康和业务读取。存在活动采集或研究任务时先妥善结束，不能在 collector 写入期间覆盖文件；失败时用本次远端备份恢复。本地缺少某条数据不代表需要删除远端数据，未选定的数据集保持原状。
 
 当前仓库没有跨机器公共数据导入工具；同机双服务的运行时更新机制和 `/api/data/refresh-cache` 不提供跨机合并或磁盘 enriched 重算。实际随版同步应按具体数据集实施并验证，不能用裸目录覆盖替代。下文“备份与恢复”用于同一环境的整站恢复，不用于本地向预发同步。
-
-> 📌 前置依赖(仅方式 D 需要):Python ≥ 3.11 · Node ≥ 20 · [`uv`](https://docs.astral.sh/uv/) · `pnpm`（`npm i -g pnpm`）
-
----
 
 ## 方式 A：已有镜像
 
@@ -93,18 +124,12 @@ docker compose up --build
 
 Docker 使用同一镜像启动 `web` 和唯一的 `collector`，共享 `./data:/app/data`。只有 `web` 映射宿主机端口；`collector` 仅在 Compose 网络内可达，外部反向代理也只能指向 `web`。两个服务均配置健康检查和 `restart: unless-stopped`。
 
-> ⚠️ **stock-sdk 插件默认不打包(合规考虑)**
->
-> stock-sdk 数据源本质是抓取第三方财经网站(如东方财富)的行情接口,未经对方授权,可能违反其服务条款并涉及交易所行情版权问题。**出于合规考虑,Docker 默认构建不再内置 stock-sdk 插件依赖**。
->
-> - **默认行为**:`docker compose up --build` 构建出的镜像**不含** stock-sdk,插件不可用。
-> - **如确需启用**(自行承担合规责任):
->   ```bash
->   docker compose build --build-arg INCLUDE_STOCKSDK=1
->   docker compose up -d
->   ```
-> - 启用后镜像会额外内置 Node.js 运行时并预装 stock-sdk 依赖,插件开箱即用。
-> - **建议优先使用 TickFlow 等正规授权数据源。**
+stock-sdk 插件默认不打包。需要时显式启用构建参数；镜像会额外安装 Node.js 与插件依赖：
+
+```bash
+docker compose build --build-arg INCLUDE_STOCKSDK=1
+docker compose up -d
+```
 
 更新到新版本:
 
@@ -115,21 +140,12 @@ docker compose up --build -d
 
 ---
 
-## 方式 C:本机 AI 代部署(小白推荐)
+## 本地开发
 
-装一个本机 AI 编程助手(Trae / Codex / OpenCode / ZCode / WorkBuddy 等,任选其一),把 [README · 快速开始](../README.md#-快速开始) 里方式 C 的提示词原样发给它,AI 会自动完成克隆、装依赖、启动服务。适合完全不想碰命令行的用户;AI 最终执行的仍是方式 A / B / D 之一。
-
----
-
-
-## 方式 D:Dev 模式(二次开发推荐)
-
-由于刚开源近期更新频繁,推荐开发模式运行,可随时 `git pull` 同步最新代码。
+需要 Python 3.11+、Node.js 20+、`uv` 与 `pnpm`。在已有仓库根目录启动：
 
 ```bash
-git clone https://github.com/shy3130/tick-stock-panel.git
-cd tick-stock-panel
-cp .env.example .env       # 按需填 TICKFLOW_API_KEY(留空 = None 模式)
+# 首次启动且尚无 .env 时，从 .env.example 复制并配置
 ./dev.sh                   # Windows: .\dev.ps1
 ```
 
@@ -193,7 +209,15 @@ TSP --stop-collector
 
 ## 备份与恢复
 
-备份整个 `data/`（包括行情、用户配置、策略、报告和任务记录），同时保存 `.env` 与 `tiers.yaml`。为获得一致备份，先停止两个服务，拷贝到独立备份目录，再启动：
+备份整个 `data/`（包括行情、用户配置、策略、报告和任务记录），同时保存 `.env`、`tiers.yaml` 与服务器覆盖配置。为获得一致备份，先停止服务，拷贝到独立备份目录，再启动。已接入自动发布的服务器预发使用当前版本入口，确保同时加载应用版本与 HTTPS 配置：
+
+```bash
+bash /opt/stock-panel/current/scripts/preproduction_compose.sh /opt/stock-panel stop
+# 复制运行数据与配置到备份位置，确认完成后：
+bash /opt/stock-panel/current/scripts/preproduction_compose.sh /opt/stock-panel up -d --no-build
+```
+
+本地或手动 Compose 部署使用原入口：
 
 ```bash
 docker compose stop
@@ -202,7 +226,9 @@ docker compose stop
 docker compose up -d
 ```
 
-恢复时停止两服务，用备份替换目标目录并确认挂载路径和文件权限，再启动同版本镜像。不要在 collector 写入时覆盖数据。备份包含密钥与个人数据，应保存在受控位置。
+恢复时停止服务，用备份替换目标目录并确认挂载路径和文件权限，再启动同版本镜像。不要在 collector 写入时覆盖数据。备份包含密钥与个人数据，应保存在受控位置。
+
+目录备份不包含 Caddy 的 `stock-panel_caddy_data` 与 `stock-panel_caddy_config` Docker 卷。整站迁移若需保留证书和 ACME 账号，还须在 Caddy 停止期间单独备份并恢复这两个卷。
 
 ---
 
@@ -226,26 +252,11 @@ vectorbt → numba 体积较大,作为可选 extras(`uv sync --extra backtest`)�
 
 ---
 
-## 更新代码(已部署用户必读)
+## 更新代码
 
-拉取新版本只需一条命令(Dev / Compose 本地构建用户):
+本地开发更新代码和依赖后重启启动脚本；Compose 本地构建更新后执行 `docker compose up --build -d`；已有镜像部署使用 `docker compose pull` 后再启动两个同版本服务。服务器预发按本文的自动发布流程管理。
 
-```bash
-git pull
-```
-
-> 镜像部署执行 `docker compose pull && docker compose up -d`；两个服务始终使用相同版本。
-
-**整个 `data/` 目录都不纳入 git** —— 行情 K线、财务、自选、回测、监控记录,乃至概念/行业扩展数据,全部是程序运行时生成/拉取的用户数据,`git pull` 物理上无法影响它们。新用户首次启动只创建概念/行业预设配置，分类数据由盘后自动管道或数据页手动同步。
-
-> ⚠️ **切勿使用以下命令"解决冲突"或"清理",它们会一次性删光 `data/` 下所有未被 git 跟踪的数据:**
-> - `git clean -fdx`(最危险,会删掉所有 `.gitignore` 忽略的文件)
-> - `git reset --hard`
-> - 直接删除整个项目文件夹重新 `git clone`
->
-> 若 `git pull` 报冲突,通常是本地误改了被跟踪的文件,请先 `git stash` 暂存再 pull,或单独联系作者,不要直接执行上面的命令。
-
----
+更新前保存运行数据与环境配置，遇到代码冲突逐文件处理。`data/` 不受 Git 跟踪，`git clean -fdx` 会连同被忽略的数据和密钥文件一起删除，不能用于整理运行目录。分类预设只初始化配置，数据由盘后管道或数据页采集。
 
 ## 账号初始化与访问控制
 

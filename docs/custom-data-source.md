@@ -1,58 +1,27 @@
-# 自定义数据源接入
+# 自定义 HTTP 数据源
 
-本项目默认使用 TickFlow。自定义数据源是一个可选扩展: 外部 HTTP 服务负责取数和整理, 本项目只把返回结果映射成内部标准字段, 然后复用现有存储、指标、enriched、策略和前端展示逻辑。
+外部 HTTP 服务返回 JSON，本项目按 YAML 映射字段，复用已有存储、指标、策略和展示流程。配置解析及取数实现位于 `backend/app/data_providers/custom/`；需要自定义 Python 取数逻辑时使用 [数据源插件](plugin-development.md)。
 
-## 支持范围
+## 配置与加载
 
-当前自定义源支持七类数据:
+配置保存在 `<DATA_DIR>/data_sources/*.yaml`，默认即仓库的 `data/data_sources/`。修改后在「设置 → 数据源」重新加载，用「试拉测试」确认字段和数据，再保存各能力的数据源选择。试拉使用当前表单内容，未保存的配置也可测试。
 
-| 数据集 | 配置名 | 说明 |
-| --- | --- | --- |
-| 日K | `daily` | 批量返回一组股票在指定区间内的日K |
-| 除权因子 | `adj_factor` | 批量返回一组股票的复权因子 |
-| 实时行情 | `realtime` | 返回全市场快照,用于盘中 enriched 增量计算 |
-| 分钟K | `minute` | 返回 1m 分钟K(需映射出 symbol / datetime / OHLC / 量; amount 成交额可缺省, 缺省时均价线降级显示 —) |
-| 全量分钟 | `full_minute` | 与 `minute` 同形;声明后可被路由为「全量分钟」生效源,内置服务盘中按当日窗口全市场批量落盘(仅修复轮语义,节奏下限 60s) |
-| 五档盘口 | `depth5` | 按标的批量返回 `symbol`、`asks` 和 `bids`；每档为 `[价格, 数量（手）]` |
-| 财务数据 | `financial` | 一个配置覆盖全部财务表,请求时把表名作为参数传给上游;字段由数据源决定,仅需映射出 symbol |
-
-声明式 `depth5` 使用 `field_map` 映射 `symbol`、`asks`、`bids`，请求标的通过 `symbols_param` 传入；支持 `batch` 和 `rpm`，单批失败不影响其他批次。数量单位必须由上游转换为“手”，本层不猜测或自动换算。映射后的档位会派生 `ask_volumes`、`bid_volumes`，数据源选择仍通过现有五档盘口能力路由。
-
-`full_minute` 声明式源只提供修复轮(当日窗口批量);廉价增量端点
-(`get_intraday_latest`)是 Python 插件契约,见
-[plugin-development.md](./plugin-development.md)。
-
-## 配置位置
-
-把 YAML 放到运行数据目录下:
-
-```text
-data/data_sources/*.yaml
-```
-
-Dev 模式下，默认位置是项目根目录的 `data/`；Docker 部署中，项目的 `data/` 会挂载为容器内的 `/app/data`。可通过 `DATA_DIR` 覆盖。
-
-修改 YAML 后可在「设置 -> 数据源」点击「重新加载」,或调用:
-
-```bash
-curl -X POST http://127.0.0.1:3018/api/settings/data-sources/reload
-```
-
-## 最小 YAML
+完整本地样例为 [`mock_source.yaml`](examples/custom-data-source/mock_source.yaml)，运行方法见 [联调说明](examples/custom-data-source/README.md)。最小日线配置：
 
 ```yaml
-name: mock_source
-display_name: "Mock 自定义数据源"
+name: my_source
+display_name: 我的数据源
 auth:
   type: none
 
 datasets:
   daily:
-    url: http://127.0.0.1:3021/daily
+    url: https://api.example.com/kline
     method: POST
     batch: 100
     rpm: 200
-    response_path: data
+    timeout: 30
+    response_path: data.list
     field_map:
       ts_code: symbol
       trade_date: date
@@ -63,286 +32,89 @@ datasets:
       vol: volume
       amt: amount
     transforms:
-      date: "parse_date(value, '%Y-%m-%d')"
-
-  adj_factor:
-    url: http://127.0.0.1:3021/adj_factor
-    method: POST
-    batch: 100
-    rpm: 200
-    response_path: data
-    field_map:
-      ts_code: symbol
-      trade_date: trade_date
-      factor: ex_factor
-    transforms:
-      trade_date: "parse_date(value, '%Y-%m-%d')"
-
-  realtime:
-    url: http://127.0.0.1:3021/realtime
-    method: GET
-    rpm: 60
-    response_path: data
-    field_map:
-      ts_code: symbol
-      name: name
-      last: last_price
-      pre_close: prev_close
-      open: open
-      high: high
-      low: low
-      vol: volume
-      amt: amount
-      pct: change_pct
-      amount_change: change_amount
-      amplitude: amplitude
-      turnover: turnover_rate
+      date: "parse_date(value, '%Y%m%d')"
 ```
 
-## 字段契约
+`field_map` 的方向是「接口字段 → 内部字段」；`transforms` 使用映射后的内部字段名。`response_path` 指向响应中的记录数组，空字符串表示顶层数组。
 
-### daily 必填
+## 数据集与字段
 
-| 内部字段 | 含义 |
-| --- | --- |
-| `symbol` | 标准代码,如 `000001.SZ` |
-| `date` | 交易日 |
-| `open` / `high` / `low` / `close` | 不复权 OHLC |
-| `volume` | 成交量 |
-| `amount` | 成交额 |
+只配置实际提供的数据集，能力选择和可用状态以设置页路由矩阵为准。
 
-### adj_factor 必填
+| 数据集 | 必填内部字段 | 说明 |
+| --- | --- | --- |
+| `daily` | `symbol`、`date`、`open/high/low/close`、`volume`、`amount` | 批量区间日 K，不复权原始价 |
+| `adj_factor` | `symbol`、`trade_date`、`ex_factor` | 除权因子 |
+| `realtime` | `symbol`、`last_price`、`prev_close`、`open/high/low`、`volume` | 全市场实时快照，不支持逐股轮询 |
+| `minute` | `symbol`、`datetime`、`open/high/low/close`、`volume` | 1 分钟 K，`datetime` 为北京时间墙钟，无时区 |
+| `full_minute` | 同 `minute` | 当日全市场分钟批量修复，节奏下限 60 秒 |
+| `depth5` | `symbol`、`asks`、`bids` | 按标的批量取五档盘口，每档为 `[价格, 数量（手）]` |
+| `financial` | 校验仅要求 `symbol` | 同一配置接收不同表名；业务字段与版本时间见 [插件财务契约](plugin-development.md#财务版本时间契约) |
 
-| 内部字段 | 含义 |
-| --- | --- |
-| `symbol` | 标准代码 |
-| `trade_date` | 除权日期 |
-| `ex_factor` | 复权因子 |
+统一代码带交易所后缀，例如 `600519.SH`、`000001.SZ`；`volume` 为手，成交额 `amount` 为元。供应商按股返回的成交量必须显式换算，不能直接透传。
 
-可选明细列 (提供即落库, 缺省为空): `dividend` 每股现金分红、`bonus` 每股送转比例、
-`allot`/`allot_price` 配股比例与配股价、`prev_close` 除权前收盘 — 供等差显示投影
-与全精度因子链重建。
+- `adj_factor` 可提供 `dividend`、`bonus`、`allot`、`allot_price`、`prev_close`，用于等差显示投影和全精度因子链重建，缺省为空。
+- `realtime` 建议补充 `amount`、`change_pct`、`change_amount`、`amplitude`、`turnover_rate`、`name`、`timestamp`。涨跌额为元，时间戳为毫秒。
+- `minute/full_minute` 的 `amount` 可缺省；无法提供可靠成交额时留空，前端累计均价线停止绘制后续值并显示 `—`。
+- `full_minute` 的低成本稳态增量接口 `get_intraday_latest` 仅由 Python 插件提供，YAML 源只提供修复轮。
+- `depth5` 映射后派生买卖价格、数量数组，数量单位不自动猜测或换算；单批失败不影响其他批次，不跨源回退。
 
-### realtime 必填
+### 实时比例单位
 
-| 内部字段 | 含义 |
-| --- | --- |
-| `symbol` | 标准代码 |
-| `last_price` | 最新价 |
-| `prev_close` | 昨收 |
-| `open` / `high` / `low` | 当日 OHLC |
-| `volume` | 成交量 |
-
-建议实时接口额外提供 `amount`、`change_pct`、`change_amount`、`amplitude`、`turnover_rate`、`name`。缺失时部分字段会由 pipeline 回算,但精度取决于可用输入。
-
-`change_pct`、`amplitude`、`turnover_rate` 统一使用小数制,例如 `0.0366` 表示 `3.66%`。百分制单位必须在 realtime 数据集上**显式声明**,不做数值猜测(数值无法区分两种单位:`0.05` 既可能是 0.05% 也可能是 5%):
+内部 `change_pct`、`amplitude`、`turnover_rate` 均为小数制，`0.0366` 表示 `3.66%`。新配置应显式声明：
 
 ```yaml
 datasets:
   realtime:
     url: https://api.example.com/snapshot
-    pct_unit: percent   # 接口返回 3.66 表示 3.66%;小数制源声明 decimal 或省略
+    pct_unit: percent   # 接口以 3.66 表示 3.66%；以 0.0366 表示时用 decimal
 ```
 
-处理规则:
-
-| 声明 | 行为 |
+| 配置 | 当前处理 |
 | --- | --- |
-| `pct_unit: percent` | `change_pct` / `amplitude` / `turnover_rate` 无条件 `/100` |
-| `pct_unit: decimal` | 三列原样透传 |
-| 未声明 | `change_pct` 按截面中位数归一(A 股涨跌停 30% 上限使两种单位物理可分);`amplitude` / `turnover_rate` **置 `None`** 交由 pipeline 按价格与股本口径重算,并记录 WARNING |
-| 列已配置 `transforms` | 视为用户已接管该列单位,原样透传 |
+| `pct_unit: percent` | 三列无条件除以 100，包含已配置转换的列；不要重复换算 |
+| `pct_unit: decimal` | 三列原样传递 |
+| 旧配置未声明 | 未经 `transforms` 处理的 `change_pct` 沿用统计阈值兼容；`amplitude/turnover_rate` 置空交下游重算并记警告 |
+| 未声明单位，但该列已有 `transforms` | 认为该列单位已由配置接管，不再额外换算 |
 
-## 请求约定
+旧配置的统计兼容取绝对值中位数（少于 5 个有效值时取最大值），大于 `0.31` 则整列除以 100。它不能可靠区分全部合法行情的单位；维护配置时应以实际接口单位声明 `pct_unit`。
 
-- `daily` / `adj_factor` 会按 `batch` 切分 symbols。
-- POST 请求会发送 JSON body: `symbols`、`start_time`、`end_time`。
-- GET 请求会发送 query 参数: `symbols=000001.SZ,600000.SH`。
-- `realtime` 必须是全市场快照接口,不支持逐个 symbol 拉实时行情。
+## 请求参数
 
-可通过这些字段改参数名:
+| 配置项 | 默认值与用途 |
+| --- | --- |
+| `method` | `GET`；非 GET 请求发送 JSON body |
+| `batch` | 每批标的数，用于日线、因子、分钟、盘口和财务请求 |
+| `rpm` | 批次限频 |
+| `timeout` | 单次请求 30 秒，允许 `0 < timeout <= 300`；同步和试拉均生效 |
+| `symbols_param` | `symbols`，GET 为逗号分隔字符串，JSON body 为数组 |
+| `start_param` / `end_param` | `start_time` / `end_time`，区间起止时间 |
+| `params` / `body` | 固定 query 参数／JSON 字段 |
+| `asset_type_param` / `freq_param` | 分钟源可选参数名，配置后传 `stock/etf/index`、`1m`；省略则不发送 |
 
-```yaml
-symbols_param: symbols
-start_param: start_time
-end_param: end_time
-```
-
-分钟数据源如果需要区分资产类型或周期，可继续配置：
-
-```yaml
-asset_type_param: asset_type
-freq_param: period
-```
-
-配置后，分钟请求会分别传入 `stock` / `etf` / `index` 和 `1m`；留空时不向上游发送这两个参数，以兼容已有数据源。
-
-### 请求超时
-
-每个数据集可单独配置请求超时（秒），默认 30：
-
-```yaml
-timeout: 60
-```
-
-留空或省略时用默认 30 秒，可配置范围为大于 0 且不超过 300 秒；该值对数据同步与「试拉测试」均生效。在设置页编辑数据源时可在「超时」输入框修改（与 批量 / RPM / 响应路径 同行）。「试拉测试」直接使用当前表单内容，新建数据源或尚未保存的修改也可测试。
+`financial` 请求额外传入 `table`；`shares` 表额外传入 `latest`。HTTP 映射层不替代财务版本服务的来源、观察日与历史可用性校验。
 
 ## 鉴权
 
-支持三种简单鉴权:
+Token 来自系统环境变量或项目 `.env`，YAML 用 `token_env` 指定变量名。
 
-```yaml
-auth:
-  type: bearer
-  token_env: MY_DATA_TOKEN
-```
+| `auth.type` | 其他配置 | 请求形式 |
+| --- | --- | --- |
+| `none` | 无 | 无鉴权 |
+| `bearer` | `token_env: MY_DATA_TOKEN` | `Authorization: Bearer ...` |
+| `header` | `token_env: MY_DATA_TOKEN`、`header: X-Token` | 自定义请求头 |
+| `query` | `token_env: MY_DATA_TOKEN`、`param: token` | URL query 参数 |
 
-```yaml
-auth:
-  type: header
-  header: X-Token
-  token_env: MY_DATA_TOKEN
-```
+## 排查
 
-```yaml
-auth:
-  type: query
-  param: token
-  token_env: MY_DATA_TOKEN
-```
-
-Token 可以放在系统环境变量或项目 `.env` 中。
-
-## 联调流程
-
-1. 启动 mock 数据源:
-
-```bash
-cd docs/examples/custom-data-source
-python mock_server.py
-```
-
-2. 复制示例配置:
-
-```bash
-mkdir -p data/data_sources
-cp docs/examples/custom-data-source/mock_source.yaml data/data_sources/mock_source.yaml
-```
-
-3. 在「设置 -> 数据源」点击「重新加载」。
-
-4. 使用「试拉测试」选择 `mock_source` 和 `daily` / `adj_factor` / `realtime`。
-
-5. 保存数据源选择:
-
-- 日K: `mock_source`
-- 除权因子: `mock_source` (或保持默认 `tickflow`)
-- 实时行情: `mock_source`
-
-6. 触发同步或开启实时行情。
-
-## 常见错误
-
-| 现象 | 处理 |
+| 现象 | 检查位置 |
 | --- | --- |
-| 列表里没有 custom 源 | 检查 YAML 是否放在 `data/data_sources/` 并点击重新加载 |
-| errors 提示 missing mapped fields | `field_map` 没映射到必填内部字段 |
-| 试拉 rows 为 0 | 检查 `response_path` 是否指向数组 |
-| 日期列全为空 | 检查 `parse_date` 的格式是否和返回值一致 |
-| 实时行情没刷新 | 确认实时数据源已保存为 custom,且返回全市场快照 |
+| 重新加载后没有数据源 | YAML 位置、数据集字段映射及设置页错误信息 |
+| `missing mapped fields` | `field_map` 是否覆盖必填内部字段 |
+| 试拉为 0 行 | `response_path` 是否指向数组，接口是否实际有数据 |
+| 日期为空 | `parse_date` 格式是否与响应一致 |
+| 实时未更新 | 实时路由是否已保存、接口是否返回全市场快照 |
 
 ## 用 AI 生成映射配置
 
-如果你的数据源 API 文档比较复杂,可以把 API 文档和返回示例丢给 AI,让它帮你生成 `field_map` 和 YAML 配置。
-
-### 操作步骤
-
-1. 从你的数据源获取 API 文档(接口地址、请求方式、返回字段说明)
-2. 试拉一次,拿到返回的 JSON 示例
-3. 把下面的 prompt 模板 + API 文档 + JSON 示例一起发给 AI
-4. 把 AI 生成的 YAML 贴到 `data/data_sources/xxx.yaml`
-5. 在设置页点「重新加载」,再「试拉测试」验证
-
-### Prompt 模板
-
-复制以下内容发给 AI(替换方括号部分):
-
-```text
-我在配置一个自定义数据源接入股票面板。请根据我的 API 文档和返回示例,生成 YAML 配置。
-
-要求:
-1. 输出标准 YAML 配置,包含 name / display_name / auth / datasets
-2. 每个数据集的 field_map 把我的接口字段名映射到内部字段名
-3. 日期类字段如果格式不是 YYYY-MM-DD, 加上 transforms 里的 parse_date
-4. 只配置我能提供的接口, 不存在的数据集不要写
-
-内部字段对照表:
-
-日K (daily):
-  symbol = 股票代码, 格式 000001.SZ / 600000.SH
-  date = 交易日期
-  open / high / low / close = OHLC
-  volume = 成交量
-  amount = 成交额
-
-除权因子 (adj_factor):
-  symbol = 股票代码
-  trade_date = 除权日期
-  ex_factor = 复权因子
-
-实时行情 (realtime):
-  symbol = 股票代码
-  last_price = 最新价
-  prev_close = 昨收价
-  open / high / low = 当日 OHLC
-  volume = 成交量
-  amount = 成交额 (可缺省)
-  change_pct = 涨跌幅 (小数, 0.0366 = 3.66%)
-  change_amount = 涨跌额
-  amplitude = 振幅 (小数, 0.024 = 2.4%)
-  turnover_rate = 换手率 (小数, 0.05 = 5%)
-  # 上游若返回百分数值 (3.66 表示 3.66%), 在 realtime 数据集声明 pct_unit: percent,
-  # 不要依赖数值自动识别; 逐列转换也可用 transforms: turnover_rate: "value / 100"
-
-分钟K (minute) 与 全量分钟 (full_minute, 字段同 minute):
-  symbol = 股票代码
-  # datetime 必须是北京时间墙钟 (如 2026-08-28 09:35:00), 不要返回 UTC;
-  # 入口守卫会自动纠偏 UTC 特征帧, 但契约仍要求源头写对
-  datetime = 北京时间墙钟 (YYYY-MM-DD HH:MM:SS)
-  open / high / low / close = OHLC
-  volume = 成交量
-  amount = 成交额 (可缺省: 无法提供可靠成交额时不要映射, 前端均价线降级显示 —)
-
-=== 我的 API 文档 ===
-[把你的接口文档贴这里: URL / 请求方式 / 参数 / 返回字段说明]
-
-=== 返回 JSON 示例 ===
-[把试拉的 JSON 返回贴这里]
-```
-
-AI 会输出类似这样的结果:
-
-```yaml
-name: my_source
-display_name: "我的数据源"
-auth:
-  type: bearer
-  token_env: MY_API_TOKEN
-
-datasets:
-  daily:
-    url: https://api.example.com/kline
-    method: POST
-    batch: 100
-    rpm: 200
-    response_path: data.list
-    field_map:
-      ts_code: symbol
-      trade_date: date
-      open: open
-      vol: volume
-    transforms:
-      date: "parse_date(value, '%Y%m%d')"
-```
-
-把这段 YAML 保存为 `data/data_sources/my_source.yaml`,然后在设置页重新加载即可。
+提供接口地址、请求参数、实际 JSON 样例和单位，让 AI 依据本页字段生成 YAML 即可。配置仍需用「试拉测试」检查日期、代码、比例及成交量单位，不能仅凭示例响应格式判断正确。

@@ -15,15 +15,13 @@ from app.tickflow.capabilities import Cap, CapabilitySet
 T = TypeVar("T")
 
 # TickFlow Pro 单进程安全预算: 套餐标称 rpm 的 80%。
-# 注意: _next_slot 仅在本 Python 进程内共享, 不能跨 Gold 容器与 A 股面板进程。
-# Stage A 期间跨产品靠错峰(盘中 Gold 优先, A 股 Pro 批处理建议 16:00 后),
-# 不要把「各进程各扣 80%」误当成账户级共享限频。
+# _next_slot 只在本进程内共享；其他进程的请求不会扣减同一预算。
 SAFETY_RPM_FACTOR = 0.8
 
 # 进程级共享限速器: 按 rpm 分桶的「下一个可用时刻」表 (Lock 守护)。
 # 限制: sleep_between_batches(index=0) 只登记槽位、不 sleep, 因此多个调用方若同时以
 # index=0 启动, 仍可能瞬时突发超过单能力 rpm。后续 index>0 批次会按同一时间轴排队。
-# Phase 1 / Stage A: 不要并发启动多个 probe 或大批量 sync; 跨进程仍靠错峰, 非账户级限频。
+# 预算只在本进程内共享；多个 probe 或批量 sync 进程仍需错峰，不是账户级限频。
 _slot_lock = threading.Lock()
 _next_slot: dict[int, float] = {}
 
@@ -104,8 +102,8 @@ def sleep_between_batches(index: int, rpm: int | None, *, default_interval: floa
     - index > 0: wait until the reserved slot time.
 
     Concurrent callers that all pass index=0 can still burst above rpm; only later
-    batches and single-pipeline callers get full spacing. Do not launch multiple
-    Phase 1 probes/syncs at once during Stage A.
+    batches and single-pipeline callers get full spacing. The slot table is not
+    shared across processes, so concurrent probe/sync processes need coordination.
     """
     interval = batch_interval(rpm, default=default_interval)
     if interval <= 0:

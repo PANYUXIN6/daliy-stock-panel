@@ -1,28 +1,10 @@
-# TickFlow Pro 限频安全预算（进程内 + 跨产品错峰）
+# TickFlow 请求预算与进程边界
 
-## 决策（经 ChatGPT/Codex 评析修订）
-- `backend/app/tickflow/rate_limits.py` 提供**单 Python 进程内**的 rpm 槽位限速与 `SAFETY_RPM_FACTOR=0.8`。
-- **不要**把「各进程各扣 80%」当成账户级共享限频：Gold Shadow 容器与 A 股面板进程状态独立，理论聚合可达 160%。
-- Stage A 期间跨产品靠**错峰**，不在 Gold 上部署分布式限频重构。
+`backend/app/tickflow/rate_limits.py` 集中处理 TickFlow 批长与 RPM，默认以 `SAFETY_RPM_FACTOR=0.8` 缩减能力注册结果中的 RPM。实际配额以当前能力检测结果为准。
 
-## 预算表示例（Pro，单进程 80%）
-| capability | 套餐 rpm | 进程内 80% |
-|---|---:|---:|
-| quote.batch | 120 | 96 |
-| quote.pool | 60 | 48 |
-| kline.daily.batch | 60 | 48 |
-| kline.minute.batch | 30 | 24 |
-| depth5.batch | 30 | 24 |
-| adj_factor | 60 | 48 |
+- 限速槽位只在同一 Python 进程内共享。同一账号被其他进程或服务使用时，预算不会自动合并，需协调运行时段与请求量。
+- `resolve_limit(..., apply_safety=True)` 默认缩减 RPM；诊断可显式关闭缩减。
+- `sleep_between_batches(index=0)` 只登记槽位而不等待；多个调用方同时发出首批请求仍可能突发超限。后续批次才按共享时间轴等待。
+- 探测脚本和大批量同步应避免同时运行；429、降级或能力缺失应保留明确结果，不能静默混用数据源。
 
-## 错峰（Stage A）
-- 盘中：优先 Gold Shadow 观察与 legacy `gold-monitor`。
-- A 股 Pro 探测/大批量同步：建议 **16:00 后**。
-- 禁止全市场一年分钟一次性回填。
-
-## 实现要点
-- `resolve_limit(..., apply_safety=True)` 默认对 rpm 做 `floor(rpm * 0.8)`。
-- `sleep_between_batches`：`index=0` 只占槽不 sleep（首批突发；**并发多个 index=0 仍可能超 rpm**）；后续 batch 按槽位等待。
-- Phase 1 / Stage A：**不要并发**启动多个 probe 或大批量 sync。
-- 诊断可传 `apply_safety=False`；跨容器账户预算需另设（Stage A 不做）。
-- 任一 429 / fallback 应记入证据链，禁止静默混源。
+受控探测方式见 [Pro 探测说明](tickflow-pro-phase1-probe.md)。

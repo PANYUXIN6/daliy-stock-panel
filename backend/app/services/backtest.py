@@ -406,8 +406,7 @@ class BacktestService:
         summary.write_parquet(out_dir / f"run_id={result.run_id}.parquet")
 
     def get_result(self, run_id: str) -> BacktestResult | None:
-        # Phase 1:只保留近似落盘,完整结果保存在内存的近期 cache 中
-        # 简化:重新 run 比缓存复杂结果代价小,暂不实现 get_result
+        # 磁盘只保存汇总，未持久化重建完整结果所需的交易与净值序列。
         return None
 
 

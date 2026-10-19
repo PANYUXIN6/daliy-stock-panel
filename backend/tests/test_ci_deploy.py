@@ -2,10 +2,12 @@
 
 import json
 import os
+import shlex
 import subprocess
 import textwrap
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import pytest
 
@@ -55,8 +57,11 @@ TRANSPORT_FAKE = textwrap.dedent(
         print("simulated deployment failure", file=sys.stderr)
         sys.exit(23)
     elif tool == "curl":
+        if failure == "tls":
+            print("simulated certificate verification failure", file=sys.stderr)
+            sys.exit(60)
         print(json.dumps({"status": "ok", "service_role": "web",
-                          "collector_connected": True}))
+                          "collector_connected": failure != "health"}))
     """
 )
 
@@ -182,6 +187,81 @@ def test_deploys_only_tracked_release_and_cleans_credentials(deploy_runner):
     assert deploy_runner.remaining_work_directories() == []
     assert (deploy_runner.repository / ".env").read_text() == "private fixture configuration\n"
     assert (deploy_runner.repository / "data" / "auth.sqlite3").read_text() == "private fixture user data\n"
+
+
+@pytest.mark.parametrize("url", ["https://shuaihub.cn", "https://shuaihub.cn/", "https://shuaihub.cn:443"])
+def test_https_root_passes_only_hostname_to_remote_deployment(deploy_runner, url):
+    result = deploy_runner.run(DEPLOY_URL=url)
+
+    assert result.returncode == 0, result.stderr
+    calls = deploy_runner.calls()
+    remote, = [call for call in calls if call["tool"] == "ssh" and call["args"][-1].startswith("bash ")]
+    assert shlex.split(remote["args"][-1]) == [
+        "bash", f"{REMOTE_TEMP_DIR}/deploy_preproduction.sh", f"{REMOTE_TEMP_DIR}/release.tar.gz",
+        deploy_runner.env["GITHUB_SHA"], deploy_runner.env["DEPLOY_DIR"], "shuaihub.cn",
+    ]
+    public_health, = [call for call in calls if call["tool"] == "curl"]
+    target = urlsplit(public_health["args"][-1])
+    assert (target.scheme, target.hostname, target.path) == ("https", "shuaihub.cn", "/health")
+    assert target.port in (None, 443) and not target.query and not target.fragment
+    assert not any(argument == "-k" or argument.startswith("--insecure") for argument in public_health["args"])
+
+
+@pytest.mark.parametrize("url", [None, ""], ids=["unset", "empty"])
+def test_deployment_without_https_url_keeps_original_remote_arguments(deploy_runner, url):
+    if url is None:
+        deploy_runner.env.pop("DEPLOY_URL")
+    else:
+        deploy_runner.env["DEPLOY_URL"] = url
+    result = deploy_runner.run()
+
+    assert result.returncode == 0, result.stderr
+    calls = deploy_runner.calls()
+    remote, = [call for call in calls if call["tool"] == "ssh" and call["args"][-1].startswith("bash ")]
+    assert shlex.split(remote["args"][-1]) == [
+        "bash", f"{REMOTE_TEMP_DIR}/deploy_preproduction.sh", f"{REMOTE_TEMP_DIR}/release.tar.gz",
+        deploy_runner.env["GITHUB_SHA"], deploy_runner.env["DEPLOY_DIR"],
+    ]
+    assert all(call["tool"] != "curl" for call in calls)
+    assert calls[-1]["args"][-1] == f"rm -rf -- '{REMOTE_TEMP_DIR}'"
+    assert deploy_runner.remaining_work_directories() == []
+
+
+@pytest.mark.parametrize("url", [
+    "http://shuaihub.cn",
+    "https://shuaihub.cn:8443",
+    "https://user:password@shuaihub.cn",
+    "https://shuaihub.cn/panel",
+    "https://shuaihub.cn?probe=1",
+    "https://shuaihub.cn#fragment",
+    "https://shuaihub.cn?",
+    "https://shuaihub.cn#",
+    "https://",
+    "https://bad_host.cn",
+    "https://-bad.cn",
+    "https://shuaihub.cn\nmalicious",
+    "https://shuaihub.cn';touch injected;'",
+])
+def test_invalid_https_url_is_rejected_before_external_access(deploy_runner, url):
+    result = deploy_runner.run(DEPLOY_URL=url)
+
+    assert result.returncode != 0
+    assert deploy_runner.calls() == []
+    assert deploy_runner.remaining_work_directories() == []
+
+
+@pytest.mark.parametrize("failure", ["tls", "health"])
+def test_public_https_failure_is_not_reported_successful_and_cleans_up(deploy_runner, failure):
+    result = deploy_runner.run(DEPLOY_TEST_FAILURE=failure)
+
+    assert result.returncode != 0
+    assert "successfully" not in result.stdout
+    calls = deploy_runner.calls()
+    assert any(call["tool"] == "curl" for call in calls)
+    assert calls[-1]["args"][-1] == f"rm -rf -- '{REMOTE_TEMP_DIR}'"
+    assert deploy_runner.remaining_work_directories() == []
+    for name in ("DEPLOY_SSH_KEY", "DEPLOY_KNOWN_HOSTS"):
+        assert deploy_runner.env[name] not in result.stdout + result.stderr
 
 
 @pytest.mark.parametrize("failure", ["upload", "remote"])

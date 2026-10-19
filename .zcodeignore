@@ -73,19 +73,19 @@ frontend/tsconfig*.tsbuildinfo
 # ===== Data files =====
 *.xlsx
 
-# ===== Private deploy / 服务器私有信息(不开源) =====
+# ===== 服务器私有配置 =====
 DEPLOY.md
 deploy.sh
 
-# ===== 内部设计文档(不开源) =====
+# ===== 本地设计文档 =====
 DESIGN.md
 DESIGN-proposal.md
 CLAUDE.md
 
-# ===== 私人脚本(不开源) =====
+# ===== 本地写作资料 =====
 docs/zhihu/
 
-# ===== 用户自定义策略(私有,不开源) =====
+# ===== 个人策略 =====
 data/strategies/custom/
 
 # ===== 临时 / 调试产物 =====

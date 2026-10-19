@@ -34,7 +34,7 @@ from app.strategy.scoring import (
 logger = logging.getLogger(__name__)
 
 # 可研究因子目录。保留历史 ID 兼容已有候选方案; 价格尺度相关指标优先提供归一化版本。
-# P1 起目录元数据单一权威来源为 app/factors/registry.py, 本常量为兼容别名 (顺序与键不变)。
+# 目录元数据由 app/factors/registry.py 维护，本常量保留兼容别名的顺序与键。
 FACTOR_COLUMNS: list[dict] = _factor_columns_view()
 
 FACTOR_WARMUP_DAYS = 120
@@ -137,7 +137,7 @@ class FactorBatchItem:
     yearly_ic: list[dict] = field(default_factory=list)
     ic_decay: list[dict] = field(default_factory=list)
     regime_stats: list[dict] = field(default_factory=list)
-    # metrics_v2 (P3): NW HAC t 值 (滞后=1, 日频 1 日前瞻) 与 BH-FDR q 值; 样本不足为 None
+    # NW HAC t 值 (滞后=1, 日频 1 日前瞻) 与 BH-FDR q 值；样本不足为 None。
     t_naive: float | None = None
     t_newey_west: float | None = None
     nw_lag: int | None = None
@@ -258,7 +258,7 @@ class FactorBacktestService:
                 elapsed_ms=round((time.perf_counter() - t0) * 1000, 1),
             )
 
-        # P1: 预计算共享下期收益 (仅依赖 close/date/symbol), 避免每个因子重复 shift/调仓日 JOIN。
+        # 预计算共享下期收益 (仅依赖 close/date/symbol), 避免每个因子重复 shift/调仓日 JOIN。
         trading_dates = self._global_trading_dates(config)
         self._assert_data_generation(config.asset_type, generation)
         panel = self._attach_shared_next_return(
@@ -682,7 +682,7 @@ class FactorBacktestService:
         from app.factors.registry import get_factor
         from app.indicators.pipeline import compute_indicators
 
-        # custom/composite 因子走注册表→DSL/组合 的同一条物化路径 (P3, 与策略评分共用);
+        # custom/composite 因子与策略评分共用注册表→DSL/组合的物化路径；
         # 其底层依赖 (如 change_pct/ma20) 先经内置补算路径物化, 再做 DSL/组合物化。
         registry_names = {
             name for name in factor_cols

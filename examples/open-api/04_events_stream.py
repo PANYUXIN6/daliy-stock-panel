@@ -1,11 +1,7 @@
-"""示例 4 — 事件流 SSE (任意有效 Token; 票据继承 scope)。
+"""历史示例 4 — SSE 票据与事件流；当前应用已停用此入口。
 
-EventSource 带不了 Authorization 头, 走两步:
-  POST /api/events/ticket (Bearer) → 一次性票据 (60 秒)
-  GET  /api/events?ticket=…        → hello 帧 + 事件 (此处演示 alert 告警推送)
-
-票据一次性: 断线重连需重新换票。浏览器端用 EventSource,
-脚本端像本例一样逐行读流即可。
+旧版流程为 Bearer Token 换取一次性票据，再订阅继承 scope 的事件流。
+适用范围见同目录 README.md。
 """
 import itertools
 

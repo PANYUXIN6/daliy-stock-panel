@@ -5,7 +5,7 @@ authority_status: observed
 
 # 仓库地图
 
-本文用于定位 Tick Stock Panel 的实现、调用方和测试。核对日期为 2026-10-10，描述当前源码中的职责，不新增开发契约。贡献规则以 [CONTRIBUTING.md](../CONTRIBUTING.md) 为准；整体关系见 [架构说明](ARCHITECTURE.md)，启动和验证见 [开发导航](DEVELOPMENT.md)。
+本文用于定位实现、调用方和测试；维护规则与数据契约见 [CONTRIBUTING.md](../CONTRIBUTING.md)，整体关系见 [架构说明](ARCHITECTURE.md)，启动和验证见 [开发导航](DEVELOPMENT.md)。
 
 ## 主要目录
 
@@ -22,15 +22,14 @@ authority_status: observed
 | `backend/app/strategy/` | 策略加载执行、评分、信号、监控规则、持仓提醒、模拟盘；内置策略在 `builtin/` |
 | `backend/app/backtest/` | 历史撮合、因子研究、矩阵、优化、步进验证、挖掘与独立 worker |
 | `backend/app/factors/` | 因子注册、DSL、自定义因子持久化及扩展字段因子 |
-| `backend/app/extensions/`、`backend/app/custom/` | 后端二开契约和加载器，以及实际定制模块；`custom/assistant/` 是 AI 助手实现 |
+| `backend/app/extensions/`、`backend/app/custom/` | 后端扩展契约和加载器，以及实际定制模块；`custom/assistant/` 是 AI 助手实现 |
 | `frontend/src/pages/` | 页面编排；路由由 `frontend/src/router.tsx` 定义，主外壳在 `components/Layout.tsx` |
 | `frontend/src/components/` | 图表、个股详情、表格、弹窗和领域组件；看板组件注册在 `dashboard/registry.tsx` |
 | `frontend/src/lib/` | API 客户端及类型、查询键、共享查询、实时订阅和任务状态 |
-| `frontend/src/extensions/`、`frontend/src/custom/` | 前端二开注册、插槽、异常隔离，以及 AI 助手定制模块 |
+| `frontend/src/extensions/`、`frontend/src/custom/` | 前端扩展注册、插槽、异常隔离，以及 AI 助手定制模块 |
 | `backend/tests/`、`frontend/src/**/*.test.*` | 后端 pytest 与前端 Vitest；后端回测测试集中在 `tests/backtest/` |
-| `examples/open-api/` | 开放接口客户端示例，通过 HTTP 消费后端能力 |
 | `packaging/`、`Dockerfile`、`docker-compose.yml` | 桌面与容器打包；桌面入口为 `backend/app/desktop.py` |
-| `.github/workflows/`、`dev.sh`、`dev.ps1`、`scripts/` | CI、发布、开发启动与升级预检；后端专项脚本另在 `backend/scripts/` |
+| `.github/workflows/`、`dev.sh`、`dev.ps1`、`scripts/` | CI、发布与开发启动；后端专项脚本另在 `backend/scripts/` |
 | `docs/`、`brand/`、`screenshots/` | 领域文档、品牌素材与界面示例 |
 | `data/` | 默认运行时数据根目录，受 `DATA_DIR` 配置影响；不属于可提交的业务源码 |
 
@@ -41,7 +40,7 @@ authority_status: observed
 - 前端：`src/main.tsx` → `initializeFrontendExtensions` → 动态导入 `router.tsx` → `Layout` → 页面；首页 `/` 直接呈现 `pages/Dashboard.tsx`，访问认证由现有登录流程处理，共享 `QueryClient` 在 `main.tsx` 创建。
 - 桌面：`app/desktop.py` 启动或复用独立 collector，再启动网页线程和 pywebview；关闭窗口仅退出网页，`--stop-collector` 显式停止采集。打包清单在 `packaging/tsp.spec`。
 
-页面进入时读取已配置的凭据与能力路由，不再运行首次配置向导或自动选择数据源。凭据读取归属 `backend/app/secrets_store.py`，路由读取归属 `backend/app/services/preferences.py`；TickFlow / AI 密钥只在后端 `.env` 或历史本地凭据中配置，`api/settings.py` 不返回密钥片段并拒绝网页写入和清除；`pages/settings/Keys.tsx`、`AI.tsx` 仅显示密钥状态。能力路由和 AI 非密钥选项仍通过 settings API 保存。看板展示已有行情，无数据时由各组件显示原有空态；手动同步入口在 `frontend/src/pages/Data.tsx`，不再从看板提供首次取数弹窗或卡片。
+页面读取已配置的凭据与能力路由。凭据归属 `backend/app/secrets_store.py`，路由归属 `backend/app/services/preferences.py`；TickFlow / AI 密钥在后端配置，`api/settings.py` 仅返回配置状态并拒绝网页写入和清除。能力路由和 AI 非密钥选项通过 settings API 保存；手动数据同步集中在 `frontend/src/pages/Data.tsx`。
 
 ## 从任务定位实现
 
@@ -81,11 +80,11 @@ authority_status: observed
 | 龙虎榜、竞价风向标及复盘摘要 | `services/dragon_tiger.py`、`auction_benchmark.py` 由后台获取并保存；`api/market_recap.py` 的 GET 只读，页面在 `pages/Review.tsx`、`AbnormalMoves.tsx`、`Dashboard.tsx` | `test_dragon_tiger.py`、`test_auction_benchmark.py` |
 | 财务与个股分析 | 数据页 `FinancialSyncPanel.tsx` 展示覆盖并导航至财务页，`pages/Financials.tsx` 即使财务库全空也允许搜索、按股按表获取和浏览历史报告；`api/financials.py` 的 `/status` 在 web 读取本地覆盖画像，`/execution-status` 转交 collector 查询任务状态；`api/stock_analysis.py`、`services/financial_sync.py`、分析服务沿用原链路，本地读取不受供应商能力门控 | `test_financials_local_api.py`、`test_financial_review_regressions.py`、`test_financial_shares.py`、`test_fuyao_financial.py`、`test_stock_analyzer_index.py` |
 | 账号、权限与个人归属 | `services/auth_access.py` → `auth.py`、`user_context.py`；`api/users.py` 管理账号；`user_runtime.py`、`private_storage.py`、`user_migration.py` 管用户运行时、路径和旧数据归属；`business_access.py` 管业务权限 | `test_multiuser_auth.py`、`test_multiuser_ai.py`、`test_user_private_stores.py`、`test_user_runtime_boundaries.py`、`test_research_ownership.py` |
-| 页面、请求或二开 | 前端 `router.tsx`、`lib/api.ts`、`lib/queryKeys.ts`、`extensions/`；后端 `extensions/` 和 `custom/` | 前端相邻 `*.test.*`；后端 `test_extensions.py`、`test_custom_assistant.py`、`test_assistant_actions.py` |
+| 页面、请求或扩展 | 前端 `router.tsx`、`lib/api.ts`、`lib/queryKeys.ts`、`extensions/`；后端 `extensions/` 和 `custom/` | 前端相邻 `*.test.*`；后端 `test_extensions.py`、`test_custom_assistant.py`、`test_assistant_actions.py` |
 
 ## 关键调用链
 
-预发自动发布入口（2026-10-18）：`.github/workflows/ci.yml` 在 `push main` 的后端测试与前端构建成功后调用 `scripts/ci_deploy.sh`，上传指定提交源码并通过 SSH 执行 `scripts/deploy_preproduction.sh`。后者在远端 `releases/<SHA>/` 构建镜像，保留运行根目录的数据与配置，完成双服务健康验收或尝试恢复旧版本；`scripts/preproduction_compose.sh` 管理当前已发布版本。回归入口为 `backend/tests/test_ci_deploy.py` 和 `backend/tests/test_preproduction_deploy.py`，操作说明见 [部署指南](deployment.md#github-自动发布预发)。
+预发自动发布入口（2026-10-19）：`.github/workflows/ci.yml` 在 `push main` 检查成功后调用 `scripts/ci_deploy.sh`，上传指定源码并传递 HTTPS 域名到 `scripts/deploy_preproduction.sh`。后者在远端 `releases/<SHA>/` 构建应用镜像，通过 `docker-compose.https.yml` 接入 Caddy；`deploy/Caddyfile` 只反代 web，发布生成的 `.deploy-https.json` 固定域名、Caddy 镜像及版本配置挂载。证书保存在稳定持久卷，服务器数据和配置独立保留；服务与本机 TLS 验收失败时恢复旧应用及代理。`scripts/preproduction_compose.sh` 选择已发布版本的全部覆盖文件。回归入口为 `backend/tests/test_ci_deploy.py`、`test_preproduction_deploy.py`、`test_https_deployment.py` 与 `test_proxy_trust_runtime.py`，操作说明见 [部署指南](deployment.md#docker-https-与-caddy)。
 
 ```text
 盘后同步：web api/pipeline → collector_proxy → collector pipeline_jobs → daily_pipeline.run_now
@@ -131,13 +130,12 @@ AI报告：显式分析请求 → collector analysis_archive → 报告保存 �
 | 原始与 enriched 存储字段 | [parquet.py](../backend/app/parquet.py)、[pipeline.py](../backend/app/indicators/pipeline.py) 的 `ENRICHED_STORAGE_COLS` |
 | 策略文件与执行上下文 | [engine.py](../backend/app/strategy/engine.py)、[market_data.py](../backend/app/strategy/market_data.py)、[策略开发规范](../backend/app/strategy/prompts/strategy-guide.md) |
 | 前后端请求与类型 | `backend/app/api/` 的路由及请求模型、[frontend/src/lib/api.ts](../frontend/src/lib/api.ts)；类型在两端分别维护 |
-| 对外开放面 | [api_gateway.py](../backend/app/services/api_gateway.py) 的规则表、`/api/openapi.json?tier=a`、[开放契约测试](../backend/tests/test_openapi_contract.py) |
-| 前端二开 | [extensions/types.ts](../frontend/src/extensions/types.ts)、[registry.ts](../frontend/src/extensions/registry.ts)、[前端模板](../frontend/src/custom/_template/extension.tsx.example) |
-| 后端二开 | [extensions/contracts.py](../backend/app/extensions/contracts.py)、[registry.py](../backend/app/extensions/registry.py)、[后端模板](../backend/app/custom/_template.py.example) |
+| 前端扩展 | [extensions/types.ts](../frontend/src/extensions/types.ts)、[registry.ts](../frontend/src/extensions/registry.ts)、[前端模板](../frontend/src/custom/_template/extension.tsx.example) |
+| 后端扩展 | [extensions/contracts.py](../backend/app/extensions/contracts.py)、[registry.py](../backend/app/extensions/registry.py)、[后端模板](../backend/app/custom/_template.py.example) |
 
-源码扩展、数据源插件、用户策略文件、扩展数据表是不同机制，不能互换注册入口。能力与数据单位的长期要求仍以贡献规范和对应领域文档为准。
+源码扩展、数据源插件、用户策略文件、扩展数据表是不同机制，不能互换注册入口。能力与数据单位见维护约定和对应领域文档。
 
-### 页面缩放与模拟盘移植入口
+### 页面缩放与模拟盘
 
 - 页面缩放：`frontend/src/lib/pageScale.ts` 负责根节点缩放与坐标比例；`pageZoom.ts` 和 `sessionRuntime.ts` 共用该实现，偏好仍按登录账户隔离。看板网格、助手及分析气泡按此比例换算拖拽坐标。
 - 模拟盘：`frontend/src/pages/Paper.tsx` 保持正式路由，复用 `api/paper.py` 与用户私有台账；账户删除、回合与实时对比覆盖于 `test_paper_account_delete.py`，持仓上限与自动方向覆盖于 `test_paper_auto_max_positions.py`。

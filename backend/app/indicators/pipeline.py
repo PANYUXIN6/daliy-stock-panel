@@ -1,11 +1,7 @@
-"""enriched 表计算流水线(§7.5 / §7.7 Step 2)。
+"""enriched 表计算流水线。
 
 存储层 (enriched parquet):
-  仅存储基础行情窄表 (14 列), 指标和信号由各服务即时计算。
-
-  存储列: symbol, date, OHLCV(前复权), volume, amount,
-          raw_close, raw_high, raw_low, turnover_rate,
-          consecutive_limit_ups, consecutive_limit_downs
+  持久化列以 ENRICHED_STORAGE_COLS 为准，指标和信号由各服务即时计算。
 
 设计:
   - 100% Polars 表达式(SQL 窗口无法表达递归 EMA)
@@ -45,12 +41,7 @@ from app.share_capital import apply_historical_float_shares, load_share_history
 logger = logging.getLogger(__name__)
 
 
-# ── 自定义信号缓存 ─────────────────────────────────────
-# 从 data/user_data/custom_signals/*.json 加载并编译为 Polars 表达式。
-# 两套表达式分别用于全量路径 (allow_shift=True, 支持日期偏移条件)
-# 和盘中增量热路径 (allow_shift=False, 跳过偏移条件)。
-# 模块级缓存：首次调用时加载，invalidate_custom_signals() 后下次重载。
-# 增量路径每秒级执行, 若不缓存则每轮 glob + 读所有 JSON + 重编译表达式。
+# 共享行情不加载个人信号表达式；个人公式在所属用户的策略和监控输入中注入。
 _custom_signal_exprs: dict[str, pl.Expr] | None = None
 _custom_signal_exprs_today: dict[str, pl.Expr] | None = None
 
@@ -70,7 +61,7 @@ def invalidate_custom_signals() -> None:
     invalidate_intraday_cache()
 
 
-# enriched parquet 仅存储的列 (14 列)
+# enriched parquet 持久化列
 ENRICHED_STORAGE_COLS = [
     "symbol", "date",
     "open", "high", "low", "close",          # 前复权
@@ -84,9 +75,8 @@ ENRICHED_STORAGE_COLS = [
 
 
 # ================================================================
-# enriched 完整列清单 (存储 + 运行时计算)
-# 供 AI 审查代码时参考: 策略/筛选/回测 可直接使用以下列名。
-# 分类: 存储列 → 指标列 → 信号列 → JOIN 列
+# 字段说明供数据字典、信号表单与 AI 提示词共用。
+# 同时包含持久化列和运行时计算列，不代表每个输入帧都已具备这些列。
 # ================================================================
 ENRICHED_COLUMNS: dict[str, dict[str, str]] = {
     # ── 存储列 (parquet 持久化) ──────────────────────────
@@ -185,7 +175,7 @@ ENRICHED_COLUMNS: dict[str, dict[str, str]] = {
     "float_shares":            "流通股本 (来自 instruments)",
 }
 
-# 仅供 AI/开发者快速索引: 按类别的列名列表
+# 字段分类供信号表单与 AI 提示词共用。
 ENRICHED_COLUMNS_BY_CATEGORY: dict[str, list[str]] = {
     "storage":  [k for k in ENRICHED_COLUMNS if k in ENRICHED_STORAGE_COLS],
     "basic":    ["prev_close", "change_pct", "change_amount", "amplitude"],
@@ -2273,9 +2263,7 @@ def compute_enriched_today(
     from app.factors import ext_factors
     df = ext_factors.attach_ext_columns(df, include_snapshot=True)
 
-    # 自定义信号（日级实时路径同样注入, 但不支持日期偏移条件 → allow_shift=False）
-    # 复用模块级缓存 _custom_signal_exprs_today: 增量热路径每秒级执行,
-    # 不缓存则每轮 glob + 读所有 JSON + 重编译表达式。失效由 invalidate_custom_signals 统一管理。
+    # 共享日级实时帧保持个人公式隔离，此处表达式集合为空。
     from app.strategy import custom_signals
     df = custom_signals.inject(df, _get_custom_signal_exprs_today())
 

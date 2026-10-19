@@ -15,7 +15,35 @@ die() { printf '%s\n' "$*" >&2; exit 1; }
     || die 'DEPLOY_PORT must be between 1 and 65535.'
 [[ "${DEPLOY_DIR:-}" =~ ^/[a-zA-Z0-9_/-]+$ && "$DEPLOY_DIR" != / ]] || die 'DEPLOY_DIR must be an absolute deployment path.'
 [[ -n "${DEPLOY_SSH_KEY:-}" && -n "${DEPLOY_KNOWN_HOSTS:-}" ]] || die 'Deployment SSH secrets are missing.'
-[[ -z "${DEPLOY_URL:-}" || "$DEPLOY_URL" == https://* ]] || die 'DEPLOY_URL must use HTTPS.'
+domain=$(python3 - "${DEPLOY_URL:-}" <<'PY'
+import re
+import sys
+from urllib.parse import urlsplit
+
+value = sys.argv[1]
+if not value:
+    sys.exit(0)
+try:
+    url = urlsplit(value)
+    host = url.hostname or ""
+    labels = host.split(".")
+    valid = (
+        value.startswith("https://")
+        and not any(ord(char) <= 32 for char in value)
+        and not any(char in value for char in "?#\\")
+        and url.username is None and url.password is None
+        and url.port in (None, 443) and url.path in ("", "/")
+        and len(host) <= 253 and len(labels) >= 2
+        and any(char.isalpha() for char in labels[-1])
+        and all(re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", label) for label in labels)
+    )
+except ValueError:
+    valid = False
+if not valid:
+    sys.exit("DEPLOY_URL must be a root HTTPS domain URL on port 443.")
+print(host)
+PY
+)
 
 # 旧检查重跑不得把服务器回退到 main 之外的历史提交。
 latest=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq '.object.sha')
@@ -50,8 +78,9 @@ remote_dir=$(ssh "${ssh_options[@]}" "$destination" 'mktemp -d /tmp/stock-panel-
 scp -i "$work_dir/key" -P "$DEPLOY_PORT" -o BatchMode=yes -o IdentitiesOnly=yes \
     -o StrictHostKeyChecking=yes -o "UserKnownHostsFile=$work_dir/known_hosts" \
     "$work_dir/release.tar.gz" scripts/deploy_preproduction.sh "$destination:$remote_dir/"
-ssh "${ssh_options[@]}" "$destination" \
-    "bash '$remote_dir/deploy_preproduction.sh' '$remote_dir/release.tar.gz' '$GITHUB_SHA' '$DEPLOY_DIR'"
+remote_command="bash '$remote_dir/deploy_preproduction.sh' '$remote_dir/release.tar.gz' '$GITHUB_SHA' '$DEPLOY_DIR'"
+[[ -z $domain ]] || remote_command+=" '$domain'"
+ssh "${ssh_options[@]}" "$destination" "$remote_command"
 
 if [[ -n "${DEPLOY_URL:-}" ]]; then
     curl --fail --silent --show-error --retry 3 --max-time 20 "${DEPLOY_URL%/}/health" |

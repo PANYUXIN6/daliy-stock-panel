@@ -76,6 +76,9 @@ def admin_required(path: str, method: str) -> bool:
         return True
     if path.startswith("/api/settings"):
         return path.removeprefix("/api/settings/preferences/") not in _PERSONAL_PREFERENCES
+    # 概念／行业 AI 轮动分析向所有已登录用户开放。
+    if path == "/api/rps/rotation-analyze" and method == "POST":
+        return False
     return any(
         path == p or path.startswith(p + "/")
         for p in ("/api/ext-data", "/api/regime", "/api/rps", "/api/capabilities")

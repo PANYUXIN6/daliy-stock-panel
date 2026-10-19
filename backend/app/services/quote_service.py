@@ -1434,12 +1434,26 @@ class QuoteService:
                         enriched_today["raw_close"].to_list(),
                         strict=False,
                     ))
+                    strategy_events = None
+                    paper_engine = getattr(runtime, "paper_monitor_engine", None)
+                    if paper_engine is not None:
+                        internal_rules = paper_auto.strategy_monitor_rules(data_dir)
+                        if internal_rules != list(paper_engine.rules.values()):
+                            paper_engine.set_rules(internal_rules)
+                        strategy_events = paper_engine.evaluate(enriched_today) if paper_engine.rule_count else []
+                        # 策略计算沿用前复权价格，下单与即时撮合统一使用快照原始价。
+                        strategy_events = [
+                            {**event, "price": snapshot.get(event.get("symbol"))}
+                            for event in strategy_events
+                        ]
                     paper_events: list[dict] = []
                     for acc_id in paper_trading.list_account_ids(data_dir):
                         paper_events.extend(
                             paper_trading.evaluate_intraday(data_dir, snapshot, account_id=acc_id))
-                        if rule_events:
-                            created = paper_auto.on_rule_events(data_dir, rule_events, account_id=acc_id)
+                        if rule_events or strategy_events:
+                            created = paper_auto.on_rule_events(
+                                data_dir, rule_events, account_id=acc_id, strategy_events=strategy_events,
+                            )
                             paper_events.extend(paper_auto.auto_order_events(created, account_id=acc_id))
                     # 成交/自动跟单下单推送 (V3): 复用监控中心既有管道 —— SSE toast /
                     # 语音 (前端按 source 拼文案) / 系统通知 / alert_store 留痕 /

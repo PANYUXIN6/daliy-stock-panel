@@ -21,7 +21,6 @@ from app.backtest import stats_v2
 from app.backtest.engine import BacktestEngine
 from app.backtest.fundamentals import (
     FUNDAMENTAL_FACTOR_NAMES,
-    attach_fundamental_factors,
     load_fundamental_snapshot,
 )
 from app.factors.registry import factor_columns_view as _factor_columns_view
@@ -192,7 +191,7 @@ class FactorBacktestService:
         if config.factor_name in FUNDAMENTAL_FACTOR_NAMES and self._fundamentals_missing():
             return self._error_result(
                 config, run_id, t0,
-                "本地没有可用于回测的财务版本: 请在数据页重新同步财务数据建立版本记录",
+                "本地没有可用于回测的财务版本: 数据源未提供所需历史版本，请检查财务数据源与研究区间",
             )
 
         trading_dates = self._global_trading_dates(config)
@@ -297,7 +296,7 @@ class FactorBacktestService:
                     label=str(meta.get("label", factor_name)),
                     group=str(meta.get("group", "")),
                     elapsed_ms=round((time.perf_counter() - item_t0) * 1000, 1),
-                    error="本地没有可用于回测的财务版本: 请在数据页重新同步财务数据建立版本记录",
+                    error="本地没有可用于回测的财务版本: 数据源未提供所需历史版本，请检查财务数据源与研究区间",
                 ))
                 continue
             try:
@@ -430,17 +429,12 @@ class FactorBacktestService:
         if panel.is_empty():
             return panel
 
+        if config.asset_type == "stock":
+            from app.services.financial_demand import prepare_factor_frame
+            panel = prepare_factor_frame(self._fundamentals_data_dir(), panel, factor_names)
         missing = set(factor_names) - set(panel.columns)
         if missing:
             panel = self._compute_missing_factors(panel, missing)
-        fundamental_names = [name for name in factor_names if name in FUNDAMENTAL_FACTOR_NAMES]
-        if fundamental_names:
-            # 点时财务因子: 公告日门控, 无数据标的保持 null (不参与该日截面)。
-            panel = attach_fundamental_factors(
-                panel,
-                load_fundamental_snapshot(self._fundamentals_data_dir()),
-                fundamental_names,
-            )
         return panel
 
     def _global_trading_dates(

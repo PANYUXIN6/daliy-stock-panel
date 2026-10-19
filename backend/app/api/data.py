@@ -57,11 +57,11 @@ _last_finished_cache: dict[str, str | None] | None = None
 _last_finished_lock = threading.Lock()
 
 
-def invalidate_data_cache(table: str | None = None) -> None:
+def invalidate_data_cache(table: str | None = None, *, storage: bool = False) -> None:
     """数据写入/清除后调用。
 
     table=None 时清所有表 cache + storage(粗粒度,用于 pipeline 完成/clear);
-    指定 table 时只清那张表,不影响 storage(细粒度,用于单 stage 写完)。
+    指定 table 时只清那张表；storage=True 同时刷新容量统计。
     """
     with _table_cache_lock:
         if table is None:
@@ -75,6 +75,9 @@ def invalidate_data_cache(table: str | None = None) -> None:
         elif table in _table_cache:
             _table_cache[table] = None
             _table_cache_ts[table] = 0.0
+        if storage:
+            _storage_cache = None
+            _storage_cache_ts = 0.0
 
 
 def invalidate_storage_cache() -> None:

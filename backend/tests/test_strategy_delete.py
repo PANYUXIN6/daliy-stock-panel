@@ -29,11 +29,11 @@ def filter(df, params):
 
 class _MonitorEngine:
     def __init__(self) -> None:
-        self.invalidations = 0
+        self.invalidations: list[str | None] = []
         self.rules: list[dict] = []
 
-    def invalidate_strategy_state(self) -> None:
-        self.invalidations += 1
+    def invalidate_strategy_state(self, strategy_id: str | None = None) -> None:
+        self.invalidations.append(strategy_id)
 
     def set_rules(self, rules: list[dict]) -> None:
         self.rules = rules
@@ -96,7 +96,7 @@ def test_delete_strategy_is_not_blocked_by_another_broken_file(monkeypatch, tmp_
     assert preference_updates == [{"strategy_monitor_ids": ["other"]}]
     saved_rule = monitor_rules.load_one(tmp_path, "mr_target")
     assert saved_rule is not None and saved_rule["enabled"] is False
-    assert monitor.invalidations == 1
+    assert monitor.invalidations == [None]
     assert monitor.rules and monitor.rules[0]["enabled"] is False
 
 

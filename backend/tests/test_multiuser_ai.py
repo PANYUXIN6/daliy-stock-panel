@@ -99,8 +99,9 @@ async def test_scheduled_review_is_owned_and_disabled_owner_cannot_run(actors, m
         assert market_recap_reports.list_reports()[0]['content'] == 'private review'
     with user_scope(second):
         assert market_recap_reports.list_reports() == []
-    store.create_user('otheradmin', 'temporary-secret', 'admin')
-    store.update_user(first.id, {'is_active': False})
+    # Simulate an externally disabled owner; account management protects admin.
+    with store._connection(True) as db:
+        db.execute('UPDATE users SET is_active=0 WHERE id=?', (first.id,))
     await daily_pipeline._run_scheduled_review(repo)
     assert captured == [first.id]
 

@@ -1,3 +1,4 @@
+import { useCurrentUser } from '@/lib/auth'
 import { accountStorage } from '@/lib/sessionRuntime'
 /**
  * 模拟盘 (虚拟账户) — 多账户对比主视图 + 行展开账户操作。
@@ -181,6 +182,7 @@ function loadNewAccountDefaults(): Required<NewAccountDefaults> {
  * onCancel 由外层按「是否已有其他账户」传入 —— 一个账户都没有时必须先建一个, 不给取消。
  * 费用三参数可设置, 且记住为下次新建的默认值。 */
 function SetupCard({ accId, onDone, onCancel }: { accId: string; onDone: (createdId: string) => void; onCancel?: () => void }) {
+  const isAdmin = useCurrentUser()?.role === 'admin'
   const defaults = loadNewAccountDefaults()
   const [cash, setCash] = useState(defaults.cash)
   const [commissionWan, setCommissionWan] = useState(defaults.commissionWan)
@@ -206,7 +208,7 @@ function SetupCard({ accId, onDone, onCancel }: { accId: string; onDone: (create
     queryFn: () => api.screenerStrategies(undefined, 'all'),
     staleTime: 60_000,
   })
-  const rulesQ = useQuery({ queryKey: QK.monitorRules, queryFn: api.monitorRulesList, staleTime: 30_000 })
+  const rulesQ = useQuery({ queryKey: QK.monitorRules, queryFn: api.monitorRulesList, enabled: isAdmin, staleTime: 30_000 })
 
   const m = useMutation({
     mutationFn: async () => {
@@ -329,7 +331,7 @@ function SetupCard({ accId, onDone, onCancel }: { accId: string; onDone: (create
         <div className="mt-2 flex flex-wrap items-center gap-2">
           <div className="flex gap-1">
             <button onClick={() => { setAutoKind('strategy'); setAutoId(''); setAutoName(''); setAutoSearch(''); setSide('auto') }} className={segBtn(autoKind === 'strategy')}>策略</button>
-            <button onClick={() => { setAutoKind('rule'); setAutoId(''); setAutoName(''); setAutoSearch(''); setSide(s => (s === 'auto' ? 'buy' : s)) }} className={segBtn(autoKind === 'rule')}>监控规则</button>
+            {isAdmin && <button onClick={() => { setAutoKind('rule'); setAutoId(''); setAutoName(''); setAutoSearch(''); setSide(s => (s === 'auto' ? 'buy' : s)) }} className={segBtn(autoKind === 'rule')}>监控规则</button>}
           </div>
           <div className="min-w-44 flex-1">
             {/* 选中后显示中文名 (id 只做匹配键); 重新输入则回到搜索态 */}
@@ -1234,6 +1236,7 @@ function AutoRulesPanel({ acc }: { acc: string }) {
 }
 
 function AutoRuleForm({ acc, onDone, onCancel }: { acc: string; onDone: () => void; onCancel: () => void }) {
+  const isAdmin = useCurrentUser()?.role === 'admin'
   const [name, setName] = useState('')
   const [matchKind, setMatchKind] = useState<'strategy' | 'rule'>('strategy')
   const [matchId, setMatchId] = useState('')
@@ -1274,6 +1277,7 @@ function AutoRuleForm({ acc, onDone, onCancel }: { acc: string; onDone: () => vo
   const rulesQ = useQuery({
     queryKey: QK.monitorRules,
     queryFn: api.monitorRulesList,
+    enabled: isAdmin,
     staleTime: 30_000,
   })
   const idQuery = matchId.trim().toLowerCase()
@@ -1310,7 +1314,7 @@ function AutoRuleForm({ acc, onDone, onCancel }: { acc: string; onDone: () => vo
         <div>
           <label className="text-[11px] text-muted">跟什么</label>
           <div className="mt-1 flex gap-1.5">
-            {(['strategy', 'rule'] as const).map(k => (
+            {(['strategy', 'rule'] as const).filter(k => isAdmin || k !== 'rule').map(k => (
               <button key={k} onClick={() => { setMatchKind(k); setMatchId(''); setSide(s => (k === 'strategy' ? 'auto' : s === 'auto' ? 'buy' : s)) }}
                 className={cn('flex-1 rounded-btn border py-1 text-[11px] transition-colors',
                   matchKind === k ? 'border-accent/40 bg-accent/10 text-accent' : 'border-border text-muted hover:text-secondary')}>
@@ -1815,6 +1819,7 @@ function CompareView({ onCreateSingle }: { onCreateSingle: () => void }) {
 type BatchSourceRow = { name: string; kind: 'strategy' | 'rule'; matchId: string }
 
 function BatchCreateModal({ onClose, onCreated }: { onClose: () => void; onCreated: (count: number) => void }) {
+  const isAdmin = useCurrentUser()?.role === 'admin'
   const qc = useQueryClient()
   const defaults = loadNewAccountDefaults()
   const [cash, setCash] = useState(defaults.cash)
@@ -1838,7 +1843,7 @@ function BatchCreateModal({ onClose, onCreated }: { onClose: () => void; onCreat
     queryFn: () => api.screenerStrategies(undefined, 'all'),
     staleTime: 60_000,
   })
-  const rulesQ = useQuery({ queryKey: QK.monitorRules, queryFn: api.monitorRulesList, staleTime: 30_000 })
+  const rulesQ = useQuery({ queryKey: QK.monitorRules, queryFn: api.monitorRulesList, enabled: isAdmin, staleTime: 30_000 })
 
   const m = useMutation({
     mutationFn: () =>
@@ -1919,7 +1924,7 @@ function BatchCreateModal({ onClose, onCreated }: { onClose: () => void; onCreat
         <div className="mt-4 rounded-card border border-border bg-base/40 p-3">
           <div className="flex flex-wrap items-center gap-2">
             <div className="flex gap-1">
-              {(['strategy', 'rule'] as const).map(k => (
+              {(['strategy', 'rule'] as const).filter(k => isAdmin || k !== 'rule').map(k => (
                 <button key={k} onClick={() => { setQuickKind(k); setQuickId('') }}
                   className={cn('rounded-btn border px-2 py-1 text-[11px] transition-colors',
                     quickKind === k ? 'border-accent/40 bg-accent/10 text-accent' : 'border-border text-muted hover:text-secondary')}>

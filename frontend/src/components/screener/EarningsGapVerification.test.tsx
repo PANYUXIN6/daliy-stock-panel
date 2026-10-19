@@ -175,7 +175,7 @@ it.each(['running', 'pending'] as const)('重新打开已有%s核验任务只恢
 it.each(['guest', 'pro'] as const)('非管理员%s仅浏览本地结果，不发任务查询或采集命令', async role => {
   await render({ verification: { ...pending, status: 'running', job_id: 'admin-job' } }, { ...admin, role })
   expect(button('业绩断层跳空').disabled).toBe(true)
-  expect(host.textContent).toContain('管理员')
+  expect(host.textContent).toContain('按需准备财务数据')
   expect(mocks.pipelineJob).not.toHaveBeenCalled()
   expect(mocks.verify).not.toHaveBeenCalled()
 })
@@ -186,7 +186,7 @@ it('历史日期仅回放本地结果，不提交核验或查询采集任务，�
   await act(async () => button('业绩断层跳空').click())
   expect(mocks.verify).not.toHaveBeenCalled()
   expect(mocks.pipelineJob).not.toHaveBeenCalled()
-  expect(host.textContent).toContain('历史日期仅使用本地数据回放')
+  expect(host.textContent).toContain('历史结果按财报版本可用时间回放')
   expect(host.textContent).not.toContain('财务更新需管理员操作')
 })
 
@@ -295,5 +295,5 @@ it('实际策略卡片选择历史日期时沿用原本地选股入口', async (
   await settle()
   expect(mocks.verify).not.toHaveBeenCalled()
   expect(mocks.screenerRunPreset).toHaveBeenCalledWith('earnings_breakout_gap', undefined, '2026-10-15', undefined, 'stock', '1d')
-  expect(host.textContent).toContain('历史日期仅使用本地数据回放')
+  expect(host.textContent).toContain('历史结果按财报版本可用时间回放')
 })

@@ -1,3 +1,4 @@
+import { useCurrentUser } from '@/lib/auth'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { motion, AnimatePresence } from 'framer-motion'
@@ -90,6 +91,7 @@ function fmtAbnormalCalcTime(asofSec: number): string {
 
 
 export function StockPreviewDialogContent({ symbol, name, onClose, triggerInfo, navList: navListSource, onNavigate }: Props) {
+  const isAdmin = useCurrentUser()?.role === 'admin'
   const [view, setView] = useState<PreviewView>('daily')
   const [intradayDays, setIntradayDays] = useState<number | null>(loadIntradayDays)
   const [dateRange, setDateRange] = useState(getDefaultRange)
@@ -108,7 +110,7 @@ export function StockPreviewDialogContent({ symbol, name, onClose, triggerInfo, 
   const monitorRules = useQuery({
     queryKey: QK.monitorRules,
     queryFn: api.monitorRulesList,
-    enabled: !!symbol,
+    enabled: !!symbol && isAdmin,
   })
   // 异动边缘: 与异动页同 queryKey 共享缓存; 该股处于观察/边缘/触发状态时在图表上方显示信息条。
   // 尊重异动页「主开关默认关闭, 关闭时零计算」的设计 — 开关关闭时弹窗不触发全市场计算
@@ -408,13 +410,13 @@ export function StockPreviewDialogContent({ symbol, name, onClose, triggerInfo, 
                   </WatchlistAddMenu>
                 )}
                 {/* 加监控 */}
-                <button
+                {isAdmin && <button
                   onClick={() => setShowMonitorEditor(true)}
                   className="p-1.5 rounded-btn text-amber-400 hover:bg-amber-400/10 transition-colors cursor-pointer"
                   title="加监控"
                 >
                   <RadioTower className="h-4 w-4" />
-                </button>
+                </button>}
 
                 {/* 刷新 */}
                 <button
@@ -540,7 +542,7 @@ export function StockPreviewDialogContent({ symbol, name, onClose, triggerInfo, 
                   showIntraday
                   dateRange={dateRange}
                   priceLines={monitorPriceLines}
-                  onPriceDoubleClick={openPriceAlert}
+                  onPriceDoubleClick={isAdmin ? openPriceAlert : undefined}
                   refetchIntervalMs={intradayRefetchMs}
                   prefetchSymbols={prefetchSymbols}
                   intradayDays={effectiveIntradayDays}
@@ -563,7 +565,7 @@ export function StockPreviewDialogContent({ symbol, name, onClose, triggerInfo, 
                   height={480}
                   refetchIntervalMs={intradayRefetchMs}
                   priceLines={monitorPriceLines}
-                  onPriceDoubleClick={openPriceAlert}
+                  onPriceDoubleClick={isAdmin ? openPriceAlert : undefined}
                 />
                 </div>
               )}

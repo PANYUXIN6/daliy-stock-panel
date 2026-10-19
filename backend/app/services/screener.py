@@ -481,12 +481,24 @@ class ScreenerService:
         current: pl.DataFrame | None = None,
         market=None,
         cache_key: str | None = None,
+        prepare_financials: bool = False,
+        pool: list[str] | None = None,
     ):
         """按调用方要求装配标准策略数据上下文，不解释策略公式。"""
         from app.strategy.engine import StrategyDataContext
 
         if current is None:
             current = self._load_enriched_for_date(as_of)
+        financial_names = set()
+        if prepare_financials and self.asset_type == "stock" and timeframe == "1d":
+            from app.services.auth import require_current_session
+            from app.services.financial_demand import prepare_strategies
+            inputs = current.filter(pl.col("symbol").is_in(pool)) if pool and not current.is_empty() else current
+            financial_names = prepare_strategies(
+                self.repo, engine, strategy_ids, inputs, as_of, overrides_map=overrides_map,
+                params_map=params_map,
+                before_write=require_current_session,
+            )
         if timeframe == "1m":
             # 分钟策略数据源是本地当日分钟K分区 (单分区文件直读), 与日线
             # enriched 历史窗口无关, 不走 required_history_bars 日线路径。
@@ -525,6 +537,15 @@ class ScreenerService:
                                      on=["symbol", "date"], how="anti") if not history.is_empty() else history,
                         latest,
                     ], how="diagonal_relaxed").sort(["symbol", "date"])
+        if financial_names:
+            from app.backtest.fundamentals import (
+                attach_fundamental_factors,
+                load_fundamental_snapshot,
+            )
+            snapshot = load_fundamental_snapshot(self.repo.store.data_dir)
+            current = attach_fundamental_factors(current, snapshot, financial_names)
+            if history is not None and not history.is_empty():
+                history = attach_fundamental_factors(history, snapshot, financial_names)
         return StrategyDataContext(
             asset_type=self.asset_type,
             timeframe=timeframe,

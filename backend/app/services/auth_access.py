@@ -33,6 +33,19 @@ _AUTH_MUTATIONS = frozenset({"/api/auth/logout", "/api/auth/change-password"})
 
 
 def admin_required(path: str, method: str) -> bool:
+    # 选股叠加条件与信号编辑共用字段元数据，不包含个人信号定义。
+    if path == '/api/custom-signals/options' and method in ('GET', 'HEAD'):
+        return False
+    if any(path == p or path.startswith(p + '/') for p in (
+        '/api/monitor-rules', '/api/custom-signals', '/api/alerts', '/api/lots',
+    )):
+        return True
+    # 因子检验、挖掘及候选管理与回测页共用 URL 前缀，保留各自业务权限。
+    if ((path == '/api/backtest' or path.startswith('/api/backtest/'))
+            and not any(path == p or path.startswith(p + '/') for p in (
+            '/api/backtest/factor', '/api/backtest/mining', '/api/backtest/candidates',
+        ))):
+        return True
     if path == "/api/users" or path.startswith("/api/users/"):
         return True
     if path in {"/api/data/version", "/api/data/status"} and method in ("GET", "HEAD"):

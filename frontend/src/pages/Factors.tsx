@@ -1,3 +1,4 @@
+import { useCurrentUser } from '@/lib/auth'
 import { useState } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import { BookmarkCheck, Combine, LibrarySquare, PenLine, Pickaxe, Sigma } from 'lucide-react'
@@ -20,6 +21,7 @@ const TABS: Record<Tab, { title: string; icon: typeof Sigma }> = {
 }
 
 export function Factors() {
+  const isAdmin = useCurrentUser()?.role === 'admin'
   const [searchParams, setSearchParams] = useSearchParams()
   const [candidatesOpen, setCandidatesOpen] = useState(false)
   const navigate = useNavigate()
@@ -115,11 +117,11 @@ export function Factors() {
       {candidatesOpen && (
         <ResearchCandidatesDialog
           onClose={() => setCandidatesOpen(false)}
-          onLoadStrategy={candidate => {
+          onLoadStrategy={isAdmin ? candidate => {
             setCandidatesOpen(false)
             // 跨页「载入复测」: 候选经 router state 交给回测策略页消费
             navigate('/backtest?tab=strategy', { state: { loadCandidate: candidate } })
-          }}
+          } : undefined}
         />
       )}
     </div>

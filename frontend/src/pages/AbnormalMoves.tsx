@@ -1,4 +1,5 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCurrentUser } from '@/lib/auth'
 import { Link } from 'react-router-dom'
 import { useQuery, type UseQueryResult } from '@tanstack/react-query'
 import {
@@ -74,6 +75,7 @@ const SIGNAL_META: Record<IntradaySignalKey, { label: string; cls: string }> = {
 }
 
 export function AbnormalMoves() {
+  const isAdmin = useCurrentUser()?.role === 'admin'
   const [tab, setTab] = useState<AbnormalTab>('intraday')
   // navList: 弹窗切股的候选列表, 打开详情时由来源 tab 一并给出
   const [preview, setPreview] = useState<{ symbol: string; name: string; navList: NavItem[] } | null>(null)
@@ -94,7 +96,7 @@ export function AbnormalMoves() {
         <PageHeader
           title="异动监控"
           subtitle="竞价 · 盘中 · 偏移 · 全时段异动中心"
-          right={
+          right={isAdmin &&
             <Link
               to="/monitor"
               className="inline-flex h-7 items-center gap-1 rounded border border-border bg-base px-2 text-[11px] text-secondary transition-colors hover:text-foreground"
@@ -612,6 +614,7 @@ const IntradayRowView = memo(function IntradayRowView({ row, rank, onPreview }: 
 function DeviationView({ onPreview }: {
   onPreview: (r: AbnormalRow, navList?: NavItem[]) => void
 }) {
+  const isAdmin = useCurrentUser()?.role === 'admin'
   // 主开关: 默认关闭, 开启后才轮询计算 (仅控制本页计算, 后台告警由监控规则驱动)
   const [enabled, setEnabled] = useState(() => storage.abnormalEnabled.get(false))
   // 规则口径面板 (工具栏「?」)
@@ -737,11 +740,11 @@ function DeviationView({ onPreview }: {
               对应指数同期), 找出接近触发「异常波动 / 严重异常波动」的标的。
               计算量较大, 默认关闭; 每次计算的结果会保留, 关闭后仍可查看 (不再实时更新)。
             </p>
-            <p className="mx-auto mt-2 max-w-lg text-[11px] leading-relaxed text-muted/80">
+            {isAdmin && <p className="mx-auto mt-2 max-w-lg text-[11px] leading-relaxed text-muted/80">
               需要告警推送时, 在<Link to="/monitor?new=abnormal" className="text-accent hover:underline">监控中心</Link>
               新建「异动监控」规则 —— 后台持续评估, 触发时统一走触发记录 / 站内通知 / 外部渠道推送,
               与本页开关互不影响。
-            </p>
+            </p>}
             <button
               type="button"
               onClick={() => toggleEnabled(true)}

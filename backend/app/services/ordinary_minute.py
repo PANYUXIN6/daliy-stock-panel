@@ -38,7 +38,7 @@ def collection_pool(repo) -> dict[str, list[str]]:
         with user_scope(UserContext(user['id'], user['role'], repo.store.data_dir)):
             symbols.update(row["symbol"] for row in watchlist.list_symbols())
             for rule in monitor_rules.load_all(repo.store.data_dir):
-                if rule.get("enabled", True):
+                if rule.get("enabled", True) and monitor_rules.runtime_rule_allowed(rule, user['role']):
                     symbols.update(rule.get("symbols", []))
     groups = {asset: [] for asset in MINUTE_TABLES}
     for symbol in sorted(symbols):

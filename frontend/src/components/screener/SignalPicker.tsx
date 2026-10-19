@@ -1,3 +1,4 @@
+import { useCurrentUser } from '@/lib/auth'
 import { useMemo } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { PenLine } from 'lucide-react'
@@ -38,8 +39,9 @@ interface Props {
  * - entry 蓝色主题, exit 橙色主题; 自定义信号边框配色与内置一致, 右上角 PenLine 角标区分
  */
 export function SignalPicker({ signals, onChange, kind, options }: Props) {
+  const isAdmin = useCurrentUser()?.role === 'admin'
   const { variant = 'panel', builtinSignals, disabledSignals = [], disabledSignalHint, filterCustomByKind = true } = options ?? {}
-  const customSignalsQuery = useQuery({ queryKey: QK.customSignals, queryFn: api.customSignalsList })
+  const customSignalsQuery = useQuery({ queryKey: QK.customSignals, queryFn: api.customSignalsList, enabled: isAdmin })
 
   const customOptions = useMemo(() => {
     const list = (customSignalsQuery.data?.signals ?? [])

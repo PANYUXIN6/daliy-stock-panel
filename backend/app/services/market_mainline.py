@@ -281,7 +281,7 @@ def upsert_mainline_history(data_dir: Path, new_rows: pl.DataFrame) -> None:
 
 
 def compute_mainline_incremental(repo, data_dir: Path, *, today: date | None = None,
-                                 kind: str = "concept") -> pl.DataFrame:
+                                 kind: str = "concept", refresh_today: bool = False) -> pl.DataFrame:
     """增量补算主线(供 daily_pipeline / 手动触发): 补 enriched 已有而主线缺失的日。"""
     today = today or cn_today()
     from app.services.regime_builder import enriched_date_set
@@ -290,6 +290,8 @@ def compute_mainline_incremental(repo, data_dir: Path, *, today: date | None = N
     existing = load_mainline_history(data_dir, kind)
     existing_dates = set(existing["date"].to_list()) if not existing.is_empty() else set()
     missing = sorted(d for d in enriched_dates if d not in existing_dates and d <= today)
+    if refresh_today and today in enriched_dates:
+        missing = sorted(set(missing) | {today})
     if not missing:
         return pl.DataFrame()
     logger.info("mainline incremental(%s): compute %d days", kind, len(missing))

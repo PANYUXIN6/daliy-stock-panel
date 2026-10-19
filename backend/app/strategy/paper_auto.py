@@ -134,6 +134,28 @@ def _matches(rule: dict, ev: dict) -> bool:
     return ev.get("rule_id") == rule["match_id"]
 
 
+def strategy_monitor_rules(data_dir: Path) -> list[dict]:
+    """从启用的策略跟单派生内部事件源，与可见监控规则独立。"""
+    strategy_ids: set[str] = set()
+    for account_id in paper.list_account_ids(data_dir):
+        account = paper.get_account(data_dir, account_id)
+        if account is None or account.get("status") != "active":
+            continue
+        strategy_ids.update(
+            rule["match_id"]
+            for rule in load_auto_rules(data_dir, account_id, enabled_only=True)
+            if rule.get("match_kind") == "strategy"
+        )
+    return [{
+        "id": f"paper_strategy_{strategy_id}", "name": "模拟盘策略跟单",
+        "type": "strategy", "strategy_id": strategy_id, "asset_type": "stock",
+        "scope": "all", "enabled": True, "cooldown_seconds": 0,
+        "notify_events": ["buy_signal", "sell_signal", "pool_entry", "pool_exit"],
+        # 普通监控批量合并文案，跟单必须保留每只股票的价格和方向。
+        "batch_events": False,
+    } for strategy_id in sorted(strategy_ids)]
+
+
 def _in_cooldown(data_dir: Path, rule: dict, symbol: str, cooldown_days: int, account_id: str) -> bool:
     """同规则同 symbol 最近一次自动下单是否仍在冷却期 (按日历日, 含当日)。"""
     if cooldown_days <= 0:
@@ -203,7 +225,8 @@ def _held_qty(data_dir: Path, symbol: str, account_id: str) -> int:
     return int(p["qty"]) if p else 0
 
 
-def on_rule_events(data_dir: Path, events: list[dict], account_id: str = paper.DEFAULT_ACCOUNT_ID) -> list[dict]:
+def on_rule_events(data_dir: Path, events: list[dict], account_id: str = paper.DEFAULT_ACCOUNT_ID,
+                   *, strategy_events: list[dict] | None = None) -> list[dict]:
     """监控事件 → 自动下单。返回本次创建的订单列表 (被拒订单只记日志)。
 
     触发条件: 事件带 symbol 与价格、有规则匹配、未冷却; 下单复用 paper.create_order
@@ -212,23 +235,33 @@ def on_rule_events(data_dir: Path, events: list[dict], account_id: str = paper.D
     达到上限后, 新标的开仓被跳过; 已持仓标的加仓与卖出信号不受限。
     """
     created: list[dict] = []
-    if not events:
+    if not events and not strategy_events:
         return created
     rules = load_auto_rules(data_dir, account_id, enabled_only=True)
     if not rules:
         return created
+    batches = [(events, False)]
+    if strategy_events is not None:
+        batches.append((strategy_events, True))
+    ordered: set[tuple[str, str, str]] = set()
     with paper.PAPER_LOCK:
         # 同一批事件内复用快照, 由 create_order 后的持仓变化反映 (循环内重取)
-        for ev in events:
+        for ev, internal in ((ev, internal) for batch, internal in batches for ev in batch):
             symbol = (ev.get("symbol") or "").strip()
             price = ev.get("price")
             if not symbol or price is None or price <= 0:
                 continue
             for rule in rules:
+                # 独立来源接线后，策略跟单仅消费内部事件；按规则跟单仍消费公开规则。
+                if strategy_events is not None and (rule["match_kind"] == "strategy") != internal:
+                    continue
                 if not _matches(rule, ev):
                     continue
                 side = _resolve_side(rule, ev)
                 if side is None:
+                    continue
+                order_key = (rule["id"], symbol, side)
+                if order_key in ordered:
                     continue
                 # 自动出场不受入场冷却限制，否则默认五天冷却会吞掉退出信号。
                 if not (rule.get("side") == "auto" and side == "sell") and _in_cooldown(
@@ -275,6 +308,7 @@ def on_rule_events(data_dir: Path, events: list[dict], account_id: str = paper.D
                     logger.info("paper auto %s: %s 下单被拒: %s", rule["name"], symbol, err)
                     continue
                 created.append(order)
+                ordered.add(order_key)
                 logger.info("paper auto %s: %s 触发 %s %d 股 (%s)", rule["name"], symbol, side, qty, order["id"])
     return created
 

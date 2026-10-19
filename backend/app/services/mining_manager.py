@@ -155,7 +155,7 @@ class MiningJobManager:
         cancel_event = threading.Event()
         thread = threading.Thread(
             target=self._run_owned_job,
-            args=(run_id, source, cancel_event),
+            args=(current_user(), run_id, source, cancel_event),
             name=f"mining-{run_id}",
             daemon=True,
         )
@@ -163,8 +163,9 @@ class MiningJobManager:
         self._threads[run_id] = thread
         thread.start()
 
-    def _run_owned_job(self, *args) -> None:
-        with user_scope(self._owner):
+    def _run_owned_job(self, owner, *args) -> None:
+        # 每次启动捕获本次会话；运行实例可能在启动恢复时以无会话上下文建立。
+        with user_scope(owner):
             self._run_job(*args)
 
     def _run_job(

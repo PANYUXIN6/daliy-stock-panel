@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 from datetime import date
+from pathlib import Path
 
 import numpy as np
 import polars as pl
@@ -215,15 +216,27 @@ def test_composite_exceeds_child_limit_rejected(tmp_path):
 
 def test_composite_with_filter_fn_rejected(tmp_path):
     """composite 策略声明了 filter 函数 → 加载失败。"""
+    child_dir = tmp_path / "strategies" / "custom"
     comp_dir = tmp_path / "strategies" / "composite"
+    child_dir.mkdir(parents=True)
     comp_dir.mkdir(parents=True)
-    code = _composite_code("bad", []) + "def filter(df, params):\n    return pl.lit(True)\n"
-    (comp_dir / "bad.py").write_text(code, encoding="utf-8")
+    (child_dir / "child.py").write_text(_filter_strategy_code("child"), encoding="utf-8")
+    code = _composite_code("bad", [("child", 1.0)])
+    path = comp_dir / "bad.py"
+    path.write_text(code + "def filter(df, params):\n    return True\n", encoding="utf-8")
 
-    engine = StrategyEngine(strategy_dirs=[comp_dir])
+    engine = StrategyEngine(strategy_dirs=[child_dir, comp_dir])
 
+    assert engine.has("child")
     assert not engine.has("bad")
-    assert any("bad" in e["file"] for e in engine.load_errors())
+    errors = [error for error in engine.load_errors() if Path(error["file"]).name == "bad.py"]
+    assert len(errors) == 1
+    assert "composite strategy must not declare filter" in errors[0]["error"]
+
+    path.write_text(code, encoding="utf-8")
+    engine.reload()
+    assert engine.has("bad")
+    assert engine.load_errors() == []
 
 
 # ───────────────────────── find_dependents ─────────────────────────

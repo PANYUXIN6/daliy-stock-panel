@@ -215,11 +215,13 @@ async def _application_lifespan(app: FastAPI):
     pull_scheduler.refresh(store.data_dir)
     app.state.pull_scheduler = pull_scheduler
 
-    # 财务数据 (需 Expert 套餐): 仅初始化调度器供 /api/financials/sync/* 手动同步,
-    # 不启动自动调度——用户在「数据」页手动同步。
+    # 保留旧同步状态供本地画像展示，采集统一由按需服务执行。
     from app.services.financial_sync import financial_scheduler
     financial_scheduler.start(store.data_dir, capset)
     app.state.financial_scheduler = financial_scheduler
+
+    from app.services import financial_demand
+    financial_demand.register(repo, capset)
 
     # 自愈看门狗: 探测 polars 闸与写锁, 僵死时退出交由 supervisor 拉起 (兜底层)。
     from app.watchdog import start_watchdog
@@ -346,6 +348,7 @@ async def _application_lifespan(app: FastAPI):
         fsc = getattr(app.state, "financial_scheduler", None)
         if fsc:
             fsc.stop()
+        financial_demand.unregister(store.data_dir)
         qs = getattr(app.state, "quote_service", None)
         if qs:
             qs.stop()

@@ -25,6 +25,7 @@ from app.data_providers.base import AssetType
 from app.indicators.pipeline import filter_halt_days
 from app.market_time import CN_TZ, cn_now, cn_today
 from app.services import minute_adjust, preferences
+from app.services.daily_coverage import DailyCoverage
 from app.tickflow.capabilities import Cap, CapabilitySet
 from app.tickflow.client import get_client
 from app.tickflow.rate_limits import chunked, resolve_limit, sleep_between_batches
@@ -90,7 +91,8 @@ CANONICAL_DAILY_COLS = [
 ]
 
 
-def _normalize_daily(df_in, default_symbol: str | None = None) -> pl.DataFrame:
+def _normalize_daily(df_in, default_symbol: str | None = None,
+                     coverage: DailyCoverage | None = None) -> pl.DataFrame:
     """把 SDK 返回的 pandas/任意 DataFrame 规范成 canonical 列。"""
     if df_in is None or len(df_in) == 0:
         return pl.DataFrame()
@@ -124,6 +126,8 @@ def _normalize_daily(df_in, default_symbol: str | None = None) -> pl.DataFrame:
         if col in df.columns:
             df = df.with_columns(pl.col(col).cast(pl.Float64, strict=False))
 
+    if coverage is not None:
+        coverage.observe(df)
     # 过滤停牌日 (open/high 为 0; close 可能被填充为前收盘价, 不能用全零判断)
     df = filter_halt_days(df)
 
@@ -206,7 +210,8 @@ def sync_daily_batch(symbols: list[str],
                      start_time: datetime | None = None,
                      end_time: datetime | None = None,
                      on_chunk_done: Callable[[int, int], None] | None = None,
-                     failed_out: list[str] | None = None) -> pl.DataFrame:
+                     failed_out: list[str] | None = None,
+                     coverage: DailyCoverage | None = None) -> pl.DataFrame:
     """批量拉取多股日 K。
 
     优先使用 start_time / end_time 区间 + count=10000,确保覆盖完整时间段。
@@ -256,13 +261,15 @@ def sync_daily_batch(symbols: list[str],
         seg = _compact_klines_to_df(raw)
         if not seg.is_empty():
             seg = seg.with_columns(_timestamp_to_beijing_datetime(pl.col("timestamp")).alias("datetime")).drop("timestamp")
-            out.append(_normalize_daily(seg))
+            out.append(_normalize_daily(seg, coverage=coverage))
 
         if on_chunk_done:
             on_chunk_done(i + 1, len(chunks))
 
     # 部分失败可见化: 聚合一条 WARNING(而非只有逐块 debug/warning), 并回传出参。
     if failed_syms:
+        if coverage is not None:
+            coverage.failed.update(failed_syms)
         logger.warning("日K批量同步部分失败: %d/%d 标的未获取, 本轮保持旧数据 (样例: %s)",
                        len(failed_syms), len(symbols), failed_syms[:10])
         if failed_out is not None:
@@ -282,6 +289,7 @@ def sync_and_persist_daily_batch(
     end_date: datetime | None = None,
     on_chunk_done: Callable[[int, int], None] | None = None,
     zero_row_out: list[str] | None = None,
+    coverage: DailyCoverage | None = None,
 ) -> int:
     """批量同步日 K 并落到 Parquet。返回写入的行数。
 
@@ -294,8 +302,14 @@ def sync_and_persist_daily_batch(
     seen: set[str] = set()
     failed_syms: list[str] = []
     skipped_bare: list[str] = []
+    provider = None
 
     def _finalize(written: int) -> int:
+        if coverage is not None and set(requested) - coverage.active - coverage.halted:
+            # provider 若已过滤停牌行，只有明确的当日日线证据才能豁免缺失标的。
+            halted_symbols = getattr(provider, "get_daily_halted_symbols", None)
+            if callable(halted_symbols):
+                coverage.halted.update(halted_symbols(coverage.day))
         zero_full = [s for s in requested if s not in seen and s not in failed_syms]
         if zero_full or skipped_bare:
             zero = [orig_by_full.get(s, s) for s in zero_full] + skipped_bare
@@ -330,6 +344,8 @@ def sync_and_persist_daily_batch(
 
                 def _tracking_chunks(chunks):
                     for df in chunks:
+                        if coverage is not None:
+                            coverage.observe(df)
                         if not df.is_empty() and "symbol" in df.columns:
                             seen.update(df["symbol"].cast(pl.Utf8).unique().to_list())
                         yield df
@@ -349,6 +365,8 @@ def sync_and_persist_daily_batch(
                 end_time=end_time,
                 on_chunk_done=on_chunk_done,
             )
+            if coverage is not None:
+                coverage.observe(df)
             if df.is_empty():
                 return _finalize(0)
             if "symbol" in df.columns:
@@ -363,6 +381,8 @@ def sync_and_persist_daily_batch(
             except Exception as e:  # noqa: BLE001
                 logger.warning("refresh view failed: %s", e)
             return _finalize(df.height)
+        if coverage is not None:
+            raise RuntimeError(f"数据源 {provider_name} 未提供正式日线，无法执行盘后同步")
         # 自定义源未配置 daily → 回退 TickFlow
 
     if not capset.has(Cap.KLINE_DAILY_BATCH):
@@ -373,12 +393,16 @@ def sync_and_persist_daily_batch(
     end_time = end_date or datetime.now()
     start_time = start_date or (end_time - timedelta(days=365))
 
+    coverage_kwargs = {"coverage": coverage} if coverage is not None else {}
     df = sync_daily_batch(
         symbols, count=count, batch_size=limit.batch, rpm=limit.rpm,
         start_time=start_time, end_time=end_time,
         on_chunk_done=on_chunk_done,
         failed_out=failed_syms,
+        **coverage_kwargs,
     )
+    if coverage is not None:
+        coverage.observe(df)
 
     if not df.is_empty() and "symbol" in df.columns:
         seen.update(df["symbol"].cast(pl.Utf8).unique().to_list())
@@ -610,7 +634,8 @@ def sync_adj_factor(symbols: list[str], repo: KlineRepository,
                     start_time: datetime | None = None,
                     end_time: datetime | None = None,
                     on_chunk_done: Callable[[int, int], None] | None = None,
-                    asset_type: str = "stock") -> tuple[int, list[str]]:
+                    asset_type: str = "stock",
+                    require_complete: bool = False) -> tuple[int, list[str]]:
     """同步除权因子(Starter+)。SDK 接口:`tf.klines.ex_factors(symbols=...)`。
 
     支持增量: 传 start_time/end_time 只拉取该时间范围内的新除权事件。
@@ -626,12 +651,19 @@ def sync_adj_factor(symbols: list[str], repo: KlineRepository,
         from app.data_providers import custom as custom_sources
         if custom_sources.provider_has_dataset(provider_name, "adj_factor"):
             provider = custom_sources.get_provider(provider_name)
+            strict_kwargs = {}
+            if require_complete:
+                import inspect
+
+                if "require_complete" in inspect.signature(provider.get_adj_factors).parameters:
+                    strict_kwargs["require_complete"] = True
             new_data = provider.get_adj_factors(
                 symbols,
                 start_time=start_time,
                 end_time=end_time,
                 asset_type=asset_type,
                 on_chunk_done=on_chunk_done,
+                **strict_kwargs,
             )
             if new_data.is_empty():
                 # 扶摇等自定义源对 ETF 直接空返回, 与「该 ETF 无除权」无法区分;
@@ -649,6 +681,8 @@ def sync_adj_factor(symbols: list[str], repo: KlineRepository,
                     repo.store.data_dir / factor_dir / "all.parquet", new_data
                 )
                 return added, affected
+        if require_complete:
+            raise RuntimeError(f"数据源 {provider_name} 未提供可用除权因子")
         # 自定义源未配置 adj_factor → 回退 TickFlow
 
     if not capset.has(Cap.ADJ_FACTOR):
@@ -698,6 +732,8 @@ def sync_adj_factor(symbols: list[str], repo: KlineRepository,
     if failed_syms:
         logger.warning("adj_factor 同步部分失败: %d/%d 标的未获取复权因子, 将保持旧复权价 (样例: %s)",
                        len(failed_syms), len(symbols), failed_syms[:10])
+        if require_complete:
+            raise RuntimeError(f"除权因子同步失败 {len(failed_syms)} 只，不能生成当日复权指标")
 
     if not all_dfs:
         return 0, []

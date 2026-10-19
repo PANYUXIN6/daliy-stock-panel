@@ -1,18 +1,22 @@
-name: CI
+name: CI and Preproduction Deploy
 
-# 持续集成: 后端全量测试 + 前端构建。
+# 持续集成: 后端全量测试 + 前端构建；main 检查成功后部署预发。
 # 与 release.yml 的分工: 这里不打包, 只守质量门 —
 # 后端含 Tier A 开放契约快照测试 (test_openapi_contract.py),
 # 开放面的任何变化都会在这里被拦下, 须有意识地更新快照。
 on:
   push:
-    branches: [main]
+    branches: [main, develop]
   pull_request:
-    branches: [main]
+    branches: [main, develop]
 
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  # main 发布不能被后续提交中途取消；develop/PR 仍可取消过时检查。
+  cancel-in-progress: ${{ github.event_name != 'push' || github.ref != 'refs/heads/main' }}
+
+permissions:
+  contents: read
 
 jobs:
   backend:
@@ -62,3 +66,33 @@ jobs:
 
       - name: 构建 (tsc + vite)
         run: pnpm build
+
+  deploy:
+    name: Deploy Preproduction
+    needs: [backend, frontend]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    environment:
+      name: preproduction
+      url: ${{ vars.DEPLOY_URL }}
+    concurrency:
+      group: deploy-preproduction
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: 发布已验证的 main 提交
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+          DEPLOY_PORT: ${{ vars.DEPLOY_PORT || '22' }}
+          DEPLOY_DIR: ${{ vars.DEPLOY_DIR || '/opt/stock-panel' }}
+          DEPLOY_URL: ${{ vars.DEPLOY_URL }}
+        run: bash scripts/ci_deploy.sh

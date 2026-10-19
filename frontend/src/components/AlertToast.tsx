@@ -1,3 +1,4 @@
+import { useCurrentUser } from '@/lib/auth'
 import { accountStorage } from '@/lib/sessionRuntime'
 import { useCallback, useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
@@ -103,6 +104,7 @@ const SOURCE_BADGE: Record<string, { label: string; cls: string }> = {
 
 // ===== 容器 — 挂在 Layout =====
 export function AlertToastContainer() {
+  const isAdmin = useCurrentUser()?.role === 'admin'
   const [items, setItems] = useState<Item[]>([])
   const navigate = useNavigate()
   const { data: prefs } = usePreferences()
@@ -121,7 +123,7 @@ export function AlertToastContainer() {
   // 点击通知 → 跳转监控中心 + 关闭当前通知
   const handleClick = (id: number) => {
     dismiss(id)
-    navigate('/monitor')
+    if (isAdmin) navigate('/monitor')
   }
 
   if (!items.length) return null

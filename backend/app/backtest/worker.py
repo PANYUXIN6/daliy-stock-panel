@@ -292,6 +292,8 @@ def run_worker_task(
     cancel_event: threading.Event | None = None,
 ) -> dict[str, Any]:
     """Run one complete task in a spawned process and wait for deterministic exit."""
+    from app.services.financial_demand import prepare_worker
+    prepare_worker(task, cancel_event, progress_cb)
     context = mp.get_context("spawn")
     events = context.Queue()
     process_cancel = context.Event()

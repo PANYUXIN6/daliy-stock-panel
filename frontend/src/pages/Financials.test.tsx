@@ -21,6 +21,21 @@ async function settle() {
   for (let i = 0; i < 5; i++) await act(async () => { await new Promise(r => setTimeout(r, 0)) })
 }
 
+it('财务库全空时仍可搜索并进入单股获取', async () => {
+  Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true })
+  mocks.status.mockResolvedValue({ available: false, tables: {} })
+  mocks.execution.mockResolvedValue({ last_sync: {}, syncing: false })
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  const host = document.createElement('div'); const root = createRoot(host)
+  try {
+    await act(async () => root.render(<MemoryRouter><QueryClientProvider client={qc}><Financials /></QueryClientProvider></MemoryRouter>))
+    await settle()
+    await act(async () => [...host.querySelectorAll('button')].find(b => b.textContent === '选择浦发银行')!.click())
+    expect(host.textContent).toContain('600000.SH 财务详情与 AI 分析')
+    expect(mocks.sync).not.toHaveBeenCalled()
+  } finally { await act(async () => root.unmount()); qc.clear() }
+})
+
 it('browses saved financial tables without provider capability and refreshes only local status', async () => {
   Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true })
   mocks.execution.mockReset().mockResolvedValue({ last_sync: {}, syncing: false, active_job_id: null })
@@ -56,8 +71,7 @@ it('采集服务离线时新浏览器仍可访问本地画像、搜索、报表�
     await act(async () => root.render(<MemoryRouter><QueryClientProvider client={qc}><Financials /></QueryClientProvider></MemoryRouter>))
     await settle()
     expect(host.textContent).toContain('75')
-    expect(host.textContent).toContain('采集执行状态不可用')
-    expect(host.textContent).toContain('同步记录不可用')
+    expect(host.textContent).toContain('已保存，按需更新')
     expect(host.textContent).toContain('历史分析报告')
     const pick = [...host.querySelectorAll('button')].find(node => node.textContent === '选择浦发银行')!
     await act(async () => pick.click())

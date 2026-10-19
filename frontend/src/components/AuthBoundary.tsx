@@ -34,24 +34,13 @@ export function AuthBoundary({ children }: { children: ReactNode }) {
   }, [accept])
   useEffect(() => {
     void check()
-    const interval = window.setInterval(() => void check(), 5000)
     const locked = () => { revision.current++; setStatus({ configured: true, authenticated: false, user: null, expires_at: null }) }
-    const focus = () => { if (!document.hidden) void check() }
     const storage = (event: StorageEvent) => { if (event.key === AUTH_CHANGED_KEY) { lockSession(); window.location.reload() } }
     window.addEventListener('session-locked', locked)
     window.addEventListener('session-check', check)
-    window.addEventListener('focus', focus)
     window.addEventListener('storage', storage)
-    document.addEventListener('visibilitychange', focus)
-    return () => { clearInterval(interval); window.removeEventListener('session-locked', locked); window.removeEventListener('session-check', check); window.removeEventListener('focus', focus); window.removeEventListener('storage', storage); document.removeEventListener('visibilitychange', focus) }
+    return () => { window.removeEventListener('session-locked', locked); window.removeEventListener('session-check', check); window.removeEventListener('storage', storage) }
   }, [check])
-  useEffect(() => {
-    if (!status?.authenticated || !status.expires_at) return
-    const remaining = new Date(status.expires_at).getTime() - Date.now()
-    if (!Number.isFinite(remaining)) return
-    const timeout = window.setTimeout(lockSession, Math.max(0, remaining))
-    return () => window.clearTimeout(timeout)
-  }, [status?.authenticated, status?.expires_at])
   if (!status?.authenticated || !status.user || status.user.must_change_password) {
     return <Auth key={status?.user?.id ?? 'anonymous'} status={status} error={error} retry={() => void check()} onAuthenticated={next => { revision.current++; if (mountedBusiness.current) window.location.reload(); else { identity.current = null; accept(next) } }} />
   }

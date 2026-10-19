@@ -331,8 +331,10 @@ class MonitorRuleEngine:
       - ★ cooldown 去重: 同一 (rule_id, symbol, event_type) 在冷却期内不重复触发
     """
 
-    def __init__(self, alert_handler: Callable[[dict], None] | None = None):
+    def __init__(self, alert_handler: Callable[[dict], None] | None = None,
+                 rule_filter: Callable[[dict], bool] | None = None):
         self._alert_handler = alert_handler
+        self._rule_filter = rule_filter
         self._rules: dict[str, dict] = {}  # rule_id → rule
         # (rule_id, symbol, event_type) → 上次触发时间戳(秒)。用于 cooldown 去重。
         self._last_fire: dict[tuple[str, str, str], float] = {}
@@ -479,7 +481,7 @@ class MonitorRuleEngine:
         """
         new_rules: dict[str, dict] = {}
         for r in rules:
-            if r.get("enabled") is not False:
+            if r.get("enabled") is not False and (self._rule_filter is None or self._rule_filter(r)):
                 new_rules[r["id"]] = r
         changed_ids = {
             rule_id
@@ -516,11 +518,14 @@ class MonitorRuleEngine:
             for key, value in list(self._abnormal_condition_state.items())
             if key[0] in active_ids
         }
+        active_strategies = {rule.get("strategy_id") for rule in new_rules.values() if rule.get("type") == "strategy"}
+        for strategy_id in set(self._latest_strategy_results) - active_strategies:
+            self.invalidate_strategy_state(strategy_id)
         logger.info("MonitorRuleEngine: 装载 %d 条规则", len(self._rules))
         self._rules_version += 1
 
     def add_rule(self, rule: dict) -> None:
-        if rule.get("enabled") is not False:
+        if rule.get("enabled") is not False and (self._rule_filter is None or self._rule_filter(rule)):
             self._rules[rule["id"]] = rule
         else:
             self._rules.pop(rule["id"], None)
@@ -1413,7 +1418,7 @@ class MonitorRuleEngine:
             if event_type not in notify_events or not symbols:
                 continue
             symbol_list = sorted(symbols)
-            if len(symbol_list) > 5:
+            if len(symbol_list) > 5 and rule.get("batch_events", True):
                 names = [
                     str(row_map.get(symbol, {}).get("name") or self._name_map.get(symbol, symbol))
                     for symbol in symbol_list

@@ -16,7 +16,7 @@ _OWNER_PREFIXES = (
     '/api/settings', '/api/capabilities', '/api/custom/assistant',
     '/api/factors', '/api/custom-signals',
 )
-_OWNER_READS = {'/api/data/status', '/api/financials/execution-status', '/api/screener/cached',
+_OWNER_READS = {'/api/data/status', '/api/financials/execution-status', '/api/financials/collection-options', '/api/screener/cached',
                 '/api/screener/cached-summary', '/api/screener/strategies'}
 _WRITE_PREFIXES = (
     '/api/kline', '/api/index', '/api/intraday', '/api/data', '/api/watchlist',

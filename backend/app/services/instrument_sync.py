@@ -45,7 +45,7 @@ def _flatten_instruments(items: list[dict]) -> list[dict]:
     return rows
 
 
-def _fetch_instruments_via_provider() -> list[dict] | None:
+def _fetch_instruments_via_provider(*, require_complete: bool = False) -> list[dict] | None:
     """若当前日K数据源不是 tickflow 且该 provider 提供 get_instruments, 用它拉标的维表。
 
     返回 flatten 行列表; 未命中(仍应走 tickflow)时返回 None。
@@ -65,7 +65,9 @@ def _fetch_instruments_via_provider() -> list[dict] | None:
         return None
     try:
         items = provider.get_instruments("stock") or []
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
+        if require_complete:
+            raise RuntimeError(f"数据源 {provider_name} 股票维表同步失败") from e
         logger.warning("provider %s get_instruments 失败: %s", provider_name, e)
         return None
     rows = _flatten_instruments(items)
@@ -73,12 +75,13 @@ def _fetch_instruments_via_provider() -> list[dict] | None:
     return rows
 
 
-def sync_instruments(data_dir: Path) -> int:
+def sync_instruments(data_dir: Path, *, require_complete: bool = False) -> int:
     """全量同步标的维表 → data/instruments/instruments.parquet。
 
     返回写入的行数。
     """
-    all_rows = _fetch_instruments_via_provider()
+    all_rows = (_fetch_instruments_via_provider(require_complete=True)
+                if require_complete else _fetch_instruments_via_provider())
     if all_rows is None:
         # 未命中非 tickflow provider → 走 tickflow 直连
         tf = get_client()
@@ -89,7 +92,11 @@ def sync_instruments(data_dir: Path) -> int:
                 if items:
                     all_rows.extend(_flatten_instruments(items))
                     logger.info("instruments %s: %d stocks", ex, len(items))
-            except Exception as e:  # noqa: BLE001 — 供应商单交易所失败独立留痕，其他交易所继续取数
+                elif require_complete:
+                    raise RuntimeError(f"{ex} 股票维表为空")
+            except Exception as e:
+                if require_complete:
+                    raise RuntimeError(f"{ex} 股票维表同步失败") from e
                 logger.warning("get_instruments(%s) failed: %s", ex, e, exc_info=True)
 
     if not all_rows:

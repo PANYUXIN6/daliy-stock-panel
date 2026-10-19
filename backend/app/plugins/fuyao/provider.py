@@ -46,6 +46,7 @@ import pyarrow.parquet as pq
 from app.data_providers.base import ProviderFinancialDataUnavailableError
 from app.data_providers.normalizer import DAILY_COLS, normalize_daily
 from app.indicators.pipeline import filter_halt_days
+from app.market_time import cn_today
 from app.plugins.fuyao import client as fuyao_client
 from app.plugins.fuyao.client import (
     FuyaoClient,
@@ -350,6 +351,7 @@ class FuyaoProvider:
         self._client: FuyaoClient | None = None
         self._dump_memo: dict[str, pl.DataFrame] = {}
         self._dump_path_memo: dict[str, Path] = {}
+        self._dump_checked_at: dict[str, float] = {}
 
     def close(self) -> None:  # loader.load_all 重建注册表时会对每个 provider 调 close
         if self._client is not None:
@@ -358,6 +360,7 @@ class FuyaoProvider:
             self._client = None
         self._dump_memo.clear()
         self._dump_path_memo.clear()
+        self._dump_checked_at.clear()
 
     def _get_client(self) -> FuyaoClient:
         if self._client is None:
@@ -365,11 +368,20 @@ class FuyaoProvider:
         return self._client
 
     # ---- dump 缓存 ----
+    def _expire_dump(self, dump_kind: str) -> None:
+        # collector 长驻；跨日和盘后重试必须重新查询 release，不能永久复用昨日 dump。
+        now = time.monotonic()
+        checked_at = self._dump_checked_at.setdefault(dump_kind, now)
+        if now - checked_at >= 300:
+            self._dump_path_memo.pop(dump_kind, None)
+            self._dump_memo.pop(dump_kind, None)
+
     def _ensure_dump_path(self, dump_kind: str, cache_prefix: str) -> Path:
         """确保最新 release 的 dump 已落盘, 返回缓存路径(大文件不整读进内存)。
 
         release 号取自预签名 URL 的 releases/<date>/ 路径; 新 release 落盘后清理旧版缓存。
         """
+        self._expire_dump(dump_kind)
         memo = self._dump_path_memo.get(dump_kind)
         if memo is not None and memo.exists():
             return memo
@@ -384,10 +396,12 @@ class FuyaoProvider:
                     old.unlink(missing_ok=True)
             logger.info("扶摇 dump %s(release %s)已下载: %s", dump_kind, release, dest.name)
         self._dump_path_memo[dump_kind] = dest
+        self._dump_checked_at[dump_kind] = time.monotonic()
         return dest
 
     def _ensure_dump(self, dump_kind: str, cache_prefix: str) -> pl.DataFrame:
         """小体量 dump(快照 10d / 因子)整读 + 进程内 memo, 避免重复打接口/读盘。"""
+        self._expire_dump(dump_kind)
         memo = self._dump_memo.get(dump_kind)
         if memo is not None:
             return memo
@@ -484,6 +498,19 @@ class FuyaoProvider:
         return records
 
     # ---- daily ----
+    def get_daily_halted_symbols(self, day: date) -> set[str]:
+        """仅从目标交易日的正式日线 dump 识别停牌；缺行不能被当成停牌。"""
+        dump = self._ensure_dump(_DAILY10_DUMP_KIND, "daily_k_10d")
+        required = {"date_ms", "thscode", "open_price", "high_price", "volume", "turnover"}
+        if not required.issubset(dump.columns):
+            return set()
+        halted = dump.filter(
+            (pl.col("date_ms") == _ms_of_date(day))
+            & (((pl.col("open_price") == 0) & (pl.col("high_price") == 0))
+               | ((pl.col("volume") == 0) & (pl.col("turnover") == 0)))
+        )
+        return set(halted["thscode"].drop_nulls().to_list())
+
     def get_daily(
         self,
         symbols: list[str],
@@ -734,6 +761,7 @@ class FuyaoProvider:
         end_time: datetime | None,
         asset_type: str = "stock",
         on_chunk_done: Callable[[int, int], None] | None = None,
+        require_complete: bool = False,
     ) -> pl.DataFrame:
         """A 股除权因子 → 内部契约(symbol/trade_date/ex_factor, 单事件比值非累积)
         + 事件明细列(dividend/bonus/allot/allot_price/prev_close, 可空):
@@ -759,6 +787,8 @@ class FuyaoProvider:
         try:
             events = self._load_adj_events(set(symbols), start_time, end_time)
         except FuyaoError as e:
+            if require_complete:
+                raise
             logger.warning("扶摇除权因子 dump 加载失败: %s", e)
             return pl.DataFrame(schema=schema)
         if events.is_empty():
@@ -1000,6 +1030,8 @@ class FuyaoProvider:
             ) from errors[0][1]
         return rows
 
+    financial_tables = ("income", "balance_sheet", "cash_flow", "metrics")
+
     def get_financials(
         self,
         table: str,
@@ -1007,13 +1039,14 @@ class FuyaoProvider:
         latest_only: bool = True,
         on_chunk_done: Callable[[int, int], None] | None = None,
         *, cancel_event: Event | None = None,
+        start_date: date | None = None, end_date: date | None = None,
     ) -> pl.DataFrame:
         """拉取财务数据, 映射为 canonical 列(symbol/period_end/announce_date/指标)。
 
         - 三大报表: 单股单请求, latest_only 决定最近 1 期还是 20 期季报;
-        - metrics: 指标接口为单股单期, 恒只拉最新一期(bps 由估值快照 pb_mrq 反推,
-          eps_basic 顺带取自利润表); 历史各期建议切回 TickFlow 同步补齐 —
-          报告期合并写入会让两源数据共存, 互不覆盖;
+        - 显式日期范围按报告期过滤，报表走 start/end；metrics 逐期查询已披露报告。
+        - 无范围的 metrics 仍只拉最新一期(bps 由估值快照 pb_mrq 反推,
+          eps_basic 顺带取自利润表)；当前估值反推 BPS 仅附于本次查询的最新期。
         - shares: 扶摇无股本接口, 恒返回空(已有存量靠合并写入保留)。
         """
         if table == "shares":
@@ -1030,8 +1063,10 @@ class FuyaoProvider:
                 "cash_flow": self._CASHFLOW_FIELD_MAP,
             }[table]
             return self._financial_statements(table, field_map, symbols, latest_only,
-                                              on_chunk_done, cancel_event)
+                                              on_chunk_done, cancel_event, start_date, end_date)
         if table == "metrics":
+            if start_date is not None and end_date is not None:
+                return self._financial_metrics_history(symbols, start_date, end_date, on_chunk_done, cancel_event)
             return self._financial_metrics(symbols, on_chunk_done, cancel_event)
         return pl.DataFrame()
 
@@ -1043,12 +1078,15 @@ class FuyaoProvider:
         latest_only: bool,
         on_chunk_done: Callable[[int, int], None] | None = None,
         cancel_event: Event | None = None,
+        start_date: date | None = None, end_date: date | None = None,
     ) -> pl.DataFrame:
         client = self._get_client()
         limit = 1 if latest_only else _FINANCIAL_HISTORY_PERIODS
         def fetch(sym: str, cancel_event: Event) -> list[dict]:
+            range_kwargs = ({"start": _ms_of_date(start_date), "end": _ms_of_date(end_date)}
+                            if start_date is not None and end_date is not None else {})
             rows = client.financial_statements(stmt, sym, limit=limit,
-                                               cancel_event=cancel_event)
+                                               cancel_event=cancel_event, **range_kwargs)
             normalized = []
             for r in rows:
                 row: dict = {
@@ -1075,6 +1113,66 @@ class FuyaoProvider:
         # 稀疏列(如仅银行有值的 financial_expense)前 100 行可能全空, 默认采样会
         # 推断成 Null 列, 后续数值 append 失败 → 全量扫描推断
         return pl.DataFrame(rows_out, infer_schema_length=None) if rows_out else pl.DataFrame()
+
+    def _financial_metrics_history(
+        self, symbols: list[str], start: date, end: date,
+        on_chunk_done=None, cancel_event: Event | None = None,
+    ) -> pl.DataFrame:
+        """只请求区间内实际披露过的季度；无日期指标沿用观察时间契约。"""
+        client = self._get_client()
+        income = self._financial_rows(
+            lambda sym, event: client.financial_statements(
+                "income", sym, start=_ms_of_date(start), end=_ms_of_date(end), cancel_event=event,
+            ), symbols, on_chunk_done, cancel_event=cancel_event,
+        )
+        reports = {}
+        latest_periods = {}
+        for sym, rows in zip(symbols, income, strict=True):
+            for row in rows:
+                period = _iso_of_ms(row.get("period_end_ms"))
+                quarter = _report_quarter(row.get("fiscal_period"))
+                if period and start.isoformat() <= period <= end.isoformat() and quarter:
+                    report = f"{row.get('fiscal_year')}-{quarter}"
+                    reports[f"{sym}@{report}"] = (sym, report, row)
+                    if end >= cn_today():
+                        latest_periods[sym] = max(latest_periods.get(sym, ""), period)
+        bps = self._derive_bps(sorted(latest_periods), cancel_event=cancel_event) if latest_periods else {}
+        missing = {}
+
+        def fetch(key: str, event: Event) -> list[dict]:
+            sym, report, _row = reports[key]
+            for attempt in range(2):
+                try:
+                    return client.financial_indicators(sym, report, cancel_event=event)
+                except FuyaoDataUnavailableError as exc:
+                    if attempt:
+                        missing[key] = f"报告期 {report} 连续两次确认缺数：{exc}"
+            return []
+
+        abilities = self._financial_rows(fetch, list(reports), on_chunk_done, cancel_event=cancel_event)
+        result = []
+        for (key, (sym, _report, income_row)), items in zip(reports.items(), abilities, strict=True):
+            if key in missing:
+                continue
+            row = {
+                "symbol": sym, "period_end": _iso_of_ms(income_row.get("period_end_ms")),
+                "announce_date": _iso_of_ms(income_row.get("report_date_ms")),
+                "eps_basic": _to_float(income_row.get("basic_eps")),
+                "date_basis": "observed", "disclosure_type": "formal", "roe_basis": "weighted_average",
+            }
+            if latest_periods.get(sym) == row["period_end"]:
+                row.update(bps=bps.get(sym), bps_basis="valuation_snapshot")
+            for ability in items:
+                for indicator in ability.get("indicators") or []:
+                    index_id = indicator.get("index_id")
+                    value = _to_float(indicator.get("value"))
+                    if index_id and value is not None:
+                        row[self._METRICS_FIELD_MAP.get(index_id, index_id)] = value
+            result.append(row)
+        frame = pl.DataFrame(result, infer_schema_length=None) if result else pl.DataFrame()
+        if missing:
+            raise ProviderFinancialDataUnavailableError(frame, missing)
+        return frame
 
     def _financial_metrics(
         self,

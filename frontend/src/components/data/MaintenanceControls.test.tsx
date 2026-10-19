@@ -106,35 +106,12 @@ async function input(element: HTMLInputElement, value: string) {
   })
 }
 
-it('在数据维护中恢复已有财务任务，可取消且不会另启同步', async () => {
-  mocks.financialExecutionStatus.mockResolvedValue({ last_sync: {}, syncing: true, active_job_id: 'existing-financial' })
-  await render(<FinancialSyncPanel hasCap onJobStart={vi.fn()} />)
-  expect(host.textContent).toContain('40%')
-  expect(button('更新利润表').disabled).toBe(true)
-  await act(async () => button('取消任务').click())
-  expect(mocks.pipelineJobCancel).toHaveBeenCalledWith('existing-financial')
-  expect(mocks.financialSync).not.toHaveBeenCalled()
-})
-
-it.each([['更新利润表', 'income'], ['继续未完成', 'unfinished']])('财务入口 %s 只更新利润表范围', async (label, table) => {
-  const onJobStart = vi.fn()
-  await render(<FinancialSyncPanel hasCap onJobStart={onJobStart} />)
-  expect(host.textContent).not.toContain('核心指标')
-  expect(host.textContent).not.toContain('资产负债表')
-  expect(host.textContent).not.toContain('现金流量表')
-  await act(async () => button(label).click())
-  await settle()
-  expect(mocks.financialSync).toHaveBeenCalledWith(table)
-  expect(mocks.collectionSyncCheck).toHaveBeenCalledWith({ kind: 'financial', table })
-  expect(onJobStart).toHaveBeenCalledWith('financial-new')
-  expect(mocks.pipelineJob).toHaveBeenCalledWith('financial-new')
-})
-
-it('财务采集能力不可用时仍展示本地画像，并禁用采集', async () => {
-  mocks.financialStatus.mockResolvedValue({ tables: { income: { rows: 12, symbols: 1 } }, syncing: false, active_job_id: null })
-  await render(<FinancialSyncPanel hasCap={false} onJobStart={vi.fn()} />)
+it('财务维护展示共享画像并引导按股获取，不再提供全量任务', async () => {
+  mocks.financialStatus.mockResolvedValue({ tables: { income: { rows: 12, symbols: 1 } } })
+  await render(<FinancialSyncPanel />)
   expect(host.textContent).toContain('12 条')
-  expect(button('更新利润表').disabled).toBe(true)
+  expect(host.querySelector('a')?.getAttribute('href')).toBe('/financials')
+  expect(host.querySelectorAll('button')).toHaveLength(0)
   expect(mocks.financialSync).not.toHaveBeenCalled()
 })
 
@@ -277,26 +254,27 @@ it.each([['financial:all', false], ['pipeline', true]])('后台任务 %s 的行�
   expect(host.textContent?.includes('数据同步期间暂停行情采集')).toBe(paused)
 })
 
-it('数据页保留盘前自动更新时间和状态，盘后数据由行情模块手动启动', async () => {
+it('数据页展示盘前与交易日盘后自动同步时间，手动维护仍可用', async () => {
   mocks.capabilities.mockResolvedValue({ capabilities: { 'kline.daily.batch': true, 'adj_factor': true, 'kline.minute.batch': true } })
   mocks.preferences.mockResolvedValue({
     instruments_schedule: { hour: 9, minute: 10 },
-    pipeline_schedule: { hour: 15, minute: 35 },
+    pipeline_schedule: { hour: 16, minute: 0 },
   })
   mocks.dataStatus.mockResolvedValue({
     instruments: { rows: 1 }, storage: {},
     last_instruments_run: '2026-10-09T09:10:00+08:00',
     next_instruments_run: '2026-10-12T09:10:00+08:00',
     last_pipeline_run: '2026-10-09T15:40:00+08:00',
-    next_pipeline_run: '2026-10-12T15:35:00+08:00',
+    next_pipeline_run: '2026-10-12T16:00:00+08:00',
   })
   await render(<Data />)
   const heading = [...host.querySelectorAll('h3')].find(node => node.textContent === '同步安排')!
   const card = heading.parentElement!.parentElement!
   expect(card.textContent).toContain('09:10')
   expect(card.textContent).toContain(formatScheduleTimePart('2026-10-09T15:40:00+08:00'))
-  expect(card.textContent).toContain('盘后 · 手动同步')
-  expect(card.textContent).not.toContain('15:35')
+  expect(card.textContent).toContain('交易日 · 盘后自动同步')
+  expect(card.textContent).toContain('16:00 北京时间')
+  expect(card.textContent).toContain('当天行情与指标核验通过后')
   for (const [title, label] of [['个股维表', '自动'], ['日 K', '随同步'], ['除权因子', '随同步'], ['Enriched', '随同步'], ['指数', '随同步'], ['分钟 K', '不随同步'], ['市场环境', '不随同步']]) {
     const cardTitle = [...host.querySelectorAll('h3')].find(node => node.textContent === title)!
     expect(cardTitle.parentElement!.textContent).toContain(label)
@@ -316,7 +294,6 @@ it('数据页保留盘前自动更新时间和状态，盘后数据由行情模�
 
 it.each([
   ['同步分钟历史数据', { kind: 'minute_batch', days: 5 }, 'syncMinute', [5, false], 'minutes-batch-new'],
-  ['同步财务数据', { kind: 'financial', table: 'all' }, 'financialSync', ['all'], 'financial-new'],
   ['同步板块分类', { kind: 'classifications' }, 'extDataPresetsSync', [], 'classifications-new'],
 ] as const)('大模块入口 %s 只提交一个后台任务并跟踪进度', async (label, request, method, args, jobId) => {
   mocks.capabilityMatrix.mockResolvedValue({ capabilities: [{ id: 'daily', usable: true }, { id: 'minute', usable: true }, { id: 'financial', usable: true }] })
@@ -329,7 +306,7 @@ it.each([
   expect(mocks.pipelineJob).toHaveBeenCalledWith(jobId)
   expect(mocks.extDataPresetFetch).not.toHaveBeenCalled()
   expect(mocks.syncMinuteSingle).not.toHaveBeenCalled()
-  for (const title of ['同步行情与基础数据', '同步分钟历史数据', '同步财务数据', '同步板块分类']) {
+  for (const title of ['同步行情与基础数据', '同步分钟历史数据', '同步板块分类']) {
     expect(button(title).disabled).toBe(true)
   }
 })
@@ -359,7 +336,7 @@ it('模块重复确认期间全页同步互锁，取消不采集，确认仅提�
   await act(async () => button('同步板块分类').click())
   await settle()
   expect(button('同步分钟历史数据').disabled).toBe(true)
-  expect(button('同步财务数据').disabled).toBe(true)
+  expect([...host.querySelectorAll('button')].some(item => item.textContent === '同步财务数据')).toBe(false)
   expect(button('手动获取行情').disabled).toBe(true)
   expect(button('更新五档盘口').disabled).toBe(true)
   await act(async () => dialogButton('取消').click())
@@ -382,7 +359,6 @@ it('大模块显示后台冲突错误，失败后允许重新提交', async () =
 })
 
 it.each([
-  ['同步财务数据', 'financial:all', 'succeeded', ['financials', 'income', '600000.SH']],
   ['同步板块分类', 'classifications', 'failed', ['ext-data-rows', 'ext_gn_ths']],
 ] as const)('模块 %s 终态刷新对应本地缓存，保留已分块落盘的失败结果', async (label, requestKey, status, affectedKey) => {
   mocks.capabilityMatrix.mockResolvedValue({ capabilities: [{ id: 'financial', usable: true }] })
@@ -393,24 +369,23 @@ it.each([
   await act(async () => button(label).click())
   await settle()
   expect(qc.getQueryState(affectedKey)?.isInvalidated).toBe(true)
-  if (requestKey.startsWith('financial:')) expect(qc.getQueryState(['kline-batch', 'unaffected'])?.isInvalidated).toBe(false)
 })
 
 it('环境计算明确随手动全量同步执行，并保留原范围偏好开关', async () => {
   await render(<RegimeConfigCard />)
-  expect(host.textContent).toContain('随全量同步计算')
-  expect(host.textContent).toContain('点击数据页“同步行情与基础数据”时一并增量计算环境状态')
+  expect(host.textContent).toContain('随手动同步计算')
+  expect(host.textContent).toContain('此开关控制手动“同步行情与基础数据”时是否一并计算')
   await act(async () => host.querySelector<HTMLButtonElement>('[role="checkbox"]')!.click())
   await settle()
   expect(mocks.updatePipelineRegimeEnabled).toHaveBeenCalledWith(true)
 })
 
-it('盘口配置保留盘中轮询间隔，盘后改为手动更新说明', async () => {
+it('盘口配置保留盘中轮询间隔，说明盘后自动更新与手动补采', async () => {
   mocks.capabilities.mockResolvedValue({ capabilities: { 'depth5.batch': true } })
   mocks.preferences.mockResolvedValue({ depth_polling_interval: 10, depth_finalize_time: { hour: 15, minute: 2 } })
   await render(<DepthConfigContent />)
-  expect(host.textContent).toContain('盘后手动更新')
-  expect(host.textContent).toContain('手动拉取最终盘口并定版')
+  expect(host.textContent).toContain('盘后自动更新')
+  expect(host.textContent).toContain('点击“更新五档盘口”手动补采')
   const intervals = host.querySelectorAll<HTMLInputElement>('input[type="number"]')
   expect(intervals).toHaveLength(1)
   await input(intervals[0], '30')
@@ -499,20 +474,17 @@ function dialogButton(text: string) {
 }
 const duplicate = { requires_confirmation: true, message: '相同范围已经同步，是否重新拉取？', last_synced_at: null }
 
-it.each(['financial_data_provider', 'adj_factor_provider', 'minute_data_provider'] as const)(
+it.each(['adj_factor_provider', 'minute_data_provider'] as const)(
   '维护入口切换 %s 后旧确认失效，重新操作会再次检查', async providerField => {
     mocks.preferences.mockResolvedValue({ [providerField]: 'provider_a' })
     mocks.collectionSyncCheck.mockResolvedValue(duplicate)
-    const financial = providerField === 'financial_data_provider'
     const adj = providerField === 'adj_factor_provider'
-    await render(financial
-      ? <FinancialSyncPanel hasCap onJobStart={vi.fn()} />
-      : adj
+    await render(adj
         ? <AdjFactorSyncConfig hasCap providerDisplay="测试源" />
         : <MinuteSyncConfig hasCap />)
-    if (!financial && !adj) await input(host.querySelector<HTMLInputElement>('input[placeholder="600000.SH"]')!, '600000.SH')
-    const label = financial ? '更新利润表' : adj ? '全历史同步除权因子' : '获取单标的'
-    const collect = financial ? mocks.financialSync : adj ? mocks.pipelineAdjFactorRun : mocks.syncMinuteSingle
+    if (!adj) await input(host.querySelector<HTMLInputElement>('input[placeholder="600000.SH"]')!, '600000.SH')
+    const label = adj ? '全历史同步除权因子' : '获取单标的'
+    const collect = adj ? mocks.pipelineAdjFactorRun : mocks.syncMinuteSingle
     await act(async () => button(label).click())
     await settle()
     expect(document.querySelector('[role="dialog"]')).not.toBeNull()
@@ -530,22 +502,6 @@ it.each(['financial_data_provider', 'adj_factor_provider', 'minute_data_provider
     expect(collect).toHaveBeenCalledOnce()
   },
 )
-
-it('财务重复同步取消不提交，确认仍只更新所选财务表', async () => {
-  mocks.collectionSyncCheck.mockResolvedValue(duplicate)
-  await render(<FinancialSyncPanel hasCap onJobStart={vi.fn()} />)
-  const income = button('更新利润表')
-  await act(async () => income.click())
-  await settle()
-  expect(income.disabled).toBe(true)
-  await act(async () => dialogButton('取消').click())
-  expect(mocks.financialSync).not.toHaveBeenCalled()
-  await act(async () => income.click())
-  await settle()
-  await act(async () => dialogButton('重新拉取').click())
-  await settle()
-  expect(mocks.financialSync).toHaveBeenCalledExactlyOnceWith('income')
-})
 
 it('除权独立入口重复确认后沿用任务机制，检查错误不会发起采集', async () => {
   mocks.collectionSyncCheck.mockResolvedValueOnce(duplicate)
@@ -706,16 +662,14 @@ it('清库确认默认聚焦取消，约束键盘焦点，Escape 关闭并恢复
 })
 
 
-it('财务执行状态离线时保留本地画像，明确提示且禁止提交采集', async () => {
+it('财务维护只查询本地画像，采集服务离线也保留浏览入口', async () => {
   mocks.financialStatus.mockResolvedValue({ available: true, tables: { income: { rows: 24, symbols: 3 } } })
   mocks.financialExecutionStatus.mockRejectedValue(new Error('采集服务未连接'))
-  await render(<FinancialSyncPanel hasCap onJobStart={vi.fn()} />)
+  await render(<FinancialSyncPanel />)
   expect(host.textContent).toContain('24 条')
-  expect(host.textContent).toContain('采集执行状态不可用')
-  expect(button('更新利润表').disabled).toBe(true)
+  expect(mocks.financialExecutionStatus).not.toHaveBeenCalled()
   expect(mocks.financialSync).not.toHaveBeenCalled()
 })
-
 
 it('清库请求进行中禁止 Escape 或取消关闭确认框', async () => {
   let resolve: (result: { deleted_files: number }) => void = () => {}

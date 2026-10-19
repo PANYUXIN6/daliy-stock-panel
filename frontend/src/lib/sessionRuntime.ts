@@ -20,7 +20,7 @@ export function lockSession() {
   window.dispatchEvent(new Event('session-locked'))
 }
 export function announceSessionChange() {
-  try { localStorage.setItem(AUTH_CHANGED_KEY, `${Date.now()}:${Math.random()}`) } catch { /* 存储禁用时仍由身份轮询同步 */ }
+  try { localStorage.setItem(AUTH_CHANGED_KEY, `${Date.now()}:${Math.random()}`) } catch { /* 存储禁用时由后续业务请求检测会话变化 */ }
 }
 export const accountStorage = {
   getItem(key: string): string | null { try { return owner && !blocked ? localStorage.getItem(`tf-user:${owner}:${key}`) : null } catch { return null } },

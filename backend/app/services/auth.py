@@ -63,7 +63,9 @@ def _username(value: str) -> str:
 
 
 def _role(role: str, expires: str | None) -> tuple[str, str | None]:
-    if role not in ("admin", "pro", "guest"):
+    if role == "admin":
+        raise AuthError("管理员账号唯一，不可新增或授予管理员权限", 409)
+    if role not in ("pro", "guest"):
         raise AuthError("无效角色")
     if role != "pro":
         return role, None
@@ -164,6 +166,15 @@ class AuthStore:
         ):
             raise AuthError("仅管理员可管理账号", 403)
 
+    @staticmethod
+    def _managed_user(db, uid):
+        row = db.execute("SELECT * FROM users WHERE id=?", (uid,)).fetchone()
+        if not row:
+            raise AuthError("账号不存在", 404)
+        if row["role"] == "admin":
+            raise AuthError("管理员账号受保护，不可修改权限、禁用、重置密码或强制下线", 409)
+        return row
+
     def bootstrap(self, username: str, password: str) -> dict | None:
         with self._connection() as db:
             if db.execute("SELECT 1 FROM users LIMIT 1").fetchone():
@@ -234,24 +245,12 @@ class AuthStore:
     def update_user(self, uid, changes, *, actor_id=None):
         with self._connection(True) as db:
             self._admin(db, actor_id)
-            row = db.execute("SELECT * FROM users WHERE id=?", (uid,)).fetchone()
-            if not row:
-                raise AuthError("账号不存在", 404)
+            row = self._managed_user(db, uid)
             role, expires = _role(
                 changes.get("role", row["role"]),
                 changes.get("pro_expires_on", row["pro_expires_on"]),
             )
             active = changes.get("is_active", bool(row["is_active"]))
-            if (
-                row["role"] == "admin"
-                and row["is_active"]
-                and (role != "admin" or not active)
-                and db.execute(
-                    "SELECT COUNT(*) FROM users WHERE role='admin' AND is_active=1"
-                ).fetchone()[0]
-                <= 1
-            ):
-                raise AuthError("不能禁用或降级最后一个有效管理员", 409)
             db.execute(
                 "UPDATE users SET role=?,pro_expires_on=?,is_active=? WHERE id=?",
                 (role, expires, active, uid),
@@ -264,8 +263,7 @@ class AuthStore:
         hashed = _password_hash(password)
         with self._connection(True) as db:
             self._admin(db, actor_id)
-            if not db.execute("SELECT 1 FROM users WHERE id=?", (uid,)).fetchone():
-                raise AuthError("账号不存在", 404)
+            self._managed_user(db, uid)
             db.execute(
                 "UPDATE users SET password_hash=?,must_change_password=1 WHERE id=?", (hashed, uid)
             )
@@ -356,8 +354,7 @@ class AuthStore:
     def revoke_user_session(self, uid, *, actor_id=None):
         with self._connection(True) as db:
             self._admin(db, actor_id)
-            if not db.execute("SELECT 1 FROM users WHERE id=?", (uid,)).fetchone():
-                raise AuthError("账号不存在", 404)
+            self._managed_user(db, uid)
             db.execute("DELETE FROM sessions WHERE user_id=?", (uid,))
 
     def change_password(self, token, old_password, new_password):

@@ -1,9 +1,9 @@
 import { useState } from 'react'
-import { RefreshCw, Loader2, X, Search, FileText, Database, Clock, ChartPie } from 'lucide-react'
+import { RefreshCw, Loader2, X, Search, FileText, Database, ChartPie } from 'lucide-react'
 import { useQueryClient } from '@tanstack/react-query'
 import { PageHeader } from '@/components/PageHeader'
 import { EmptyState } from '@/components/EmptyState'
-import { useFinancialStatus, useFinancialExecutionStatus } from '@/lib/useFinancials'
+import { useFinancialStatus } from '@/lib/useFinancials'
 import { StockFinancialSearch } from '@/components/financials/StockFinancialSearch'
 import { StockFinancialDetail } from '@/components/financials/StockFinancialDetail'
 import { ReportHistoryPanel } from '@/components/financials/ReportHistoryPanel'
@@ -30,7 +30,6 @@ const TABLE_ICON: Record<string, typeof FileText> = {
 export function Financials() {
   const qc = useQueryClient()
   const { data: status, isLoading, isFetching, error } = useFinancialStatus()
-  const execution = useFinancialExecutionStatus()
   // 选中的个股(模糊搜索结果);null 时显示搜索引导
   const [selected, setSelected] = useState<{ symbol: string; name: string } | null>(null)
   const { last: lastStock, remember: rememberStock } = useLastStock('financials')
@@ -41,7 +40,6 @@ export function Financials() {
 
   const tables = status?.tables ?? {}
   const available = Object.values(tables).some(table => table.rows > 0)
-  const lastSync = execution.data?.last_sync ?? {}
 
   return (
     <>
@@ -53,7 +51,7 @@ export function Financials() {
             <LastStockChip stock={lastStock} onSelect={pick} />
             <button
               type="button"
-              className="inline-flex items-center gap-1.5 rounded-btn border border-border bg-elevated px-3 py-1.5 text-xs text-secondary hover:text-foreground disabled:opacity-50"
+              className="shrink-0 whitespace-nowrap inline-flex items-center gap-1.5 rounded-btn border border-border bg-elevated px-3 py-1.5 text-xs text-secondary hover:text-foreground disabled:opacity-50"
               onClick={() => void qc.invalidateQueries({ queryKey: ['financials'] })}
               disabled={isFetching}
             >
@@ -65,14 +63,12 @@ export function Financials() {
 
       <div className="px-3 sm:px-8 py-6 space-y-6 max-w-7xl">
         {error && <p role="alert" className="text-xs text-danger">{error.message}</p>}
-        {execution.isError && <p role="status" className="text-xs text-warning">采集执行状态不可用，本地财务数据仍可浏览。</p>}
         {!isLoading && available && (
           <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 xl:grid-cols-5 gap-3">
             {Object.entries(TABLE_LABELS).map(([key, label]) => {
               const info = tables[key]
               const TIcon = TABLE_ICON[key] ?? Database
               const hasData = (info?.rows ?? 0) > 0
-              const lsTime = lastSync[key]
               return (
                 <div key={key} className={`rounded-card border p-3.5 flex flex-col ${hasData ? 'border-border bg-surface' : 'border-dashed border-border/60 bg-elevated/20'}`}>
                   <div className="flex items-center gap-1.5">
@@ -85,8 +81,7 @@ export function Financials() {
                   </div>
                   <div className="text-[11px] text-muted mt-0.5">{fmtBigNum(info?.symbols ?? 0)} 只标的</div>
                   <div className="mt-auto pt-2 border-t border-border/40 text-[10px] text-muted flex items-center gap-1">
-                    <Clock className="h-2.5 w-2.5 shrink-0" />
-                    {execution.isError ? '同步记录不可用' : lsTime ? new Date(lsTime).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) : execution.isLoading ? '读取同步记录…' : '尚未采集'}
+                    {hasData ? '已保存，按需更新' : '搜索个股后获取'}
                   </div>
                 </div>
               )
@@ -97,12 +92,6 @@ export function Financials() {
         {isLoading ? (
           <div className="flex items-center justify-center py-16">
             <Loader2 className="h-5 w-5 animate-spin text-muted" />
-          </div>
-        ) : !available ? (
-          <div className="rounded-card border border-dashed border-border bg-surface px-6 py-14 text-center">
-            <Database className="mx-auto h-8 w-8 text-muted" />
-            <div className="mt-3 text-sm text-secondary">暂无财务数据</div>
-            <div className="mt-1 text-xs text-muted">后台尚未采集财务数据</div>
           </div>
         ) : (
           <>
@@ -133,7 +122,7 @@ export function Financials() {
                   <div className="w-full max-w-xl">
                     <StockFinancialSearch onSelect={pick} />
                   </div>
-                  <div className="text-[11px] text-muted">支持股票代码或名称模糊匹配，如 600000 / 浦发</div>
+                  <div className="text-[11px] text-muted">支持股票代码或名称模糊匹配，如 600000 / 浦发。缺少财务数据时可按股获取。</div>
                 </div>
               )}
             </div>
@@ -152,7 +141,7 @@ export function Financials() {
             </div>
 
             {/* AI 历史分析报告 */}
-            {available && <ReportHistoryPanel />}
+            <ReportHistoryPanel />
           </>
         )}
       </div>

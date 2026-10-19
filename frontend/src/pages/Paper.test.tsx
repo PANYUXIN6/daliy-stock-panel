@@ -3,7 +3,8 @@ import { act } from 'react'
 import { createRoot } from 'react-dom/client'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
-import type { PaperCompareRow } from '@/lib/api'
+import type { PaperCompareRow, User } from '@/lib/api'
+import { AuthContext } from '@/lib/auth'
 import { QK } from '@/lib/queryKeys'
 import { activateSession, accountStorage } from '@/lib/sessionRuntime'
 import { Paper } from './Paper'
@@ -30,7 +31,7 @@ afterEach(async () => {
   for (const cleanup of mounted.splice(0)) await cleanup()
 })
 
-async function renderPaper(accounts: PaperCompareRow[] = []) {
+async function renderPaper(accounts: PaperCompareRow[] = [], role: User['role'] = 'admin') {
   const host = document.createElement('div')
   host.id = 'root'
   document.body.append(host)
@@ -42,7 +43,7 @@ async function renderPaper(accounts: PaperCompareRow[] = []) {
     client.clear()
     host.remove()
   })
-  await act(async () => root.render(<QueryClientProvider client={client}><Paper /></QueryClientProvider>))
+  await act(async () => root.render(<AuthContext.Provider value={{ id: 'alice', role } as User}><QueryClientProvider client={client}><Paper /></QueryClientProvider></AuthContext.Provider>))
   return { host, client }
 }
 
@@ -78,6 +79,17 @@ it('batch strategies retain automatic exits after adding and removing a monitor 
   expect(mocks.paperArenaCreate).toHaveBeenCalledWith(expect.objectContaining({
     sources: [expect.objectContaining({ match_kind: 'strategy', match_id: 'strategy-a', side: 'auto' })],
   }))
+})
+
+it.each(['guest', 'pro'] as const)('hides monitor sources and skips rule queries for %s', async role => {
+  const { client } = await renderPaper([], role)
+  await act(async () => { client.setQueryData(QK.screenerStrategies('any', 'all'), await mocks.screenerStrategies()) })
+  await click(document, '批量创建账户')
+  const dialog = document.querySelector('[role="dialog"]')!
+  expect([...dialog.querySelectorAll('button')].some(b => b.textContent === '监控规则')).toBe(false)
+  expect(mocks.monitorRulesList).not.toHaveBeenCalled()
+  await click(dialog, '添加')
+  expect(dialog.querySelector('[title="strategy-a"]')).not.toBeNull()
 })
 
 it.each(['buy', 'sell'] as const)('mixed batch uses automatic strategy direction and fixed %s monitor direction', async side => {

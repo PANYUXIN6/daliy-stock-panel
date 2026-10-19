@@ -10,6 +10,8 @@ vi.mock('@/lib/useFinancials', () => {
   return {
     useFinancialMetrics: query, useFinancialIncome: query, useFinancialBalanceSheet: query,
     useFinancialCashFlow: query, useFinancialShares: query,
+    useFinancialCollectionOptions: () => ({ data: { tables: [] } }),
+    useFinancialFetch: () => ({ isPending: false, mutate: vi.fn() }),
   }
 })
 vi.mock('@/lib/aiReportStore', () => ({ startAnalysis: vi.fn(), findLatestHistoryReport: vi.fn(), openHistoryReport: vi.fn() }))

@@ -18,7 +18,14 @@ class UserRuntimeRegistry:
         with self._lock:
             existing = self._runtimes.get(user.id)
             if existing is not None:
+                role_changed = existing.user.role != user.role
                 existing.user = user
+                if role_changed:
+                    from app.strategy import monitor_rules
+                    with user_scope(user):
+                        existing.monitor_engine.set_rules(monitor_rules.load_all(self.state.repo.store.data_dir))
+                        existing.monitor_engine.invalidate_strategy_state()
+                        existing.strategy_monitor.stop_all()
                 return existing
             from app.services.screener import ScreenerService
             from app.services.sector_monitor import SectorMonitorService
@@ -32,13 +39,16 @@ class UserRuntimeRegistry:
                     declarative_dirs=[user_data_dir(root) / 'strategies' / 'composite'],
                     override_loader=lambda sid: config.load_override(root, sid),
                 )
-                monitor = MonitorRuleEngine()
+                runtime = SimpleNamespace(user=user)
+                monitor = MonitorRuleEngine(rule_filter=lambda rule: monitor_rules.runtime_rule_allowed(rule, runtime.user.role))
+                paper_monitor = MonitorRuleEngine()
                 sector = SectorMonitorService(self.state.repo)
-                monitor.set_strategy_engine(engine)
-                monitor.set_data_dir(root)
+                for rule_engine in (monitor, paper_monitor):
+                    rule_engine.set_strategy_engine(engine)
+                    rule_engine.set_data_dir(root)
+                    rule_engine.set_history_loader(ScreenerService(self.state.repo)._load_enriched_history)
+                    rule_engine.set_history_loader_etf(ScreenerService(self.state.repo, asset_type='etf')._load_enriched_history)
                 monitor.set_sector_monitor_service(sector)
-                monitor.set_history_loader(ScreenerService(self.state.repo)._load_enriched_history)
-                monitor.set_history_loader_etf(ScreenerService(self.state.repo, asset_type='etf')._load_enriched_history)
                 from app.services import preferences
                 monitor_rules.migrate_strategy_monitors(
                     root,
@@ -48,9 +58,12 @@ class UserRuntimeRegistry:
                 monitor.set_rules(monitor_rules.load_all(root))
                 from app.services.mining_manager import MiningJobManager
                 mining_manager = MiningJobManager(root)
-                runtime = SimpleNamespace(user=user, strategy_engine=engine, monitor_engine=monitor,
-                                          mining_manager=mining_manager,
-                                          sector_monitor_service=sector, strategy_monitor=StrategyMonitorService())
+                runtime.strategy_engine = engine
+                runtime.monitor_engine = monitor
+                runtime.paper_monitor_engine = paper_monitor
+                runtime.mining_manager = mining_manager
+                runtime.sector_monitor_service = sector
+                runtime.strategy_monitor = StrategyMonitorService()
                 self._runtimes[user.id] = runtime
                 return runtime
 
@@ -60,6 +73,7 @@ class UserRuntimeRegistry:
         for runtime in runtimes:
             runtime.strategy_engine.clear_realtime_matrices()
             runtime.monitor_engine.invalidate_strategy_state()
+            runtime.paper_monitor_engine.invalidate_strategy_state()
 
     def recover_interrupted(self):
         for runtime in self.active():

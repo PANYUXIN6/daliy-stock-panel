@@ -270,7 +270,7 @@ def test_manual_pipeline_holds_capacity_through_refresh_off_event_loop(capacity,
     assert limiter.in_use == 0
 
 
-@pytest.mark.parametrize("request_key,fail,expected", [("pipeline", False, True), ("pipeline", True, False), ("adj_factor", False, False)])
+@pytest.mark.parametrize("request_key,fail,expected", [("pipeline", False, True), ("pipeline", True, False), ("adj_factor", False, False), ("postmarket:2026-10-16", False, True)])
 def test_weekly_mining_follows_only_successful_manual_pipeline(capacity, monkeypatch, tmp_path, request_key, fail, expected):
     from app.api import pipeline
 

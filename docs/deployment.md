@@ -2,6 +2,68 @@
 
 本项目的几种运行方式，按推荐程度排序。配置项详解见 [configuration.md](./configuration.md)。
 
+## 本项目的环境与发布约定
+
+`develop` 用于本地开发和测试，`main` 对应服务器预发。改动在 `develop` 验证后合入 `main`，GitHub CI 的后端测试与前端构建通过后，自动从这次提交构建并发布同一版本的 web 与 collector。
+
+### 代码发布
+
+更新代码或镜像时保留目标环境的整个 `data/`、`.env`、`tiers.yaml` 和 `docker-compose.override.yml`。源码发布包只包含版本控制内的代码；其中 `tiers.yaml` 虽然受 Git 跟踪，仍须保留远端配置，不能直接用本地版本覆盖。需要调整配置结构时，应单独说明变更，并在目标环境迁移已有值。
+
+账号、会话、自选、个人策略、通知、报告、回测与挖掘产物，以及数据源、AI、采集开关和其他配置，各自由本地和远端维护。首次部署的数据迁移不代表后续继续同步这些内容。
+
+### GitHub 自动发布预发
+
+入口在 [`.github/workflows/ci.yml`](../.github/workflows/ci.yml)。合并到 `main` 后产生的 push 会先执行后端测试和前端构建，全部成功后才进入 `preproduction` 部署任务；PR、`develop` 及失败检查均不会触发部署。直接推送 `main` 也会触发同一流程。部署任务检查待发布 SHA 是否仍为 `main` 最新提交，跳过过时任务；预发发布串行执行，不因后续提交自动取消正在运行的发布。
+
+在 GitHub 仓库的 **Settings → Environments → preproduction** 设置部署分支为仅 `main`，并保存以下 Environment secrets。服务器使用独立 SSH 部署密钥，不能把私钥或登录密码写入工作流。
+
+| Secret | 内容 |
+| --- | --- |
+| `DEPLOY_HOST` | 服务器 IP 或主机名 |
+| `DEPLOY_USER` | 已获准运行 Docker 和管理部署目录的 SSH 用户 |
+| `DEPLOY_SSH_KEY` | 该服务器部署专用私钥 |
+| `DEPLOY_KNOWN_HOSTS` | 通过可信连接核验后的 SSH 主机公钥记录，严格校验，不在运行时自动接受新指纹 |
+
+同一 Environment 的 Variables 为 `DEPLOY_DIR`（默认 `/opt/stock-panel`）、`DEPLOY_PORT`（默认 `22`）、`DEPLOY_URL`（公网 HTTPS 地址，用于额外健康检查）。目标机需已完成双服务初始化，并具备 Bash、Python 3.12、OpenSSH、Docker Compose 和 `flock`；运行根目录必须已有 `.env`、`tiers.yaml`、`docker-compose.yml`、`docker-compose.override.yml` 与运行数据。密钥须能以非交互方式登录，服务器需启用公钥认证。
+
+[CI 入口](../scripts/ci_deploy.sh) 只上传 `git archive` 生成的本次提交源码。[服务器入口](../scripts/deploy_preproduction.sh) 将其放入运行根目录的 `releases/<SHA>/`，先构建新镜像，再用该版本的 Compose 定义、远端已有覆盖配置和精确镜像版本启动双服务。数据目录、环境文件及挂载配置始终从远端运行根解析，镜像版本覆盖不会改写原部署配置。首次自动发布可接管现有手动部署；后续版本通过 `current` 指向已验收的源码目录。发布不会上传金融数据或个人数据。
+
+新镜像继承远端现有 Compose 中 web 服务已解析的全部 `build.args`，包括 `BACKEND_EXTRAS`、`INCLUDE_STOCKSDK` 和镜像源选项；发布脚本不另行覆盖这些设置。
+
+服务器文件锁覆盖发布和恢复过程。切换前若检测到未完成的持久化采集／挖掘任务，或仍运行的独立策略计算 worker，发布会失败，待任务结束后重跑 GitHub 工作流。进程内的信号／因子回测及尚未启动 worker 的排队任务不在这项检查范围内，发布前应结束这些任务；状态检查与实际切换之间也存在短暂竞态。若需要在持续运行研究任务时发布，应增加 collector 的维护准入机制，当前脚本不提供这项能力。
+
+更新涉及两服务重建，会有短暂不可用，不提供零停机保证。健康验收要求两个容器正常、镜像正确、collector 未暴露宿主端口，并且 web 的 `/health` 显示已连接 collector；失败时尝试按旧版本 Compose 和旧镜像恢复双服务。成功后才更新 `current` 和 `.deployed-commit`。镜像恢复不回滚运行数据，涉及持久化格式变更的版本应单独安排兼容迁移与备份。
+
+首次自动发布成功后，使用当前版本的管理入口，避免根目录旧 Compose 定义把服务切回最初镜像：
+
+```bash
+bash /opt/stock-panel/current/scripts/preproduction_compose.sh /opt/stock-panel ps
+bash /opt/stock-panel/current/scripts/preproduction_compose.sh /opt/stock-panel logs --tail 100 web collector
+bash /opt/stock-panel/current/scripts/preproduction_compose.sh /opt/stock-panel restart web
+```
+
+发布失败可在 GitHub Actions 中查看失败步骤；修复后重新运行时仍会检查 `main` 当前提交，历史任务不能覆盖新版本。服务验收与命令替身测试不替代第一次 GitHub runner 到服务器的真实发布验收。
+
+### 按发布需要同步公共数据
+
+常规采集由服务器独立执行；只有本地新增公共数据、修复数据，或功能发布确需配套数据时，才随发布同步明确选定的数据集。代码发布不自动复制本地数据。自动任务覆盖已启用的盘中行情、基础资料、交易日历，以及默认在交易日北京时间 16:00 执行的盘后管道。collector 必须持续运行且本地日历确认当天为交易日；正式行情未齐或任务繁忙时当天每 15 分钟重试。财务仍按需求获取，ETF／分钟和 AI 保持各自开关，不能把“服务已启动”视为所有数据都会每日全量更新。具体顺序与验收见 [盘后同步顺序约定](postmarket-pipeline.md)。
+
+同步范围以文件白名单确定，不能只排除 `users/` 后复制其余内容，因为根目录仍可能保留旧版个人数据。
+
+| 可选公共数据 | 同步要求 |
+| --- | --- |
+| 股票、指数、ETF 的原始日线、分钟线、复权因子和基础维表 | 只处理对应数据文件，按记录主键核对并合并，不能用本地旧整表覆盖远端新增记录；分钟数据必须核对 `.raw_basis` 价格口径，不一致时停止导入 |
+| 财报浏览表及 `financials/versions/` 版本记录 | 保留远端独有版本及来源、可用日和首次观察时间；发现同一版本事实冲突时停止处理，不推测历史日期，也不只复制最新浏览表 |
+| `calendar/trading_days.json` | 保留两边已有的确认日期及覆盖证据，只合并重叠覆盖；不连续的区间停止合并，不能把中间未知日期视为休市，也不能用较短的本地日历替换远端历史 |
+| 公共概念／行业分类结果 | 仅在明确选定时处理预设的数据文件，不携带同目录配置；自定义扩展数据不默认纳入 |
+
+不传输 `auth/`、`users/`、旧个人目录、策略、研究产物、`user_data/`、数据源配置、密钥、任务记录、财报同步断点、运行快照、日志、锁或缓存。`ext_data/` 和 `financials/` 均含混合用途文件，不能整体复制。enriched、矩阵等派生结果由目标版本与目标环境数据重新生成，不从本地搬运。
+
+执行顺序为：确定发布提交和所需数据集 → 检查口径与合并差异 → 备份远端将改动的数据 → 在维护窗口内停止相关读写服务并完成安装及必要重算 → 启动双服务 → 核对数据覆盖、服务健康和业务读取。存在活动采集或研究任务时先妥善结束，不能在 collector 写入期间覆盖文件；失败时用本次远端备份恢复。本地缺少某条数据不代表需要删除远端数据，未选定的数据集保持原状。
+
+当前仓库没有跨机器公共数据导入工具；同机双服务的运行时更新机制和 `/api/data/refresh-cache` 不提供跨机合并或磁盘 enriched 重算。实际随版同步应按具体数据集实施并验证，不能用裸目录覆盖替代。下文“备份与恢复”用于同一环境的整站恢复，不用于本地向预发同步。
+
 > 📌 前置依赖(仅方式 D 需要):Python ≥ 3.11 · Node ≥ 20 · [`uv`](https://docs.astral.sh/uv/) · `pnpm`（`npm i -g pnpm`）
 
 ---
@@ -174,7 +236,7 @@ git pull
 
 > 镜像部署执行 `docker compose pull && docker compose up -d`；两个服务始终使用相同版本。
 
-**整个 `data/` 目录都不纳入 git** —— 行情 K线、财务、自选、回测、监控记录,乃至概念/行业扩展数据,全部是程序运行时生成/拉取的用户数据,`git pull` 物理上无法影响它们。新用户首次启动只创建概念/行业预设配置，分类数据由维护者在数据页手动同步。
+**整个 `data/` 目录都不纳入 git** —— 行情 K线、财务、自选、回测、监控记录,乃至概念/行业扩展数据,全部是程序运行时生成/拉取的用户数据,`git pull` 物理上无法影响它们。新用户首次启动只创建概念/行业预设配置，分类数据由盘后自动管道或数据页手动同步。
 
 > ⚠️ **切勿使用以下命令"解决冲突"或"清理",它们会一次性删光 `data/` 下所有未被 git 跟踪的数据:**
 > - `git clean -fdx`(最危险,会删掉所有 `.gitignore` 忽略的文件)

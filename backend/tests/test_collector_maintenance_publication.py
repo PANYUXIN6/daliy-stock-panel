@@ -178,3 +178,24 @@ def test_failed_preset_fetch_publishes_no_success(maintenance, monkeypatch):
     response = client.post("/api/ext-data/presets/ext_gn_ths/fetch")
     assert response.status_code == 400
     assert subscription.empty()
+
+
+def test_classification_update_refreshes_cached_rotation_membership(maintenance, monkeypatch):
+    from app.services.rps_rotation import _load_concept_map_df, invalidate_cache
+
+    client, web, subscription, _ = maintenance
+    concept = ["机器人"]
+    async def fetch(url):
+        return [{"symbol": "600000.SH", "name": "示例", "concepts": concept}]
+    monkeypatch.setattr(ext_presets, "_fetch_json", fetch)
+    invalidate_cache()
+    try:
+        assert client.post("/api/ext-data/presets/ext_gn_ths/fetch").status_code == 200
+        _consume_update(web, subscription)
+        assert set(_load_concept_map_df(web.repo)[0]["concept"].to_list()) == {"机器人"}
+        concept = ["人工智能"]
+        assert client.post("/api/ext-data/presets/ext_gn_ths/fetch").status_code == 200
+        _consume_update(web, subscription)
+        assert set(_load_concept_map_df(web.repo)[0]["concept"].to_list()) == {"人工智能"}
+    finally:
+        invalidate_cache()

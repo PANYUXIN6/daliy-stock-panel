@@ -13,16 +13,37 @@ def upward_gap_expr() -> pl.Expr:
     return (pl.col("low") > pl.col("high").shift(1).over("symbol")).fill_null(False)
 
 
+def _pullback_prices(bars: pl.DataFrame) -> pl.DataFrame:
+    return compute_indicators(bars.sort("date"), needed={"bull_bear_line", "ma20"}).with_columns(
+        (pl.col("close") > pl.col("close").shift(1)).fill_null(False)
+        .cast(pl.Float64).rolling_sum(12, min_samples=1).truediv(12).mul(100).alias("_eg_psy"),
+    )
+
+
+def _pullback_common() -> pl.Expr:
+    line, ma20 = pl.col("bull_bear_line"), pl.col("ma20")
+    return ((pl.col("_eg_psy") <= 50) & (pl.col("close") > line)
+            & ((line > line.shift(1)) | (ma20 > ma20.shift(1)))
+            & (pl.col("close") > pl.col("open")))
+
+
+def pullback_price_candidates(bars: pl.DataFrame, targets: pl.DataFrame) -> pl.DataFrame:
+    """仅依据回踩共同价格条件筛候选；不需要财报，不修改最终信号口径。"""
+    frames = []
+    for group in filter_halt_days(bars).partition_by("symbol", maintain_order=True):
+        eligible = _pullback_prices(group).filter(_pullback_common()).select("symbol", "date")
+        frames.append(eligible.join(targets.select("symbol", "date").unique(), on=["symbol", "date"], how="semi"))
+    return pl.concat(frames) if frames else targets.select("symbol", "date").head(0)
+
+
 def compute_earnings_breakout(bars: pl.DataFrame, event_dates: set[date]) -> pl.DataFrame:
     """单股完整前序日线；事件已按当时财务版本确定，不重新读取最新财报。"""
     bars = filter_halt_days(bars)
     if bars.is_empty():
         return bars
-    df = compute_indicators(bars.sort("date"), needed={"bull_bear_line", "ma20"})
+    df = _pullback_prices(bars)
     df = df.with_row_index("_eg_i").with_columns(
         (pl.col("date").is_in(sorted(event_dates)) & upward_gap_expr()).alias("earnings_gap"),
-        (pl.col("close") > pl.col("close").shift(1)).fill_null(False)
-        .cast(pl.Float64).rolling_sum(12, min_samples=1).truediv(12).mul(100).alias("_eg_psy"),
     )
     h, low, event = pl.col("high"), pl.col("low"), pl.col("earnings_gap")
     df = df.with_columns(
@@ -61,10 +82,7 @@ def compute_earnings_breakout(bars: pl.DataFrame, event_dates: set[date]) -> pl.
     t6 = (t2 & ((i - a1) < 125)) | ((t4 | t5) & ((i - a2) < 125))
     t8 = (a3.is_not_null() & (n3 == 0) & (low < h.gather(a3 - 4))
           & ((i - a3) > 0) & ((i - a3) < 10))
-    line, ma20 = pl.col("bull_bear_line"), pl.col("ma20")
-    common = ((pl.col("_eg_psy") <= 50) & (pl.col("close") > line)
-              & ((line > line.shift(1)) | (ma20 > ma20.shift(1)))
-              & (pl.col("close") > pl.col("open")))
+    common = _pullback_common()
     df = df.with_columns(
         (common & t6).fill_null(False).alias("signal_earnings_9"),
         (common & t8).fill_null(False).alias("signal_earnings_42"),

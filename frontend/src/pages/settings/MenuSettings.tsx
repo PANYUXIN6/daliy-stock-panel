@@ -1,4 +1,5 @@
 import { accountStorage } from '@/lib/sessionRuntime'
+import { canAccessPage, useCurrentUser } from '@/lib/auth'
 import { useMemo, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
@@ -210,6 +211,7 @@ function SortableItem({ entry, hidden, onToggleHidden, badgeEnabled, onToggleBad
 // ── Main panel ──
 
 export function SettingsMenuSettingsPanel() {
+  const user = useCurrentUser()
   const qc = useQueryClient()
   const { data: prefs } = usePreferences()
   const menus = useQuery({ queryKey: QK.analysisMenus, queryFn: api.analysisMenus })
@@ -261,15 +263,16 @@ export function SettingsMenuSettingsPanel() {
   const [localOrder, setLocalOrder] = useState<string[] | null>(null)
   const orderedEntries = useMemo(() => {
     const order = localOrder ?? prefs?.nav_order ?? []
-    if (!order.length) return allEntries
-    const byId = new Map(allEntries.map(e => [e.id, e]))
+    const allowedEntries = allEntries.filter(e => canAccessPage(user, e.id))
+    if (!order.length) return allowedEntries
+    const byId = new Map(allowedEntries.map(e => [e.id, e]))
     const result: NavEntry[] = []
     const seen = new Set<string>()
     for (const id of order) {
       const e = byId.get(id)
       if (e) { result.push(e); seen.add(id) }
     }
-    for (const e of allEntries) {
+    for (const e of allowedEntries) {
       if (seen.has(e.id)) continue
       // 与 allEntries 同一语义: 未保存的新内置页插回默认位置而非追加到末尾
       const defaultIndex = BUILTIN_PAGES.findIndex(p => p.id === e.id)
@@ -284,7 +287,7 @@ export function SettingsMenuSettingsPanel() {
       else result.push(e)
     }
     return result
-  }, [localOrder, prefs?.nav_order, allEntries])
+  }, [localOrder, prefs?.nav_order, allEntries, user])
 
   const saveNavOrder = useMutation({
     mutationFn: (order: string[]) => api.saveNavOrder(order),

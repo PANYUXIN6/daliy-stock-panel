@@ -7,6 +7,7 @@ import { EmptyState } from '@/components/EmptyState'
 import { toast } from '@/components/Toast'
 import { WatchlistGroupMenu } from '@/components/WatchlistAddMenu'
 import { api, type FactorBatchItem, type FactorColumn } from '@/lib/api'
+import { useCurrentUser } from '@/lib/auth'
 import { fmtPct, priceColorClass } from '@/lib/format'
 import { QK } from '@/lib/queryKeys'
 import { FactorBacktest } from './FactorBacktest'
@@ -111,6 +112,7 @@ function SortableTh({ label, sortKeyName, sortKey, sortAsc, onSort, className, t
 }
 
 function BatchDiscovery({ onInspect, focusFactor }: { onInspect: (factorName: string) => void; focusFactor?: string }) {
+  const isAdmin = useCurrentUser()?.role === 'admin'
   const queryClient = useQueryClient()
   const initialized = useRef(false)
   const [selected, setSelected] = useState<string[]>([])
@@ -587,16 +589,18 @@ function BatchDiscovery({ onInspect, focusFactor }: { onInspect: (factorName: st
                           >
                             <BookmarkPlus className="h-3.5 w-3.5" />
                           </button>
-                          <button
-                            type="button"
-                            onClick={() => setSignalFrom(item)}
-                            disabled={!!item.error}
-                            className="flex h-7 w-7 items-center justify-center rounded-btn text-muted transition-colors hover:bg-amber-400/10 hover:text-amber-400 disabled:opacity-40"
-                            title="加入信号条件（方向按 IC 预填，阈值给建议值）"
-                            aria-label={`把 ${item.label} 加入信号条件`}
-                          >
-                            <Zap className="h-3.5 w-3.5" />
-                          </button>
+                          {isAdmin && (
+                            <button
+                              type="button"
+                              onClick={() => setSignalFrom(item)}
+                              disabled={!!item.error}
+                              className="flex h-7 w-7 items-center justify-center rounded-btn text-muted transition-colors hover:bg-amber-400/10 hover:text-amber-400 disabled:opacity-40"
+                              title="加入信号条件（方向按 IC 预填，阈值给建议值）"
+                              aria-label={`把 ${item.label} 加入信号条件`}
+                            >
+                              <Zap className="h-3.5 w-3.5" />
+                            </button>
+                          )}
                           <button
                             type="button"
                             onClick={() => onInspect(item.factor_name)}
@@ -618,7 +622,7 @@ function BatchDiscovery({ onInspect, focusFactor }: { onInspect: (factorName: st
         )}
       </section>
 
-      {signalFrom && <AddFactorSignalDialog item={signalFrom} onClose={() => setSignalFrom(null)} />}
+      {isAdmin && signalFrom && <AddFactorSignalDialog item={signalFrom} onClose={() => setSignalFrom(null)} />}
     </div>
   )
 }

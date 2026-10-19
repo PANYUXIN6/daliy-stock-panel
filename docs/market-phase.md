@@ -81,6 +81,8 @@
 
 ## API 与运行
 
+交易日默认北京时间 16:00 的自动盘后管道会在正式行情与指标验收通过后增量计算环境、重标情绪周期并刷新当日主线，不受手动 `pipeline_regime_enabled` 开关影响。完整依赖顺序、验收、重试与取消规则见 [盘后同步顺序约定](postmarket-pipeline.md)。市场环境页的空态“环境分析”按钮仍复用下述全量重算接口。
+
 - `GET /api/regime/phases?start&end`：连续阶段段列表（阶段、区间、天数、高度/宽度/晋级率/封板率均值、段内 top 主线）。
 - `GET /api/regime/mainline?start&end&top&kind`：窗口内主线排行（top1 天数、日均分、最高板）与每日明细。
 - `POST /api/regime/mainline/recompute`：过滤配置变更后的全量重算（两类维度）。

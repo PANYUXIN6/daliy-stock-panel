@@ -1,4 +1,5 @@
 import { useMemo, useRef, useState } from 'react'
+import { useCurrentUser } from '@/lib/auth'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useNavigate } from 'react-router-dom'
 import { ArrowUpRight, CalendarClock, Pencil, Plus, Search, Trash2 } from 'lucide-react'
@@ -45,6 +46,7 @@ function CostPnL({ close, cost }: { close?: number; cost: number }) {
 }
 
 export function Lots() {
+  const isAdmin = useCurrentUser()?.role === 'admin'
   const qc = useQueryClient()
   const navigate = useNavigate()
   const [editing, setEditing] = useState<Lot | null>(null) // null=关闭
@@ -230,9 +232,9 @@ export function Lots() {
 
           <div className="flex items-center justify-center gap-1 text-[11px] text-muted">
             生成的止盈止损 / 到期提醒规则已同步至监控中心
-            <button onClick={() => navigate('/monitor')} className="inline-flex items-center gap-0.5 text-accent hover:text-accent/80 cursor-pointer">
+            {isAdmin && <button onClick={() => navigate('/monitor')} className="inline-flex items-center gap-0.5 text-accent hover:text-accent/80 cursor-pointer">
               去查看 <ArrowUpRight className="h-3 w-3" />
-            </button>
+            </button>}
           </div>
         </div>
       </div>

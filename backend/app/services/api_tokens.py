@@ -1,11 +1,8 @@
-"""API Token 域模块 — 外部调用方的第二认证通道 (与访问密码并行)。
+"""保留的 API Token 存储与校验实现；当前网页认证已停用此通道。
 
-设计 (docs/open-platform-plan.md §4.1):
-  - 存储: data/user_data/api_tokens.json (0600), 只存 SHA-256 哈希;
-    明文 Token (tsp_ + 32B hex) 仅在创建响应中出现一次。
-  - scope: 固定五档, 见 SCOPES; 管理接口无对应 scope, Token 永远进不去。
-  - last_used_at 节流落盘 (≥60s 才写一次), 避免热路径每请求写文件。
-进程内写互斥沿用域模块惯例 (PAPER_LOCK 模式); 读取无锁 (json 小文件)。
+Token 文件只存 SHA-256 哈希，明文只在创建响应中出现一次。
+写入使用进程内锁，last_used_at 至少间隔 60 秒才落盘，避免每次请求写文件。
+当前账号认证与部署说明见 docs/deploy-password.md。
 """
 from __future__ import annotations
 

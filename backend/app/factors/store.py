@@ -1,8 +1,8 @@
-"""自定义/复合因子存储 (P3) — data/user_data/custom_factors/*.json。
+"""自定义/复合因子存储与注册。
 
-镜像 custom_signals 的持久化写法; 单文件损坏只禁用该因子并告警, 不影响启动
-(对齐 CONTRIBUTING 第 4 节插件隔离要求)。生命周期状态: draft → active →
-watch → retired (P4 状态机, 存储字段就绪, 迁移逻辑见巡检设计)。
+定义保存在 data/users/<user_id>/user_data/custom_factors/*.json。
+单文件损坏时跳过并告警，避免影响其他定义加载。status 字段允许
+draft / active / watch / retired；本模块不自动执行状态迁移。
 """
 from __future__ import annotations
 

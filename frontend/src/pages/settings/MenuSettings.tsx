@@ -55,9 +55,9 @@ const BUILTIN_PAGES: NavEntry[] = [
   { id: '/data', label: '数据', type: 'builtin', visible: true },
 ]
 
-// ── 架构归属标注 (docs/open-platform-plan.md §2 核心域/扩展域边界) ──
+// ── 架构归属标注 (docs/secondary-development.md) ──
 // 核心 = 页面承载核心域能力 (数据底座/订阅锚点/策略回测/环境生产);
-// 扩展 = 核心数据的消费页, 二开可用「扩展页面」平行实现替换 UI 而不伤核心。
+// 扩展 = 核心数据的消费页；扩展入口与替换边界见上述文档。
 // 与「类型」列的区别: 类型标注页面来源 (内置/自定义), 归属标注架构分层。
 type ArchKind = 'core' | 'ext'
 const ARCH_CLASS: Record<string, { kind: ArchKind; reason: string }> = {

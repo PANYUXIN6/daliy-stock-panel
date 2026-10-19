@@ -1,4 +1,4 @@
-"""因子注册表 API — 因子库 (P1) + 公式校验/试算 (P2) + 自定义/复合因子 CRUD (P3)。"""
+"""因子注册表 API：因子库、公式校验/试算与自定义/复合因子 CRUD。"""
 from __future__ import annotations
 
 from datetime import timedelta
@@ -182,7 +182,7 @@ def trial_formula(req: FormulaTrialRequest, request: Request) -> dict:
     }
 
 
-# ── 自定义/复合因子 CRUD (P3) ──────────────────────────────
+# ── 自定义/复合因子 CRUD ──────────────────────────────
 
 
 class CustomFactorCreateRequest(BaseModel):

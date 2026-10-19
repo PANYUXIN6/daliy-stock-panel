@@ -1,7 +1,6 @@
-"""metrics_v2 统计函数 (P3) — Newey-West HAC t 值 / BH-FDR q 值 / DSR。
+"""Newey-West HAC t 值、BH-FDR q 值与 DSR 统计函数。
 
-运行时零新增第三方依赖 (后端无 scipy/statsmodels), 全部 numpy 手写;
-数值测试用固定黄金参考向量锁定 (tests/test_stats_v2.py)。
+基于 numpy 实现，数值参考用例见 tests/test_stats_v2.py。
 
 口径 (设计文档 factor-system-design.md §6):
 - IC 序列因 h 日前瞻收益存在 h-1 阶移动平均自相关, 主口径 t 值取 NW HAC, 滞后 L=h。

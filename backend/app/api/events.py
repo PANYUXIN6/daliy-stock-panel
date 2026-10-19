@@ -1,11 +1,6 @@
-"""开放事件流 — SSE 短期票据 + /api/events 订阅端点。
+"""保留的短期票据与 SSE 事件流端点；主应用在认证层拒绝此入口。
 
-EventSource 规范不能携带 Authorization 头, Token 调用方走两步:
-  POST /api/events/ticket   (Bearer, 任意 scope) → 一次性票据 (60s)
-  GET  /api/events?ticket=… (EventSource)         → 按 scope 过滤的事件流
-
-GET /api/events 在访问中间件白名单内 (票据即凭证, 不走密码会话);
-票据校验失败立即 401, 成功则流式推送: hello 帧 → 事件 + 15s 心跳。
+模块内部仍保留票据消费、scope 过滤与心跳逻辑，供独立测试覆盖。
 """
 from __future__ import annotations
 
@@ -28,8 +23,7 @@ _POLL_S = 0.5
 @router.post("/ticket")
 def issue_ticket(request: Request):
     """Bearer Token (任意 scope) → 一次性 SSE 票据。"""
-    # 认证与限流已在网关中间件完成 (scope 规则 "*"); 端点内再验一次
-    # 明文是为了拿到 Token 记录、让票据继承 scope (不放大权限)。
+    # 从 Token 记录继承 scope，票据不能放大权限。
     authz = request.headers.get("authorization", "")
     plaintext = authz[len("Bearer "):].strip() if authz.startswith("Bearer ") else ""
 

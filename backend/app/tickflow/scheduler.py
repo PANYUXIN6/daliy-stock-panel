@@ -1,7 +1,4 @@
-"""请求调度器(§5.6)。
-
-按 capability 分别维护令牌桶。Phase 0:基础实现;Phase 1 接入批量合并、优先级队列。
-"""
+"""按 capability 维护独立令牌桶的请求调度器。"""
 from __future__ import annotations
 
 import asyncio

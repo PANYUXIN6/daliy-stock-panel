@@ -5,18 +5,8 @@ import type { ECharts, EChartsOption } from 'echarts'
 import type { KlineRow, LevelSeries } from '@/lib/api'
 
 /**
- * 个股分析专用日 K 图表。
- *
- * 与 StockDailyKChart/EChartsCandlestick 刻意不复用:
- *   - 那套图表面向「行情浏览」,强调全套指标副图(MA/MACD/KDJ/BOLL)、涨停标记等;
- *   - 本图表面向「分析决策」,核心是【关键价位】(压力/支撑/密集区/枢轴/前高前低),
- *     通过开关按钮控制各价位组的显隐,布局更简洁(主图 + 成交量即可)。
- *
- * 预留接口(类型已定义,渲染逻辑留 hook,后续实现):
- *   - markers: 日期标记点(新闻/暴雷/利好 → markPoint)
- *   - ranges:  区间高亮(事件区间 → markArea)
- *   - onDateClick: 点击日期回调(后续接消息面时间轴)
- *   - 指标副图: 后续如需 MACD/KDJ,按 SUB_CHARTS 模式扩展
+ * 个股分析日 K 图表：主图叠加可切换的关键价位，下方显示成交量。
+ * markers / ranges 渲染日期标记与区间，onDateClick 回传蜡烛对应日期。
  */
 
 // ===== 配色(红涨绿跌, 双主题通用); 画布轴/网格主题相关色走 CT() =====
@@ -76,7 +66,7 @@ const CURVE_DEFS: { alignedKey: string; group: LevelType; endLabel: string; colo
   { alignedKey: 'atr_tp',         group: 'atr_stop',  endLabel: 'ATR上轨', color: '#F87171', dashed: true },
 ]
 
-// ===== 预留:标记 / 区间(后续新闻面、事件区间用) =====
+// ===== 日期标记与区间 =====
 export interface ChartMarker {
   date: string
   label?: string
@@ -99,11 +89,11 @@ interface Props {
   seriesDates?: string[]
   /** 默认开启的价位组 */
   defaultLevelTypes?: LevelType[]
-  /** 预留:新闻/暴雷/利好日期标记 */
+  /** 日期标记 */
   markers?: ChartMarker[]
-  /** 预留:事件区间高亮 */
+  /** 事件区间高亮 */
   ranges?: ChartRange[]
-  /** 预留:点击某根 K 线 */
+  /** 点击某根 K 线 */
   onDateClick?: (date: string) => void
   height?: number
   className?: string
@@ -203,7 +193,7 @@ export function AnalysisKChart({
     const volTop = PAD_TOP + mainH + GAP_MAIN_VOL
     const sliderBottom = PAD_BOTTOM
 
-    // 预留:markPoint(新闻标记)
+    // 只渲染当前交易日序列中的标记。
     const markPointData: any[] = (markers ?? [])
       .filter(m => dateIndex.has(m.date))
       .map(m => ({
@@ -213,7 +203,7 @@ export function AnalysisKChart({
         label: { show: !!m.label, formatter: m.label ?? '', fontSize: 9, color: '#fff' },
       }))
 
-    // 预留:markArea(事件区间)
+    // 区间两端均在当前交易日序列中时才渲染。
     const markAreaData: any[] = (ranges ?? [])
       .filter(r => dateIndex.has(r.start) && dateIndex.has(r.end))
       .map(r => [{
@@ -375,7 +365,7 @@ export function AnalysisKChart({
     if (!chartInstRef.current) {
       chartInstRef.current = echarts.init(chartRef.current, undefined, { renderer: 'canvas' })
       chartInstRef.current.on('click', (params: any) => {
-        // 预留:点击 K 线(非 markPoint/markLine)回调
+        // 只对蜡烛触发日期回调，忽略标记和价位线。
         if (params.componentType === 'series' && params.seriesType === 'candlestick' && onDateClick) {
           onDateClick(dates[params.dataIndex])
         }

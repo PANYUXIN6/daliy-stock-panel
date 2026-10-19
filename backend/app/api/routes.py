@@ -1,4 +1,4 @@
-"""API 路由 — Phase 0 仅 /health 与 /api/capabilities。"""
+"""健康状态与 TickFlow 能力检测路由。"""
 from __future__ import annotations
 
 from fastapi import APIRouter, Request

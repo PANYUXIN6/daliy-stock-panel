@@ -20,7 +20,7 @@ SCORING_DIRECTION_HIGH = "high"
 SCORING_DIRECTION_LOW = "low"
 SCORING_DIRECTIONS = frozenset({SCORING_DIRECTION_HIGH, SCORING_DIRECTION_LOW})
 
-# P1 起依赖声明与预热窗口的单一权威来源为 app/factors/registry.py;
+# 依赖声明与预热窗口由 app/factors/registry.py 维护；
 # 本常量为兼容别名, 键集合与历史版本逐项一致 (见 tests/test_factor_registry.py 快照测试)。
 VIRTUAL_SCORING_DEPENDENCIES: dict[str, frozenset[str]] = dict(_registry_virtual_dependencies())
 
@@ -58,7 +58,7 @@ def scoring_warmup_bars(scoring: Mapping[str, Any]) -> int:
         for name, weight in scoring.items()
         if weight
     ]
-    # composite/custom 因子的预热来自注册表 (P3)
+    # composite/custom 因子的预热来自注册表。
     for name, weight in scoring.items():
         if not weight:
             continue
@@ -127,7 +127,7 @@ def scoring_value_expr(columns: Collection[str], name: str) -> pl.Expr | None:
     available = set(columns)
     if name in available:
         return pl.col(name)
-    # composite 在 VIRTUAL 字典门控之前分派 (依赖经注册表递归展开) —— P3
+    # composite 在 VIRTUAL 字典门控之前分派，依赖经注册表递归展开。
     spec = _registry_get_factor(name)
     if spec is not None and spec.kind == "composite":
         return _composite_value_expr(available, name)
@@ -223,7 +223,7 @@ def scoring_value_expr(columns: Collection[str], name: str) -> pl.Expr | None:
         window = 20 if name == "limit_up_count_20d" else 60
         hit = (pl.col("consecutive_limit_ups").fill_null(0) > 0).cast(pl.Float64)
         return hit.rolling_sum(window, min_samples=window).over("symbol")
-    # ── 扩充批次 (2026-09-05): 全部滚动窗口默认 min_samples=窗口长 (fail-closed) ──
+    # 滚动窗口默认 min_samples=窗口长，样本不足时保持空值。
     if name == "log_float_mv":
         # 换手率 = 成交量/流通股本 → 股本 = volume/turnover_rate, 市值 = close x 股本
         return (
@@ -315,7 +315,7 @@ def materialize_scoring_columns(
     names: Collection[str],
 ) -> pl.DataFrame:
     # custom (DSL) 因子先物化: frame_transform 可能需要多阶段临时列 (嵌套窗口规避),
-    # 与单表达式路径不同, 必须整体走帧变换 —— 与检验/试算共用同一条计算路径 (P3)。
+    # 与单表达式路径不同, 必须整体走帧变换，与检验/试算共用同一条计算路径。
     from app.factors.dsl import FACTOR_COLUMN, compile_formula_cached
 
     for name in names:

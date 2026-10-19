@@ -1,6 +1,6 @@
-"""因子公式 DSL 编译器 (P2)。
+"""因子公式 DSL 编译器。
 
-流水线: text → tokenizer → 递归下降解析(EBNF 见设计文档 §3.4) → AST → 语义检查
+流水线: text → tokenizer → 递归下降解析 → AST → 语义检查
 → 依赖/预热推导 → Polars Expr。编译失败返回结构化错误 (E001-E016), 不抛裸异常。
 
 窗口纪律 (Polars 嵌套窗口会静默产出全 null, 必须在编译期杜绝):
@@ -26,7 +26,7 @@ from app.factors.registry import factor_dependencies, get_factor
 
 FACTOR_COLUMN = "__dsl_factor__"
 
-# 基准列 (设计文档 §3.1); 指标列 = 注册表 base 因子, 已注册因子 id 经注册表解析。
+# 基准列直接读取；指标列和已注册因子 id 经注册表解析。
 BASE_COLUMNS: frozenset[str] = frozenset({
     "open", "high", "low", "close", "volume", "amount",
     "turnover_rate", "prev_close", "raw_close",
@@ -747,7 +747,7 @@ def compile_formula_cached(text: str) -> CompiledFormula:
 
 @lru_cache(maxsize=256)
 def _compile_formula_cached(text: str, owner_revision: tuple[str | None, int]) -> CompiledFormula:
-    """带 LRU 缓存的编译入口 (公式文本 → 编译产物, 设计文档 §3.3)。
+    """带 LRU 缓存的编译入口 (公式文本 → 编译产物)。
 
     CompiledFormula 为不可变值对象 (frame_transform 闭包只读), 缓存共享安全。
     """

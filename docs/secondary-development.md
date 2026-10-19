@@ -1,432 +1,80 @@
-# 代码二次开发与 AI 扩展指南
+# 自定义代码入口
 
-本文面向需要在当前仓库中二次开发的维护者、团队和 AI 编码代理。目标不是禁止修改源码，而是让新增页面、业务规则和定制逻辑尽量通过稳定边界接入，使后续合并上游版本时冲突更少、风险可验证。
+本页记录当前仓库已经实现的接入位置。日常修改仍以 [维护约定](../CONTRIBUTING.md)、实际调用链和测试为准；核心行为可以直接在所属模块修改，无需先增加扩展框架。
 
-修改任何代码前，仍须先完整阅读根目录的 [`CONTRIBUTING.md`](../CONTRIBUTING.md)。金融数据口径、缓存、并发、数据源和测试要求以该文档为准。
+## 现有入口
 
-## 1. 文档状态
-
-本文同时描述现有能力和后续按需建设的代码扩展契约。两者不能混用：
-
-| 状态 | 含义 |
+| 需求 | 入口 |
 | --- | --- |
-| 已可用 | 当前仓库中已经存在，可以在确认调用链后直接复用 |
-| 按需扩展 | 尚未实现；出现真实用例后才能增加，不能提前假设 API 存在 |
+| HTTP 数据源字段映射 | `data/data_sources/*.yaml`，见 [自定义数据源](custom-data-source.md) |
+| Python 数据源适配 | `backend/app/plugins/<name>/plugin.yaml` 与 provider，见 [数据源插件](plugin-development.md) |
+| 扩展数据、声明式分析页 | [功能手册](features.md)的数据与扩展章节 |
+| 自定义前端页面、导航或局部内容 | `frontend/src/custom/<namespace>/extension.tsx` |
+| 自定义后端路由、启动处理或通知文案 | `backend/app/custom/` 下的模块或包 |
+| 策略叠加条件 | 策略设置、回测基础过滤面板；实现见 `backend/app/strategy/overlay.py` |
 
-当前已可用的主要扩展能力：
+候选过滤、评分、仓位、风控、回测成本和配置迁移没有通用注册接口。因子条件信号和回测因子归因已有实现；因子库的策略模板按钮仅提示维护者部署，不在网页生成 Python 策略。
 
-- 维护者管理受信任策略源码；个人叠加策略和历史个人策略存档位于 `data/users/<user_id>/strategies/`。网页只支持允许的声明式策略操作，禁止保存或执行用户 Python 代码。
-- 数据源 Provider 与 `plugin.yaml` 机制：详见 [`plugin-development.md`](plugin-development.md)。
-- 扩展数据与声明式分析页面：适合不需要自定义 React 交互的页面。
-- 前端源码扩展注册：`frontend/src/custom/<namespace>/extension.tsx`，支持静态页面、导航和已开放插槽。
-- 后端源码扩展注册：`backend/app/custom/<module>.py`，支持 FastAPI 路由、启动钩子和通知格式化器。
-- 当前前端插槽：`layout.navigation.extra`、`stock-preview.footer`、`watchlist.toolbar`。
-- 当前后端继承点：`NotificationFormatter`。
-- 因子平台与策略线的既有桥接（已实现，二开时直接复用、勿重复实现）：因子库一键生成单因子排名策略（`GenerateFactorStrategyDialog` → `custom_factor_*`）；策略触发器引用因子条件信号（`AddFactorSignalDialog`，`csg_f_*`）；自定义信号 AI 提示词含因子分组（`custom_signals_ai.py`）；策略回测因子归因（`strategy.py` 的 `factor_attribution`，覆盖 `meta.scoring` 非空的策略）。
+## 前端注册
 
-尚未实现、只能在真实需求出现后增加的能力：
+[`bootstrap.ts`](../frontend/src/extensions/bootstrap.ts) 自动发现 `frontend/src/custom/*/extension.tsx`。文件默认导出 [`FrontendExtension`](../frontend/src/extensions/types.ts)，包含 `id`、`apiVersion: 1` 以及可选的 `routes`、`navigation`、`slots`。完整示例保留在 [`extension.tsx.example`](../frontend/src/custom/_template/extension.tsx.example)，模板本身不参与构建。
 
-- 更多页面局部插槽。
-- 候选过滤、评分、仓位、风控和回测成本等后端业务策略接口。
-- 配置 schema 迁移注册表。
+- 路由只支持非根静态绝对路径，不能覆盖核心路径或其他扩展路径。
+- 导航项通过 `routeId` 引用同一扩展的路由；页面可以不注册导航。
+- ID、版本或路由校验失败会禁用对应扩展。注册完成后冻结；插槽和导航按 `order`、`id` 排序。
+- 插槽组件有错误边界，单个组件失败不会使整个页面无法渲染。
 
-AI 在开始任务前必须通过代码搜索确认能力是否已经实现。找不到定义和测试时，应把示例视为设计规范，不得虚构导入路径或调用结果。
+当前插槽及传入属性以 [`FrontendSlotContextMap`](../frontend/src/extensions/types.ts) 为准：
 
-### 多用户扩展边界
+| 插槽 | 位置 | 属性 |
+| --- | --- | --- |
+| `layout.navigation.extra` | 侧栏导航底部 | `collapsed`、`pathname` |
+| `stock-preview.footer` | 个股详情图表下方 | `symbol`、`name`、`view: 'daily' \| 'intraday'` |
+| `watchlist.toolbar` | 自选页工具栏末尾 | `symbols`、`viewMode`、`selectedGroup`、`refresh()` |
 
-新增个人数据入口必须复用当前 `UserContext` 和 `private_storage`，不得从请求参数决定 owner，也不得临时替换共享 `app.state`。后台线程、队列和 worker 要显式携带归属；共享行情仓库可复用，个人规则、结果、告警和报告必须进入用户目录。敏感延迟操作执行前重新验证会话与权限。管理员也不能冒用其他用户读取个人文件。
+`symbols` 是当前筛选、排序后视图的标的；扩展修改自选数据后可调用 `refresh()`。插槽属性不包含 `apiVersion`，版本声明位于扩展清单。
 
-扩展路由同时经过 web 与 collector 的认证和权限边界。前端扩展沿用认证、账号缓存隔离和请求封装，不能另设 Bearer Token 或事件票据旁路。本地 Codex CLI 与网页 Python 生成／编辑／执行入口已停用；受信任服务端源码扩展仍由维护者部署。
+请求与缓存继续使用 `frontend/src/lib/api.ts`、`queryKeys.ts` 和已有共享查询。新增页面沿用现有认证和账号缓存隔离。
 
-## 2. 二次开发分级
+## 后端注册
 
-按升级风险从低到高选择实现方式：
-
-| 级别 | 实现方式 | 适用场景 | 升级风险 |
-| --- | --- | --- | --- |
-| L1 | 配置、策略文件、扩展数据 | 已有契约能够完成需求 | 最低 |
-| L2 | 前端插槽、路由注册；后端策略接口、注册替换 | 新页面、局部 UI、可替换业务规则 | 较低 |
-| L3 | 直接修改核心源码 | 核心流程本身必须变化，现有扩展点无法表达 | 最高 |
-
-选择原则：
-
-1. 先确认现有功能能否复用，禁止平行实现第二套数据、策略、缓存或请求逻辑。
-2. 只在存在真实二开需求的位置增加扩展点，不为未来可能出现的需求预埋通用框架。
-3. 插槽或接口无法表达核心行为变化时，可以修改源码；必须缩小改动范围并补回归测试。
-4. 不为了避开一次冲突复制完整页面、服务或引擎。复制会把一次显式冲突变成长期的隐式分叉。
-
-## 3. 前端扩展规范
-
-### 3.1 何时使用插槽
-
-插槽适合在既有页面中增加局部内容：
-
-- 操作按钮或工具栏命令。
-- 筛选条件或表单字段。
-- 表格列和详情面板。
-- 个股详情、策略详情中的附加标签页。
-- 设置页面中的独立配置区。
-
-新增完整页面时应使用路由和导航注册，不要把整页塞入某个插槽。改变核心页面的数据流、状态模型或主要布局时，应直接修改核心代码并按 L3 管理。
-
-### 3.2 当前插槽契约
-
-核心页面通过已经实现的 `ExtensionSlot` 提供受控上下文：
-
-```tsx
-<ExtensionSlot
-  name="strategy.monitor.filters"
-  context={{
-    apiVersion: 1,
-    rule: draft,
-    updateRule,
-    readOnly,
-  }}
-/>
-```
-
-二开模块通过默认导出的注册清单接入，不修改核心文件：
-
-```tsx
-import type { FrontendExtension } from '@/extensions/types'
-
-function NavigationExtra({ collapsed }: { collapsed: boolean; pathname: string }) {
-  return collapsed ? null : <div>二开内容</div>
-}
-
-const extension: FrontendExtension = {
-  id: 'company.navigation',
-  apiVersion: 1,
-  slots: [{
-    name: 'layout.navigation.extra',
-    id: 'company-summary',
-    order: 100,
-    component: NavigationExtra,
-  }],
-}
-
-export default extension
-```
-
-插槽设计必须满足：
-
-- `name` 和注册项 `id` 全局稳定、唯一。
-- `context` 使用明确的 TypeScript 类型，并包含契约版本。
-- 只暴露完成该插槽职责所需的数据和操作，不传递整个页面状态。
-- 插槽通过公开回调修改状态，不直接访问父组件内部 store 或缓存。
-- 单个扩展渲染失败应由错误边界隔离，并显示可定位的扩展 ID。
-- 注册顺序确定，使用 `order` 后再按 `id` 排序，避免加载顺序导致界面漂移。
-- 插槽内容必须遵守项目现有设计系统、响应式和可访问性要求。
-
-当前开放：
-
-```text
-layout.navigation.extra
-stock-preview.footer
-watchlist.toolbar
-```
-
-各插槽 context 契约（均要求 `apiVersion: 1`，定义见 `frontend/src/extensions/types.ts` 的 `FrontendSlotContextMap`）：
-
-- `layout.navigation.extra`：`{ collapsed, pathname }`，侧边栏导航底部。
-- `stock-preview.footer`：`{ symbol, name, view }`，个股详情对话框底部（日K/分时图表下方）；`view` 为 `'daily' | 'intraday'`。适合个股附加面板：龙虎榜、资金流、外部研究链接等。
-- `watchlist.toolbar`：`{ symbols, viewMode, selectedGroup, refresh }`，自选页工具栏末尾；`symbols` 为当前筛选视图中的标的，`refresh` 在扩展修改数据后调用以刷新自选增强数据。适合批量操作入口：自定义分析、导出、组合计算等。
-
-新增插槽前必须有真实用例，并同时定义 context 类型、异常隔离和测试；不能只在类型表中预留名字。
-
-### 3.3 当前路由与导航契约
-
-完整页面通过注册表接入：
-
-```tsx
-const extension: FrontendExtension = {
-  id: 'company.risk',
-  apiVersion: 1,
-  routes: [
-    { id: 'company-risk', path: '/company/risk', component: CompanyRiskPage },
-  ],
-  navigation: [
-    {
-      id: 'company-risk',
-      routeId: 'company-risk',
-      label: '风险分析',
-      icon: ShieldCheck,
-      order: 500,
-    },
-  ],
-}
-```
-
-路由注册与菜单注册已经解耦：页面可以存在但不显示在菜单中；菜单只能引用同一扩展内的已注册路由。首版只支持静态绝对路径。扩展路由不得覆盖核心或其他扩展路径，冲突时只禁用该扩展并输出明确错误。
-
-完整前端模板位于 [`frontend/src/custom/_template/extension.tsx.example`](../frontend/src/custom/_template/extension.tsx.example)。
-
-### 3.4 前端禁止事项
-
-- 不直接在多个组件中拼接后端 URL，统一使用 `frontend/src/lib/api.ts` 或未来公开客户端。
-- 不自行创建与现有 TanStack Query 重复的缓存；查询键仍由 `queryKeys.ts` 集中管理。
-- 不用插槽绕过权限、数据口径或表单校验。
-- 不通过 DOM 查询、全局事件或 monkey patch 修改核心组件。
-- 不把整个核心页面复制到二开目录后长期独立维护。
-
-## 4. 后端扩展规范
-
-### 4.1 使用小粒度继承
-
-后端允许二开类继承稳定、职责单一的抽象基类，再通过注册表或依赖注入接入。不要继承并覆盖大型编排服务。
-
-当前已经实现的继承点：
-
-- `NotificationFormatter`：在监控规则完成评估后统一调整通知文案，不改变事件结构和触发语义。
-
-下列是可能适合的小粒度接口，但目前没有实现，不能直接导入：
-
-- `CandidateFilter`：候选池过滤。
-- `ScoringPolicy`：评分计算。
-- `PositionSizingPolicy`：仓位计算。
-- `RiskPolicy`：风险约束。
-- `NotificationFormatter`：通知文案。
-- `StrategyProvider`：策略发现。
-- `MonitorConditionEvaluator`：自定义监控条件。
-- `BacktestCostModel`：手续费和滑点模型。
-
-不适合作为公共继承点的核心类：
-
-- `StrategyEngine`。
-- `BacktestEngine`。
-- `ScreenerService`。
-- `StrategyMonitorService`。
-- `DataStore` 和仓库实现。
-- FastAPI 主应用及生命周期函数。
-
-这些类管理流程、缓存、并发或生命周期。覆盖其中的内部方法会让上游调整执行顺序后产生难以发现的语义错误。
-
-### 4.2 当前基类与注册契约
-
-后端模块从 `app.extensions` 导入稳定契约：
+[`loader.py`](../backend/app/extensions/loader.py) 扫描 `app.custom` 下的直接子模块和包，跳过下划线开头的名字。模块需提供：
 
 ```python
-from app.extensions import (
-    BACKEND_EXTENSION_API_VERSION,
-    BackendExtensionRegistrar,
-    NotificationFormatContext,
-    NotificationFormatter,
-)
-
-EXTENSION_ID = 'company.notice'
-EXTENSION_API_VERSION = BACKEND_EXTENSION_API_VERSION
+EXTENSION_ID = "personal.example"
+EXTENSION_API_VERSION = 1
 
 
-class CompanyNotificationFormatter(NotificationFormatter):
-    def format_message(self, event: dict, context: NotificationFormatContext) -> str:
-        return f"[公司规则] {event.get('message', '')}".strip()
-
-
-def setup(registrar: BackendExtensionRegistrar) -> None:
-    registrar.register_notification_formatter(
-        'company.notification',
-        CompanyNotificationFormatter(),
-    )
+def setup(registrar):
+    ...
 ```
 
-同一个 `setup` 可以通过 `registrar.include_router(router)` 注册独立 FastAPI 路由。核心路由冲突、重复 ID 或契约版本不匹配时，该扩展整体不注册，不留下半注册状态。
+契约从 [`app.extensions`](../backend/app/extensions/__init__.py) 导入，完整示例见 [`_template.py.example`](../backend/app/custom/_template.py.example)。当前支持：
 
-核心数据层初始化完成后，可选的 `startup(context: ExtensionContext)` 会收到数据目录和只读仓库协议。启动钩子失败只记录错误，不阻止主程序启动。
-
-完整后端模板位于 [`backend/app/custom/_template.py.example`](../backend/app/custom/_template.py.example)。
-
-### 4.3 后端契约要求
-
-- 上下文优先使用不可变 `dataclass` 或 `Protocol`，不向扩展暴露整个 `app.state`。
-- 抽象方法参数、返回值、单位、空值和异常行为必须有文档及契约测试。
-- 注册 ID 全局唯一；重复注册默认拒绝，不允许静默覆盖官方实现。
-- 默认实现必须存在。没有启用二开实现时，核心行为与当前版本一致。
-- 单个可选实现加载失败时应禁用自身；金融结果无法可靠计算时必须 fail-closed。
-- 注册表在启动完成后冻结，实时线程中不得动态替换实现。
-- 破坏性契约变化必须提升 `api_version`，旧版本至少保留一个大版本的兼容期。
-
-### 4.4 继承与组合的边界
-
-继承只用于表达稳定的“是一种策略实现”关系。需要同时组合过滤、评分、通知等能力时，分别注册多个小实现，不创建拥有大量可选方法的万能基类。
-
-优先组合的场景：
-
-- 一个服务需要多个独立规则。
-- 行为需要按资产类型或运行上下文选择。
-- 扩展只需要装饰默认结果，而不是完全替换算法。
-- 依赖缓存、仓库或通知服务，需要通过明确构造参数注入。
-
-## 5. 直接修改源码
-
-扩展点不是限制。核心流程必须变化时允许直接修改源码，但要把升级成本显式管理。
-
-### 5.1 修改要求
-
-- 一个提交只包含一个二开目的，不混入格式化、依赖升级和无关重构。
-- 优先新增独立模块，再对核心入口做最小接线。
-- 修改公共契约时同时更新后端模型、前端类型、调用方和测试。
-- 修改数据写入时列出持久化、内存缓存、版本、SSE 和前端查询失效链路。
-- 保留旧配置和旧数据读取能力；必须迁移时提供幂等迁移和回滚说明。
-- 在 PR 描述中标记被修改的核心热点及未来合并上游时的复核点。
-
-### 5.2 高冲突热点
-
-以下文件集中管理启动、路由或公共契约，直接修改时需要重点复核：
-
-```text
-backend/app/main.py
-backend/app/strategy/engine.py
-backend/app/backtest/engine.py
-frontend/src/router.tsx
-frontend/src/components/Layout.tsx
-frontend/src/lib/api.ts
-frontend/src/lib/queryKeys.ts
-```
-
-高冲突不代表禁止修改，而是要求改动更小、测试更完整。若多个二开需求反复修改同一热点，应把共同接线能力提升为正式插槽或策略接口。
-
-## 6. AI 开发工作流
-
-AI 必须按以下顺序工作：
-
-1. 完整阅读 `AGENTS.md`、`CONTRIBUTING.md` 和本文。
-2. 检查 `git status`，保留工作区已有修改。
-3. 搜索目标调用链、相邻实现、现有扩展点和测试。
-4. 明确需求属于 L1、L2 还是 L3，并说明选择依据。
-5. 判断目标插槽或后端基类是否真实存在，不依据本文示例虚构代码。
-6. 写出最小改动计划和完成标准。
-7. 先补能证明行为的测试，再实施必要改动。
-8. 执行对应验证矩阵，检查最终 diff 和兼容性。
-
-### 6.1 可直接使用的任务模板
-
-```text
-请在 Tick Stock Panel 当前仓库中实现：[具体需求]。
-
-开始前完整阅读 AGENTS.md、CONTRIBUTING.md 和
-docs/secondary-development.md，并先检查 git status、真实调用链和现有测试。
-
-约束：
-1. 先判断现有功能能否复用，并将方案归类为 L1/L2/L3。
-2. 前端优先使用已经存在的受控插槽、路由或导航注册；后端优先使用已经存在的
-   小粒度抽象基类和注册机制。必须用搜索和测试证明接口真实存在，不能根据设计文档
-   虚构 API。
-3. 若扩展点尚未实现，先说明最小可行方案；只有该需求确实需要时才新增扩展点。
-4. 允许直接修改源码，但保持改动最小，不复制完整页面或核心服务。
-5. 复用现有 API、数据仓库、缓存、查询键、组件和领域口径，不创建第二套逻辑。
-6. 保持历史配置和数据兼容，扩展失败不能破坏未启用扩展的主流程。
-7. 不覆盖已有修改，不提交、不推送，除非我单独确认。
-
-完成后请列出：
-- 方案分级及原因；
-- 修改文件和关键契约；
-- 对缓存、数据、API 和升级兼容性的影响；
-- 实际执行的测试、构建和结果；
-- 仍需人工确认的风险。
-```
-
-### 6.2 让 AI 设计扩展点的模板
-
-```text
-请只设计并评审以下二次开发需求的扩展边界，暂不修改代码：[具体需求]。
-
-请基于当前仓库真实调用链回答：
-1. 现有能力是否已经可以实现；
-2. 前端应使用局部插槽、路由注册还是直接改源码；
-3. 后端应使用哪个小粒度策略接口，为什么不继承大型核心服务；
-4. 最小 context/Protocol 应包含哪些字段；
-5. 默认实现、失败隔离、契约版本和测试如何设计；
-6. 哪些抽象属于当前不需要的过度设计。
-
-不要假设本文中的目标 API 已经实现，请给出代码证据和文件位置。
-```
-
-## 7. 验证矩阵
-
-除 `CONTRIBUTING.md` 的通用要求外，二开还应按接入方式验证：
-
-| 改动 | 最低验证 |
+| 接口 | 用途 |
 | --- | --- |
-| 前端插槽 | 无注册、单注册、多注册排序、异常隔离、窄屏、前端构建 |
-| 路由/导航注册 | 路径冲突、隐藏页面、无权限、直接刷新、未知路由 |
-| 后端策略实现 | 默认实现、二开实现、重复 ID、版本不兼容、加载失败隔离 |
-| 配置或契约变化 | 旧字段缺失、未知字段、更高版本拒写、迁移幂等 |
-| 直接修改核心 | 受影响模块完整回归、缓存失效、历史配置、前后端联调 |
+| `registrar.include_router(router)` | 添加独立 FastAPI 路由 |
+| `registrar.register_notification_formatter(id, formatter, order=100)` | 注册 `NotificationFormatter`，调整通知文案 |
+| 可选 `startup(context: ExtensionContext)` | 核心数据层就绪后获取数据目录与只读仓库接口 |
 
-常用命令：
+重复 ID、版本不匹配或 HTTP 路由冲突会阻止该扩展注册；加载、启动失败会记录日志并隔离。注册表启动后冻结。`NotificationFormatter.format_message(event, context)` 返回文案，不修改输入事件和触发语义；当前没有其他可替换业务策略接口。
 
-```bash
-cd backend
-uv run --frozen pytest tests/path/to/test_x.py -q
-uv run --frozen ruff check app/path.py tests/path.py
+## 个人数据与执行边界
 
-cd ../frontend
-pnpm build
+- 受信任源码由维护者部署。网页策略入口只接受受限声明，不保存或执行用户 Python 代码；个人策略及存档位于 `data/users/<user_id>/strategies/`。
+- 个人数据使用 `UserContext`、`private_storage`，后台任务显式携带归属；共享行情仓库不能写入个人规则、结果、告警或报告。
+- 自定义路由沿用 web、collector 的认证和权限边界，不从请求参数决定 owner，不临时替换共享 `app.state`。敏感延迟操作执行前重新验证会话与权限。
 
-cd ..
-git diff --check
-git status --short --branch
-```
+## 策略叠加条件
 
-不得把“扩展已加载”当作业务验证。测试必须断言真实过滤结果、评分、路由输出、界面状态或失败隔离行为。
+`strategy/overlay.py` 是选股、回测和监控的共享求值入口。设置最多 8 条 AND 条件，支持自定义信号字段、比较运算符和 0–60 个标的交易日偏移；缺省或空列表表示不叠加。非法配置、缺列明确失败，空值和非有限数不入选。
 
-## 8. 版本与升级约定
+条件在完整窗口上求值，再于评分归一化和数量截断前过滤候选；行情行与退出信号保留。矩阵依赖和历史暖机包含条件引用的字段与偏移。日线普通、矩阵策略支持；组合策略在日线子策略配置，顶层及分钟策略不支持，矩阵策略暂不支持字符串条件。
 
-- 二开分支应记录开始开发时的上游 Git Tag 或 commit，不能只写“基于 v0.x”。
-- 正式发布使用不可变 Tag；二开升级优先合并 Tag，而不是持续变化的开发分支头。
-- 公共插槽和后端扩展接口使用独立的 `api_version`，不要直接等同应用版本。
-- 同一 `api_version` 内只做向后兼容的字段新增；删除、改名或改变语义必须提升主版本。
-- 废弃字段先标记并保留兼容读取，至少跨一个大版本后再移除。
-- 升级后必须重新运行二开契约测试，不能只依赖 Git 显示“无冲突”。
+扩展字段只使用按交易日保存的时序数据，复用 `attach_ext_columns(include_snapshot=False)`，避免最新快照进入历史回测。条件按用户持久化，保存后沿用个人策略缓存、监控失效和前端查询刷新链路。
 
-直接修改核心源码的二开分支可在升级前运行只读预检：
+## 定位与验证
 
-```bash
-python3 scripts/upgrade_check.py <目标Tag或分支>
-```
+接线实现位于前端 `src/extensions/`、后端 `app/extensions/`；后端测试入口为 `backend/tests/test_extensions.py`。数据源字段、单位和失败语义分别见上述两份数据源文档。
 
-脚本不会执行 merge、修改索引或工作区。它会报告共同基线、双方修改的同一文件以及 Git 三方预演可识别的文本冲突。未提交内容不会进入预演，因此正式评估前应先提交到临时二开分支。
-
-### v0.3.8 移植记录（2026-10-18）
-
-对照上游 `v0.3.8`（`8f9251c77f12049ff5649169f51621a73d11e664`）选择性移植，版本号表示已评估到该上游版本，不表示与上游源码或功能完全一致。保留多用户数据隔离、采集服务分离、内置策略及当前复盘工作台布局。
-
-- 接入：北京时间日期默认值、自定义 HTTP 五档盘口、enriched 预热换代重试、模拟交易日线 schema 兼容与自动卖出持仓封顶、策略参数分组/条件显隐/预设联动、端点切换及部署子路径修复、策略静态校验加固。更新检查及其通知仅对管理员展示和触发。
-- 保留本地实现：内置策略不迁移为用户种子；个人 Python 策略继续只允许受限声明，不重新开放代码执行；已有 AI 连接测试继续使用本地入口。上游页面包命名调整及其未采用的运行时加载体系不作为此次移植依赖。
-- 不采用统一 ±30% 行情过滤：上市初期可能存在不受常规涨跌停限制的合法行情，不能将统一阈值视为全市场物理边界。后续处理异常数据需结合交易日期、板块和上市规则，覆盖合法超幅样本。
-- 升级保护评估：上游 `upgrade_guard` 面向带构建清单的桌面/Docker 包，源码模式无清单时停用；在本仓库源码布局下根目录仅覆盖 backend，无法保护整个前端改造。恢复 API 未接入本项目管理员边界，报告路径及符号链接也缺少恢复前校验，因此本次不注册其扫描和源码恢复入口，继续使用 Git 与上述只读升级预检。
-- 重新评估升级保护的条件：开始分发需要保留用户源码改动的安装包，并明确完整程序清单范围；接入前须验证管理员权限、路径/符号链接边界、并发扫描与恢复互斥、恢复前冲突检查及失败回滚，且不得扫描或备份账号密钥和运行时用户数据。
-
-## 9. 完成检查表
-
-- [ ] 已确认需求属于 L1、L2 或 L3。
-- [ ] 已证明使用的插槽、基类和注册 API 在当前代码中真实存在。
-- [ ] 没有复制已有数据读取、缓存、API 客户端或完整核心页面。
-- [ ] 前端扩展只获得必要 context，后端没有继承大型编排服务。
-- [ ] 默认实现和未启用二开时的行为保持不变。
-- [ ] 重复注册、加载失败、版本不兼容和空数据均有明确行为。
-- [ ] 历史配置、策略和用户数据仍可读取。
-- [ ] 已执行适用的测试、构建、Ruff 和 `git diff --check`。
-- [ ] 最终说明包含升级风险和未来合并上游时的复核点。
-
-## 10. 后续扩展原则
-
-统一注册基础设施已经完成。后续只按真实业务需求增加能力：
-
-1. 页面需要局部定制时，在真实位置增加一个类型化插槽及测试。
-2. 后端业务规则需要替换时，从该调用链提取一个小粒度接口、默认实现和契约测试。
-3. 不继承大型编排服务，不暴露整个 `app.state`，不复制核心流程。
-4. 只有出现需要持久化的二开配置后，再增加 schema 迁移注册表。
-5. 需要升级直接修改源码的分支时，使用 `scripts/upgrade_check.py` 预检，再执行真实合并和回归。
-
-这种顺序遵循 KISS 和 YAGNI：先解决已经存在的升级冲突，不提前建设完整插件平台，也不阻止开发者在必要时直接修改源码。
-
-## 策略叠加条件适配（2026-10-18）
-
-在保留内置策略和个人配置目录的前提下，借鉴上游 `v0.3.8` 的 `overlay_filter` 条件形式，使用本地执行链实现；属于 L3 核心接线，未新增策略继承接口。
-
-- 通过现有策略设置／回测基础过滤面板编辑，最多 8 条 AND 条件，复用自定义信号字段、比较运算符和 0–60 个标的交易日偏移。缺省或 `[]` 不叠加；POST/PATCH 及运行期校验，非法配置、缺列明确失败，空值和非有限数不入选。
-- `strategy/overlay.py` 为选股、回测、监控的条件求值共用入口。完整窗口求值后再交集候选，在评分归一化和数量截断之前过滤，保留行情行与退出信号。矩阵依赖与历史暖机包含条件引用字段及偏移；组合策略的子策略继承各自个人条件与暖机需求。
-- 日线普通／矩阵策略支持；组合策略顶层和分钟策略不支持，需在日线子策略配置。矩阵策略暂不支持字符串条件。扩展字段仅支持按交易日保存的时序数据，复用 `attach_ext_columns(include_snapshot=False)`；最新快照不能用于该功能，以免历史回测引入未来信息。只有补齐可验证的历史口径和矩阵字符串表达后，才扩大这些支持范围。
-- 继续通过 `UserContext`／`private_storage` 持久化，每人各自加载条件；沿用策略保存后的个人结果缓存和监控失效链路、前端查询键及回测配置签名，不向共享行情缓存写入个人条件结果。已有策略文件与旧配置无须迁移。
-- 回归入口：`test_strategy_overlay.py`、`backtest/test_strategy_backtest_correctness.py`、`test_ext_factors.py`、`ConditionEditor.test.tsx`、`StrategySettingsDialog.overlay.test.tsx`。
+修改注册或插槽时验证版本、ID／路由冲突、默认行为与失败隔离；修改业务规则时断言实际结果。策略叠加条件已有 `test_strategy_overlay.py`、`backtest/test_strategy_backtest_correctness.py`、`test_ext_factors.py`、`ConditionEditor.test.tsx` 和 `StrategySettingsDialog.overlay.test.tsx` 可供定位。

@@ -1,17 +1,14 @@
 # AI 开发入口
 
-修改、调试或审查本仓库前，必须完整阅读并遵循根目录的 [`CONTRIBUTING.md`](CONTRIBUTING.md)。其中定义了项目架构、数据契约、数据源插件化、缓存与性能要求、测试矩阵以及 PR 复审和合并标准。
+修改、调试或审查本仓库前，必须完整阅读并遵循根目录的 [`CONTRIBUTING.md`](CONTRIBUTING.md)。其中保留模块边界、金融数据契约、缓存与性能要求及验证入口。
 
-定位代码与后续工作可参考 [`docs/REPO_MAP.md`](docs/REPO_MAP.md)、[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) 和 [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md)。它们记录当前代码结构、调用链和开发入口，不替代贡献规范或领域契约。
+定位代码与后续工作可参考 [`docs/REPO_MAP.md`](docs/REPO_MAP.md)、[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) 和 [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md)。它们记录当前代码结构、调用链和开发入口，具体数据与运行约定以维护规则和领域文档为准。
 
-涉及代码二次开发、前端插槽、后端可替换策略、扩展注册或上游升级兼容时，还必须阅读 [`docs/secondary-development.md`](docs/secondary-development.md)。该文档区分当前已实现能力与目标扩展契约；不得根据设计示例虚构尚不存在的 API。
+涉及前端插槽、后端定制模块或扩展注册时，同时阅读 [`docs/secondary-development.md`](docs/secondary-development.md)，并核对实际类型、注册入口和调用方。
 
 同时遵守以下规则：
 
-- 先理解调用链和现有测试，再进行修改。
-- 保持实现简单、改动范围最小，不处理无关问题。
-- 不覆盖工作区已有修改，不虚构测试或审查结果。
-- 以实际验证结果作为完成标准。
+- 沿调用链和现有测试确认责任，保持改动聚焦，保留工作区已有修改；如实报告验证结果。
 - 交易日盘后自动同步的执行顺序、当日完整性验收、重试与取消规则以 [`docs/postmarket-pipeline.md`](docs/postmarket-pipeline.md) 为约定。新增盘后步骤必须遵守依赖顺序，并同步该文档及对应测试。
 
 ## 环境与发布约定

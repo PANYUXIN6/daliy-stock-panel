@@ -5,14 +5,13 @@ authority_status: observed
 
 # 当前架构与数据流
 
-Tick Stock Panel 由 React 前端、FastAPI 后端和本地文件数据层组成。后端分为网页服务与唯一采集服务，采集服务持有调度、实时监控与任务执行，并把部分研究计算交给独立进程。本文按 2026-10-10 的源码描述实际关系；目录定位见 [仓库地图](REPO_MAP.md)，数据契约和修改要求见 [CONTRIBUTING.md](../CONTRIBUTING.md)。
+Tick Stock Panel 由 React 前端、FastAPI 后端和本地文件数据层组成。后端分为网页服务与唯一采集服务，采集服务持有调度、实时监控与任务执行，并把部分研究计算交给独立进程。本文描述源码中的主要关系；目录定位见 [仓库地图](REPO_MAP.md)，数据契约和修改要求见 [CONTRIBUTING.md](../CONTRIBUTING.md)。
 
 ## 系统关系
 
 ```mermaid
 flowchart TD
     UI[React 页面与共享查询] --> WEB[web API 与认证]
-    EXTERNAL[外部程序] --> WEB
     WEB --> LOCAL[只读仓库与 QuoteMirror]
     WEB -->|显式采集 配置 任务与AI| COLLECTOR[collector 唯一执行者]
     COLLECTOR --> PROVIDER[行情 Provider 与专有数据源]
@@ -55,7 +54,7 @@ enriched 在磁盘上保存基础行情窄表，字段以 [ENRICHED_STORAGE_COLS
 
 [enriched_generation.py](../backend/app/enriched_generation.py) 协调 enriched 发布、读写版本和矩阵缓存所依赖的数据 generation。修改写入路径时，应沿现有发布机制检查视图、仓库快照和研究缓存，不能把写完一个文件等同于所有读者已刷新。
 
-## 实时行情与两类事件流
+## 实时行情与事件流
 
 collector 的 [QuoteService](../backend/app/services/quote_service.py) 默认每 30 秒按路由与交易时段拉取标准行情，在允许写入的阶段更新当日日线和 enriched；`compute_enriched_today` 优先使用历史聚合状态递推。完成缓存更新后，服务评估统一监控规则、更新策略实时结果并驱动模拟盘撮合。取数锁和监控评估锁分开管理。
 
@@ -69,7 +68,7 @@ collector 的 [QuoteService](../backend/app/services/quote_service.py) 默认每
 
 [dragon_tiger.py](../backend/app/services/dragon_tiger.py) 和 [auction_benchmark.py](../backend/app/services/auction_benchmark.py) 的取数由 collector 后台执行，当日及历史结果保存到本机；对应 GET 与 AI 上下文只读保存结果。专有榜单仍使用 fuyao 方法，不混入标准能力路由，未配置或无本地结果时返回原空态。
 
-普通分钟的 `ordinary_minute_enabled` 为独立持久化开关，默认开启以保持既有行为；关闭后常驻线程等待，不开始下一轮或下一资产的自动请求，已开始的请求完成落盘。它不跟随实时行情总开关，不阻止显式分钟任务。采集执行函数与触发方式分开，多数已有独立任务入口；维表和榜单也有独立执行函数，但当前没有各自的启停偏好，ETF 主要按全量同步范围执行。全量流程仍保留日K／除权之后重算指标的必要依赖。未来恢复定时可以调用这些既有执行与任务入口；旧财务自动循环并不使用当前统一任务槽，不能仅打开其旧开关就等同于完成定时集成。
+普通分钟的 `ordinary_minute_enabled` 为独立持久化开关，默认开启；关闭后常驻线程等待，不开始下一轮或下一资产的自动请求，已开始的请求完成落盘。它不跟随实时行情总开关，不阻止显式分钟任务。维表和榜单当前没有各自的启停偏好，ETF 主要按全量同步范围执行。全量流程保留日 K／除权之后重算指标的依赖。
 
 [shared_runtime.py](../backend/app/services/shared_runtime.py) 的 `publish_quotes` 原子保存 `runtime/quotes.zip`，包含后台已计算的行情表、指数、状态与必要盘口信息；`publish_data_update` 保存更新标记并发出 `data_updated`。web 的 `bridge_events` 先安装快照或刷新本地视图／缓存，再广播给页面。重连的 `hello` 会补读共享结果并发送全数据集失效，浏览器不必因网页重启重新发起采集。
 
@@ -78,12 +77,7 @@ collector 的 [QuoteService](../backend/app/services/quote_service.py) 默认每
 [review_publication.py](../backend/app/services/review_publication.py) 在盘后管道成功后保存 `market_recap/date=YYYY-MM-DD.json`。`GET /api/market-recap/publication?date=...` 默认北京时间当日，返回 `as_of`、`published`、`published_at`、`overview`；未发布时 overview 为 null，复盘页显示“当日复盘尚未更新”。市场快照发布与 AI 成功独立，历史 AI 报告与手动生成入口保留。页面跨北京时间午夜切换当日查询键，查看历史报告时摘要查询跟随报告日期。复盘、财务、个股 AI 流经 [analysis_archive.py](../backend/app/services/analysis_archive.py) 在 collector 归档，完成事件含 `archived: true` 与 `report_id`，前端刷新历史而不重复保存。
 
 
-| 事件通道 | 后端归属 | 消费与恢复方式 |
-| --- | --- | --- |
-| 面板 `/api/intraday/stream` | `api/intraday.py` 与 `QuoteService` 订阅机制 | collector 经内部事件连接传入 web；`Layout` 的 `useQuoteStream` 处理行情、告警及 `data_updated`，按数据集失效查询，焦点日 K 可增量合并；重连补读数据与任务状态 |
-| 历史开放事件入口 | `api/events.py`、`services/event_tickets.py` | 现已由认证边界拒绝访问；旧票据与 Bearer Token 不提供业务权限 |
-
-两类通道使用不同的订阅底座。开放总线使用有界队列，慢消费者可能丢旧事件，不是持久事件回放系统。
+页面事件入口为 `/api/intraday/stream`，由 `api/intraday.py` 与 `QuoteService` 管理订阅。collector 经内部事件连接传入 web，`Layout` 的 `useQuoteStream` 处理行情、告警与 `data_updated`，按数据集失效查询并合并焦点日 K；重连后补读数据与任务状态。
 
 ## 策略与研究执行
 
@@ -97,7 +91,7 @@ collector 的 [QuoteService](../backend/app/services/quote_service.py) 默认每
 
 候选核验快照保存在个人策略结果缓存的 `verification` 中，区分已确认、待核验和利润条件未通过。只有已确认股票进入 `rows`、当日曾命中及策略聚合；前端仅展示确认结果与任务状态，未确认候选及其计数保留在后台，不作为选股结果展示。普通同日重算保留最近显式核验快照，跨日清除。休市期间的可用日期映射到之后首个交易日，日期级数据无法证明具体夜间披露时刻；仍沿用供应商更新日与本地观察日规则，已建基线后在跳空当日才观察到的新版本不能倒填为当天确认，即使本次查询成功也可能持续待核验。后续修订不抹除既定事件。
 
-策略回测、优化和步进验证主要通过 [backtest/worker.py](../backend/app/backtest/worker.py) 的 `make_worker_task` / `run_worker_task` 进入 `spawn` 子进程。子进程重建数据仓库与策略引擎，读取本地数据，运行研究服务和撮合引擎，将进度与结果传回父进程。信号生成和成交模拟在各自阶段执行；成交时序、T+1、原始价与复权价的约束见贡献规范和 `tests/backtest/`。
+策略回测、优化和步进验证主要通过 [backtest/worker.py](../backend/app/backtest/worker.py) 的 `make_worker_task` / `run_worker_task` 进入 `spawn` 子进程。子进程重建数据仓库与策略引擎，读取本地数据，运行研究服务和撮合引擎，将进度与结果传回父进程。信号生成和成交模拟在各自阶段执行；成交时序、T+1、原始价与复权价的约束见维护约定和 `tests/backtest/`。
 
 另有 [services/backtest.py](../backend/app/services/backtest.py) 的信号回测路径使用可选 `vectorbt`，不能把它与矩阵策略回测的依赖和执行方式混为一谈。挖掘由 [MiningJobManager](../backend/app/services/mining_manager.py) 与 `MiningRunStore` 管理持久任务状态、事件和研究产物，重启恢复由生命周期调用；候选保存与发布是独立操作，详见 [mining.md](mining.md)。
 
@@ -125,7 +119,7 @@ collector 的 [QuoteService](../backend/app/services/quote_service.py) 默认每
 
 财务全市场同步在 `financial_sync._get_symbols` 核对请求股票池。实现可选 `get_financial_universe` 的 provider 提供当前 canonical 代码范围；Fuyao 使用全市场快照清单，因此不会请求其清单外的历史代码，也会纳入基础维表尚未收录的代码。服务将核对时间、源名称、数量与双向差异保存到 `financials/universe.json`，不修改基础维表或删除历史报表。未实现该方法的源沿用本地维表；清单异常或为空时停止同步，后续报表请求仍保留原有失败、限流和取消语义。清单存在不代表每股每期都有报表，实际覆盖以落库结果为准。
 
-当前财务写入范围由 `financial_sync.FINANCIAL_SYNC_TABLES` 限为利润表；网页主入口、旧 `all` 别名、断点和可选调度共用该范围，其他表的显式采集请求被拒绝。只读表协议和供应商适配保留。可选因子目录下线 PB、ROE、资产负债率，保留四项利润表因子；旧评分缺失仍不可计算，不静默重分权重。
+`financial_sync.FINANCIAL_SYNC_TABLES` 只限制保留的内部批次兼容路径，其范围为利润表。当前页面和计算任务经 `financial_demand` 按需获取各自所需表；支持范围由数据源能力决定。评分缺少输入时不可计算，不静默重分权重。
 
 财务同步通过 `services/financial_versions.py` 先原子保存完整版本至 `financials/versions/{table}/part.parquet`，再保存每期最新完整浏览记录并发布原有 `financials` 更新通知。首次获取的可信更新日期允许保守回填；开始观察后新增版本使用更新日与本地观察日的较晚者，重复内容不改变首次观察时间。报表每轮重查源可返回的历史窗口，股本沿用增量。旧浏览表保留，但不推测来源或历史版本时间；升级后重新同步建立版本基线。`backtest/fundamentals.py` 只读版本库，按同源输入重建指标时间线，再以最新可用报告期门控面板、矩阵、因子与挖掘；日期当日不可用，缺失不参与评分入选或产生分数离场，独立卖出与风控保持。扶摇无日期指标仅从观察后使用，估值反推 BPS 不作为财报 BPS。版本明细不进入现有浏览表 DuckDB glob，财务因子仍在行情矩阵缓存加载后重新附加，不落行情缓存。字段及剩余覆盖限制见 `docs/plugin-development.md` 的财务版本时间契约。
 
@@ -135,7 +129,7 @@ collector 的 [QuoteService](../backend/app/services/quote_service.py) 默认每
 
 ## 账号与个人数据边界
 
-web 与 collector 均通过 `auth_access.py` 验证 SQLite 会话，建立不可变 `UserContext`；账号库位于 `data/auth/auth.sqlite3`，保存用户、会话及登录事件。单账号只允许一个 7 天会话，停用及密码变更撤销会话；角色调整在后续请求中读取最新权限。pro 到期按北京时间日期判断。旧密码文件、Bearer Token 和事件票据不再参与认证。
+web 与 collector 均通过 `auth_access.py` 验证 SQLite 会话，建立不可变 `UserContext`；账号库保存用户、会话及登录事件。单账号只允许一个 7 天会话，停用及密码变更撤销会话；角色调整在后续请求中读取最新权限。pro 到期按北京时间日期判断。
 
 回测、监控中心、信号库和持仓提醒仅对 admin 开放：前端隐藏菜单及关联入口，直接 URL 由 `AdminOnly` 拦截；后端统一限制回测、监控规则、自定义信号、告警记录和持仓提醒接口，AI 助手的回测、信号及持仓提醒查询也遵守相同角色约束。因子检验、挖掘与候选管理虽共用 `/api/backtest` 前缀，仍保留各自权限，不随回测页一起关闭；模拟盘的独立接口不变。
 
@@ -153,11 +147,11 @@ web 与 collector 均通过 `auth_access.py` 验证 SQLite 会话，建立不可
 
 核心前端请求和类型集中在 [lib/api.ts](../frontend/src/lib/api.ts)，查询键与共享查询主要在 `queryKeys.ts`、`useSharedQueries.ts`。页面路由按需加载，`Layout` 负责跨页面状态与行情订阅。慢变查询可由 localStorage 恢复，但挂载后仍按查询策略刷新；快变行情不在持久化白名单。
 
-首页由 [router.tsx](../frontend/src/router.tsx) 在认证边界通过后挂载 `Layout` 和 `Dashboard`。首次配置向导、完成标记与专用完成接口已移除；进入页面只读取后端现有配置，不自动选择或保存能力路由。Key 由 [secrets_store.py](../backend/app/secrets_store.py) 读取本地凭据及环境后备值，路由由 [preferences.py](../backend/app/services/preferences.py) 读取，未设置时使用既有默认值。TickFlow / AI 密钥只由后端配置，settings API 仅暴露配置状态（旧脱敏字段为空），拒绝网页替换或清除密钥。能力路由和 AI 非密钥选项仍通过设置页及 settings API 修改。
+首页由 [router.tsx](../frontend/src/router.tsx) 在认证边界通过后挂载 `Layout` 和 `Dashboard`。页面只读取后端配置。Key 由 [secrets_store.py](../backend/app/secrets_store.py) 读取本地凭据及环境后备值，路由由 [preferences.py](../backend/app/services/preferences.py) 读取。TickFlow / AI 密钥仅由后端配置，settings API 只暴露配置状态，拒绝网页替换或清除；能力路由和 AI 非密钥选项通过设置页修改。
 
 采集、共享数据重算和缓存维护主要集中在 [Data.tsx](../frontend/src/pages/Data.tsx)：指数日 K、单标的分钟、概念／行业预设、历史环境与主线、实时采集开关与手动获取、五档盘口更新、共享缓存重建均复用现有接口。[Regime.tsx](../frontend/src/pages/Regime.tsx) 在历史查询成功但结果为空时，也提供管理员“环境分析”按钮，复用 `POST /api/regime/recompute` 根据全部本地历史生成环境、情绪周期与主线，完成后按既有数据集查询前缀失效缓存；加载失败时仅提供读取重试，普通用户提示联系管理员。管道任务通过 `active_id` 恢复；分钟维护与候选财务核验复用 `useCollectorJob`，单股财务获取使用独立的按需请求。盘后同步默认由 collector 在交易日 16:00 发起，数据页保留手动入口；盘前基础资料与交易日历维护保持原调度。数据维护与共享系统设置由后端校验 admin 权限；各账号仍可修改自己的个人偏好。
 
-页面常用同步按行情与基础数据、分钟历史、板块分类三个模块组织。财务维护仅显示本地覆盖并导航到个股财务页，不提供全市场更新或断点续采按钮；旧 `/api/financials/sync/{table}` HTTP 入口返回 410。既有底层批次同步保留供内部兼容，不由页面或调度启动。新增板块分类动作 `POST /api/ext-data/presets/sync` 复用既有预设转换，概念与行业串行写入，共用 JobStore、写入槽、容量与取消机制；执行退出时对实际写入统一刷新并发布，部分失败或取消也保留已保存结果且任务终态如实报告。原单表接口保持可用。现有扩展 PullScheduler 仍是原独立定时路径，此次没有改变其调度或并发边界。
+页面常用同步按行情与基础数据、分钟历史、板块分类三个模块组织。财务维护仅显示本地覆盖并导航到个股财务页，不提供全市场更新或断点续采按钮；旧 `/api/financials/sync/{table}` HTTP 入口返回 410。既有底层批次同步保留供内部兼容，不由页面或调度启动。板块分类动作 `POST /api/ext-data/presets/sync` 复用既有预设转换，概念与行业串行写入，共用 JobStore、写入槽、容量与取消机制；执行退出时对实际写入统一刷新并发布，部分失败或取消也保留已保存结果且任务终态如实报告。原单表接口保持可用。扩展 PullScheduler 使用独立定时路径。
 
 财务由 [financial_demand.py](../backend/app/services/financial_demand.py) 统一编排。所有已登录用户可调用 `POST /api/financials/fetch` 获取一股一表，默认按北京时间当天向前两年的报告期范围取数；传入本地 GET 返回的 `history_start` 作为 `before` 时，仅查询该边界之前的一年（含起日、不含 `before`）。各表独立向前补采，已有更长历史继续保留。`GET /api/financials/collection-options` 由 collector 返回当前源支持的表。单股请求在工作线程完成，页面显示等待、错误和成功后的本地刷新。同数据目录、数据源、股票、表及日期范围共享在途结果，以 `financials/demand/{table}/{symbol}.json` 保存源、检查日期与历史查询边界；近两年同日复用，更早区间成功后复用，重启后保留边界。空历史年度返回零行并允许继续向前查询；网络、限流、缺数错误不移动边界。网络在锁外，提交在共享财务写锁内重新读取、保存完整版本、合并浏览表并原子替换，再保存边界、发布 `financials` 更新并失效存储统计及前端查询，不修改全市场断点或完成时间。Fuyao 三大报表使用日期范围接口，核心指标根据区间内已披露报告逐期获取，历史指标不使用当前估值反推 BPS；不支持股本。其他源可用可选 `financial_tables` 限制表范围。显式计算任务仍按原依赖窗口准备历史，不把页面近两年成功记录当作整段计算历史已齐全。
 
@@ -167,18 +161,18 @@ web 与 collector 均通过 `auth_access.py` 验证 SQLite 会话，建立不可
 
 模块预检查包含全市场分钟与概念／行业组合：分钟仅在同源、同范围的收盘后任务成功且有本地结果时提示已执行；分类需两表都有今天保存的非空结果，缺一表时直接发起同步。提示不证明上游未修订或全部标的覆盖。全市场分钟任务提交时固定本次实际天数，沿用原 API 与请求标识，并在已有结果中附加范围证据。
 
-业务页的刷新只重新读取本地结果，保留研究计算、AI 分析和业务操作。财务浏览、历史报告、基于本地财务的 AI 分析和本地分钟成交研究不依赖当前供应商采集能力；能力检查留在采集入口。回测与挖掘只提示共享环境数据缺口，不在业务页面补算。概念和行业页面只读取后台保存的预设结果。普通 AI 助手保留查询和业务动作，执行策略也沿用显式财务准备；已移除全市场 `sync_data` 工具。
+业务页的刷新只重新读取本地结果，保留研究计算、AI 分析和业务操作。财务浏览、历史报告、基于本地财务的 AI 分析和本地分钟成交研究不依赖当前供应商采集能力；能力检查留在采集入口。回测与挖掘只提示共享环境数据缺口，不在业务页面补算。概念和行业页面只读取后台保存的预设结果。AI 助手的策略执行同样使用显式财务准备。
 
-源码二开通过独立注册表接线。前端当前开放 `layout.navigation.extra`、`stock-preview.footer`、`watchlist.toolbar`，类型以 [FrontendSlotContextMap](../frontend/src/extensions/types.ts) 为准；版本字段在扩展清单 `apiVersion` 上，当前插槽 context 未包含文档示例中的 `apiVersion`。前端在构建路由前完成校验并冻结注册表。后端提供路由、启动钩子和 [NotificationFormatter](../backend/app/extensions/contracts.py)，加载器隔离注册失败；应用构建时完成注册并冻结，核心服务初始化后再运行可选启动钩子，钩子不能追加注册。
+定制模块通过独立注册表接线。前端当前开放 `layout.navigation.extra`、`stock-preview.footer`、`watchlist.toolbar`，类型以 [FrontendSlotContextMap](../frontend/src/extensions/types.ts) 为准；版本字段在扩展清单 `apiVersion` 上。前端在构建路由前完成校验并冻结注册表。后端提供路由、启动钩子和 [NotificationFormatter](../backend/app/extensions/contracts.py)，加载器隔离注册失败；应用构建时完成注册并冻结，核心服务初始化后再运行可选启动钩子，钩子不能追加注册。
 
-AI 助手由 `frontend/src/custom/assistant/` 和 `backend/app/custom/assistant/` 接入，调用现有查询和动作能力，写动作经过确认流程。其后端请求会注入 `app.state` 中的核心服务，前端使用自己的流式客户端和会话 store；`AiConfigEntry.tsx` 还通过 DOM 与 portal 锚定设置入口，升级时需要复核相关布局。不能将这些具体做法推断为所有扩展的稳定公共接口。
+AI 助手由 `frontend/src/custom/assistant/` 和 `backend/app/custom/assistant/` 接入，调用现有查询和动作能力，写动作经过确认流程。其后端请求会注入 `app.state` 中的核心服务，前端使用自己的流式客户端和会话 store；`AiConfigEntry.tsx` 通过 DOM 与 portal 锚定设置入口。
 
-候选过滤、仓位、风控、回测成本和配置迁移注册等设计接口不等于已实现 API，使用前应检查定义与调用方。[secondary-development.md](secondary-development.md) 同时包含规范和按需扩展示例，新文档中的现状描述不替代其中的契约要求。
+扩展类型、注册入口与验证方式见 [扩展说明](secondary-development.md)。
 
 ## 外部系统与核对范围
 
-预发部署由 GitHub CI 连接服务器 SSH 执行：`develop` 用于本地测试，`main` 的后端和前端检查成功后，CI 将明确提交的源码交给远端发布脚本。远端运行根目录持有独立的 `data/`、`.env`、`tiers.yaml` 和部署覆盖配置，版本源码位于 `releases/<SHA>/`；构建及服务验收完成后更新 `current`。这条发布链只传输代码，公共金融数据的跨环境同步仍按发布需要单独处理。凭据归属 GitHub `preproduction` Environment，服务器健康失败时尝试恢复旧版本双服务，不能据此推断运行数据已恢复。入口与验证见 [仓库地图](REPO_MAP.md#关键调用链) 和[部署指南](deployment.md#github-自动发布预发)。
+预发部署由 GitHub CI 连接服务器 SSH 执行：`develop` 用于本地测试，`main` 检查成功后发布指定源码至 `releases/<SHA>/`，运行根目录独立保留数据与环境配置。HTTPS 模式由 Caddy 接管公网 80/443，通过专用网络反代 web；web 精确信任固定代理 IP，collector 仍仅在内部网络。证书与 ACME 账号使用稳定持久卷，Caddyfile 与代理镜像随 release 记录；应用、代理与可信证书验收成功后更新 `current`，失败恢复旧服务与代理配置。runner 再作公网 HTTPS 检查。发布链只传输代码，数据同步另行处理；服务恢复不代表运行数据回滚。入口与验证见 [仓库地图](REPO_MAP.md#关键调用链) 和[部署指南](deployment.md#docker-https-与-caddy)。
 
-外部依赖包括行情供应商或用户 HTTP 源、模型 API 与通知通道。本地 Codex CLI 和旧 Token 开放通道已停用；stocksdk 插件另有 Node 桥接，OCR 涉及 Tesseract 等机器能力，详情在对应模块与配置文档。
+外部依赖包括行情供应商或用户 HTTP 源、模型 API 与通知通道。stocksdk 插件另有 Node 桥接，OCR 涉及 Tesseract 等机器能力，详情在对应模块与配置文档。
 
-本文基于入口、代表性调用链、存储与类型定义及现有测试源码核对，没有验证真实行情源、模型服务、通知投递或全部平台运行行为。具体性能数值、第三方可用性和业务正确性需要对应任务的实际验证；后续修改入口、职责、数据流或缓存归属时应同步相关段落。
+本文用于定位职责与数据流，不代表真实行情源、模型服务、通知投递或全部平台均已验证。修改入口、职责、数据流或缓存归属时同步相关段落。

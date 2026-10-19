@@ -1,11 +1,7 @@
-"""API 开放网关 — Token 请求的 scope 校验与限流 (docs/open-platform-plan.md §4-5)。
+"""保留的 Token scope 校验与限流实现；当前账号认证不接入此网关。
 
-evaluate() 是唯一入口: 认证中间件把 Bearer 明文交给它, 得到
-放行 / 401 / 403 / 429 的裁决与响应头。UI 会话完全不经过本模块。
-
-规则表按顺序匹配 (方法 + 路径前缀); 未命中 = 不对外开放 (403)。
-刻意不放进规则表的: SSE 流端点 (EventSource 无法带 Authorization 头,
-V2 用短期票据解决)、watchlist/监控规则管理、数据同步、设置 —— 保持最小开放面。
+evaluate() 返回放行或 401 / 403 / 429 裁决及响应头。
+规则表按方法与路径前缀顺序匹配，未命中的端点拒绝访问。
 """
 from __future__ import annotations
 

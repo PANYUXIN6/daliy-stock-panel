@@ -28,6 +28,9 @@ fi
 files+=(-f "$runtime/docker-compose.override.yml")
 if [[ -n ${release:-} ]]; then
   files+=(-f "$release/.deploy-image.yml")
+  if [[ -f "$release/.deploy-https.json" ]]; then
+    files+=(-f "$release/docker-compose.https.yml" -f "$release/.deploy-https.json")
+  fi
 fi
 exec docker compose --project-directory "$runtime" --env-file "$runtime/.env" \
   -p stock-panel "${files[@]}" "$@"

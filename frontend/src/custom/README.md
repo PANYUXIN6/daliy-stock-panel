@@ -1,9 +1,5 @@
-# 前端二次开发目录
+# 前端自定义入口
 
-在独立子目录中创建 `extension.tsx`，构建时会自动发现，无需修改核心路由和导航文件。
+`<namespace>/extension.tsx` 会在构建时被自动发现，默认导出 `FrontendExtension`，可注册页面、导航和现有插槽。
 
-```text
-frontend/src/custom/<namespace>/extension.tsx
-```
-
-以 [`_template/extension.tsx.example`](_template/extension.tsx.example) 为起点，并遵循 [`docs/secondary-development.md`](../../../docs/secondary-development.md)。模板文件不会参与构建。
+类型定义见 [`../extensions/types.ts`](../extensions/types.ts)，示例见 [`_template/extension.tsx.example`](_template/extension.tsx.example)；模板不参与构建。接入说明见 [自定义代码入口](../../../docs/secondary-development.md)。

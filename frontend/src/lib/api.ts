@@ -1434,7 +1434,7 @@ export interface FactorColumn {
   desc: string
 }
 
-// ===== Factor Library (注册表, P1) =====
+// ===== Factor Library (注册表) =====
 export type FactorKind = 'base' | 'virtual' | 'composite' | 'custom'
 export type FactorStability = 'stable' | 'experimental' | 'deprecated'
 
@@ -1548,7 +1548,7 @@ export interface FactorBatchItem {
   n_dates: number
   elapsed_ms: number
   error: string | null
-  // metrics_v2 (P3): NW HAC t 值与 BH-FDR q 值; 样本不足为 null (前端降级经验规则)
+  // NW HAC t 值与 BH-FDR q 值；样本不足为 null，前端回退经验规则。
   t_naive?: number | null
   t_newey_west?: number | null
   nw_lag?: number | null

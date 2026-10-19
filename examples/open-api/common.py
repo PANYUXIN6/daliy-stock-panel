@@ -1,11 +1,6 @@
-"""开放接口示例脚本 — 公共工具 (纯标准库, 无第三方依赖)。
+"""历史开放接口示例的标准库工具；当前应用已停用此 Token 通道。
 
-使用前:
-  1. 面板 → 设置 → 开放接口 → 新建 Token (按需勾选 scope)
-  2. 设置环境变量:
-       TSP_TOKEN=tsp_xxx            (必填)
-       TSP_BASE=http://127.0.0.1:3018  (默认本机开发端口, 按实际改)
-  3. 逐个运行: python 01_pull_market.py
+适用范围见同目录 README.md；此处保留旧版 TSP_TOKEN / TSP_BASE 请求封装。
 """
 from __future__ import annotations
 

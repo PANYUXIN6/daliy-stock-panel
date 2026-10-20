@@ -190,7 +190,7 @@ class QuoteMirror:
 
 def refresh_web_data(state, datasets: list[str]) -> None:
     """刷新文件视图和相关缓存；行情热路径只安装已经计算好的最新日快照。"""
-    from app.api.data import invalidate_data_cache, invalidate_storage_cache
+    from app.api.data import invalidate_data_cache
     from app.api.ext_data import invalidate_dimension_intraday_cache
     from app.api.overview import invalidate_overview_cache
     from app.api.regime import invalidate_regime_cache
@@ -205,7 +205,6 @@ def refresh_web_data(state, datasets: list[str]) -> None:
         repo._enriched_history_generation = None
         ScreenerService.clear_history_cache()
     invalidate_data_cache()
-    invalidate_storage_cache()
     invalidate_overview_cache()
     invalidate_regime_cache()
     if any(name in {'ext_data', 'minute', 'daily', 'pipeline', 'all'} for name in datasets):

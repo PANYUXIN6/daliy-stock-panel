@@ -48,15 +48,10 @@ class WecomBotService:
         self._ws_loop: asyncio.AbstractEventLoop | None = None
         self._connected = False        # WebSocket 是否已连接并通过鉴权
         self._last_error: str = ""
-        self._app_state = None         # 延迟注入, 避免循环导入
 
     # ================================================================
     # 生命周期
     # ================================================================
-
-    def set_app_state(self, app_state) -> None:
-        """注入 FastAPI app.state (目前未使用, 预留消息处理时访问 monitor/repo)。"""
-        self._app_state = app_state
 
     def start(self) -> bool:
         """启动长连接线程。凭证不齐或已运行则跳过。返回是否真正启动。"""

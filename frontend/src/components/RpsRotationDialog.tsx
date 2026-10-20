@@ -8,6 +8,8 @@ import { cn } from '@/lib/cn'
 import { fmtPct } from '@/lib/format'
 import { MarkdownRenderer } from '@/components/financials/MarkdownRenderer'
 import { Modal } from '@/components/Modal'
+import { useAiFeature } from '@/lib/useAiCredits'
+import { AiCreditHint } from '@/components/AiCreditHint'
 
 interface Props {
   onClose: () => void
@@ -48,6 +50,8 @@ function rankColorClass(rank: number, total: number): string {
 }
 
 export function RpsRotationDialog({ onClose, kind = 'concept' }: Props) {
+  const feature = kind === 'industry' ? 'industry_rotation' : 'concept_rotation'
+  const quota = useAiFeature(feature)
   // 维度文案: concept→概念, industry→行业
   const dimLabel = kind === 'industry' ? '行业' : '概念'
   const [days, setDays] = useState(DEFAULT_DAYS)
@@ -64,6 +68,7 @@ export function RpsRotationDialog({ onClose, kind = 'concept' }: Props) {
   const [focus, setFocus] = useState('')                  // 用户追加的关注点
 
   const runAnalysis = useCallback(async (daysParam: number, focusParam: string) => {
+    if (!quota.available) return
     setAnalyzing(true)
     setAnalysis('')
     setAnalysisError('')
@@ -81,7 +86,7 @@ export function RpsRotationDialog({ onClose, kind = 'concept' }: Props) {
     } finally {
       setAnalyzing(false)
     }
-  }, [kind, level])
+  }, [kind, level, quota.available])
 
   // 数据请求: React Query 缓存, 同 (kind, level, days) 5 分钟内重开秒开
   const lvParam = kind === 'industry' ? level : undefined
@@ -264,9 +269,10 @@ export function RpsRotationDialog({ onClose, kind = 'concept' }: Props) {
                 />
                 <button
                   onClick={() => runAnalysis(days, focus)}
-                  disabled={analyzing}
+                  disabled={analyzing || !quota.available}
+                  title={quota.reason || undefined}
                   className={cn(
-                    'inline-flex items-center gap-1 px-2 py-0.5 rounded-btn text-[11px] transition-colors cursor-pointer border',
+                    'inline-flex items-center gap-1 px-2 py-0.5 rounded-btn text-[11px] transition-colors cursor-pointer border disabled:opacity-50 disabled:cursor-not-allowed',
                     analyzing
                       ? 'opacity-60 cursor-not-allowed border-border text-muted'
                       : 'bg-accent/10 text-accent border-accent/30 hover:bg-accent/20',
@@ -277,9 +283,11 @@ export function RpsRotationDialog({ onClose, kind = 'concept' }: Props) {
                     : analysis
                       ? <><RefreshCw className="h-3 w-3" />重新分析</>
                       : <><Sparkles className="h-3 w-3" />生成分析</>}
+                  {!analyzing && <> · {quota.priceLabel}</>}
                 </button>
               </div>
             </div>
+            <AiCreditHint feature={feature} className="px-4 py-1" />
 
             {/* 报告内容区: 四态渲染 */}
             <div ref={analysisRef} className="flex-1 min-h-0 overflow-auto">
@@ -289,8 +297,10 @@ export function RpsRotationDialog({ onClose, kind = 'concept' }: Props) {
                   <span>{analysisError}</span>
                   <button
                     onClick={() => runAnalysis(days, focus)}
-                    className="ml-auto text-accent hover:underline shrink-0"
-                  >重试</button>
+                    disabled={!quota.available}
+                    title={quota.reason || undefined}
+                    className="ml-auto text-accent hover:underline shrink-0 disabled:opacity-50 disabled:cursor-not-allowed"
+                  >重试 · {quota.priceLabel}</button>
                 </div>
               ) : analysis || analyzing ? (
                 <div className="px-4 py-2.5 text-[12px] leading-relaxed">
@@ -325,7 +335,7 @@ export function RpsRotationDialog({ onClose, kind = 'concept' }: Props) {
             <button
               onClick={() => setReversed(r => !r)}
               className={cn(
-                'inline-flex items-center gap-1 px-2 py-1 rounded-btn text-[11px] transition-colors cursor-pointer border',
+                'inline-flex items-center gap-1 px-2 py-1 rounded-btn text-[11px] transition-colors cursor-pointer border disabled:opacity-50 disabled:cursor-not-allowed',
                 reversed
                   ? 'bg-accent/10 text-accent border-accent/30'
                   : 'border-border text-muted hover:text-secondary hover:bg-elevated',

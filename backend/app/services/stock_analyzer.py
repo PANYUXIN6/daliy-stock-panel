@@ -24,6 +24,7 @@ import polars as pl
 
 from app.indicators.levels import compute_levels, summarize_levels
 from app.market_time import cn_today
+from app.services.ai_prompt_data import TABLE_FORMAT_HINT, tabular_records
 from app.services.financial_sync import get_financial_df
 
 logger = logging.getLogger(__name__)
@@ -245,8 +246,9 @@ def _build_user_prompt(
         "",
         "以下是该标的最近日 K 数据(JSON,含 OHLCV 与已计算的技术指标。"
         f"最近 {_KLINE_WINDOW} 个交易日,升序):",
+        TABLE_FORMAT_HINT,
         "```json",
-        json.dumps(kline_tail, ensure_ascii=False),
+        json.dumps(tabular_records(kline_tail), ensure_ascii=False, separators=(",", ":")),
         "```",
     ]
 
@@ -256,7 +258,8 @@ def _build_user_prompt(
             "",
             "以下是该标的最新财务数据(JSON,核心指标 + 利润表,金额单位为元):",
             "```json",
-            json.dumps(fins, ensure_ascii=False),
+            json.dumps({table: tabular_records(rows) for table, rows in fins.items()},
+                       ensure_ascii=False, separators=(",", ":")),
             "```",
         ])
     elif asset_type == "index":

@@ -72,6 +72,7 @@ let state: AssistantState = {
 }
 
 const listeners = new Set<() => void>()
+const toolSuccessListeners = new Set<(name: string) => void>()
 let abortController: AbortController | null = null
 let pageContext: AssistantContext = {}
 
@@ -223,6 +224,9 @@ function applyEvent(event: AssistantEvent, footprintId: string, assistantId: str
             }
           : m),
       }))
+      if (event.ok) {
+        for (const listener of toolSuccessListeners) listener(event.name)
+      }
       break
     case 'action_confirm':
       patchActiveSession(session => ({
@@ -384,6 +388,12 @@ function findLastIndex<T>(items: T[], predicate: (item: T) => boolean): number {
 }
 
 // ===== React 绑定 =====
+
+/** 实时工具成功事件由宿主处理缓存刷新，不从持久化足迹重放。 */
+export function subscribeToolSuccess(listener: (name: string) => void) {
+  toolSuccessListeners.add(listener)
+  return () => { toolSuccessListeners.delete(listener) }
+}
 
 function subscribe(listener: () => void) {
   listeners.add(listener)

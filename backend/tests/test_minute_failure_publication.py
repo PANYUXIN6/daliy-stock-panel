@@ -29,7 +29,7 @@ def _frame(symbol="600000.SH", day=9):
 @pytest.mark.parametrize("mode", ["cancel", "failure", "success", "no_write_failure"])
 async def test_minute_task_publishes_only_completed_writes(tmp_path, monkeypatch, mode):
     writer = KlineRepository(DataStore(tmp_path))
-    reader = KlineRepository(DataStore(tmp_path, read_only=True))
+    reader = KlineRepository(DataStore(tmp_path))
     peer = SimpleNamespace(repo=reader, quote_service=Mock())
     jobs = pipeline_jobs.JobStore(store_dir=tmp_path / "jobs")
     monkeypatch.setattr(pipeline_jobs, "job_store", jobs)

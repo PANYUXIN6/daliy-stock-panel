@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import logging
-import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -65,27 +64,22 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# 追加文件日志: uvicorn (含 --reload 开发模式) 默认只有 StreamHandler, 同步/管道等
-# 运行时日志仅出现在 dev 终端, 关掉或滚屏后即丢失, 排查「同步后日志没落」时无处可查。
-# 落盘到 data/backend.log 与桌面版 (desktop.py:_setup_logging → desktop.log) 行为对齐,
-# 事后可查。桌面版 (frozen) 已由 desktop.py 写 desktop.log, 此处跳过避免重复落盘。
-# RotatingFileHandler 防止长期运行/频繁 reload 导致文件无限增长。
-if not getattr(sys, "frozen", False):
-    try:
-        from logging.handlers import RotatingFileHandler
+# 追加轮转文件日志，保留服务器与本地开发的同步/管道诊断记录。
+try:
+    from logging.handlers import RotatingFileHandler
 
-        _log_path = settings.data_dir / "backend.log"
-        _log_path.parent.mkdir(parents=True, exist_ok=True)
-        _file_handler = RotatingFileHandler(
-            _log_path, maxBytes=10 * 1024 * 1024, backupCount=3,
-            mode="a", encoding="utf-8", errors="replace",
-        )
-        _file_handler.setFormatter(
-            logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
-        )
-        logging.getLogger().addHandler(_file_handler)
-    except Exception as _e:  # noqa: BLE001
-        logger.warning("文件日志初始化失败, 仅输出到终端: %s", _e)
+    _log_path = settings.data_dir / "backend.log"
+    _log_path.parent.mkdir(parents=True, exist_ok=True)
+    _file_handler = RotatingFileHandler(
+        _log_path, maxBytes=10 * 1024 * 1024, backupCount=3,
+        mode="a", encoding="utf-8", errors="replace",
+    )
+    _file_handler.setFormatter(
+        logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+    )
+    logging.getLogger().addHandler(_file_handler)
+except Exception as _e:  # noqa: BLE001
+    logger.warning("文件日志初始化失败, 仅输出到终端: %s", _e)
 
 
 @asynccontextmanager
@@ -95,12 +89,15 @@ async def _application_lifespan(app: FastAPI):
     auth_service.bootstrap_from_env()
     migrate_legacy_private_data(settings.data_dir, auth_service.get_store().first_admin_id())
     logger.info(
-        "Tick Stock Panel v%s starting (mode=%s)",
+        "小帅工作台 v%s starting (mode=%s)",
         __version__, tf_client.current_mode(),
     )
 
     from app.services.pipeline_jobs import job_store
     job_store.recover_interrupted()
+
+    from app.services.ai_credits import get_credit_store
+    get_credit_store(settings.data_dir).recover_interrupted()
 
     # 数据层
     store = DataStore()
@@ -194,7 +191,6 @@ async def _application_lifespan(app: FastAPI):
     try:
         from app.services.wecom_bot_service import WecomBotService
         wecom_bot_service = WecomBotService()
-        wecom_bot_service.set_app_state(app.state)
         app.state.wecom_bot_service = wecom_bot_service
         wecom_bot_service.boot_check()
     except Exception as e:  # noqa: BLE001
@@ -382,7 +378,7 @@ async def _web_lifespan(app: FastAPI):
     auth_service.bootstrap_from_env()
     from app.services.user_migration import migrate_legacy_private_data
     migrate_legacy_private_data(settings.data_dir, auth_service.get_store().first_admin_id())
-    store = DataStore(read_only=True)
+    store = DataStore()
     repo = KlineRepository(store)
     # 缺采集快照时返回空行情，不触发 repository 的历史重算/修复分支。
     repo.install_shared_snapshot({name: pl.DataFrame() for name in (
@@ -439,7 +435,7 @@ def create_app(role: str | None = None) -> FastAPI:
     if role not in {'web', 'collector'}:
         raise ValueError('service role must be web or collector')
     app = FastAPI(
-        title="Tick Stock Panel",
+        title="小帅工作台",
         version=__version__,
         description="A 股选股 + 回测面板 — TickFlow 适配",
         lifespan=lifespan,
@@ -471,6 +467,8 @@ def create_app(role: str | None = None) -> FastAPI:
     # 路由
     app.include_router(core_router)
     app.include_router(auth_api.router)
+    from app.api.ai_credits import router as ai_credits_router
+    app.include_router(ai_credits_router)
     from app.api.users import router as users_router
     app.include_router(users_router)
     app.include_router(kline.router)
@@ -512,6 +510,15 @@ def create_app(role: str | None = None) -> FastAPI:
     # 业务代码用 capset.require(Cap.X) 断言能力,缺失时抛 CapabilityDenied;
     # 若不注册 handler 会冒泡成 500 Internal Server Error,对前端不友好且语义错误。
     from fastapi.responses import JSONResponse
+
+    from app.services.ai_credits import CreditError
+
+    @app.exception_handler(CreditError)
+    async def handle_credit_error(request, exc):
+        return JSONResponse(
+            {"detail": exc.detail, "code": exc.code}, status_code=exc.status,
+            headers={"Cache-Control": "no-store"},
+        )
 
     from app.tickflow.capabilities import CapabilityDenied
 

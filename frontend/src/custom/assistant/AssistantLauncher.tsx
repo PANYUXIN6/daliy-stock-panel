@@ -7,8 +7,10 @@ import { useCurrentUser } from '@/lib/auth'
  * 另负责全局快捷键 ⌘K/Ctrl+K 与 Esc、按当前路由上报页面上下文。
  */
 import { useEffect } from 'react'
+import { useQueryClient } from '@tanstack/react-query'
 import type { FrontendSlotContextMap } from '@/extensions/types'
-import { closeAssistant, setPageContext, toggleAssistant, useAssistantStore } from './store'
+import { QK } from '@/lib/queryKeys'
+import { closeAssistant, setPageContext, subscribeToolSuccess, toggleAssistant, useAssistantStore } from './store'
 import { AssistantFloatingButton } from './ui/AssistantFloatingButton'
 import { AiConfigEntry } from './ui/AiConfigEntry'
 import { AssistantDrawer } from './ui/AssistantDrawer'
@@ -44,6 +46,13 @@ const PAGE_LABELS: Record<string, string> = {
 export function AssistantLauncher(props: AnySlotContext) {
   const { pathname } = props as NavigationContext
   const { open } = useAssistantStore()
+  const queryClient = useQueryClient()
+
+  useEffect(() => subscribeToolSuccess(name => {
+    if (name !== 'add_to_watchlist') return
+    void queryClient.invalidateQueries({ queryKey: QK.watchlist })
+    void queryClient.invalidateQueries({ queryKey: QK.watchlistEnriched().slice(0, 1) })
+  }), [queryClient])
 
   useEffect(() => {
     setPageContext({ page: PAGE_LABELS[pathname] ?? '' })

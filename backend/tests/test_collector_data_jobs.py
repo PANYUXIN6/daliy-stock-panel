@@ -36,7 +36,7 @@ async def terminal(store, job_id):
 @pytest.mark.asyncio
 async def test_full_market_minute_publishes_to_existing_reader(tmp_path, monkeypatch, jobs):
     writer = KlineRepository(DataStore(tmp_path))
-    reader = KlineRepository(DataStore(tmp_path, read_only=True))
+    reader = KlineRepository(DataStore(tmp_path))
     capset = CapabilitySet({Cap.KLINE_MINUTE_BATCH: CapabilityLimits()})
     monkeypatch.setattr('app.tickflow.pools.get_pool', lambda name: ['600000.SH', '000001.SH'])
     day = date(2026, 10, 9)
@@ -277,7 +277,7 @@ async def test_partial_financial_write_reaches_two_readers(tmp_path, monkeypatch
     from app.services.events import EventBus
 
     writer = KlineRepository(DataStore(tmp_path))
-    readers = [KlineRepository(DataStore(tmp_path, read_only=True)) for _ in range(2)]
+    readers = [KlineRepository(DataStore(tmp_path)) for _ in range(2)]
     events = EventBus()
     monkeypatch.setattr(shared_runtime, "runtime_bus", events)
     subscriptions = [events.subscribe() for _ in readers]

@@ -5,7 +5,7 @@ authority_status: observed
 
 # 当前架构与数据流
 
-Tick Stock Panel 由 React 前端、FastAPI 后端和本地文件数据层组成。后端分为网页服务与唯一采集服务，采集服务持有调度、实时监控与任务执行，并把部分研究计算交给独立进程。本文描述源码中的主要关系；目录定位见 [仓库地图](REPO_MAP.md)，数据契约和修改要求见 [CONTRIBUTING.md](../CONTRIBUTING.md)。
+小帅工作台仅维护通过浏览器访问的 Linux 服务器版，由 React 前端、FastAPI 后端和服务器文件数据层组成。后端分为网页服务与唯一采集服务，采集服务持有调度、实时监控与任务执行，并把部分研究计算交给独立进程。本文描述源码中的主要关系；目录定位见 [仓库地图](REPO_MAP.md)，数据契约和修改要求见 [CONTRIBUTING.md](../CONTRIBUTING.md)。
 
 ## 系统关系
 
@@ -60,7 +60,7 @@ collector 的 [QuoteService](../backend/app/services/quote_service.py) 默认每
 
 [OrdinaryMinuteService](../backend/app/services/ordinary_minute.py) 每 30 秒按共享配置中的自选、启用监控标的与核心四指数构建采集池，分别写入股票、ETF、指数分钟分区；页面浏览不改变采集池。可选全市场 [MinuteRefreshService](../backend/app/services/minute_refresh.py) 与普通分时共用采集锁，生效时普通分时跳过其股票部分，避免重复采集。[DepthService](../backend/app/services/depth_service.py) 独立管理五档盘口和封单数据。核心展示指数定义集中在 [index_const.py](../backend/app/services/index_const.py)。
 
-日线、普通／批量分钟及指数行情 GET 只读取本机数据；分钟接口继续接受 `live` 参数，但不再直接访问供应商。显式“获取分钟”集中在数据页，使用后台任务，前端复用现有任务查询与取消机制、`useCollectorJob` 显示进度和错误。业务分时图展示实际本地覆盖并允许重新读取，不发起采集。
+日线、普通／批量分钟及指数行情 GET 只读取本机数据；分钟接口继续接受 `live` 参数，但不再直接访问供应商。数据页的分钟维护使用后台任务，前端复用现有任务查询与取消机制、`useCollectorJob` 显示进度和错误。单日分时空态另提供所有登录用户可用的“采集该日分钟数据”按钮，显式调用 `POST /api/kline/minute/fetch`，只补所选标的和日期；页面打开与普通刷新仍只读本地。请求复用 collector 的 `JobStore`，相同标的、资产和日期的在途请求共享任务；取得分钟采集锁后再次检查本地数据，已有结果直接复用，避免任务完成后的迟到请求重复取数。其他数据任务占用执行槽时返回忙碌提示。`GET /api/kline/minute/fetch/{job_id}` 仅提供本类任务的进度，不开放管理员任务列表或取消接口。成功后沿分钟分区、仓库刷新、共享发布及前端分钟查询失效链路更新图表，空结果和失败允许重试。
 
 [trading_day.py](../backend/app/services/trading_day.py) 的 `sync_calendar` 由 collector 启动与定时器调用，将 fuyao 日历保存到 `calendar/trading_days.json`。`is_trading_day` 只读文件，未覆盖日期返回未知；调度和轮询要求日历明确为交易日，不再请求行情时间戳或猜测工作日。常规连续竞价为北京时间 09:30–11:30、13:00–15:00，午休／休市暂停；实时行情保留 15:00–15:30 的收盘快照确认，确认成功即停止，15:30 起实时轮询停止，正式盘后同步由独立的 16:00 管道执行。启动时读取持久化自动采集开关，关闭服务不清除该偏好，非交易时段启动也可等待下一交易时段自动恢复。盘前股票基础资料仍在 09:10 自动同步，collector 晚启动时在日历维护后检查并补跑当天未完成的更新；以非空维表的北京日期 `as_of` 去重，休市、日期未知或未到配置时点时跳过；盘口启动只恢复本地快照，盘后管道按能力更新，数据页保留手动补采。日历与能力诊断仍属于基础维护，不等同于同步业务数据。
 
@@ -135,6 +135,10 @@ web 与 collector 均通过 `auth_access.py` 验证 SQLite 会话，建立不可
 
 选股叠加条件继续通过 `GET /api/custom-signals/options` 读取共享字段元数据，此例外不开放个人信号定义或写入。因子检验保留筛选、分析与候选操作，仅管理员可从检验结果创建信号。
 
+概念／行业轮动的 AI 分析通过 `POST /api/rps/rotation-analyze` 向所有已登录用户开放，包括 guest 和 pro；前端共用 `RpsRotationDialog`，web 与 collector 使用相同权限规则。该例外不放宽其他 RPS 写入或管理员操作。
+
+AI 点数和模型用量通过独立事务账本 `auth/ai_credits.sqlite3` 管理：`ai_credit_policy.py` 定义可调整规则，`ai_credits.py` 持久化月度任务、价格快照、模型 usage 和终态；`ai_credit_stream.py` 在 collector 的实际执行边界预留及结算点数，`ai_metering.py` 逐次记录调用用量并按已配置报价估算金额。当前默认只按点数限制使用，费用不拦截、不收紧生成参数；缺失 usage 或报价明确标记，不把预留当实际消耗。web 只转发，额度查询同样由 collector 回答；前端读取服务端入口价格与可用状态，不自行扣点。游客/Pro 按北京时间自然月分别 60/4,000 点，助手 3 点、报告 5 点，管理员零点任务可统计手动生成的用量，原功能权限保留。管理员用户列表按当前页账号批量汇总月度点数、tokens 和金额估算。失败退点但保留已上报模型用量；collector 启动恢复中断任务，web 不恢复。规则更新带版本比较，已有任务继续使用启动快照。详见 [AI 点数与用量统计](ai-credits.md)。
+
 `UserRuntimeRegistry` 在规则装载和角色变化时限制普通监控，非管理员不运行普通监控及持仓派生的价格／日期提醒；旧规则文件保留，停权规则的实时结果和触发状态不继续使用。普通分钟采集池也按相同权限过滤监控标的。模拟盘按各账户启用的策略自动规则建立内部策略事件来源，复用统一监控引擎求值，不依赖用户开启监控中心；内部事件只进入模拟盘自动下单，不写普通监控告警、不叠加选股实时结果，也不作为策略告警推送。模拟盘下单与成交仍沿用个人记录与通知链路，策略配置失效同时刷新公开监控和模拟盘内部状态。
 
 共享行情和系统配置仍在公共数据目录，个人文件位于 `data/users/<user_id>/`。`user_runtime.py` 按用户建立运行时，文件存储从 `user_context.py` / `private_storage.py` 解析归属，缺少归属时拒绝个人数据访问。管理员账号不具备读取其他用户个人数据的替代身份入口。首次启动迁移仅把旧个人文件复制给初始管理员，保留源文件、拒绝符号链接且不覆盖已有目标。
@@ -161,11 +165,13 @@ web 与 collector 均通过 `auth_access.py` 验证 SQLite 会话，建立不可
 
 模块预检查包含全市场分钟与概念／行业组合：分钟仅在同源、同范围的收盘后任务成功且有本地结果时提示已执行；分类需两表都有今天保存的非空结果，缺一表时直接发起同步。提示不证明上游未修订或全部标的覆盖。全市场分钟任务提交时固定本次实际天数，沿用原 API 与请求标识，并在已有结果中附加范围证据。
 
-业务页的刷新只重新读取本地结果，保留研究计算、AI 分析和业务操作。财务浏览、历史报告、基于本地财务的 AI 分析和本地分钟成交研究不依赖当前供应商采集能力；能力检查留在采集入口。回测与挖掘只提示共享环境数据缺口，不在业务页面补算。概念和行业页面只读取后台保存的预设结果。AI 助手的策略执行同样使用显式财务准备。
+业务页的刷新只重新读取本地结果，保留研究计算、AI 分析和业务操作；单日分时缺数时可通过独立按钮显式补采。财务浏览、历史报告、基于本地财务的 AI 分析和本地分钟成交研究不依赖当前供应商采集能力；能力检查留在采集入口。回测与挖掘只提示共享环境数据缺口，不在业务页面补算。概念和行业页面只读取后台保存的预设结果。AI 助手的策略执行同样使用显式财务准备。
 
 定制模块通过独立注册表接线。前端当前开放 `layout.navigation.extra`、`stock-preview.footer`、`watchlist.toolbar`，类型以 [FrontendSlotContextMap](../frontend/src/extensions/types.ts) 为准；版本字段在扩展清单 `apiVersion` 上。前端在构建路由前完成校验并冻结注册表。后端提供路由、启动钩子和 [NotificationFormatter](../backend/app/extensions/contracts.py)，加载器隔离注册失败；应用构建时完成注册并冻结，核心服务初始化后再运行可选启动钩子，钩子不能追加注册。
 
-AI 助手由 `frontend/src/custom/assistant/` 和 `backend/app/custom/assistant/` 接入，调用现有查询和动作能力，写动作经过确认流程。其后端请求会注入 `app.state` 中的核心服务，前端使用自己的流式客户端和会话 store；`AiConfigEntry.tsx` 通过 DOM 与 portal 锚定设置入口。
+AI 助手由 `frontend/src/custom/assistant/` 和 `backend/app/custom/assistant/` 接入，调用现有查询和动作能力，写动作经过确认流程。其后端请求会注入 `app.state` 中的核心服务，前端使用自己的流式客户端和会话 store；`AiConfigEntry.tsx` 通过 DOM 与 portal 锚定设置入口。添加自选成功的实时工具事件由常驻 `AssistantLauncher` 订阅，失效自选清单及各参数的 enriched 查询，使已打开的自选页立即更新；失败和历史足迹不触发刷新。
+
+助手工具权限集中在 `custom/assistant/permissions.py`，默认游客可用 9 个、Pro 可用 15 个、管理员可用全部 24 个。管理员可在「设置 → AI → 助手工具权限」调整各工具的最低角色，Pro 继承游客权限；回测、信号目录、创建信号和持仓提醒固定仅管理员可用。添加自选默认向游客开放，仍须确认。配置经管理员专用 `GET/PUT /api/custom/assistant/tool-permissions` 原子保存至本环境的 `data/user_data/assistant_tool_permissions.json`，不随代码发布覆盖。每轮模型请求仅提供当前有权使用的工具 schema 与提示，确认前及实际执行前按最新会话和配置重验；配置损坏时普通账号工具停用，管理员保留修复入口。
 
 扩展类型、注册入口与验证方式见 [扩展说明](secondary-development.md)。
 

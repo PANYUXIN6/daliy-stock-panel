@@ -16,8 +16,8 @@ from app.tickflow.repository import DataStore, KlineRepository
 @pytest.fixture
 def maintenance(tmp_path, monkeypatch):
     writer = KlineRepository(DataStore(tmp_path))
-    reader = KlineRepository(DataStore(tmp_path, read_only=True))
-    peer_reader = KlineRepository(DataStore(tmp_path, read_only=True))
+    reader = KlineRepository(DataStore(tmp_path))
+    peer_reader = KlineRepository(DataStore(tmp_path))
     app = FastAPI()
     for router in (data.router, regime.router, ext_data.router):
         app.include_router(router)

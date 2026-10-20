@@ -48,7 +48,11 @@ def test_required_scope_mapping():
     f = api_gateway.required_scope
     assert f("GET", "/api/kline/daily") == "read:market"
     assert f("GET", "/api/kline/daily/latest") == "read:market"
+    assert f("GET", "/api/kline/minute") == "read:market"
     assert f("GET", "/api/kline/minute-range") == "read:market"
+    # 详情补采不是行情读取；任务状态也不能被 minute 的前缀规则纳入开放契约。
+    assert f("POST", "/api/kline/minute/fetch") is None
+    assert f("GET", "/api/kline/minute/fetch/job1") is None
     assert f("POST", "/api/kline/daily-batch") is None          # 管理面
     assert f("GET", "/api/ext-data/ext_fuyao_hot/rows") == "read:ext"
     assert f("GET", "/api/ext-data/ext_fuyao_hot/api-key") is None  # Key 状态不外露

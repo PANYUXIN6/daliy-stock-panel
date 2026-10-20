@@ -15,6 +15,7 @@ vi.mock('@/lib/useFinancials', () => {
   }
 })
 vi.mock('@/lib/aiReportStore', () => ({ startAnalysis: vi.fn(), findLatestHistoryReport: vi.fn(), openHistoryReport: vi.fn() }))
+vi.mock('@/lib/useAiCredits', () => ({ useAiFeature: () => ({ available: false, priceLabel: '5 点', reason: '额度未加载' }) }))
 
 it('区别更新日期与无日期指标的采集日期，估值反推 BPS 标记为估算', async () => {
   Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true })

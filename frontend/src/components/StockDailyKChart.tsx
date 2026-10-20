@@ -155,7 +155,7 @@ export function StockDailyKChart({
   extColumns,
   addedDate,
 }: Props) {
-  const [activeIndicators, setActiveIndicators] = useState<string[]>(['vol'])
+  const [activeIndicators, setActiveIndicators] = useState<string[]>(['vol', 'bull_bear_line'])
   const [showMarkers, setShowMarkers] = useState(true)
   const [showEarnings, setShowEarnings] = useState(false)
   const theme = useTheme()

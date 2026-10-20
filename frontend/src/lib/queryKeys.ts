@@ -8,11 +8,13 @@
 // ===== Query Key 工厂 =====
 
 export const QK = {
+  aiCredits: (userId: string) => ['ai-credits', userId] as const,
   users: (search = '', offset = 0) => ['users', search, offset] as const,
   loginEvents: (userId = '', offset = 0) => ['login-events', userId, offset] as const,
   // 全局 / 共享 (Layout 预取)
   capabilities:   ['capabilities'] as const,
   settings:       ['settings'] as const,
+  assistantToolPermissions: ['assistant-tool-permissions'] as const,
   endpoints:      ['endpoints'] as const,
   version:        ['version'] as const,
   preferences:    ['preferences'] as const,
@@ -112,7 +114,6 @@ export const QK = {
 
   // 模拟盘 (多账户: 键按账户隔离; paperAll 作账户无关失效前缀)
   paperAll:             ['paper'] as const,
-  apiTokens:            ['settings', 'api-tokens'] as const,
   paperAccounts:        ['paper', 'accounts'] as const,
   paperOverview:        (acc: string) => ['paper', 'overview', acc] as const,
   paperOrders:          (acc: string) => ['paper', 'orders', acc] as const,
@@ -148,6 +149,20 @@ export const QK = {
   // 扩展表 schema 清单 (板块切换的资金流列选择器等)
   extSchemaAll:         ['ext-schema-all'] as const,
 } as const
+
+/** 单股单日分钟落盘后，只刷新该股票的单日、多日和包含它的批量查询。 */
+export function minuteCollectionAffectsQuery(key: readonly unknown[], symbol: string, date: string): boolean {
+  switch (key[0]) {
+    case 'kline-minute':
+      return key[1] === symbol && (key[2] === date || key[2] === '')
+    case 'kline-minute-range':
+      return key[1] === symbol
+    case 'minute-batch':
+      return typeof key[1] === 'string' && key[1].split(',').includes(symbol)
+    default:
+      return false
+  }
+}
 
 // ===== SSE 应该 invalidate 的 key 前缀列表 =====
 // 新增需要 SSE 推送的查询，只需在此加一行

@@ -1,3 +1,4 @@
+import json
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 
@@ -64,6 +65,88 @@ def test_feature_routes_require_admin(tmp_path, monkeypatch, service_role, role)
                     assert response.json() == {'reached': True}
                 elif role not in {None, 'admin'} and method != 'HEAD':
                     assert response.json()['code'] == 'ADMIN_REQUIRED'
+
+
+@pytest.mark.parametrize('service_role', ['web', 'collector'])
+@pytest.mark.parametrize('role', [None, 'guest', 'pro', 'admin'])
+def test_rotation_analysis_is_available_to_authenticated_users(
+    tmp_path, monkeypatch, service_role, role,
+):
+    from app import secrets_store
+    from app.api import rps
+    from app.config import settings
+    from app.main import create_app
+    from app.services import ai_provider, collector_proxy
+
+    monkeypatch.setattr(settings, 'data_dir', tmp_path)
+    monkeypatch.setattr(ai_provider, 'ai_configured', lambda: True)
+    monkeypatch.setattr(ai_provider, 'current_ai_model', lambda: 'deepseek-flash')
+    monkeypatch.setattr(ai_provider, 'current_ai_provider', lambda: 'openai_compat')
+    monkeypatch.setattr(secrets_store, 'get_ai_config',
+                        lambda key, default=None: 'https://api.deepseek.com' if key == 'ai_base_url' else default)
+
+    async def no_proxy(request, call_next):
+        return await call_next(request)
+
+    monkeypatch.setattr(collector_proxy, 'proxy_middleware', no_proxy)
+    store = AuthStore(tmp_path)
+    store.bootstrap('admin', 'initial-secret')
+    token = None
+    if role:
+        if role != 'admin':
+            store.create_user(role, 'initial-secret', role,
+                              '2099-12-31' if role == 'pro' else None)
+        token, _ = store.login(role, 'initial-secret', 'test', '')
+        if role != 'admin':
+            token, _ = store.change_password(token, 'initial-secret', 'changed-secret')
+
+    generated = []
+
+    async def analysis_stream(repo, days, focus, quote_service, depth_service, kind, level):
+        generated.append(kind)
+        yield json.dumps({'type': 'meta', 'days': days, 'summary': kind})
+        yield json.dumps({'type': 'delta', 'content': f'{kind}:{level}:{focus}'})
+        yield json.dumps({'type': 'done'})
+
+    monkeypatch.setattr(rps, 'analyze_rotation_stream', analysis_stream)
+
+    @asynccontextmanager
+    async def lifespan(app):
+        app.state.auth_store = store
+        app.state.repo = SimpleNamespace()
+        yield
+
+    app = create_app(service_role)
+    app.router.lifespan_context = lifespan
+    with TestClient(app) as client:
+        if token:
+            client.cookies.set('tf_session', token)
+        for kind, level in (('concept', None), ('industry', 2)):
+            response = client.post('/api/rps/rotation-analyze', json={
+                'days': 12, 'focus': '关注主线', 'kind': kind, 'level': level,
+            })
+            if role is None:
+                assert response.status_code == 401
+                assert response.json()['code'] == 'SESSION_INVALID'
+                assert generated == []
+                continue
+            assert response.status_code == 200, response.text
+            assert response.headers['content-type'].startswith('application/x-ndjson')
+            assert [json.loads(line) for line in response.text.splitlines()] == [
+                {'type': 'meta', 'days': 12, 'summary': kind},
+                {'type': 'delta', 'content': f'{kind}:{level}:关注主线'},
+                {'type': 'done'},
+            ]
+        if role in {'guest', 'pro'}:
+            for method, path in (
+                ('POST', '/api/rps/rotation'),
+                ('POST', '/api/rps/rotation-analyze/private'),
+                ('PUT', '/api/rps/rotation-analyze'),
+                ('DELETE', '/api/rps/rotation-analyze'),
+            ):
+                denied = client.request(method, path, json={})
+                assert denied.status_code == 403, (method, path, denied.text)
+                assert denied.json()['code'] == 'ADMIN_REQUIRED'
 
 
 @pytest.mark.parametrize('role', ['guest', 'pro'])

@@ -21,6 +21,7 @@ from typing import Any
 
 from app.custom.assistant import actions as assistant_actions
 from app.custom.assistant import tools as assistant_tools
+from app.custom.assistant.permissions import require_tool_access
 from app.custom.assistant.prompt import build_system_prompt
 from app.custom.assistant.streaming import stream_openai_round
 from app.services.ai_provider import (
@@ -183,10 +184,9 @@ async def chat_stream(
         yield _line({"type": "notice", "message": f"对话较长, 已仅保留最近 {_MAX_HISTORY_MESSAGES // 2} 轮作为上下文。"})
 
     req_messages: list[dict[str, Any]] = [
-        {"role": "system", "content": build_system_prompt(context)},
+        {"role": "system", "content": build_system_prompt(context, allowed_tools=())},
         *truncated,
     ]
-    schemas = assistant_tools.build_tool_schemas()
     tool_ctx = assistant_tools.ToolContext.build(
         repo=repo,
         quote_service=quote_service,
@@ -201,7 +201,7 @@ async def chat_stream(
     sentinel: object = object()
 
     async def execute(name: str, args: dict[str, Any]) -> dict[str, Any]:
-        from app.services.auth import require_current_session
+        from app.services.auth import AuthError, require_current_session
         require_current_session()
         call_id = assistant_actions.new_call_id()
         await queue.put({
@@ -211,6 +211,20 @@ async def chat_stream(
             "args": _compact_args(args),
         })
         started = time.monotonic()
+
+        # 权限先于确认，阻止模型请求未提供的工具或使用过期的授权。
+        try:
+            require_tool_access(name)
+        except AuthError as exc:
+            if exc.status == 401:
+                raise
+            result = {"ok": False, "error": exc.detail}
+            await queue.put({
+                "type": "tool_result", "call_id": call_id, "name": name, "ok": False,
+                "summary": assistant_tools.summarize_tool_result(name, result),
+                "elapsed_ms": int((time.monotonic() - started) * 1000),
+            })
+            return result
 
         # 动作工具确认闸门: 先发确认卡事件并挂起, 用户点确认后才真正执行。
         # 拒绝/超时按工具错误契约回填(ok=False), 模型据此改走文字建议而非重试。
@@ -265,11 +279,14 @@ async def chat_stream(
         from app.services.auth import require_current_session
         try:
             require_current_session()
-            _guard_input_budget(req_messages)
             text_seen = False
             tool_rounds = 0
             round_checkpoint = _round_checkpoint()
             while True:
+                schemas = assistant_tools.build_tool_schemas()
+                allowed = {schema["function"]["name"] for schema in schemas}
+                req_messages[0] = {"role": "system", "content": build_system_prompt(context, allowed_tools=allowed)}
+                _guard_input_budget(req_messages)
                 round_text: list[str] = []
                 tool_calls: list[dict[str, Any]] = []
                 async for event in stream_openai_round(req_messages, schemas, temperature=0.3, timeout=240.0):

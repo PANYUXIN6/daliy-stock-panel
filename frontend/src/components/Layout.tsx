@@ -2,7 +2,7 @@ import { canAccessPage, useCurrentUser } from '@/lib/auth'
 import { announceSessionChange, lockSession } from '@/lib/sessionRuntime'
 import { accountStorage } from '@/lib/sessionRuntime'
 import { useEffect, useMemo, useRef, useState, Suspense, type ReactNode } from 'react'
-import { NavLink, Outlet, useNavigate, useLocation } from 'react-router-dom'
+import { NavLink, Outlet, useLocation } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import { motion } from 'framer-motion'
 import { useQuoteStream, useQuoteStreamStatus } from '@/lib/useQuoteStream'
@@ -18,7 +18,6 @@ import {
   useQuoteStatus,
   useVersion,
 } from '@/lib/useSharedQueries'
-import { useUpdateCheck } from '@/lib/updateCheck'
 import { QK } from '@/lib/queryKeys'
 import {
   Settings,
@@ -37,7 +36,6 @@ import {
   PanelLeft,
   PanelLeftClose,
   PanelLeftOpen,
-  Download,
 } from 'lucide-react'
 import {
   IconDashboard,
@@ -220,9 +218,6 @@ export function Layout() {
   // ===== 共享 hooks (替代内联 useQuery) =====
   const { data: settingsState } = useSettings()
   const { data: versionData } = useVersion()
-  // 更新检查 (单例 store): 启动静默查一次 GitHub Releases, 供左下角版本号徽标
-  const update = useUpdateCheck()
-  const hasUpdate = user?.role === 'admin' && update.status === 'found'
   const { data: prefs } = usePreferences()
   // 数据源列表 (用于实时行情状态显示当前数据源名称)
   const { data: dataSources } = useQuery({
@@ -331,7 +326,6 @@ export function Layout() {
     prevSyncingRef.current = isDataSyncing
   }, [isDataSyncing])
 
-  const navigate = useNavigate()
   const version = versionData?.version
   const realtimeEnabled = prefs?.realtime_quotes_enabled ?? false
   // 自选实时模式限制提示: 可手动关闭, 不持久化 (刷新后恢复显示)
@@ -512,10 +506,10 @@ export function Layout() {
             />
             {!railMode && (
               <div
-                className="font-bold text-[11px] uppercase tracking-[0.14em] text-foreground whitespace-nowrap"
+                className="font-bold text-sm tracking-[0.08em] text-foreground whitespace-nowrap"
                 style={{ textShadow: `0 0 10px ${BRAND}44` }}
               >
-                Tick Stock Panel
+                小帅工作台
               </div>
             )}
             {/* 收起/展开 按钮 (桌面三态循环) / 移动端抽屉关闭按钮 */}
@@ -789,35 +783,7 @@ export function Layout() {
                   {!railMode && version && (
                     <span className="ml-auto flex items-center gap-1.5 font-mono text-[10px] text-muted/50 select-none shrink-0">
                       {version}
-                      {user?.role === 'admin' && hasUpdate && update.info && (
-                        <span
-                          role="button"
-                          tabIndex={0}
-                          title={`发现新版本 ${update.info.latest}，点击检查更新`}
-                          onClick={(e) => {
-                            e.preventDefault()
-                            e.stopPropagation()
-                            navigate('/settings?tab=system&autoupdate=1')
-                          }}
-                          onKeyDown={(e) => {
-                            if (e.key === 'Enter' || e.key === ' ') {
-                              e.preventDefault()
-                              e.stopPropagation()
-                              navigate('/settings?tab=system&autoupdate=1')
-                            }
-                          }}
-                          className="inline-flex cursor-pointer text-amber-400 transition-transform hover:scale-110 animate-breath"
-                        >
-                          <Download className="h-3 w-3" />
-                        </span>
-                      )}
                     </span>
-                  )}
-                  {railMode && hasUpdate && (
-                    <span
-                      className="absolute right-1.5 top-1.5 h-1.5 w-1.5 rounded-full bg-accent shadow-[0_0_6px_rgba(59,130,246,0.8)]"
-                      title="发现新版本"
-                    />
                   )}
                 </>
               )}

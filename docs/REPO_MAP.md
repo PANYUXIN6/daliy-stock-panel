@@ -14,7 +14,7 @@ authority_status: observed
 | `backend/app/main.py`、`collector.py` | `create_app` 构建 web／collector 角色；网页仅查询与转发，collector 独占后台服务；实例放在各自 `app.state` |
 | `backend/app/api/` | 各领域 HTTP 和流式接口；`routes.py` 只定义健康与能力探测等基础接口，全部核心路由在 `main.py` 接线 |
 | `backend/app/services/` | 同步、行情、筛选、扩展数据、任务管理、通知、偏好和认证等编排 |
-| `backend/app/tickflow/` | TickFlow SDK、档位策略、限频与调度；`repository.py` 同时承载通用 `DataStore` 和 `KlineRepository` |
+| `backend/app/tickflow/` | TickFlow SDK、档位策略与请求限速；`repository.py` 同时承载通用 `DataStore` 和 `KlineRepository` |
 | `backend/app/data_providers/` | 标准化模型、Provider 协议、能力矩阵，以及 `custom/` 下的 YAML 源和插件加载 |
 | `backend/app/plugins/` | 内置可选数据源插件，当前有 `fuyao/` 和 `stocksdk/` |
 | `backend/app/indicators/` | enriched 数据生产、指标和信号计算、关键价位；核心在 `pipeline.py` |
@@ -28,8 +28,8 @@ authority_status: observed
 | `frontend/src/lib/` | API 客户端及类型、查询键、共享查询、实时订阅和任务状态 |
 | `frontend/src/extensions/`、`frontend/src/custom/` | 前端扩展注册、插槽、异常隔离，以及 AI 助手定制模块 |
 | `backend/tests/`、`frontend/src/**/*.test.*` | 后端 pytest 与前端 Vitest；后端回测测试集中在 `tests/backtest/` |
-| `packaging/`、`Dockerfile`、`docker-compose.yml` | 桌面与容器打包；桌面入口为 `backend/app/desktop.py` |
-| `.github/workflows/`、`dev.sh`、`dev.ps1`、`scripts/` | CI、发布与开发启动；后端专项脚本另在 `backend/scripts/` |
+| `Dockerfile`、`docker-compose.yml` | Linux 服务器镜像与 web / collector 双服务运行定义 |
+| `.github/workflows/`、`dev.sh`、`scripts/` | CI、服务器发布与 macOS / Linux 开发启动；后端专项脚本另在 `backend/scripts/` |
 | `docs/`、`brand/`、`screenshots/` | 领域文档、品牌素材与界面示例 |
 | `data/` | 默认运行时数据根目录，受 `DATA_DIR` 配置影响；不属于可提交的业务源码 |
 
@@ -38,7 +38,6 @@ authority_status: observed
 - 网页：`app.main:app`（默认 `SERVICE_ROLE=web`）→ `_web_lifespan` → 只读 `DataStore`、`QuoteMirror`、collector 事件连接与 HTTP 转发。
 - 采集：`app.collector:app` → `create_app("collector")` → 独占进程锁与 `_application_lifespan` → 数据源、行情、调度、普通／全量分钟、策略、监控及任务执行。两个进程共享 `DATA_DIR`，网页重启不触发采集任务恢复。
 - 前端：`src/main.tsx` → `initializeFrontendExtensions` → 动态导入 `router.tsx` → `Layout` → 页面；首页 `/` 直接呈现 `pages/Dashboard.tsx`，访问认证由现有登录流程处理，共享 `QueryClient` 在 `main.tsx` 创建。
-- 桌面：`app/desktop.py` 启动或复用独立 collector，再启动网页线程和 pywebview；关闭窗口仅退出网页，`--stop-collector` 显式停止采集。打包清单在 `packaging/tsp.spec`。
 
 页面读取已配置的凭据与能力路由。凭据归属 `backend/app/secrets_store.py`，路由归属 `backend/app/services/preferences.py`；TickFlow / AI 密钥在后端配置，`api/settings.py` 仅返回配置状态并拒绝网页写入和清除。能力路由和 AI 非密钥选项通过 settings API 保存；手动数据同步集中在 `frontend/src/pages/Data.tsx`。
 
@@ -50,7 +49,7 @@ authority_status: observed
 | --- | --- | --- |
 | 双服务与更新传播 | `main.py::_web_lifespan`、`collector.py` → `services/collector_proxy.py`、`shared_runtime.py`；前端 `lib/useQuoteStream.ts` | `test_shared_runtime.py`、前端 `lib/useQuoteStream.test.tsx` |
 | 行情纯本地查询 | `api/kline.py`、`api/indices.py` → 本机仓库／共享行情快照；`live` 不触发采集 | `test_local_market_reads.py` |
-| 普通分时、显式任务与取消 | `services/ordinary_minute.py` → 股票／ETF／指数分钟分区；`services/pipeline_jobs.py`、`api/pipeline.py`；数据页 `components/data/MinuteSyncConfig.tsx` 复用现有任务 API 与 `lib/useCollectorJob.ts`；财务按需入口见下文；业务分时图只读 | 前端 `components/data/MaintenanceControls.test.tsx`、`components/StockMultiDayIntradayChart.test.tsx`、`pages/Financials.test.tsx` |
+| 普通分时、显式任务与取消 | `services/ordinary_minute.py` → 股票／ETF／指数分钟分区；`services/pipeline_jobs.py`、`api/pipeline.py`；数据页 `components/data/MinuteSyncConfig.tsx` 复用现有任务 API 与 `lib/useCollectorJob.ts`；单日分时空态 `components/StockIntradayChart.tsx`／`MinuteCollectionButton.tsx` → `POST /api/kline/minute/fetch` 显式补采所选标的和日期，在途共享任务、锁内复查已有数据，专用进度 GET 仅暴露分钟补采任务；浏览与刷新仍只读；财务按需入口见下文 | `test_minute_fetch_api.py`、`test_minute_fetch_access.py`；前端 `components/StockIntradayChart.test.tsx`、`components/data/MaintenanceControls.test.tsx`、`components/StockMultiDayIntradayChart.test.tsx`、`lib/minuteBatchIncremental.test.ts`、`pages/Financials.test.tsx` |
 | 当日复盘发布与 AI 归档 | `services/review_publication.py`、`analysis_archive.py` → `api/market_recap.py`、`financials.py`、`stock_analysis.py`；前端 `pages/Review.tsx`、分析报告 store | 前端 `pages/Review.test.tsx`、`lib/analysisArchival.test.ts` |
 | 数据源路由或能力门控 | `api/settings.py` → `services/preferences.py`、`data_providers/capabilities.py`、`data_providers/custom/loader.py` | `test_capability_matrix.py`、`test_capability_augment.py`、`test_full_minute_capability.py` |
 | fuyao 插件取数与归一化 | `plugins/fuyao/plugin.yaml`、`provider.py`、`client.py` → 自定义源路由及专有服务 | `test_fuyao_provider.py`、`test_fuyao_daily_streaming_sync.py`、`test_fuyao_financial.py` |
@@ -80,6 +79,8 @@ authority_status: observed
 | 龙虎榜、竞价风向标及复盘摘要 | `services/dragon_tiger.py`、`auction_benchmark.py` 由后台获取并保存；`api/market_recap.py` 的 GET 只读，页面在 `pages/Review.tsx`、`AbnormalMoves.tsx`、`Dashboard.tsx` | `test_dragon_tiger.py`、`test_auction_benchmark.py` |
 | 财务与个股分析 | 数据页 `FinancialSyncPanel.tsx` 展示覆盖并导航至财务页，`pages/Financials.tsx` 即使财务库全空也允许搜索、按股按表获取和浏览历史报告；`api/financials.py` 的 `/status` 在 web 读取本地覆盖画像，`/execution-status` 转交 collector 查询任务状态；`api/stock_analysis.py`、`services/financial_sync.py`、分析服务沿用原链路，本地读取不受供应商能力门控 | `test_financials_local_api.py`、`test_financial_review_regressions.py`、`test_financial_shares.py`、`test_fuyao_financial.py`、`test_stock_analyzer_index.py` |
 | 账号、权限与个人归属 | `services/auth_access.py` → `auth.py`、`user_context.py`；`api/users.py` 管理账号；`user_runtime.py`、`private_storage.py`、`user_migration.py` 管用户运行时、路径和旧数据归属；`business_access.py` 管业务权限 | `test_multiuser_auth.py`、`test_multiuser_ai.py`、`test_user_private_stores.py`、`test_user_runtime_boundaries.py`、`test_research_ownership.py` |
+| AI 助手工具权限与动作反馈 | `custom/assistant/permissions.py` 保存工具元数据与角色配置；`routes.py` 提供管理员配置 API；`tools.py`、`chat_service.py`、`prompt.py` 共用策略过滤模型工具并在确认和执行时重验；前端 `components/settings/AssistantToolPermissions.tsx` 挂载于设置 AI 页，`custom/assistant/AssistantLauncher.tsx` 订阅成功添加自选事件并刷新页面缓存 | `test_assistant_tool_permissions.py`、`test_assistant_tool_access.py`、`test_assistant_actions.py`、`AssistantToolPermissions.test.tsx`、`AssistantLauncher.test.tsx` |
+| AI 点数与用量统计 | `api/ai_credits.py` → `services/ai_credit_policy.py`、`ai_credits.py` 保存运行规则与事务账本；六类生成和连接测试由 `ai_credit_stream.py` 包装，`ai_metering.py` 在核心 provider 与助手流逐次采集 usage，默认仅点数限制使用；`api/users.py` 批量返回各用户当月点数、tokens 与金额估算，前端 `pages/settings/Users.tsx` 展示；`ai_prompt_data.py` 无损压缩个股/财务输入；前端 `lib/aiGeneration.ts`、`useAiCredits.ts` 与 `components/AiCreditHint.tsx` 共用价格/余额；[规则说明](ai-credits.md) | `test_ai_credits.py`、`test_ai_credit_routes.py`、`test_ai_metering.py`、`test_ai_provider_metering.py`、`test_ai_prompt_budget.py`、`test_user_ai_usage.py`；前端 `aiGeneration.test.ts`、`AiCreditHint.test.tsx`、`pages/settings/Users.test.tsx` |
 | 页面、请求或扩展 | 前端 `router.tsx`、`lib/api.ts`、`lib/queryKeys.ts`、`extensions/`；后端 `extensions/` 和 `custom/` | 前端相邻 `*.test.*`；后端 `test_extensions.py`、`test_custom_assistant.py`、`test_assistant_actions.py` |
 
 ## 关键调用链

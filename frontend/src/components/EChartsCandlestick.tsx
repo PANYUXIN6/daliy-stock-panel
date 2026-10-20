@@ -317,9 +317,6 @@ export const SUB_CHARTS: SubChartDef[] = [
   },
 ]
 
-/** 向后兼容的 INDICATORS 导出 (不含 vol) */
-export const INDICATORS = SUB_CHARTS.filter(s => s.key !== 'vol')
-
 /** 主图叠加指标 (画在 K 线上方, 不占副图空间) */
 export const OVERLAY_INDICATORS: { key: string; label: string }[] = [
   { key: 'boll', label: 'BOLL' },

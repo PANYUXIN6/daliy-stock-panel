@@ -48,6 +48,8 @@ def collection_pool(repo) -> dict[str, list[str]]:
 
 def collect_minutes(repo, capset, groups: dict[str, list[str]], start: datetime, end: datetime, on_progress=None, *, should_collect=None) -> int:
     """按资产与provider路由采集并写现有分钟分区；调用方持采集锁。"""
+    import polars as pl
+
     from app.jobs.daily_pipeline import _refresh_single_view
     from app.services.shared_runtime import publish_data_update
 
@@ -71,6 +73,13 @@ def collect_minutes(repo, capset, groups: dict[str, list[str]], start: datetime,
         )
         if df.is_empty():
             continue
+        # 源可能返回更宽的历史；只写入此次显式请求的标的和北京墙钟区间。
+        df = df.filter(
+            pl.col("symbol").is_in(symbols)
+            & pl.col("datetime").is_between(start.replace(tzinfo=None), end.replace(tzinfo=None))
+        )
+        if df.is_empty():
+            continue
         with repo._write_lock:
             total += kline_sync._write_minute_partition(df, repo.store.data_dir / MINUTE_TABLES[asset])
         _refresh_single_view(repo, MINUTE_TABLES[asset])
@@ -91,6 +100,31 @@ def sync_symbol_minutes(repo, capset, symbol: str, days: int, on_progress=None) 
     if on_progress:
         on_progress("done", 100, f"分钟K完成，写入 {rows} 行")
     return {"symbol": symbol, "rows": rows}
+
+
+def fetch_missing_symbol_minutes(repo, capset, symbol: str, trade_date: date, on_progress=None) -> dict:
+    """显式补采一个标的的一天；持采集锁复查，复用其他用户或后台已保存的结果。"""
+    now = cn_now()
+    if trade_date > now.date():
+        raise ValueError("采集日期不能晚于今天")
+    asset_type = repo.resolve_asset_type(symbol)
+    with MINUTE_COLLECTION_LOCK:
+        existing = repo.get_minute(symbol, trade_date, asset_type=asset_type)
+        if not existing.is_empty():
+            rows = existing.height
+            reused = True
+        else:
+            start = datetime.combine(trade_date, time(9, 30), tzinfo=now.tzinfo)
+            end = min(now, datetime.combine(trade_date, time(15), tzinfo=now.tzinfo))
+            if end <= start:
+                raise ValueError("尚未开盘，暂无可采集的分钟数据")
+            collect_minutes(repo, capset, {asset_type: [symbol]}, start, end, on_progress)
+            rows = repo.get_minute(symbol, trade_date, asset_type=asset_type).height
+            reused = False
+    if on_progress:
+        message = f"已复用本地 {rows} 行分钟K" if reused else f"分钟K完成，写入 {rows} 行"
+        on_progress("done", 100, message)
+    return {"symbol": symbol, "date": trade_date.isoformat(), "rows": rows, "reused": reused}
 
 
 class OrdinaryMinuteService:

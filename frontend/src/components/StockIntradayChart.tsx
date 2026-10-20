@@ -1,9 +1,12 @@
-import { useEffect, useMemo } from 'react'
-import { useQuery } from '@tanstack/react-query'
+import { useEffect, useMemo, useRef } from 'react'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { RefreshCw } from 'lucide-react'
 import { type MinuteKlineRow } from '@/lib/api'
 import { klineMinuteQueryOptions, minuteRefetchInterval } from '@/lib/kline'
+import { markMinuteBatchForFullRead } from '@/lib/minuteBatchIncremental'
+import { minuteCollectionAffectsQuery, QK } from '@/lib/queryKeys'
 import { EChartsIntraday } from '@/components/EChartsIntraday'
+import { MinuteCollectionButton } from '@/components/MinuteCollectionButton'
 import type { DailySummary } from '@/lib/intraday-chart'
 
 interface Props {
@@ -34,6 +37,7 @@ export function StockIntradayChart({
   priceLines,
   refetchIntervalMs,
 }: Props) {
+  const qc = useQueryClient()
   const minute = useQuery({
     // 读取后台保存的最新数据，轮询不会触发供应商请求。
     ...klineMinuteQueryOptions(symbol, date ?? undefined, refetchIntervalMs != null),
@@ -42,6 +46,23 @@ export function StockIntradayChart({
   })
 
   const minuteRows: MinuteKlineRow[] = useMemo(() => minute.data?.rows ?? [], [minute.data?.rows])
+  const hasMinuteRows = minuteRows.length > 0
+  const previous = useRef<{ symbol: string; date: string | null; empty: boolean } | null>(null)
+  useEffect(() => {
+    const sameContext = previous.current?.symbol === symbol && previous.current.date === date
+    if (sameContext && previous.current?.empty && minute.isSuccess && hasMinuteRows && date) {
+      // SSE 可能先于任务终态送达并卸载空态按钮，按实际数据到达刷新相关列表分时。
+      markMinuteBatchForFullRead(qc, symbol, date)
+      void qc.invalidateQueries({
+        predicate: query => query.queryKey[0] === QK.minuteBatch('')[0]
+          && minuteCollectionAffectsQuery(query.queryKey, symbol, date),
+      })
+    }
+    previous.current = {
+      symbol, date,
+      empty: minute.isSuccess ? !hasMinuteRows : sameContext && previous.current?.empty === true,
+    }
+  }, [symbol, date, minute.isSuccess, hasMinuteRows, qc])
   useEffect(() => {
     onPriceHover?.(null)
   }, [date, onPriceHover])
@@ -58,6 +79,7 @@ export function StockIntradayChart({
           ) : (
             <span className="text-muted">后台尚未采集 {date} 的分钟数据</span>
           )}
+          {!minute.error && <MinuteCollectionButton key={`${symbol}:${date}`} symbol={symbol} date={date} />}
           <button
             type="button"
             onClick={() => void minute.refetch()}

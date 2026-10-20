@@ -4,6 +4,12 @@ import { beforeEach } from 'vitest'
 import { afterEach, expect, it, vi } from 'vitest'
 import { api } from './api'
 import { startReviewGeneration, cancelReviewGeneration, getReviewState, resetReview } from './reviewStore'
+import { creditsFixture } from '@/test/aiCredits'
+
+function stubGenerationFetch(modelFetch: typeof fetch) {
+  vi.stubGlobal('fetch', (url: RequestInfo | URL, options?: RequestInit) => String(url) === '/api/ai/credits'
+    ? Promise.resolve(Response.json(creditsFixture())) : modelFetch(url, options))
+}
 
 vi.mock('@/components/Toast', () => ({ toast: vi.fn() }))
 afterEach(() => { cancelReviewGeneration(); resetReview(); vi.unstubAllGlobals(); vi.restoreAllMocks() })
@@ -17,7 +23,7 @@ it('显式取消中止 fetch，在没有新事件时收尾并释放响应 reader
     options?.signal?.addEventListener('abort', () => controller.error(new DOMException('Aborted', 'AbortError')))
     return new Response(stream, { status: 200 })
   })
-  vi.stubGlobal('fetch', fetchMock)
+  stubGenerationFetch(fetchMock as typeof fetch)
   const onDone = vi.fn()
   const generation = startReviewGeneration('2026-10-12', '', onDone)
   await vi.waitFor(() => expect(fetchMock).toHaveBeenCalled())
@@ -41,7 +47,7 @@ it('提前退出复盘 generator 时取消响应流并解锁', async () => {
     start(controller) { controller.enqueue(new TextEncoder().encode('{"type":"delta","content":"部分内容"}\n')) },
     cancel,
   })
-  vi.stubGlobal('fetch', vi.fn(async () => new Response(stream, { status: 200 })))
+  stubGenerationFetch(vi.fn(async () => new Response(stream, { status: 200 })))
   for await (const _event of api.reviewStream('2026-10-12', '')) break
   expect(cancel).toHaveBeenCalledOnce()
   expect(stream.locked).toBe(false)
@@ -53,7 +59,7 @@ it('旧请求取消后的收尾不清理新复盘 controller 或覆盖新状态'
   const fetchMock = vi.fn()
     .mockImplementationOnce(() => new Promise((_resolve, reject) => { rejectOld = reject }))
     .mockImplementationOnce(() => new Promise((_resolve, reject) => { rejectNew = reject }))
-  vi.stubGlobal('fetch', fetchMock)
+  stubGenerationFetch(fetchMock)
   const oldGeneration = startReviewGeneration('2026-10-11', '旧请求')
   await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledOnce())
   cancelReviewGeneration()
@@ -75,7 +81,7 @@ it('手动复盘无 done 的 EOF 保留残文但不伪造成功归档', async ()
     controller.enqueue(new TextEncoder().encode('{"type":"delta","content":"未完成的复盘"}\n'))
     controller.close()
   } })
-  vi.stubGlobal('fetch', vi.fn(async () => new Response(stream, { status: 200 })))
+  stubGenerationFetch(vi.fn(async () => new Response(stream, { status: 200 })))
   const onDone = vi.fn()
   await startReviewGeneration('2026-10-12', '', onDone)
   expect(getReviewState()).toMatchObject({ phase: 'error', content: '未完成的复盘', error: expect.stringContaining('中断') })
@@ -89,7 +95,7 @@ it('复盘正常 done 收尾一次完成回调且释放 reader', async () => {
     controller.enqueue(new TextEncoder().encode('{"type":"meta","as_of":"2026-10-12","archived":true}\n{"type":"delta","content":"已完成复盘"}\n{"type":"done","archived":true}\n'))
     controller.close()
   } })
-  vi.stubGlobal('fetch', vi.fn(async () => new Response(stream, { status: 200 })))
+  stubGenerationFetch(vi.fn(async () => new Response(stream, { status: 200 })))
   const onDone = vi.fn()
   await startReviewGeneration('2026-10-12', '', onDone)
   expect(getReviewState()).toMatchObject({ phase: 'done', content: '已完成复盘', error: '' })

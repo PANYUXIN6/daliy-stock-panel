@@ -33,7 +33,7 @@ def test_two_web_readers_install_same_persisted_quote_without_recomputation(tmp_
     )
     publish_quotes(source)
     for _ in range(2):
-        reader = KlineRepository(DataStore(tmp_path, read_only=True))
+        reader = KlineRepository(DataStore(tmp_path))
         reader._index_symbol_set_cache = {'obsolete'}
         reader._etf_symbol_set_cache = {'obsolete'}
         reader._name_map_cache = {'obsolete': 'old'}

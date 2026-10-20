@@ -9,6 +9,7 @@ import { useSettings } from '@/lib/useSharedQueries'
 import { api, type SettingsState } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { useCardFlash, cardFlashCls } from '@/lib/useCardFlash'
+import { AssistantToolPermissions } from '@/components/settings/AssistantToolPermissions'
 
 // 统一的输入框样式(与项目其他设置页一致)
 const INPUT_CLS =
@@ -519,6 +520,8 @@ export function SettingsAIPanel({ highlight }: { highlight?: string } = {}) {
           {save.isPending ? '保存中...' : saved ? '已保存' : '保存配置'}
         </button>
       </div>
+
+      <AssistantToolPermissions />
 
     </div>
     </HighlightContext.Provider>

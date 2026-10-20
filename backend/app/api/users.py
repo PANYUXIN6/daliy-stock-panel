@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, Query, Request
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.api.auth import COOKIE_NAME, store_for
+from app.services.ai_credits import get_credit_store
 from app.services.auth import AuthError
 
 router = APIRouter(prefix="/api/users", tags=["users"])
@@ -49,7 +50,12 @@ def list_users(
     offset: int = Query(0, ge=0),
     actor: str = Depends(require_admin),
 ):
-    return store_for(request).list_users(search, limit, offset)
+    accounts = store_for(request)
+    result = accounts.list_users(search, limit, offset)
+    usage = get_credit_store(accounts.data_dir).usage_for_users(result["users"])
+    for user in result["users"]:
+        user["ai_usage"] = usage[user["id"]]
+    return result
 
 
 @router.get("/login-events")

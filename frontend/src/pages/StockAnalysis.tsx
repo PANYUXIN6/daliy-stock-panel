@@ -17,6 +17,8 @@ import {
   startAnalysis, findTodayReport, useHistoryReports,
   deleteReport, openHistoryReport, loadHistory,
 } from '@/lib/stockAnalysisStore'
+import { useAiFeature } from '@/lib/useAiCredits'
+import { AiCreditHint } from '@/components/AiCreditHint'
 
 /**
  * 个股分析页 —— 日 K + 关键价位(压力/支撑/密集区/枢轴/前高前低)+ AI 四维分析。
@@ -27,6 +29,7 @@ import {
  *  - 报告胶囊用蓝色系,与财务分析(紫色)并存
  */
 export function StockAnalysis() {
+  const quota = useAiFeature('stock_analysis')
   const isAdmin = useCurrentUser()?.role === 'admin'
   const [symbol, setSymbol] = useState<string>('')
   const [name, setName] = useState<string>('')
@@ -75,6 +78,7 @@ export function StockAnalysis() {
   }
 
   const doAnalysis = async () => {
+    if (!quota.available) { toast(quota.reason || '当前 AI 额度不可用', 'error'); return }
     const r = await startAnalysis(symbol, name)
     if (r.error) toast(r.error, 'error')
   }
@@ -111,10 +115,11 @@ export function StockAnalysis() {
               <button
                 onClick={handleAnalyze}
                 disabled={checking}
+                title={quota.reason ? `${quota.reason}；仍可查看已有历史报告` : `AI 个股分析 · ${quota.priceLabel}`}
                 className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-btn bg-gradient-to-r from-sky-500/25 to-blue-500/15 border border-sky-400/30 text-sky-300 text-xs font-medium hover:from-sky-500/35 hover:to-blue-500/25 transition-all disabled:opacity-40 disabled:cursor-not-allowed"
               >
                 {checking ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Sparkles className="h-3.5 w-3.5" />}
-                AI 个股分析
+                AI 个股分析 · {quota.priceLabel}
               </button>
               {isAdmin && <button
                 onClick={() => setShowPriceAlerts(true)}
@@ -128,6 +133,7 @@ export function StockAnalysis() {
           )}
         </div>
 
+        {symbol && <AiCreditHint feature="stock_analysis" />}
         {/* 主体:左侧当前个股看板 + 右侧常驻历史报告 */}
         <div className="grid grid-cols-[1fr_288px] gap-6 items-start">
           <div className="min-w-0">
@@ -323,6 +329,7 @@ function ConfirmModal({ report, onView, onRedo, onClose }: {
   onRedo: () => void
   onClose: () => void
 }) {
+  const quota = useAiFeature('stock_analysis')
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-4" onClick={onClose}>
       <div
@@ -343,9 +350,9 @@ function ConfirmModal({ report, onView, onRedo, onClose }: {
             className="flex-1 h-8 rounded-lg bg-elevated border border-border text-xs text-secondary hover:text-foreground transition-colors">
             查看历史
           </button>
-          <button onClick={onRedo}
-            className="flex-1 h-8 rounded-lg bg-gradient-to-r from-sky-500/20 to-blue-500/15 border border-sky-400/30 text-xs text-sky-300 hover:from-sky-500/30 transition-all">
-            重新分析
+          <button onClick={onRedo} disabled={!quota.available} title={quota.reason || undefined}
+            className="flex-1 h-8 rounded-lg bg-gradient-to-r from-sky-500/20 to-blue-500/15 border border-sky-400/30 text-xs text-sky-300 hover:from-sky-500/30 transition-all disabled:opacity-40 disabled:cursor-not-allowed">
+            重新分析 · {quota.priceLabel}
           </button>
         </div>
       </div>

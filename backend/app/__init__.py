@@ -1,23 +1,17 @@
-"""Tick Stock Panel backend."""
+"""小帅工作台后端。"""
 
 import json
 import sys
 from contextlib import suppress
 from pathlib import Path
 
-# 版本号唯一权威 = frontend/package.json: 安装包 AppVersion (release.yml 读它传给
-# ISCC)、macOS 包元数据 (tsp.spec 读它)、页面版本徽标与更新检查 (本模块) 全部同源,
-# 改版本只改那一份文件。dev 模式读仓库文件; PyInstaller 冻结后读 _MEIPASS/package.json
-# (tsp.spec 的 datas 会收集)。读取失败回退硬编码值 —— 版本号绝不阻塞应用启动。
+# 版本号从 frontend/package.json 加载，与页面版本徽标同源。
+# 缺少元数据时回退硬编码值，版本读取不得阻塞服务启动。
 _FALLBACK_VERSION = "0.3.8"
 
 
 def _load_version() -> str:
-    if getattr(sys, "frozen", False):
-        pkg = Path(getattr(sys, "_MEIPASS", ".")) / "package.json"
-    else:
-        # backend/app/__init__.py 上溯两级 = 项目根
-        pkg = Path(__file__).resolve().parents[2] / "frontend" / "package.json"
+    pkg = Path(__file__).resolve().parents[2] / "frontend" / "package.json"
     try:
         return json.loads(pkg.read_text(encoding="utf-8"))["version"]
     except (OSError, ValueError, KeyError, TypeError):
@@ -26,9 +20,7 @@ def _load_version() -> str:
 
 __version__ = _load_version()
 
-# Windows 默认 stdout/stderr 编码为 GBK(cp936),TickFlow SDK 内部输出含 emoji 的
-# 指数/标的名称(如 \U0001f193)时会抛 UnicodeEncodeError,导致请求失败。
-# 进程加载最早阶段强制 UTF-8,根治此类编码崩溃。
+# 源码与容器日志统一使用 UTF-8，避免 SDK 输出含 emoji 的名称时受终端编码影响。
 for _stream in (sys.stdout, sys.stderr):
     if hasattr(_stream, "reconfigure"):
         with suppress(Exception):

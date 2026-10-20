@@ -13,6 +13,8 @@ import {
   minimizeDialog, closeDialog, startAnalysis,
 } from '@/lib/aiReportStore'
 import { useDialogBackdrop } from '@/lib/useDialogBackdrop'
+import { useAiFeature } from '@/lib/useAiCredits'
+import { AiCreditHint } from '@/components/AiCreditHint'
 
 interface Props {
   /** 当前展示的任务;活跃任务或历史报告 */
@@ -51,6 +53,7 @@ export function AiAnalysisDialog({ task, mode, minimized }: Props) {
   const isHistory = mode === 'history'
   const isWorking = phase === 'loading' || phase === 'streaming'
   const open = !!task && !minimized
+  const quota = useAiFeature('financial_analysis', open)
 
   // 流式时自动滚动到底部
   useEffect(() => {
@@ -65,10 +68,10 @@ export function AiAnalysisDialog({ task, mode, minimized }: Props) {
   }, [task])
 
   const handleStartNew = useCallback(async () => {
-    if (!task) return
+    if (!task || !quota.available) return
     const name = 'name' in task ? task.name : ''
     await startAnalysis(task.symbol, name, focus.trim())
-  }, [task, focus])
+  }, [task, focus, quota.available])
 
   const handleCopy = async () => {
     if (!content) return
@@ -231,23 +234,25 @@ export function AiAnalysisDialog({ task, mode, minimized }: Props) {
               {isHistory ? (
                 <button
                   onClick={handleStartNew}
-                  className="inline-flex items-center gap-1.5 h-8 px-3 rounded-lg bg-gradient-to-r from-purple-500/20 to-fuchsia-500/15 border border-purple-400/30 text-xs font-medium text-purple-300 hover:from-purple-500/30 hover:to-fuchsia-500/20 transition-all shrink-0"
-                  title="以此关注点重新生成新报告"
+                  disabled={!quota.available}
+                  className="inline-flex items-center gap-1.5 h-8 px-3 rounded-lg bg-gradient-to-r from-purple-500/20 to-fuchsia-500/15 border border-purple-400/30 text-xs font-medium text-purple-300 hover:from-purple-500/30 hover:to-fuchsia-500/20 transition-all shrink-0 disabled:opacity-40 disabled:cursor-not-allowed"
+                  title={quota.reason || '以此关注点重新生成新报告'}
                 >
-                  <RefreshCw className="h-3.5 w-3.5" />重新生成
+                  <RefreshCw className="h-3.5 w-3.5" />重新生成 · {quota.priceLabel}
                 </button>
               ) : (
                 <button
                   onClick={handleStartNew}
-                  disabled={isWorking}
-                  className="inline-flex items-center gap-1.5 h-8 px-3 rounded-lg bg-gradient-to-r from-purple-500/20 to-fuchsia-500/15 border border-purple-400/30 text-xs font-medium text-purple-300 hover:from-purple-500/30 hover:to-fuchsia-500/20 disabled:opacity-40 disabled:cursor-not-allowed transition-all shrink-0"
-                  title={focus.trim() ? '按关注重点重新分析' : '重新分析'}
+                  disabled={isWorking || !quota.available}
+                  className="inline-flex items-center gap-1.5 h-8 px-3 rounded-lg bg-gradient-to-r from-purple-500/20 to-fuchsia-500/15 border border-purple-400/30 text-xs font-medium text-purple-300 hover:from-purple-500/30 hover:to-fuchsia-500/20 disabled:opacity-40 disabled:cursor-not-allowed transition-all shrink-0 disabled:opacity-40 disabled:cursor-not-allowed"
+                  title={quota.reason || (focus.trim() ? '按关注重点重新分析' : '重新分析')}
                 >
                   {isWorking ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : phase === 'done' ? <RefreshCw className="h-3.5 w-3.5" /> : <Send className="h-3.5 w-3.5" />}
-                  {phase === 'done' ? '重新分析' : '分析'}
+                  {phase === 'done' ? '重新分析' : '分析'} · {quota.priceLabel}
                 </button>
               )}
             </div>
+            <AiCreditHint feature="financial_analysis" className="mt-1.5" />
             <p className="mt-1.5 text-[10px] text-muted/50 leading-relaxed">
               {isHistory
                 ? '历史报告为静态记录;修改关注重点后将作为新任务重新生成。报告仅供参考,不构成投资建议。'

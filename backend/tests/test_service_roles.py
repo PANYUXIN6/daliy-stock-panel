@@ -43,6 +43,8 @@ def test_proxy_routes_keep_batch_queries_local_and_forward_owner_state():
     assert not collector_owns('POST', '/api/kline/daily-batch')
     assert not collector_owns('GET', '/api/kline/minute')
     assert collector_owns('POST', '/api/kline/sync_minute_single')
+    assert collector_owns('POST', '/api/kline/minute/fetch')
+    assert collector_owns('GET', '/api/kline/minute/fetch/job1')
     assert collector_owns('GET', '/api/pipeline/jobs/job1')
     assert not collector_owns('GET', '/api/financials/status')
     assert collector_owns('GET', '/api/financials/execution-status')
@@ -137,7 +139,7 @@ def test_collector_initial_snapshot_includes_etf_and_index_without_stocks(tmp_pa
             self._on_warmup_done()
     monkeypatch.setattr(KlineRepository, 'refresh_cache', refresh)
     with TestClient(create_app('collector')):
-        reader = KlineRepository(DataStore(tmp_path, read_only=True))
+        reader = KlineRepository(DataStore(tmp_path))
         mirror = shared_runtime.QuoteMirror(reader)
         assert mirror.load_snapshot(SimpleNamespace())
         assert reader.get_enriched_latest_asset('etf')[0]['symbol'].to_list() == ['510300.SH']

@@ -15,9 +15,9 @@
 
 ## 环境与启动
 
-后端要求 Python 3.11 以上，使用 `uv`；CI 使用 Python 3.12。前端使用 Node 20 和 pnpm 9，`package.json` 声明 pnpm 9.10.0。依赖以各子项目 manifest 与锁文件为准，配置见 [configuration.md](configuration.md)。
+项目仅维护 Linux 服务器版，通过浏览器访问；本地开发支持 macOS / Linux。后端要求 Python 3.11 以上，使用 `uv`；CI 使用 Python 3.12。前端使用 Node 20 和 pnpm 9，`package.json` 声明 pnpm 9.10.0。依赖以各子项目 manifest 与锁文件为准，配置见 [configuration.md](configuration.md)。
 
-需要本地配置且根目录尚无 `.env` 时，从 `.env.example` 复制；已有配置按需编辑，保留密钥和运行数据。根目录运行 `./dev.sh`，Windows 使用 `./dev.ps1`。启动器检查依赖并启动 web、collector 与前端；遇到已有 collector 端口占用会停止并提示。默认端口为 web 3018、collector 3019、前端 3011。
+需要本地配置且根目录尚无 `.env` 时，从 `.env.example` 复制；已有配置按需编辑，保留密钥和运行数据。根目录运行 `./dev.sh`。启动器检查依赖并启动 web、collector 与前端；遇到已有 collector 端口占用会停止并提示。默认端口为 web 3018、collector 3019、前端 3011。
 
 分开启动时，在三个终端执行。两个后端必须使用相同 `DATA_DIR`，以下都从同一 `backend` 目录启动：
 
@@ -49,7 +49,7 @@ collector 启动会创建或使用数据目录、恢复任务并启动调度、�
 
 实时行情、普通分钟采集和盘后任务的开关、时段及本地读取边界见 [架构说明](ARCHITECTURE.md#实时行情与事件流)；交易日 16:00 盘后同步的依赖顺序、验收、重试与取消见 [盘后同步约定](postmarket-pipeline.md)。手动同步和任务进度集中在数据页，财务按股按表获取，计算任务由 collector 准备所需财务输入。
 
-可选依赖按需安装：`backtest` 提供 vectorbt，`desktop` 提供 pywebview，`legacy-cpu` 提供兼容 Polars 内核。矩阵回测与 vectorbt 信号回测是不同路径。容器、桌面发布和 CPU 兼容见 [deployment.md](deployment.md) 与 `packaging/`。
+可选依赖按需安装：`backtest` 提供 vectorbt，`legacy-cpu` 提供兼容 Polars 内核。矩阵回测与 vectorbt 信号回测是不同路径。容器发布和 CPU 兼容见 [deployment.md](deployment.md)。
 
 ## 验证入口
 

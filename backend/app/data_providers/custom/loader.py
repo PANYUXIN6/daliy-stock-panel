@@ -179,8 +179,8 @@ def install_plugin(name: str) -> tuple[bool, str]:
             import sys
             # Python 型插件: 优先用 uv pip install (uv 管理的 venv 无 pip 模块),
             # 回退 python -m pip。都装进当前后端虚拟环境。
-            # 关键: uv 分支必须显式传 --python sys.executable。dev.ps1 直接跑
-            # .venv/Scripts/python.exe 而不 activate, 后端进程 VIRTUAL_ENV 为空,
+            # 关键: uv 分支必须显式传 --python sys.executable。直接调用虚拟环境
+            # Python 而不 activate 时, 后端进程 VIRTUAL_ENV 可能为空,
             # uv pip 会默认选 PATH 上的基础解释器 (如 conda base, 常为只读) →
             # 装错环境并 exit 2 (访问拒绝)。--python 锁定后端自身 venv, 与 pip
             # 回退路径 (sys.executable -m pip) 的目标一致。

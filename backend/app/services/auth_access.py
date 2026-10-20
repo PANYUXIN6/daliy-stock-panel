@@ -65,6 +65,9 @@ def admin_required(path: str, method: str) -> bool:
         return path.startswith("/api/ext-data/") and path.endswith("/api-key")
     if path == "/api/backtest/mining/config":
         return True
+    # 详情空态只允许显式补采单标的、单日期；批量维护仍限管理员。
+    if path == "/api/kline/minute/fetch" and method == "POST":
+        return False
     if path.startswith("/api/kline/"):
         return path not in {
             "/api/kline/instruments/names", "/api/kline/daily-batch", "/api/kline/minute-batch",
@@ -76,6 +79,9 @@ def admin_required(path: str, method: str) -> bool:
         return True
     if path.startswith("/api/settings"):
         return path.removeprefix("/api/settings/preferences/") not in _PERSONAL_PREFERENCES
+    # 概念／行业 AI 轮动分析向所有已登录用户开放。
+    if path == "/api/rps/rotation-analyze" and method == "POST":
+        return False
     return any(
         path == p or path.startswith(p + "/")
         for p in ("/api/ext-data", "/api/regime", "/api/rps", "/api/capabilities")

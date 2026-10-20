@@ -17,13 +17,11 @@ from datetime import timedelta
 
 import polars as pl
 from fastapi import APIRouter, HTTPException, Query, Request
-from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from app.indicators.levels import compute_levels, summarize_levels
 from app.market_time import cn_today
 from app.services import stock_reports
-from app.services.ndjson_heartbeat import with_heartbeat
 from app.services.stock_analyzer import analyze_stock_stream
 
 logger = logging.getLogger(__name__)
@@ -166,19 +164,17 @@ async def analyze_stock(request: Request, req: AnalyzeRequest):
     repo = request.app.state.repo
     data_dir = repo.store.data_dir
 
+    from app.services.ai_credit_stream import CreditStreamingResponse, prepare_credit_task
     from app.services.analysis_archive import archive_analysis
 
-    async def stream_gen():
-        async for chunk in with_heartbeat(archive_analysis(
+    credit_task = await prepare_credit_task(request, "stock_analysis")
+
+    return CreditStreamingResponse(
+        archive_analysis(
             analyze_stock_stream(repo, data_dir, req.symbol, req.focus),
             stock_reports.save_report, data_dir, "analysis", {"symbol": req.symbol, "focus": req.focus},
-        )):
-            yield chunk + "\n"
-
-    return StreamingResponse(
-        stream_gen(),
-        media_type="application/x-ndjson",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        ),
+        credit_task=credit_task,
     )
 
 

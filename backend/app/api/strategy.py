@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import ast
+import asyncio
 import json
 import logging
 import math
@@ -24,7 +25,6 @@ from app.services.user_runtime import runtime_for
 from app.strategy import config as strategy_config
 from app.strategy.ai_generator import AIStrategyGenerator, find_meta_assignment
 from app.strategy.engine import StrategyDef, StrategyEngine
-from app.strategy.monitor import StrategyMonitorService
 from app.strategy.prompt_builder import build_step1, build_step2
 from app.strategy.scoring import (
     SCORING_DIRECTIONS,
@@ -53,13 +53,6 @@ def _get_public_strategy(engine: StrategyEngine, strategy_id: str) -> StrategyDe
     if strategy.meta.get("research_only"):
         raise HTTPException(status_code=404, detail=f"unknown strategy: {strategy_id}")
     return strategy
-
-
-def _get_monitor(request: Request) -> StrategyMonitorService:
-    mon = getattr(runtime_for(request), "strategy_monitor", None)
-    if not mon:
-        raise HTTPException(status_code=503, detail="策略监控未初始化")
-    return mon
 
 
 def _data_dir(request: Request) -> Path:
@@ -877,24 +870,36 @@ def get_strategy_source(strategy_id: str, request: Request):
 @router.post("/ai/test")
 async def ai_test(request: Request):
     """Send a small prompt through the selected AI provider."""
+    from app.services.ai_credit_stream import finish_credit_task, prepare_credit_task
+    from app.services.ai_credits import credit_task_scope
     from app.services.ai_provider import current_ai_model, current_ai_provider, generate_ai_text
 
+    credit_task = await prepare_credit_task(request, "assistant")
+    outcome = "failed"
     try:
-        text = await generate_ai_text(
-            [{"role": "user", "content": "Reply exactly: OK"}],
-            temperature=0,
-            max_tokens=256,
-            timeout=15,
-        )
+        with credit_task_scope(credit_task):
+            text = await generate_ai_text(
+                [{"role": "user", "content": "Reply exactly: OK"}],
+                temperature=0,
+                max_tokens=256,
+                timeout=15,
+            )
         if not text.strip():
             return {"ok": False, "error": "AI 服务未返回正文，请检查模型或输出预算"}
+        outcome = "success"
         return {"ok": True, "model": current_ai_model() or current_ai_provider(), "response": text[:80]}
+    except asyncio.CancelledError:
+        if credit_task is not None and credit_task.started:
+            outcome = "cancelled"
+        raise
     except Exception as e:  # noqa: BLE001 -- AI连接测试将任意供应商异常映射为明确失败结果
         return {
             "ok": False,
             "error": str(e) or repr(e),
             "error_type": type(e).__name__,
         }
+    finally:
+        await finish_credit_task(credit_task, outcome)
 
 
 def _build_prompt(req: BuildRequest) -> str:

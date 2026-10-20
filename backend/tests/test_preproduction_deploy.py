@@ -246,7 +246,7 @@ def test_deploy_preserves_remote_plugin_mirror_and_optional_build_arguments(depl
     runtime, state_file, _, _ = deployment
     state = json.loads(state_file.read_text())
     arguments = {
-        "BACKEND_EXTRAS": "backtest desktop",
+        "BACKEND_EXTRAS": "backtest legacy-cpu",
         "INCLUDE_STOCKSDK": "1",
         "USE_CN_MIRROR": "1",
         "NPM_REGISTRY": "https://registry.example.test/",

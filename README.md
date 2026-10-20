@@ -1,6 +1,6 @@
-# TSP · A 股量化工作台
+# 小帅工作台
 
-个人维护的行情、选股、回测与监控项目。后端使用 Python / FastAPI / Polars，前端使用 React / TypeScript；行情与研究数据保存在本机。
+个人维护的行情、选股、回测与监控项目，仅维护 Linux 服务器版，通过浏览器访问。后端使用 Python / FastAPI / Polars，前端使用 React / TypeScript；行情与研究数据保存在服务器。
 
 网页服务 `web` 负责查询与交互，唯一的 `collector` 负责采集、调度和任务执行。两者共享数据目录；页面读取后台已保存的数据。
 
@@ -10,7 +10,6 @@
 
 ```bash
 ./dev.sh
-# Windows: .\dev.ps1
 ```
 
 前端默认为 <http://localhost:3011>，网页后端为 <http://localhost:3018>，采集服务为 `127.0.0.1:3019`。Ctrl-C 会关闭本次启动的三个服务。

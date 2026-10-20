@@ -3,6 +3,7 @@
 POST /api/custom/assistant/chat      NDJSON 事件流(协议见模块 __init__)
 GET  /api/custom/assistant/status     供应商配置状态(前端门控展示)
 GET  /api/custom/assistant/suggests   空会话快捷指令
+GET/PUT /api/custom/assistant/tool-permissions  管理员工具权限配置
 POST /api/custom/assistant/actions/{call_id}/decision
                                      动作工具确认/拒绝(确认卡按钮回调)
 """
@@ -11,19 +12,18 @@ from __future__ import annotations
 from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from app.custom.assistant import actions as assistant_actions
 from app.custom.assistant import tools as assistant_tools
 from app.custom.assistant.chat_service import chat_stream
+from app.custom.assistant.permissions import get_tool_permissions, set_tool_permissions
 from app.services.ai_provider import (
     ai_configured,
     current_ai_model,
     current_ai_provider,
     is_codex_cli_provider,
 )
-from app.services.ndjson_heartbeat import with_heartbeat
 
 
 class HistoryMessage(BaseModel):
@@ -45,6 +45,11 @@ class ActionDecisionRequest(BaseModel):
     approve: bool
 
 
+class ToolPermissionsRequest(BaseModel):
+    model_config = {"extra": "forbid"}
+    permissions: dict[str, Literal["guest", "pro", "admin"]]
+
+
 def build_router() -> APIRouter:
     router = APIRouter(prefix="/api/custom/assistant", tags=["custom-assistant"])
 
@@ -55,9 +60,12 @@ def build_router() -> APIRouter:
         repo = getattr(request.app.state, "repo", None)
         data_dir = str(repo.store.data_dir) if repo is not None else None
         context = req.context.model_dump() if req.context else None
+        from app.services.ai_credit_stream import CreditStreamingResponse, prepare_credit_task
 
-        async def gen():
-            async for line in with_heartbeat(chat_stream(
+        credit_task = await prepare_credit_task(request, "assistant")
+
+        return CreditStreamingResponse(
+            chat_stream(
                 history=[m.model_dump() for m in req.messages],
                 context=context,
                 engine=engine,
@@ -67,13 +75,8 @@ def build_router() -> APIRouter:
                 depth_service=getattr(request.app.state, "depth_service", None),
                 capabilities=getattr(request.app.state, "capabilities", None),
                 financial_scheduler=getattr(request.app.state, "financial_scheduler", None),
-            )):
-                yield line + "\n"
-
-        return StreamingResponse(
-            gen(),
-            media_type="application/x-ndjson",
-            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+            ),
+            credit_task=credit_task,
         )
 
     @router.get("/status")
@@ -89,6 +92,14 @@ def build_router() -> APIRouter:
     @router.get("/suggests")
     def suggests() -> dict:
         return {"suggests": assistant_tools.QUICK_SUGGESTS}
+
+    @router.get("/tool-permissions")
+    def tool_permissions() -> dict:
+        return get_tool_permissions()
+
+    @router.put("/tool-permissions")
+    def update_tool_permissions(req: ToolPermissionsRequest) -> dict:
+        return set_tool_permissions(req.permissions)
 
     @router.post("/actions/{call_id}/decision")
     async def action_decision(call_id: str, req: ActionDecisionRequest) -> dict:

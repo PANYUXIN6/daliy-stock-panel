@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import threading
 from pathlib import Path
 
 import httpx
@@ -78,32 +77,6 @@ def test_container_cli_loads_without_proxy_rewriting(monkeypatch, proxy_probe, e
     monkeypatch.setattr(uvicorn.Server, 'run', run)
     result = CliRunner().invoke(uvicorn.main, arguments)
     assert result.exit_code == 0, result.output or repr(result.exception)
-    assert calls == [True]
-
-
-@pytest.mark.parametrize('entrypoint', ['web', 'collector'])
-def test_desktop_configs_preserve_raw_peer(monkeypatch, proxy_probe, entrypoint):
-    import app.collector
-    import app.main
-    from app import desktop
-
-    probe, verify = proxy_probe
-    monkeypatch.setattr(app.main, 'create_app', lambda role: probe)
-    monkeypatch.setattr(app.collector, 'app', probe)
-    calls = []
-
-    def run(server, sockets=None):
-        verify(server.config)
-        calls.append(True)
-        server.started = True
-
-    monkeypatch.setattr(uvicorn.Server, 'run', run)
-    if entrypoint == 'web':
-        ready = threading.Event()
-        desktop._run_uvmicorn(3018, ready)
-        assert ready.is_set()
-    else:
-        assert desktop._run_collector_service() == 0
     assert calls == [True]
 
 

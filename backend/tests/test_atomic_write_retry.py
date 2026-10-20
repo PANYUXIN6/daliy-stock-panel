@@ -1,34 +1,18 @@
-"""Windows 读锁竞态下 parquet 原子替换的重试测试。
+"""Parquet 原子替换的临时错误重试与失败传播测试。
 
-根因: polars scan_parquet / DuckDB read_parquet 扫描进行中持有分区句柄,
-Windows os.replace 替换"仍被打开"的目标文件抛 PermissionError (WinError 5);
-Linux 的 inode 交换语义无此限制。表现为个股分时"补齐数据"500。
-
-修复: replace_with_retry 短退避重试穿过读窗口; 永久占用则原样抛出。
-两处 _atomic_write_parquet (repository / kline_sync) 均接入。
-
-另含 DuckDB 句柄泄漏回归: latest_minute_date 等曾用 self.db.execute(...)
-.fetchone() 直连共享连接, 未消费结果集把首个分区句柄钉死在连接上,
-导致同步 os.replace 永久被拒 (修为 execute_one cursor+close)。
+replace_with_retry 对临时 PermissionError 短退避重试，耗尽后原样抛出。
+repository 与 kline_sync 的原子写入共用这一契约。
 """
 from __future__ import annotations
 
 import os
-import sys
-from datetime import date, datetime
+from datetime import datetime
 
 import polars as pl
 import pytest
 
 from app.services import kline_sync
 from app.tickflow import repository
-
-try:
-    import psutil
-
-    _PSUTIL = True
-except ImportError:  # pragma: no cover
-    _PSUTIL = False
 
 
 def _minute_frame() -> pl.DataFrame:
@@ -131,31 +115,3 @@ def test_write_minute_partition_survives_reader_race(tmp_path, monkeypatch):
 
     assert written == 1
     assert state["calls"] >= 3  # 至少经历了重试
-
-
-# ---------- DuckDB 句柄泄漏回归 (Windows 实测语义) ----------
-
-@pytest.mark.skipif(sys.platform != "win32" or not _PSUTIL, reason="Windows 句柄语义 + psutil")
-def test_minute_date_queries_do_not_pin_partition_handles(tmp_path):
-    """latest_minute_date 等查询后不得残留分区句柄。
-
-    旧实现 self.db.execute(...).fetchone() 的未消费结果集经 DuckDB buffer
-    manager 钉住首个分区句柄, 后续同步 os.replace 永久 PermissionError。
-    """
-    from app.tickflow.repository import DataStore, KlineRepository
-
-    minute_dir = tmp_path / "kline_minute"
-    kline_sync._write_minute_partition(
-        _minute_frame(), minute_dir)  # date=2026-01-15
-    repo = KlineRepository(DataStore(data_dir=tmp_path))
-
-    assert repo.latest_minute_date("600519.SH") == date(2026, 1, 15)
-    assert repo.latest_minute_date_global() == date(2026, 1, 15)
-    assert repo.earliest_minute_date() == date(2026, 1, 15)
-
-    me = psutil.Process()
-    held = [f.path for f in me.open_files() if "kline_minute" in f.path]
-    assert held == []
-
-    # 钉住场景的端到端后果: 查询后重写同一分区必须成功 (旧实现在此 PermissionError)
-    assert kline_sync._write_minute_partition(_minute_frame(), minute_dir) == 1

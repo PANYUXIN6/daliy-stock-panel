@@ -1,6 +1,8 @@
 import { getPageScale } from '@/lib/pageZoom'
 import { useCurrentUser } from '@/lib/auth'
 import { accountStorage } from '@/lib/sessionRuntime'
+import { useAiFeature } from '@/lib/useAiCredits'
+import { AiCreditHint } from '@/components/AiCreditHint'
 /**
  * AI 助手面板 — 非模态, 从页面最右缘滑入(right: 0), 默认 720px 宽,
  * 左缘拖拽可调宽并持久化到 localStorage。
@@ -16,11 +18,9 @@ import { AnimatePresence, motion } from 'framer-motion'
 import {
   ArrowDown,
   Bot,
-  Database,
   FlaskConical,
   History,
   Plus,
-  Puzzle,
   SendHorizontal,
   Settings2,
   Sparkles,
@@ -72,9 +72,11 @@ function saveWidth(width: number) {
 }
 
 function clampWidth(width: number): number {
-  // 右缘贴齐, 至少给页面主体留 64px 上下文。
-  const maxWidth = Math.max(MIN_WIDTH, window.innerWidth / getPageScale() - 64)
-  return Math.min(Math.max(width, MIN_WIDTH), maxWidth)
+  // 宽屏给页面主体留 64px 上下文，窄屏贴合视口，避免额度和输入框被裁切。
+  const viewportWidth = window.innerWidth / getPageScale()
+  const minWidth = Math.min(MIN_WIDTH, viewportWidth)
+  const maxWidth = Math.max(minWidth, viewportWidth - 64)
+  return Math.min(Math.max(width, minWidth), maxWidth)
 }
 
 export function AssistantDrawer() {
@@ -305,6 +307,7 @@ function MessageList({
   status: AssistantStatus | null
   suggests: QuickSuggest[]
 }) {
+  const quota = useAiFeature('assistant')
   const scrollRef = useRef<HTMLDivElement>(null)
   const pinnedRef = useRef(true)
   const [showJump, setShowJump] = useState(false)
@@ -334,7 +337,7 @@ function MessageList({
           <EmptyState status={status} suggests={suggests} />
         ) : (
           messages.map(message => (
-            <AssistantMessageView key={message.id} message={message} onRetry={sending ? undefined : retryLast} />
+            <AssistantMessageView key={message.id} message={message} onRetry={sending || !quota.available ? undefined : retryLast} />
           ))
         )}
       </div>
@@ -363,10 +366,10 @@ const SUGGEST_GROUP_ICONS: Record<string, typeof TrendingUp> = {
   行情与大盘: TrendingUp,
   我的与个股: Star,
   策略与信号: FlaskConical,
-  数据与扩展: Database,
 }
 
 function EmptyState({ status, suggests }: { status: AssistantStatus | null; suggests: QuickSuggest[] }) {
+  const quota = useAiFeature('assistant')
   const isAdmin = useCurrentUser()?.role === 'admin'
   const navigate = useNavigate()
 
@@ -423,6 +426,7 @@ function EmptyState({ status, suggests }: { status: AssistantStatus | null; sugg
   // 按后端 group 字段分区, 保持原始顺序; 未分组的建议归入「更多」。
   const groups = new Map<string, QuickSuggest[]>()
   for (const suggest of suggests) {
+    if (suggest.group === '数据与扩展') continue
     const key = suggest.group || '更多'
     groups.set(key, [...(groups.get(key) ?? []), suggest])
   }
@@ -451,7 +455,9 @@ function EmptyState({ status, suggests }: { status: AssistantStatus | null; sugg
                   key={suggest.id}
                   type="button"
                   onClick={() => sendMessage(suggest.prompt)}
-                  className="max-w-full shrink-0 cursor-pointer rounded-card border border-border bg-base/60 px-3 py-2 text-left text-xs text-secondary transition-all duration-150 ease-smooth hover:border-accent/40 hover:bg-elevated hover:text-foreground"
+                  disabled={!quota.available}
+                  title={quota.reason || `提问 · ${quota.priceLabel}`}
+                  className="max-w-full shrink-0 cursor-pointer rounded-card border border-border bg-base/60 px-3 py-2 text-left text-xs text-secondary transition-all duration-150 ease-smooth hover:border-accent/40 hover:bg-elevated hover:text-foreground disabled:opacity-40 disabled:cursor-not-allowed"
                 >
                   {suggest.label}
                 </button>
@@ -460,26 +466,16 @@ function EmptyState({ status, suggests }: { status: AssistantStatus | null; sugg
           </div>
         )
       })}
-
-      <div className="rounded-card border border-dashed border-border bg-base/40 px-3.5 py-3 text-xs">
-        <div className="flex items-center gap-1.5 font-medium text-foreground">
-          <Puzzle className="h-3.5 w-3.5 text-accent" />
-          扩展内容同样可以问
-        </div>
-        <p className="mt-1 leading-relaxed text-secondary">
-          扩展数据表、自定义策略与信号等扩展内容都能问答互动, 比如「我的扩展数据表里有什么」「看看最新一张的数据」。
-          AI 助手本身也是一个 custom 扩展模块。
-        </p>
-      </div>
     </div>
   )
 }
 
 function InputArea({ sending, blocked }: { sending: boolean; blocked: boolean }) {
+  const quota = useAiFeature('assistant')
   const [text, setText] = useState('')
   const textareaRef = useRef<HTMLTextAreaElement>(null)
 
-  const canSend = !sending && !blocked && text.trim().length > 0
+  const canSend = !sending && !blocked && quota.available && text.trim().length > 0
 
   const submit = () => {
     if (!canSend) return
@@ -530,7 +526,7 @@ function InputArea({ sending, blocked }: { sending: boolean; blocked: boolean })
             type="button"
             onClick={submit}
             disabled={!canSend}
-            title="发送"
+            title={quota.reason || `发送 · ${quota.priceLabel}`}
             aria-label="发送"
             className="mr-1.5 mb-1.5 flex h-8 w-8 cursor-pointer items-center justify-center rounded-btn bg-accent text-white transition-all duration-150 ease-smooth hover:bg-accent/90 disabled:cursor-not-allowed disabled:opacity-40"
           >
@@ -538,6 +534,7 @@ function InputArea({ sending, blocked }: { sending: boolean; blocked: boolean })
           </button>
         )}
       </div>
+      <AiCreditHint feature="assistant" className="mt-1.5 px-1" />
       <div className="mt-1.5 px-1 text-[10px] text-muted">
         ⌘K / Ctrl+K 呼出 · 左缘可拖拽调宽 · 回答基于本地数据, 不构成投资建议
       </div>

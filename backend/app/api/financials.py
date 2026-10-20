@@ -7,13 +7,11 @@ from typing import Literal
 
 import polars as pl
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from app.services import ai_reports
 from app.services.financial_analyzer import analyze_financials_stream
 from app.services.financial_sync import FINANCIAL_SYNC_TABLES, FINANCIAL_TABLES, get_financial_df
-from app.services.ndjson_heartbeat import with_heartbeat
 from app.tickflow.capabilities import Cap
 
 logger = logging.getLogger(__name__)
@@ -254,19 +252,17 @@ async def analyze_financials(request: Request, req: AnalyzeRequest):
 
     data_dir = request.app.state.repo.store.data_dir
 
+    from app.services.ai_credit_stream import CreditStreamingResponse, prepare_credit_task
     from app.services.analysis_archive import archive_analysis
 
-    async def stream_gen():
-        async for chunk in with_heartbeat(archive_analysis(
+    credit_task = await prepare_credit_task(request, "financial_analysis")
+
+    return CreditStreamingResponse(
+        archive_analysis(
             analyze_financials_stream(data_dir, req.symbol, req.focus),
             ai_reports.save_report, data_dir, "financials", {"symbol": req.symbol, "focus": req.focus},
-        )):
-            yield chunk + "\n"
-
-    return StreamingResponse(
-        stream_gen(),
-        media_type="application/x-ndjson",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        ),
+        credit_task=credit_task,
     )
 
 

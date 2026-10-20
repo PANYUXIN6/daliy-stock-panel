@@ -1,4 +1,6 @@
 import { sessionFetch } from '@/lib/sessionRuntime'
+import { fetchAiCredits, runAiGeneration } from './aiGeneration'
+export type { AiCredits, AiFeature } from './aiGeneration'
 // 后端 API 客户端 — 全项目统一入口
 //
 // Dev: Vite 按启动脚本解析出的 BACKEND_HOST/BACKEND_PORT 代理 /api
@@ -2092,16 +2094,6 @@ export interface WecomBotStatus {
   last_error: string
 }
 
-/** API Token 记录 (管理视图, 不含哈希) */
-export interface ApiTokenRecord {
-  id: string
-  name: string
-  scopes: string[]
-  created_at: string
-  last_used_at?: string | null
-  revoked: boolean
-}
-
 export type CollectionSyncRequest =
   | { kind: 'pipeline' }
   | { kind: 'adj_factor' }
@@ -2167,7 +2159,6 @@ export interface Preferences {
   sse_refresh_pages: Record<string, boolean>
   strategy_monitor_enabled: boolean
   strategy_monitor_ids: string[]
-  system_notify_enabled: boolean
   feishu_webhook_url?: string
   feishu_webhook_secret?: string
   wecom_webhook_url?: string
@@ -2298,16 +2289,48 @@ export interface SectorRotationUniverseItem {
 }
 
 export type UserRole = 'admin' | 'pro' | 'guest'
+export interface AssistantToolPermission {
+  name: string
+  label: string
+  description: string
+  group: string
+  min_role: UserRole
+  default_min_role: UserRole
+  locked: boolean
+  requires_confirmation: boolean
+}
+export interface AssistantToolPermissionsResponse {
+  tools: AssistantToolPermission[]
+  counts: Record<UserRole, number>
+  configuration_error: string | null
+}
 export interface User {
   id: string; username: string; is_initial_admin: boolean; role: UserRole; pro_expires_on: string | null
   is_active: boolean; must_change_password: boolean; created_at: string
   last_login_at: string | null; last_login_ip: string | null; login_count: number
 }
+export interface AiUserUsage {
+  period: string
+  monthly_points: number | null
+  used_points: number
+  reserved_points: number
+  remaining_points: number | null
+  unlimited: boolean
+  prompt_tokens: number
+  completion_tokens: number
+  total_tokens: number
+  estimated_cost_cny: string
+  unreported_calls: number
+  unpriced_calls: number
+  total_calls: number
+}
+export type ManagedUser = User & { ai_usage: AiUserUsage }
 export interface AuthStatus { configured: boolean; authenticated: boolean; user: User | null; expires_at: string | null }
 export interface LoginEvent { id: number; user_id: string | null; username: string; occurred_at: string; ip: string; user_agent: string; success: boolean; reason: string }
 
 // ===== API surface =====
 export const api = {
+  aiCredits: fetchAiCredits,
   health: () => request<{ status: string; version: string; mode: string }>('/health'),
 
   // ===== Auth (访问认证) =====
@@ -2319,7 +2342,7 @@ export const api = {
   authChangePassword: (oldPassword: string, newPassword: string) => request<AuthStatus>('/api/auth/change-password', {
     method: 'POST', body: JSON.stringify({ old_password: oldPassword, new_password: newPassword }), quiet: true,
   }),
-  users: (search = '', offset = 0) => request<{ users: User[]; total: number }>(`/api/users?search=${encodeURIComponent(search)}&offset=${offset}&limit=50`),
+  users: (search = '', offset = 0) => request<{ users: ManagedUser[]; total: number }>(`/api/users?search=${encodeURIComponent(search)}&offset=${offset}&limit=50`),
   createUser: (value: { username: string; password: string; role: UserRole; pro_expires_on?: string | null }) => request<{ user: User }>('/api/users', { method: 'POST', body: JSON.stringify(value) }),
   updateUser: (id: string, value: { role?: UserRole; pro_expires_on?: string | null; is_active?: boolean }) => request<{ user: User }>(`/api/users/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify(value) }),
   resetUserPassword: (id: string, password: string) => request<{ ok: boolean }>(`/api/users/${encodeURIComponent(id)}/reset-password`, { method: 'POST', body: JSON.stringify({ password }) }),
@@ -2327,6 +2350,12 @@ export const api = {
   loginEvents: (userId = '', offset = 0) => request<{ events: LoginEvent[]; total: number }>(`/api/users/login-events?user_id=${encodeURIComponent(userId)}&offset=${offset}&limit=50`),
 
   settings: () => request<SettingsState>('/api/settings'),
+  assistantToolPermissions: () =>
+    request<AssistantToolPermissionsResponse>('/api/custom/assistant/tool-permissions', { quiet: true }),
+  saveAssistantToolPermissions: (permissions: Record<string, UserRole>) =>
+    request<AssistantToolPermissionsResponse>('/api/custom/assistant/tool-permissions', {
+      method: 'PUT', body: JSON.stringify({ permissions }), quiet: true,
+    }),
   /** 保存 AI 配置 */
   saveAiSettings: (ai: { provider?: string; base_url?: string; model?: string; reasoning_effort?: string; codex_command?: string; codex_reasoning_effort?: string; user_agent?: string; max_output_tokens?: number; context_window?: number; round_checkpoint?: number }) =>
     request<{ ok: boolean; ai_provider?: string; ai_model?: string; ai_openai_model?: string; ai_reasoning_effort?: string; ai_codex_model?: string; ai_codex_command?: string; ai_codex_reasoning_effort?: string; ai_configured?: boolean; ai_max_output_tokens?: number; ai_context_window?: number; ai_round_checkpoint?: number }>('/api/settings/ai', {
@@ -2337,22 +2366,6 @@ export const api = {
   /** RunningHub 模型列表(后端代理, 规避其网关按 Origin 过滤) */
   sponsorModels: () =>
     request<{ models: string[] }>('/api/settings/ai/sponsor-models'),
-
-  // ===== API Token 管理 (开放层; 仅 UI 会话可达) =====
-  apiTokensList: () =>
-    request<{ tokens: ApiTokenRecord[] }>('/api/settings/api-tokens'),
-
-  /** 创建 Token — 明文只在本次响应出现一次 */
-  apiTokenCreate: (name: string, scopes: string[]) =>
-    request<{ token: ApiTokenRecord; plaintext: string }>('/api/settings/api-tokens', {
-      method: 'POST',
-      body: JSON.stringify({ name, scopes }),
-    }),
-
-  apiTokenRevoke: (id: string) =>
-    request<{ status: string; id: string }>(`/api/settings/api-tokens/${encodeURIComponent(id)}`, {
-      method: 'DELETE',
-    }),
 
   preferences: () => request<Preferences>('/api/settings/preferences'),
   updateOrdinaryMinute: (enabled: boolean) =>
@@ -2565,11 +2578,6 @@ export const api = {
       method: 'PUT',
       body: JSON.stringify(cfg),
     }),
-  updateSystemNotify: (enabled: boolean) =>
-    request<{ system_notify_enabled: boolean }>('/api/settings/preferences/system-notify', {
-      method: 'PUT',
-      body: JSON.stringify({ enabled }),
-    }),
   updateFeishuWebhook: (url: string, secret: string = '') =>
     request<{ feishu_webhook_url: string; feishu_webhook_secret: string }>('/api/settings/preferences/feishu-webhook', {
       method: 'PUT',
@@ -2759,6 +2767,12 @@ export const api = {
     }>(
       `/api/kline/minute?symbol=${encodeURIComponent(symbol)}${date ? `&date=${date}` : ''}${live ? '&live=1' : ''}`,
     ),
+  minuteFetch: (symbol: string, date: string) =>
+    request<{ status: 'started'; symbol: string; date: string; job_id: string; reused: boolean }>('/api/kline/minute/fetch', {
+      method: 'POST',
+      body: JSON.stringify({ symbol, date }),
+    }),
+  minuteFetchJob: (id: string) => request<PipelineJob>(`/api/kline/minute/fetch/${encodeURIComponent(id)}`),
   /** 最多返回最近 days 个已落库交易日的分时；只读本地 */
   klineMinuteRange: (symbol: string, days = 10) =>
     request<{
@@ -3616,44 +3630,51 @@ export const api = {
     content?: string
     message?: string
   }> {
-    const res = await sessionFetch('/api/financials/analyze', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ symbol, focus: focus ?? '' }),
-    })
-    if (!res.ok) {
-      let detail = ''
-      try { const j = JSON.parse(await res.text()); detail = j.detail ?? j.message ?? '' } catch { /* ignore */ }
-      const msg = detail || `${res.status} ${res.statusText}`
-      toast(msg, 'error')
-      throw new Error(msg)
-    }
-    if (!res.body) throw new Error('响应无 body')
-
-    const reader = res.body.getReader()
-    const decoder = new TextDecoder()
-    let buf = ''
-    for (;;) {
-      const { done, value } = await reader.read()
-      if (done) break
-      buf += decoder.decode(value, { stream: true })
-      // 按行分割(保留最后不完整的行在 buf)
-      const lines = buf.split('\n')
-      buf = lines.pop() ?? ''
-      for (const line of lines) {
-        const s = line.trim()
-        if (!s) continue
-        try {
-          yield JSON.parse(s)
-        } catch {
-          // 忽略无法解析的行
-        }
+    yield* runAiGeneration('financial_analysis', async function* (creditHeaders) {
+      const res = await sessionFetch('/api/financials/analyze', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...creditHeaders },
+        body: JSON.stringify({ symbol, focus: focus ?? '' }),
+      })
+      if (!res.ok) {
+        let detail = ''
+        try { const j = JSON.parse(await res.text()); detail = j.detail ?? j.message ?? '' } catch { /* ignore */ }
+        const msg = detail || `${res.status} ${res.statusText}`
+        toast(msg, 'error')
+        throw new Error(msg)
       }
-    }
-    // 处理残余
-    if (buf.trim()) {
-      try { yield JSON.parse(buf.trim()) } catch { /* ignore */ }
-    }
+      if (!res.body) throw new Error('响应无 body')
+
+      const reader = res.body.getReader()
+      const decoder = new TextDecoder()
+      let buf = ''
+      try {
+        for (;;) {
+          const { done, value } = await reader.read()
+          if (done) break
+          buf += decoder.decode(value, { stream: true })
+          // 按行分割(保留最后不完整的行在 buf)
+          const lines = buf.split('\n')
+          buf = lines.pop() ?? ''
+          for (const line of lines) {
+            const s = line.trim()
+            if (!s) continue
+            try {
+              yield JSON.parse(s)
+            } catch {
+              // 忽略无法解析的行
+            }
+          }
+        }
+        // 处理残余
+        if (buf.trim()) {
+          try { yield JSON.parse(buf.trim()) } catch { /* ignore */ }
+        }
+      } finally {
+        try { await reader.cancel() } catch { /* 连接已关闭 */ }
+        reader.releaseLock()
+      }
+    })
   },
 
   // ===== 个股分析 =====
@@ -3690,38 +3711,45 @@ export const api = {
     content?: string
     message?: string
   }> {
-    const res = await sessionFetch('/api/stock-analysis/analyze', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ symbol, focus: focus ?? '' }),
-    })
-    if (!res.ok) {
-      let detail = ''
-      try { const j = JSON.parse(await res.text()); detail = j.detail ?? j.message ?? '' } catch { /* ignore */ }
-      const msg = detail || `${res.status} ${res.statusText}`
-      toast(msg, 'error')
-      throw new Error(msg)
-    }
-    if (!res.body) throw new Error('响应无 body')
-
-    const reader = res.body.getReader()
-    const decoder = new TextDecoder()
-    let buf = ''
-    for (;;) {
-      const { done, value } = await reader.read()
-      if (done) break
-      buf += decoder.decode(value, { stream: true })
-      const lines = buf.split('\n')
-      buf = lines.pop() ?? ''
-      for (const line of lines) {
-        const s = line.trim()
-        if (!s) continue
-        try { yield JSON.parse(s) } catch { /* ignore */ }
+    yield* runAiGeneration('stock_analysis', async function* (creditHeaders) {
+      const res = await sessionFetch('/api/stock-analysis/analyze', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...creditHeaders },
+        body: JSON.stringify({ symbol, focus: focus ?? '' }),
+      })
+      if (!res.ok) {
+        let detail = ''
+        try { const j = JSON.parse(await res.text()); detail = j.detail ?? j.message ?? '' } catch { /* ignore */ }
+        const msg = detail || `${res.status} ${res.statusText}`
+        toast(msg, 'error')
+        throw new Error(msg)
       }
-    }
-    if (buf.trim()) {
-      try { yield JSON.parse(buf.trim()) } catch { /* ignore */ }
-    }
+      if (!res.body) throw new Error('响应无 body')
+
+      const reader = res.body.getReader()
+      const decoder = new TextDecoder()
+      let buf = ''
+      try {
+        for (;;) {
+          const { done, value } = await reader.read()
+          if (done) break
+          buf += decoder.decode(value, { stream: true })
+          const lines = buf.split('\n')
+          buf = lines.pop() ?? ''
+          for (const line of lines) {
+            const s = line.trim()
+            if (!s) continue
+            try { yield JSON.parse(s) } catch { /* ignore */ }
+          }
+        }
+        if (buf.trim()) {
+          try { yield JSON.parse(buf.trim()) } catch { /* ignore */ }
+        }
+      } finally {
+        try { await reader.cancel() } catch { /* 连接已关闭 */ }
+        reader.releaseLock()
+      }
+    })
   },
 
   // ===== 大盘复盘 =====
@@ -3770,45 +3798,47 @@ export const api = {
     content?: string
     message?: string
   }> {
-    const res = await sessionFetch('/api/market-recap/analyze', {
-      method: 'POST',
-      signal,
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ as_of: asOf ?? null, focus: focus ?? '' }),
-    })
-    if (!res.ok) {
-      let detail = ''
-      try { const j = JSON.parse(await res.text()); detail = j.detail ?? j.message ?? '' } catch { /* ignore */ }
-      const msg = detail || `${res.status} ${res.statusText}`
-      toast(msg, 'error')
-      throw new Error(msg)
-    }
-    if (!res.body) throw new Error('响应无 body')
+    yield* runAiGeneration('market_recap', async function* (creditHeaders) {
+      const res = await sessionFetch('/api/market-recap/analyze', {
+        method: 'POST',
+        signal,
+        headers: { 'Content-Type': 'application/json', ...creditHeaders },
+        body: JSON.stringify({ as_of: asOf ?? null, focus: focus ?? '' }),
+      })
+      if (!res.ok) {
+        let detail = ''
+        try { const j = JSON.parse(await res.text()); detail = j.detail ?? j.message ?? '' } catch { /* ignore */ }
+        const msg = detail || `${res.status} ${res.statusText}`
+        toast(msg, 'error')
+        throw new Error(msg)
+      }
+      if (!res.body) throw new Error('响应无 body')
 
-    const reader = res.body.getReader()
-    const decoder = new TextDecoder()
-    let buf = ''
-    try {
-      for (;;) {
-        const { done, value } = await reader.read()
-        if (done) break
-        buf += decoder.decode(value, { stream: true })
-        const lines = buf.split('\n')
-        buf = lines.pop() ?? ''
-        for (const line of lines) {
-          const s = line.trim()
-          if (!s) continue
-          try { yield JSON.parse(s) } catch { /* ignore */ }
+      const reader = res.body.getReader()
+      const decoder = new TextDecoder()
+      let buf = ''
+      try {
+        for (;;) {
+          const { done, value } = await reader.read()
+          if (done) break
+          buf += decoder.decode(value, { stream: true })
+          const lines = buf.split('\n')
+          buf = lines.pop() ?? ''
+          for (const line of lines) {
+            const s = line.trim()
+            if (!s) continue
+            try { yield JSON.parse(s) } catch { /* ignore */ }
+          }
         }
+        if (buf.trim()) {
+          try { yield JSON.parse(buf.trim()) } catch { /* ignore */ }
+        }
+      } finally {
+        // 包括显式取消及调用方提前退出；已中止的 fetch 可能令 cancel 拒绝，仍须解锁。
+        try { await reader.cancel() } catch { /* aborted response */ }
+        reader.releaseLock()
       }
-      if (buf.trim()) {
-        try { yield JSON.parse(buf.trim()) } catch { /* ignore */ }
-      }
-    } finally {
-      // 包括显式取消及调用方提前退出；已中止的 fetch 可能令 cancel 拒绝，仍须解锁。
-      try { await reader.cancel() } catch { /* aborted response */ }
-      reader.releaseLock()
-    }
+    }, signal)
   },
 
   /** AI 概念轮动分析 — 流式 NDJSON。 */
@@ -3819,38 +3849,45 @@ export const api = {
     content?: string
     message?: string
   }> {
-    const res = await sessionFetch('/api/rps/rotation-analyze', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ days, focus: focus ?? '', kind: kind ?? 'concept', level: level ?? null }),
-    })
-    if (!res.ok) {
-      let detail = ''
-      try { const j = JSON.parse(await res.text()); detail = j.detail ?? j.message ?? '' } catch { /* ignore */ }
-      const msg = detail || `${res.status} ${res.statusText}`
-      toast(msg, 'error')
-      throw new Error(msg)
-    }
-    if (!res.body) throw new Error('响应无 body')
-
-    const reader = res.body.getReader()
-    const decoder = new TextDecoder()
-    let buf = ''
-    for (;;) {
-      const { done, value } = await reader.read()
-      if (done) break
-      buf += decoder.decode(value, { stream: true })
-      const lines = buf.split('\n')
-      buf = lines.pop() ?? ''
-      for (const line of lines) {
-        const s = line.trim()
-        if (!s) continue
-        try { yield JSON.parse(s) } catch { /* ignore */ }
+    yield* runAiGeneration(kind === 'industry' ? 'industry_rotation' : 'concept_rotation', async function* (creditHeaders) {
+      const res = await sessionFetch('/api/rps/rotation-analyze', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...creditHeaders },
+        body: JSON.stringify({ days, focus: focus ?? '', kind: kind ?? 'concept', level: level ?? null }),
+      })
+      if (!res.ok) {
+        let detail = ''
+        try { const j = JSON.parse(await res.text()); detail = j.detail ?? j.message ?? '' } catch { /* ignore */ }
+        const msg = detail || `${res.status} ${res.statusText}`
+        toast(msg, 'error')
+        throw new Error(msg)
       }
-    }
-    if (buf.trim()) {
-      try { yield JSON.parse(buf.trim()) } catch { /* ignore */ }
-    }
+      if (!res.body) throw new Error('响应无 body')
+
+      const reader = res.body.getReader()
+      const decoder = new TextDecoder()
+      let buf = ''
+      try {
+        for (;;) {
+          const { done, value } = await reader.read()
+          if (done) break
+          buf += decoder.decode(value, { stream: true })
+          const lines = buf.split('\n')
+          buf = lines.pop() ?? ''
+          for (const line of lines) {
+            const s = line.trim()
+            if (!s) continue
+            try { yield JSON.parse(s) } catch { /* ignore */ }
+          }
+        }
+        if (buf.trim()) {
+          try { yield JSON.parse(buf.trim()) } catch { /* ignore */ }
+        }
+      } finally {
+        try { await reader.cancel() } catch { /* 连接已关闭 */ }
+        reader.releaseLock()
+      }
+    })
   },
 
   // ===== Strategy Engine =====
@@ -4155,6 +4192,8 @@ export interface PipelineJob {
     index_count?: number
     index_daily_rows?: number
     minute_rows?: number
+    /** 单标的、指定日期的分钟补采行数。 */
+    rows?: number
     skipped_stages?: string[]
   } | null
   error: string | null

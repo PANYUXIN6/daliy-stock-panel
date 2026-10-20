@@ -799,17 +799,6 @@ def get_strategy_monitor_enabled() -> bool:
     return load().get("strategy_monitor_enabled", False)
 
 
-def get_system_notify_enabled() -> bool:
-    """系统通知开关 — 开启后监控告警同时推送到操作系统通知中心。"""
-    return load().get("system_notify_enabled", False)
-
-
-def set_system_notify_enabled(enabled: bool) -> bool:
-    """保存系统通知开关。"""
-    save({"system_notify_enabled": bool(enabled)})
-    return bool(enabled)
-
-
 def get_feishu_webhook_url() -> str:
     """飞书自定义机器人 Webhook 地址 — 全局共用一处, 所有启用推送的规则都推到这一个群。"""
     return load().get("feishu_webhook_url", "")

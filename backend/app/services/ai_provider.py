@@ -19,6 +19,12 @@ import anyio
 from app import secrets_store
 from app.config import settings
 from app.services.ai_capacity import limited_ai
+from app.services.ai_metering import (
+    metering_active,
+    prepare_metered_call,
+    require_complete_finish,
+    retry_metered_request,
+)
 
 OPENAI_COMPAT_PROVIDER = "openai_compat"
 OPENAI_PROVIDER = "openai"
@@ -474,29 +480,55 @@ async def _run_openai_message_once(
     if not ai_key:
         raise RuntimeError("AI API Key 未配置, 请在后端 .env 配置 AI_API_KEY 并重启服务")
 
-    client = _openai_client(ai_key, timeout)
     model = current_ai_model()
+    base_url = secrets_store.get_ai_config("ai_base_url", settings.ai_base_url)
     req_messages = list(messages)
     kwargs = _openai_kwargs(temperature=temperature, max_tokens=max_tokens, tools=tools)
+    transport_retries = 0
     while True:
+        permit = prepare_metered_call(
+            model=model, base_url=base_url, messages=req_messages, tools=tools,
+            max_tokens=kwargs.get("max_tokens"),
+        )
+        request_kwargs = permit.request_kwargs(kwargs, stream=False) if permit else kwargs
+        success = False
         try:
+            client = (
+                _openai_client(ai_key, timeout, base_url=base_url)
+                if permit else _openai_client(ai_key, timeout)
+            )
             resp = await client.chat.completions.create(
                 model=model,
                 messages=req_messages,
-                **kwargs,
+                **request_kwargs,
             )
-            break
+            if permit:
+                permit.record_usage(getattr(resp, "usage", None))
+                choice = resp.choices[0] if resp.choices else None
+                require_complete_finish(
+                    getattr(choice, "finish_reason", ""),
+                    allow_tools=bool(getattr(getattr(choice, "message", None), "tool_calls", None)),
+                )
+            success = True
+            if not resp.choices:
+                return None
+            return resp.choices[0].message
         except Exception as exc:
-            retry_kwargs = _openai_retry_kwargs(exc, kwargs)
+            retry_kwargs = _openai_retry_kwargs(exc, request_kwargs)
+            if permit and permit.strict and retry_kwargs is not None and "extra_body" not in retry_kwargs:
+                retry_kwargs = None
             if retry_kwargs is not None:
                 kwargs = retry_kwargs
+                continue
+            if permit and await retry_metered_request(exc, transport_retries):
+                transport_retries += 1
                 continue
             if _is_openai_transport_error(exc):
                 raise RuntimeError(_format_openai_error(exc)) from exc
             raise
-    if not resp.choices:
-        return None
-    return resp.choices[0].message
+        finally:
+            if permit:
+                permit.settle(success=success)
 
 
 @limited_ai
@@ -512,7 +544,6 @@ async def _stream_openai(
     if not ai_key:
         raise RuntimeError("AI API Key 未配置, 请在后端 .env 配置 AI_API_KEY 并重启服务")
 
-    client = _openai_client(ai_key, timeout)
     model = current_ai_model()
     base_url = secrets_store.get_ai_config("ai_base_url", settings.ai_base_url)
     req_messages = list(messages)
@@ -524,41 +555,69 @@ async def _stream_openai(
         base_url=base_url,
         prefer_final_answer=prefer_final_answer,
     )
+    include_usage = True
+    transport_retries = 0
     while True:
+        permit = prepare_metered_call(
+            model=model, base_url=base_url, messages=req_messages, tools=None,
+            max_tokens=kwargs.get("max_tokens"),
+        )
+        request_kwargs = permit.request_kwargs(kwargs, stream=True, include_usage=include_usage) if permit else kwargs
+        stream = None
+        success = False
         try:
+            client = (
+                _openai_client(ai_key, timeout, base_url=base_url)
+                if permit else _openai_client(ai_key, timeout)
+            )
             stream = await client.chat.completions.create(
                 model=model,
                 messages=req_messages,
-                **kwargs,
+                **request_kwargs,
                 stream=True,
             )
-            break
+            async for piece in _iter_openai_text(
+                stream, usage_callback=permit.record_usage if permit else None,
+                strict_finish=permit is not None,
+            ):
+                yield piece
+            success = True
+            return
         except Exception as exc:
-            # 流尚未开始 yield, 可安全移除被拒绝的可选参数后重建。
-            retry_kwargs = _openai_retry_kwargs(exc, kwargs)
+            # 仅首包前重试，每个实际请求独立记录；正文开始后不重放。
+            retry_kwargs = _openai_retry_kwargs(exc, request_kwargs) if stream is None else None
+            if permit and permit.strict and retry_kwargs is not None and "extra_body" not in retry_kwargs:
+                retry_kwargs = None
             if retry_kwargs is not None:
+                if "stream_options" in request_kwargs and "stream_options" not in retry_kwargs:
+                    include_usage = False
                 kwargs = retry_kwargs
+                continue
+            if stream is None and permit and await retry_metered_request(exc, transport_retries):
+                transport_retries += 1
                 continue
             if _is_openai_transport_error(exc):
                 raise RuntimeError(_format_openai_error(exc)) from exc
             raise
-
-    try:
-        async for piece in _iter_openai_text(stream):
-            yield piece
-    except Exception as exc:
-        if _is_openai_transport_error(exc):
-            raise RuntimeError(_format_openai_error(exc)) from exc
-        raise
-    finally:
-        with anyio.CancelScope(shield=True):
-            await stream.close()
+        finally:
+            try:
+                if stream is not None:
+                    with anyio.CancelScope(shield=True):
+                        await stream.close()
+            except BaseException:
+                success = False
+                raise
+            finally:
+                if permit:
+                    permit.settle(success=success)
 
 
 _LENGTH_FINISH_REASONS = {"length", "max_tokens", "max_output_tokens"}
 
 
-async def _iter_openai_text(stream) -> AsyncIterator[str]:
+async def _iter_openai_text(
+    stream, *, usage_callback: Callable | None = None, strict_finish: bool = False,
+) -> AsyncIterator[str]:
     """Normalize an OpenAI-compatible stream into complete text deltas.
 
     Reasoning models may spend the entire completion budget on
@@ -571,6 +630,9 @@ async def _iter_openai_text(stream) -> AsyncIterator[str]:
     finish_reason = ""
 
     async for chunk in stream:
+        # DeepSeek/OpenAI 的累计 usage 尾帧可能没有 choices，必须先处理。
+        if usage_callback is not None:
+            usage_callback(getattr(chunk, "usage", None))
         choices = getattr(chunk, "choices", None) or []
         if not choices:
             continue
@@ -589,6 +651,8 @@ async def _iter_openai_text(stream) -> AsyncIterator[str]:
             content_seen = True
             yield content
 
+    if strict_finish:
+        require_complete_finish(finish_reason)
     if finish_reason in _LENGTH_FINISH_REASONS:
         if reasoning_seen and not content_seen:
             raise RuntimeError(
@@ -602,18 +666,19 @@ async def _iter_openai_text(stream) -> AsyncIterator[str]:
         raise RuntimeError("AI 服务未返回正文内容; 请检查模型配置或稍后重试")
 
 
-def _openai_client(api_key: str, timeout: float):
+def _openai_client(api_key: str, timeout: float, *, base_url: str | None = None):
     from openai import AsyncOpenAI
 
     user_agent = secrets_store.get_ai_config("ai_user_agent", "") or settings.ai_user_agent
     return AsyncOpenAI(
         api_key=api_key,
-        base_url=normalize_openai_base_url(secrets_store.get_ai_config("ai_base_url", settings.ai_base_url)),
+        base_url=normalize_openai_base_url(
+            base_url if base_url is not None else secrets_store.get_ai_config("ai_base_url", settings.ai_base_url),
+        ),
         timeout=timeout,
-        # SDK 层重试仅覆盖首包前的连接错误/超时/429/5xx, 此时尚未产出任何内容,
-        # 重试安全; 首 chunk 之后的断流不在此列, 由上层协议报错处理。
-        # 根因: DeepSeek 等上游高峰过载时首包失败率高, max_retries=0 导致一次抖动即终止。
-        max_retries=2,
+        # 受控任务的每个网络请求单独记录用量，禁用 SDK 的隐藏重试。
+        # 适配层显式保留首包前两次重试；每次缺失 usage 的尝试都记为未知。
+        max_retries=0 if metering_active() else 2,
         default_headers={"User-Agent": user_agent},
     )
 
@@ -668,6 +733,13 @@ def _openai_error_param(exc: Exception) -> str:
 def _openai_retry_kwargs(exc: Exception, kwargs: dict) -> dict | None:
     """Remove one explicitly rejected optional argument for a bounded retry."""
     retry_kwargs = dict(kwargs)
+    if getattr(exc, "status_code", None) == 400 and "stream_options" in retry_kwargs:
+        text = f"{_openai_error_detail(exc)} {exc}".lower()
+        if _openai_error_param(exc) in {"stream_options", "include_usage"} or any(
+            hint in text for hint in ("stream_options", "include_usage")
+        ):
+            retry_kwargs.pop("stream_options")
+            return retry_kwargs
     if "temperature" in retry_kwargs and _is_temperature_rejected(exc):
         retry_kwargs.pop("temperature")
         return retry_kwargs
@@ -894,7 +966,7 @@ def _make_writable_and_retry(
 
 def _codex_prompt(messages: Sequence[Message], *, max_tokens: int | None) -> str:
     parts = [
-        "You are Tick Stock Panel's local AI provider.",
+        "You are the local AI provider for 小帅工作台.",
         "This is a text-generation task. The working directory is intentionally empty.",
         "Use only the user-provided prompt content below; do not inspect or modify local files.",
         "Return only the final requested content; do not include execution logs.",

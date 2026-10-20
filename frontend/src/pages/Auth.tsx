@@ -31,7 +31,7 @@ export function Auth({ status, error, retry, onAuthenticated }: {
   return <div className="min-h-screen bg-base">
     <Modal onClose={() => {}} closeOnBackdrop={false} labelledBy="auth-title" overlayClassName="fixed inset-0 z-[9999] flex items-center justify-center bg-base p-4" panelClassName="w-full max-w-sm max-h-[90dvh] overflow-y-auto rounded-card border border-border bg-surface p-6 shadow-xl">
       <Logo size={32} className="mb-4 text-accent" />
-      <h1 id="auth-title" className="text-lg font-semibold text-foreground">{change ? '设置个人密码' : '登录 Tick Stock Panel'}</h1>
+      <h1 id="auth-title" className="text-lg font-semibold text-foreground">{change ? '设置个人密码' : '登录小帅工作台'}</h1>
       {!status ? <div className="mt-4 text-sm text-secondary">{error || '正在验证身份…'}{error && <button className="ml-2 text-accent" onClick={retry}>重试</button>}</div>
         : !status.configured ? <p className="mt-4 text-sm leading-6 text-secondary">服务器尚未初始化管理员账号，请联系部署管理员配置初始用户名与密码后重启服务。</p>
         : <form onSubmit={submit} className="mt-4 space-y-4">

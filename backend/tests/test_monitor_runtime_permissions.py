@@ -55,7 +55,7 @@ def filter(df, params):
         (current_user().id, event) for event in events
     ))
     monkeypatch.setattr(service, "notify_strategy_results_updated", lambda: strategy_updates.append(current_user().id))
-    for name in ("_maybe_send_system_notifications", "_maybe_send_webhook", "_maybe_send_paper_webhook"):
+    for name in ("_maybe_send_webhook", "_maybe_send_paper_webhook"):
         monkeypatch.setattr(service, name, lambda *args: None)
     monkeypatch.setattr("app.services.quote_service.cn_today", lambda: DAY)
     monkeypatch.setattr("app.strategy.monitor.cn_today", lambda: DAY)

@@ -1290,7 +1290,7 @@ def fetch_intraday_full_market_burst(
     capset: CapabilitySet | None,
     *,
     count: int = 300,
-) -> tuple[pl.DataFrame, int]:
+) -> tuple[pl.DataFrame, int, bool]:
     """全市场当日分钟K并发脉冲拉取 (盘中增量刷新专用, 不落盘)。
 
     与 fetch_intraday_monitor_batch 的区别:
@@ -1304,15 +1304,16 @@ def fetch_intraday_full_market_burst(
 
     限流口径: 只用 intraday.batch 独立池 (Cap.INTRADAY_BATCH, Expert 专有),
     不与 kline.minute.batch (盘后分钟同步) 共享配额。
-    返回 (当日全市场分钟K, 请求数)。
+    返回 (当日全市场分钟K, 请求数, 所有分块请求是否成功)。部分失败仍返回成功帧，
+    调用方必须保留修复状态，不能仅凭非空数据进入增量模式。
     """
     if not symbols:
-        return (pl.DataFrame(), 0)
+        return (pl.DataFrame(), 0, False)
     limits = capset.limits(Cap.INTRADAY_BATCH) if capset and capset.has(Cap.INTRADAY_BATCH) else None
     batch_size = max(1, int(limits.batch) if limits and limits.batch else 200)
     chunks = list(chunked(symbols, batch_size))
     if not chunks:
-        return (pl.DataFrame(), 0)
+        return (pl.DataFrame(), 0, False)
 
     from concurrent.futures import ThreadPoolExecutor
 
@@ -1342,8 +1343,10 @@ def fetch_intraday_full_market_burst(
                 frames.extend(sub)
 
     requests = len(chunks)
+    complete = True
     if failed:
         if len(failed) > 4:
+            complete = False
             missed = sum(len(chunk) for chunk in failed)
             logger.warning(
                 "intraday burst: %d/%d chunks failed (%d symbols), systemic — skip retry, next round re-pulls full day",
@@ -1357,13 +1360,14 @@ def fetch_intraday_full_market_burst(
                 if err is None:
                     frames.extend(sub)
                 else:
+                    complete = False
                     logger.warning(
                         "intraday burst: chunk retry still failed, skip %d symbols this round: %s",
                         len(chunk), err,
                     )
     if not frames:
-        return (pl.DataFrame(), requests)
-    return (pl.concat(frames, how="diagonal_relaxed"), requests)
+        return (pl.DataFrame(), requests, complete)
+    return (pl.concat(frames, how="diagonal_relaxed"), requests, complete)
 
 
 def fetch_intraday_universe_increment(

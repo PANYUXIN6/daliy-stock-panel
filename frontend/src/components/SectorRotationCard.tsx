@@ -16,7 +16,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import * as echarts from 'echarts'
 import { Activity, Database, RefreshCw } from 'lucide-react'
-import { api, type SectorRotationSector } from '@/lib/api'
+import { api, type SectorRotationPoint, type SectorRotationSector } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { useChartTheme } from '@/lib/theme'
 import { cn } from '@/lib/cn'
@@ -151,6 +151,10 @@ function useEChart(
 function fmtPct(value: number | null | undefined): string {
   if (value == null) return '—'
   return `${(value * 100).toFixed(2)}%`
+}
+
+function fmtRotation(point: SectorRotationPoint): string {
+  return point.rotation_available === false ? '—（分钟数据不足）' : point.rotation.toFixed(2)
 }
 
 function fmtFlow(value: number | null | undefined): string {
@@ -328,10 +332,18 @@ export function SectorRotationCard({ kind }: { kind: 'concept' | 'industry' }) {
   const total = timeline.length
   const startCol = bucket === 1 ? Math.max(0, total - HEAT_COLS_1M) : 0
   const cols = Math.max(0, total - startCol)
+  const incompleteSeriesCount = useMemo(() => {
+    const series = data?.series
+    if (!series) return 0
+    const visibleRows = displayMode === 'heatmap' ? heatRows : series.sectors.length
+    return series.sectors.slice(0, visibleRows).filter((_, row) =>
+      series.buckets.slice(startCol).some((_, col) => series.matrix[row]?.[startCol + col] == null),
+    ).length
+  }, [data, displayMode, heatRows, startCol])
 
   const chartTheme = useChartTheme()
 
-  // 展示图 (trend): 每个展示板块一条累计涨幅走势线, y = 桶内涨幅均值 (右轴 %)
+  // 展示图 (trend): 每个展示板块一条累计涨幅走势线, y = 桶内涨幅均值 (左轴 %)
   const trendOption = useMemo<echarts.EChartsOption | null>(() => {
     const heatSeries = data?.series
     if (!heatSeries || !heatSeries.sectors.length || !heatSeries.buckets.length) return null
@@ -380,35 +392,40 @@ export function SectorRotationCard({ kind }: { kind: 'concept' | 'industry' }) {
         axisLabel: { fontSize: 9, color: chartTheme.text, formatter: (v: number) => `${(v * 100).toFixed(1)}%` },
         splitLine: { lineStyle: { color: 'rgba(128,140,160,0.15)' } },
       },
-      series: heatSeries.sectors.map((name, i) => ({
-        name,
-        type: 'line' as const,
-        smooth: true,
-        symbol: 'none',
-        data: (heatSeries.matrix[i] ?? []).slice(startCol),
-        lineStyle: { color: TREND_COLORS[i % TREND_COLORS.length], width: 1.4 },
-        connectNulls: true,
-        // 悬停聚焦 (图上线条或榜单行均可触发): 目标线加粗并在末端浮出板块名,
-        // 其余线压到近透明 — 多线并行时不用再靠颜色逐一匹配
-        emphasis: {
-          focus: 'series',
-          lineStyle: { width: 2.6 },
-          label: {
-            show: true, formatter: () => name, position: 'top' as const,
-            fontSize: 9, color: TREND_COLORS[i % TREND_COLORS.length],
-            textBorderColor: chartTheme.tooltipBg, textBorderWidth: 2,
+      series: heatSeries.sectors.map((name, i) => {
+        const values = (heatSeries.matrix[i] ?? []).slice(startCol)
+        const singlePoint = values.filter(value => value != null).length === 1
+        return {
+          name,
+          type: 'line' as const,
+          smooth: true,
+          symbol: singlePoint ? 'circle' : 'none',
+          symbolSize: 5,
+          data: values,
+          lineStyle: { color: TREND_COLORS[i % TREND_COLORS.length], width: 1.4 },
+          connectNulls: false,
+          // 悬停聚焦 (图上线条或榜单行均可触发): 目标线加粗并在末端浮出板块名,
+          // 其余线压到近透明 — 多线并行时不用再靠颜色逐一匹配
+          emphasis: {
+            focus: 'series',
+            lineStyle: { width: 2.6 },
+            label: {
+              show: true, formatter: () => name, position: 'top' as const,
+              fontSize: 9, color: TREND_COLORS[i % TREND_COLORS.length],
+              textBorderColor: chartTheme.tooltipBg, textBorderWidth: 2,
+            },
           },
-        },
-        blur: { lineStyle: { opacity: 0.06 } },
-        // 首条线挂 0% 参考虚线, 便于分辨板块在线上/线下
-        ...(i === 0 ? {
-          markLine: {
-            silent: true, symbol: 'none',
-            lineStyle: { color: chartTheme.border, type: 'dashed' as const, width: 1 },
-            data: [{ yAxis: 0 }], label: { show: false },
-          },
-        } : {}),
-      })),
+          blur: { lineStyle: { opacity: 0.06 } },
+          // 首条线挂 0% 参考虚线, 便于分辨板块在线上/线下
+          ...(i === 0 ? {
+            markLine: {
+              silent: true, symbol: 'none',
+              lineStyle: { color: chartTheme.border, type: 'dashed' as const, width: 1 },
+              data: [{ yAxis: 0 }], label: { show: false },
+            },
+          } : {}),
+        }
+      }),
     }
   }, [data, bucket, startCol, timeline, chartTheme, phase, dimLabel, cols])
   const trend = useEChart(trendOption, {
@@ -551,7 +568,8 @@ export function SectorRotationCard({ kind }: { kind: 'concept' | 'industry' }) {
     if (!buckets.length) return null
     const switchIndices: number[] = []
     for (let index = 1; index < timeline.length; index++) {
-      if (timeline[index - 1].leader !== timeline[index].leader) switchIndices.push(index)
+      if (timeline[index - 1].rotation_available !== false && timeline[index].rotation_available !== false
+        && timeline[index - 1].leader !== timeline[index].leader) switchIndices.push(index)
     }
     const inWindow = switchIndices.filter(index => index >= startCol)
     const byRotation = [...inWindow].sort(
@@ -564,6 +582,7 @@ export function SectorRotationCard({ kind }: { kind: 'concept' | 'industry' }) {
       fontSize: 8, color, textBorderColor: chartTheme.tooltipBg, textBorderWidth: 2,
     })
     const intensityData = timeline.slice(startCol).map((point, offset) => {
+      if (point.rotation_available === false) return null
       const index = startCol + offset
       if (highIdx.has(index)) return { value: point.rotation, label: switchLabel(point.leader, '#f59e0b') }
       if (lowIdx.has(index)) return { value: point.rotation, label: switchLabel(point.leader, 'rgba(128,140,160,0.95)') }
@@ -583,7 +602,7 @@ export function SectorRotationCard({ kind }: { kind: 'concept' | 'industry' }) {
           if (!point) return ''
           const lines = [
             `<b>${point.time}</b>`,
-            `切换强度 ${point.rotation.toFixed(2)}`,
+            `切换强度 ${fmtRotation(point)}`,
             `领涨${dimLabel} ${point.leader} (${fmtPct(point.leader_pct)})`,
             `全市场 ${fmtPct(point.market_pct)}`,
           ]
@@ -602,6 +621,7 @@ export function SectorRotationCard({ kind }: { kind: 'concept' | 'industry' }) {
         {
           name: '切换强度', type: 'line', smooth: true, symbol: 'none',
           data: intensityData,
+          connectNulls: false,
           lineStyle: { color: '#f59e0b', width: 1.6 },
           areaStyle: { color: 'rgba(245,158,11,0.12)' },
         },
@@ -717,7 +737,7 @@ export function SectorRotationCard({ kind }: { kind: 'concept' | 'industry' }) {
           )
         )}
         <span className="text-[10px] text-muted">
-          {data?.status === 'ok' && latest ? `${data.date} ${data.as_of} · 切换强度 ${latest.rotation.toFixed(2)} · 领涨 ${latest.leader}` : '全量分钟聚合'}
+          {data?.status === 'ok' && latest ? `${data.date} ${data.as_of} · 切换强度 ${fmtRotation(latest)} · 领涨 ${latest.leader}` : '全量分钟聚合'}
         </span>
         <div className="ml-auto flex flex-wrap items-center gap-1.5">
           <span className="text-[9px] text-muted">显示</span>
@@ -922,6 +942,11 @@ export function SectorRotationCard({ kind }: { kind: 'concept' | 'industry' }) {
             </div>
           )}
 
+          {incompleteSeriesCount > 0 && (
+            <div role="status" className="mb-2 rounded-lg border border-amber-400/30 bg-amber-400/5 px-2 py-1.5 text-[10px] text-amber-500">
+              当前展示的 {incompleteSeriesCount} 个{dimLabel}存在分钟历史缺口，仅显示已采集时段；请补采 {data.date} 全市场分钟数据。
+            </div>
+          )}
           {displayMode === 'heatmap' ? (
             heatRows > 0 && (
               // key 强制模式切换时销毁重建容器: 两个分支同为 <div> 时 React 会原地
@@ -937,7 +962,7 @@ export function SectorRotationCard({ kind }: { kind: 'concept' | 'industry' }) {
             displayNames.length > 0 && (
               <div key="trend" className="rounded-lg border border-border/60 bg-elevated/30 p-1.5">
                 <div className="px-1 pb-1 text-[9px] text-muted">
-                  展示板块涨幅走势 (桶内均值, 右轴 %) — 线上穿 0% 轴为切入, 下穿为退潮; 悬停列表或线条即聚焦: 其余线压暗、目标线加粗并浮出名称, 图例可单看某条线
+                  展示板块涨幅走势 (桶内均值, 左轴 %) — 线上穿 0% 轴为切入, 下穿为退潮; 悬停列表或线条即聚焦: 其余线压暗、目标线加粗并浮出名称, 图例可单看某条线
                 </div>
                 <div ref={trend.ref} style={{ height: Math.max(260, displayNames.length * 8 + 240) }} className="w-full" />
               </div>

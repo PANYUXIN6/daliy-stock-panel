@@ -2217,6 +2217,8 @@ export interface StrategyAlertEvent {
 export interface SectorRotationPoint {
   time: string
   rotation: number
+  /** 分钟覆盖不足、无法比较领涨梯队时为 false；rotation 保留 0 以兼容旧调用方。 */
+  rotation_available?: boolean
   leader: string
   leader_pct: number | null
   market_pct: number | null

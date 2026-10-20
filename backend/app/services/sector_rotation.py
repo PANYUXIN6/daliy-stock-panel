@@ -346,7 +346,7 @@ def build_sector_rotation(
       status/date/basis/kind/flow_field/bucket_minutes/member_count/flow_available/
       default_exclude_sectors: 内置排除名单 (供前端编辑器预填) /
       max_auto_members: 自动活跃榜成员数上限 /
-      timeline: [{time, rotation, leader, leader_pct, market_pct,
+      timeline: [{time, rotation, rotation_available, leader, leader_pct, market_pct,
                   cross_up, cross_down}] /
       cross_events: [{time, name, dir: "up"|"down", pct}] 0 轴穿越事件
         (全市场板块, 最新在前, 封顶 120 条; dir=up 转强/down 转弱) /
@@ -475,6 +475,12 @@ def _compute(repo, data_dir: Path, kind: str, flow_field: str | None, top: int, 
         })
     per_bucket.sort(key=lambda item: item["bucket"])
     market_map = {row["_bucket"]: row["_mpct"] for row in market.iter_rows(named=True)}
+    # 普通单股分钟也写入同一分区。早盘只有一两个板块、尾盘才补入全市场时，
+    # 两个不完整的 top 集合不能解释为领涨梯队换血；不足完整梯队宽度时标记不可比。
+    rank_width = min(_TOP_OVERLAP, member_count)
+
+    def _has_rank_sample(index: int) -> bool:
+        return len(per_bucket[index]["top_set"]) >= rank_width
 
     # 对照窗口: 距当前桶约 _RANK_WINDOW_MIN 个交易分钟的最近历史桶 (午休不计,
     # 与活跃度窗口按桶数回看同口径; 按墙钟算时 13:00~13:59 会拿 11:30 桶作「1 小时前」)
@@ -488,7 +494,7 @@ def _compute(repo, data_dir: Path, kind: str, flow_field: str | None, top: int, 
 
     rank_now = {name: i + 1 for i, name in enumerate(per_bucket[-1]["names"])}
     ref_index = _reference_index(len(per_bucket) - 1)
-    if ref_index is not None:
+    if ref_index is not None and _has_rank_sample(len(per_bucket) - 1) and _has_rank_sample(ref_index):
         rank_prev = {name: i + 1 for i, name in enumerate(per_bucket[ref_index]["names"])}
         pct_prev_map = dict(zip(per_bucket[ref_index]["names"], per_bucket[ref_index]["pct"], strict=True))
     else:
@@ -497,7 +503,8 @@ def _compute(repo, data_dir: Path, kind: str, flow_field: str | None, top: int, 
     timeline = []
     for index, item in enumerate(per_bucket):
         back = _reference_index(index)
-        if back is not None:
+        available = _has_rank_sample(index) and (back is None or _has_rank_sample(back))
+        if back is not None and available:
             # 除数取梯队宽与两侧实际板块数的较小值: 板块总数不足 10 时
             # top 集合恒为全集, 按 10 归一会稀释换血信号
             width = min(_TOP_OVERLAP, len(item["top_set"]), len(per_bucket[back]["top_set"]))
@@ -507,6 +514,8 @@ def _compute(repo, data_dir: Path, kind: str, flow_field: str | None, top: int, 
         timeline.append({
             "time": item["bucket"].strftime("%H:%M"),
             "rotation": round(1.0 - min(1.0, max(0.0, overlap)), 4),
+            # 保留数值字段兼容旧调用方；新调用方据此将不可计算状态显示为缺失。
+            "rotation_available": available,
             "leader": item["leader"],
             "leader_pct": _r4(item["leader_pct"]),
             "market_pct": _r4(market_map.get(item["bucket"])),

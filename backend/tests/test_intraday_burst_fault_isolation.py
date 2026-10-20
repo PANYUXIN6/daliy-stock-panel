@@ -56,34 +56,38 @@ def _run(symbols: list[str], fake: _FakeKlines, batch: int = 2):
 def test_transient_chunk_failure_retried_and_all_symbols_returned():
     symbols = [f"S{i}" for i in range(6)]  # 3 chunks (batch=2)
     fake = _FakeKlines(fail_once={"S0", "S1"}, fail_always=set())
-    df, requests = _run(symbols, fake)
+    df, requests, complete = _run(symbols, fake)
     # 失败块 (S0,S1) 重试后成功 → 6 只全在, 请求数 = 3 块 + 1 次重试
     assert set(df["symbol"].to_list()) == set(symbols)
     assert requests == 4
+    assert complete is True
 
 
 def test_permanent_chunk_failure_skipped_without_losing_other_chunks():
     symbols = [f"S{i}" for i in range(6)]
     fake = _FakeKlines(fail_once=set(), fail_always={"S4", "S5"})
-    df, requests = _run(symbols, fake)
+    df, requests, complete = _run(symbols, fake)
     # 失败块重试仍失败 → 只跳过该块, 其余 4 只必须返回 (旧实现会整轮丢弃)
     assert set(df["symbol"].to_list()) == {"S0", "S1", "S2", "S3"}
     assert requests == 4
+    assert complete is False
 
 
 def test_all_chunks_succeed_requests_equals_chunk_count():
     symbols = [f"S{i}" for i in range(6)]
     fake = _FakeKlines(fail_once=set(), fail_always=set())
-    df, requests = _run(symbols, fake)
+    df, requests, complete = _run(symbols, fake)
     assert set(df["symbol"].to_list()) == set(symbols)
     assert requests == 3
+    assert complete is True
 
 
 def test_systemic_failure_skips_retry_to_avoid_pressuring_overloaded_server():
     symbols = [f"S{i}" for i in range(12)]  # 6 chunks (batch=2)
     # 5 个块恒失败 (>4) → 系统性故障, 不再重试
     fake = _FakeKlines(fail_once=set(), fail_always={s for s in symbols if s not in ("S0", "S1")})
-    df, requests = _run(symbols, fake)
+    df, requests, complete = _run(symbols, fake)
     assert set(df["symbol"].to_list()) == {"S0", "S1"}
     assert requests == 6  # 无重试
     assert len(fake.calls) == 6
+    assert complete is False

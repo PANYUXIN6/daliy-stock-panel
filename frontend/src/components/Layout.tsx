@@ -72,7 +72,7 @@ import { setCurrentTotal as setAlertTotal, useUnreadAlerts } from '@/lib/monitor
 import { ExtensionSlot } from '@/extensions/ExtensionSlot'
 import { getFrontendExtensionNavigation } from '@/extensions/registry'
 
-// 品牌色 — 只用于 logo / brand 区域,不影响功能语义色
+// 品牌文字强调色，不影响功能语义色
 const BRAND = '#8B5CF6'
 
 // 核心四只指数 — 与后端 index_const.py 单一权威对齐 (前端展示层固定清单)
@@ -501,8 +501,7 @@ export function Layout() {
           <div className={cn('flex', railMode ? 'flex-col items-center gap-2' : 'items-center gap-2')}>
             <Logo
               size={railMode ? 24 : 26}
-              className="shrink-0 drop-shadow-[0_0_8px_rgba(139,92,246,0.4)]"
-              style={{ color: BRAND }}
+              className="shrink-0"
             />
             {!railMode && (
               <div

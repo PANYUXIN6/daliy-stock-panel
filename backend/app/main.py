@@ -568,6 +568,18 @@ def create_app(role: str | None = None) -> FastAPI:
         if (_static / "assets").exists():
             app.mount("/assets", StaticFiles(directory=_static / "assets"), name="assets")
 
+        @app.get("/favicon.svg", include_in_schema=False)
+        def favicon():
+            # public 根目录图标必须先于 SPA 回退处理，否则会返回 HTML。
+            icon = _static / "favicon.svg"
+            if not icon.is_file():
+                return JSONResponse(status_code=404, content={"detail": "Not Found"})
+            return FileResponse(
+                icon,
+                media_type="image/svg+xml",
+                headers={"Cache-Control": "no-cache"},
+            )
+
         @app.get("/{full_path:path}", include_in_schema=False)
         def spa_fallback(full_path: str):
             """所有未匹配路径回退到 index.html — React Router 接管。

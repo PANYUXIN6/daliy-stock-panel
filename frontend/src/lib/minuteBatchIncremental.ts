@@ -1,5 +1,6 @@
 import type { QueryClient } from '@tanstack/react-query'
 import { api, type MinuteKlineRow } from '@/lib/api'
+import { minuteCollectionAffectsQuery, QK } from '@/lib/queryKeys'
 
 // 分钟批量分时的增量轮询助手:
 // 后端 /api/kline/minute-batch 已支持 since 增量 (只回 >= since 的K, 含形成中
@@ -9,6 +10,21 @@ import { api, type MinuteKlineRow } from '@/lib/api'
 // 缓存不存在 (首次/换标的池/换日) 时不带 since, 全量拉取。
 
 type MinuteBatchData = Record<string, MinuteKlineRow[]>
+interface MinuteBatchResult {
+  data: MinuteBatchData
+  /** 分钟图从空态读到数据后，相关股票下次进入批量请求范围时全日读取一次。 */
+  fullReadSymbols?: string[]
+}
+
+export function markMinuteBatchForFullRead(qc: QueryClient, symbol: string, date: string) {
+  qc.setQueriesData<MinuteBatchResult>({
+    predicate: query => query.queryKey[0] === QK.minuteBatch('')[0]
+      && minuteCollectionAffectsQuery(query.queryKey, symbol, date),
+  }, previous => previous ? {
+    ...previous,
+    fullReadSymbols: [...new Set([...(previous.fullReadSymbols ?? []), symbol])],
+  } : previous)
+}
 
 function lastBarTs(data: MinuteBatchData, symbols?: string[]): string | null {
   // 直接取"最旧最后一根"的原始 datetime 字符串 (与服务端行同格式, 同为北京墙钟):
@@ -43,10 +59,25 @@ export async function fetchMinuteBatchIncremental(
   cacheKey: readonly unknown[],
   symbols: string[],
   preferLocal?: boolean,
-): Promise<{ data: MinuteBatchData }> {
-  const prev = qc.getQueryData<{ data: MinuteBatchData }>(cacheKey)?.data
-  const since = prev ? lastBarTs(prev, symbols) ?? undefined : undefined
+): Promise<MinuteBatchResult> {
+  const cached = qc.getQueryData<MinuteBatchResult>(cacheKey)
+  const prev = cached?.data
+  const pending = cached?.fullReadSymbols ?? []
+  const fullRead = pending.some(symbol => symbols.includes(symbol))
+  const since = !fullRead && prev ? lastBarTs(prev, symbols) ?? undefined : undefined
   const resp = await api.klineMinuteBatch(symbols, undefined, preferLocal, since)
-  if (!since || !resp.incremental) return { data: resp.data ?? {} }
-  return { data: mergeInto(prev ?? {}, resp.data ?? {}) }
+  const remaining = fullRead ? pending.filter(symbol => !symbols.includes(symbol)) : pending
+  const metadata = remaining.length ? { fullReadSymbols: remaining } : {}
+  if (fullRead && prev) {
+    // 视口请求只替换本次范围，避免清掉其他股票的完整序列；跨日结果仍整体换日。
+    const previousDate = lastBarTs(prev)?.slice(0, 10)
+    const responseDate = lastBarTs(resp.data ?? {})?.slice(0, 10)
+    if (!previousDate || !responseDate || previousDate === responseDate) {
+      const data = { ...prev }
+      for (const symbol of symbols) delete data[symbol]
+      return { data: { ...data, ...resp.data }, ...metadata }
+    }
+  }
+  if (!since || !resp.incremental) return { data: resp.data ?? {}, ...metadata }
+  return { data: mergeInto(prev ?? {}, resp.data ?? {}), ...metadata }
 }

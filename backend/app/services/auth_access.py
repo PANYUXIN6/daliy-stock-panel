@@ -65,6 +65,9 @@ def admin_required(path: str, method: str) -> bool:
         return path.startswith("/api/ext-data/") and path.endswith("/api-key")
     if path == "/api/backtest/mining/config":
         return True
+    # 详情空态只允许显式补采单标的、单日期；批量维护仍限管理员。
+    if path == "/api/kline/minute/fetch" and method == "POST":
+        return False
     if path.startswith("/api/kline/"):
         return path not in {
             "/api/kline/instruments/names", "/api/kline/daily-batch", "/api/kline/minute-batch",

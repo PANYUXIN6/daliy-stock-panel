@@ -2799,6 +2799,12 @@ export const api = {
     }>(
       `/api/kline/minute?symbol=${encodeURIComponent(symbol)}${date ? `&date=${date}` : ''}${live ? '&live=1' : ''}`,
     ),
+  minuteFetch: (symbol: string, date: string) =>
+    request<{ status: 'started'; symbol: string; date: string; job_id: string; reused: boolean }>('/api/kline/minute/fetch', {
+      method: 'POST',
+      body: JSON.stringify({ symbol, date }),
+    }),
+  minuteFetchJob: (id: string) => request<PipelineJob>(`/api/kline/minute/fetch/${encodeURIComponent(id)}`),
   /** 最多返回最近 days 个已落库交易日的分时；只读本地 */
   klineMinuteRange: (symbol: string, days = 10) =>
     request<{
@@ -4218,6 +4224,8 @@ export interface PipelineJob {
     index_count?: number
     index_daily_rows?: number
     minute_rows?: number
+    /** 单标的、指定日期的分钟补采行数。 */
+    rows?: number
     skipped_stages?: string[]
   } | null
   error: string | null

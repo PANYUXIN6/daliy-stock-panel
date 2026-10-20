@@ -7,6 +7,7 @@ import gzip
 import json
 import logging
 import math
+import re
 from contextlib import suppress
 from datetime import date, timedelta
 from functools import lru_cache
@@ -867,6 +868,54 @@ def get_minute(
          "prev_close": _get_previous_closes(repo, symbol, [trade_date], asset_type).get(trade_date)},
         pref_key="minute_batch_compress",
     )
+
+
+@router.post("/minute/fetch")
+async def fetch_minute(request: Request, body: dict):
+    """显式补采详情中的标的和日期，同一资产、标的、日期共享后台任务。"""
+    raw_symbol = body.get("symbol")
+    symbol = raw_symbol.strip().upper() if isinstance(raw_symbol, str) else ""
+    if re.fullmatch(r"[0-9]{6}\.(SH|SZ|BJ)", symbol) is None:
+        raise HTTPException(status_code=400, detail="请提供有效的标的代码，例如 600000.SH")
+    raw_date = body.get("date")
+    try:
+        if not isinstance(raw_date, str) or re.fullmatch(r"\d{4}-\d{2}-\d{2}", raw_date) is None:
+            raise ValueError("invalid date")
+        trade_date = date.fromisoformat(raw_date)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="请提供有效的采集日期 (YYYY-MM-DD)") from exc
+    if trade_date > cn_today():
+        raise HTTPException(status_code=400, detail="采集日期不能晚于今天")
+
+    repo = request.app.state.repo
+    capset = request.app.state.capabilities
+    if not _minute_allowed(capset):
+        raise HTTPException(status_code=403, detail="分钟数据能力不可用，请在数据源设置中配置")
+
+    from app.api.pipeline import _submit_job
+    from app.services.ordinary_minute import fetch_missing_symbol_minutes
+
+    asset_type = repo.resolve_asset_type(symbol)
+    result = await _submit_job(
+        repo, getattr(request.app.state, "quote_service", None),
+        lambda progress: lambda: fetch_missing_symbol_minutes(repo, capset, symbol, trade_date, progress),
+        request_key=f"minute_fetch:{asset_type}:{symbol}:{trade_date}", datasets=["minute"],
+        # collect_minutes 已刷新分钟视图并发布更新，无需重算全市场日线指标缓存。
+        finalize=lambda: None, pause_quotes=False,
+    )
+    return {"status": "started", "symbol": symbol, "date": trade_date.isoformat(), **result}
+
+
+@router.get("/minute/fetch/{job_id}")
+def get_minute_fetch_job(job_id: str):
+    """仅查询详情补采任务，不暴露其他数据维护任务。"""
+    from app.services.pipeline_jobs import job_store
+
+    job_store.reap_stale()
+    job = job_store.get(job_id)
+    if not job or not (job.get("request_key") or "").startswith("minute_fetch:"):
+        raise HTTPException(status_code=404, detail="分钟采集任务不存在")
+    return job
 
 
 async def _sync_daily_job(request: Request, symbols: list[str], days: int) -> dict:

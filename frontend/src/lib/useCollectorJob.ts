@@ -4,14 +4,14 @@ import { api } from './api'
 import { QK } from './queryKeys'
 
 /** 采集任务由后台持有；页面只查询进度并发送协作式取消。 */
-export function useCollectorJob(jobId: string | null, onFinished?: () => void) {
+export function useCollectorJob(jobId: string | null, onFinished?: () => void, getJob = api.pipelineJob) {
   const qc = useQueryClient()
   const onFinishedRef = useRef(onFinished)
   onFinishedRef.current = onFinished
   const finishedId = useRef<string | null>(null)
   const query = useQuery({
     queryKey: QK.pipelineJob(jobId ?? ''),
-    queryFn: () => api.pipelineJob(jobId!),
+    queryFn: () => getJob(jobId!),
     enabled: !!jobId,
     refetchInterval: query => {
       const status = query.state.data?.status

@@ -455,7 +455,6 @@ def get_preferences() -> dict:
         "sse_refresh_pages": preferences.get_sse_refresh_pages(),
         "strategy_monitor_enabled": preferences.get_strategy_monitor_enabled(),
         "strategy_monitor_ids": preferences.get_strategy_monitor_ids(),
-        "system_notify_enabled": preferences.get_system_notify_enabled(),
         "feishu_webhook_url": preferences.get_feishu_webhook_url(),
         "feishu_webhook_secret": preferences.get_feishu_webhook_secret(),
         "wecom_webhook_url": preferences.get_wecom_webhook_url(),
@@ -1142,22 +1141,6 @@ def update_pipeline_index_symbols(req: PipelineIndexSymbolsIn) -> dict:
 
 class QuoteIntervalIn(BaseModel):
     interval: float
-
-
-class SystemNotifyPrefsIn(BaseModel):
-    enabled: bool
-
-
-@router.put("/preferences/system-notify")
-def update_system_notify(req: SystemNotifyPrefsIn) -> dict:
-    """系统通知开关 — 开启后监控告警同时推送到操作系统通知中心。
-
-    纯偏好, 无副作用 (不像策略监控要迁移规则), 直接落盘即可。
-    quote_service 在每轮告警评估时读此开关决定是否发系统通知。
-    """
-    from app.services import preferences
-    saved = preferences.set_system_notify_enabled(req.enabled)
-    return {"system_notify_enabled": saved}
 
 
 class FeishuWebhookPrefsIn(BaseModel):

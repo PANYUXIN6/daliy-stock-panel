@@ -9,7 +9,7 @@ import polars as pl
 import pytest
 
 from app.backtest.matrix import build_market_data_matrix, make_signal_matrix
-from app.services import alert_store, preferences, quote_service
+from app.services import alert_store, quote_service
 from app.services.quote_service import QuoteService
 from app.strategy import monitor_rules
 from app.strategy.engine import StrategyDataContext, StrategyDef, StrategyEngine, StrategyResult
@@ -421,7 +421,6 @@ def test_quote_service_forwards_real_strategy_id(monkeypatch, tmp_path):
             return pl.DataFrame({"symbol": ["A"], "name": ["测试股票"]})
 
     monkeypatch.setattr(alert_store, "append_many", lambda *args: None)
-    monkeypatch.setattr(preferences, "get_system_notify_enabled", lambda: False)
     service = QuoteService()
     subscriber = service.subscribe()
     service.set_app_state(SimpleNamespace(monitor_engine=_Engine(), repo=_Repo()))

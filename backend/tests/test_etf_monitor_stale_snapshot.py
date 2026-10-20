@@ -61,7 +61,6 @@ def _run(etf_date: date) -> list[dict]:
         patch.object(QuoteService, "_inject_intraday_signals", side_effect=lambda df, e, at: df),
         patch.object(QuoteService, "_enrich_alerts_ext", lambda self, alerts: None),
         patch.object(QuoteService, "_broadcast_alerts", lambda self, alerts: broadcast.extend(alerts)),
-        patch.object(QuoteService, "_maybe_send_system_notifications", lambda self, alerts: None),
         patch.object(QuoteService, "_maybe_send_webhook", lambda self, events, engine: None),
         patch("app.services.alert_store.append_many", lambda *a, **k: None),
         patch("app.services.quote_service.cn_today", return_value=TODAY),

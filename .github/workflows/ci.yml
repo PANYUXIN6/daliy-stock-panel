@@ -1,7 +1,6 @@
 name: CI and Preproduction Deploy
 
 # 持续集成: 后端全量测试 + 前端构建；main 检查成功后部署预发。
-# 与 release.yml 的分工: 这里不打包, 只守质量门 —
 # 后端含 Tier A 开放契约快照测试 (test_openapi_contract.py),
 # 开放面的任何变化都会在这里被拦下, 须有意识地更新快照。
 on:

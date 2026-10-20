@@ -14,7 +14,7 @@ authority_status: observed
 | `backend/app/main.py`、`collector.py` | `create_app` 构建 web／collector 角色；网页仅查询与转发，collector 独占后台服务；实例放在各自 `app.state` |
 | `backend/app/api/` | 各领域 HTTP 和流式接口；`routes.py` 只定义健康与能力探测等基础接口，全部核心路由在 `main.py` 接线 |
 | `backend/app/services/` | 同步、行情、筛选、扩展数据、任务管理、通知、偏好和认证等编排 |
-| `backend/app/tickflow/` | TickFlow SDK、档位策略、限频与调度；`repository.py` 同时承载通用 `DataStore` 和 `KlineRepository` |
+| `backend/app/tickflow/` | TickFlow SDK、档位策略与请求限速；`repository.py` 同时承载通用 `DataStore` 和 `KlineRepository` |
 | `backend/app/data_providers/` | 标准化模型、Provider 协议、能力矩阵，以及 `custom/` 下的 YAML 源和插件加载 |
 | `backend/app/plugins/` | 内置可选数据源插件，当前有 `fuyao/` 和 `stocksdk/` |
 | `backend/app/indicators/` | enriched 数据生产、指标和信号计算、关键价位；核心在 `pipeline.py` |
@@ -28,8 +28,8 @@ authority_status: observed
 | `frontend/src/lib/` | API 客户端及类型、查询键、共享查询、实时订阅和任务状态 |
 | `frontend/src/extensions/`、`frontend/src/custom/` | 前端扩展注册、插槽、异常隔离，以及 AI 助手定制模块 |
 | `backend/tests/`、`frontend/src/**/*.test.*` | 后端 pytest 与前端 Vitest；后端回测测试集中在 `tests/backtest/` |
-| `packaging/`、`Dockerfile`、`docker-compose.yml` | 桌面与容器打包；桌面入口为 `backend/app/desktop.py` |
-| `.github/workflows/`、`dev.sh`、`dev.ps1`、`scripts/` | CI、发布与开发启动；后端专项脚本另在 `backend/scripts/` |
+| `Dockerfile`、`docker-compose.yml` | Linux 服务器镜像与 web / collector 双服务运行定义 |
+| `.github/workflows/`、`dev.sh`、`scripts/` | CI、服务器发布与 macOS / Linux 开发启动；后端专项脚本另在 `backend/scripts/` |
 | `docs/`、`brand/`、`screenshots/` | 领域文档、品牌素材与界面示例 |
 | `data/` | 默认运行时数据根目录，受 `DATA_DIR` 配置影响；不属于可提交的业务源码 |
 
@@ -38,7 +38,6 @@ authority_status: observed
 - 网页：`app.main:app`（默认 `SERVICE_ROLE=web`）→ `_web_lifespan` → 只读 `DataStore`、`QuoteMirror`、collector 事件连接与 HTTP 转发。
 - 采集：`app.collector:app` → `create_app("collector")` → 独占进程锁与 `_application_lifespan` → 数据源、行情、调度、普通／全量分钟、策略、监控及任务执行。两个进程共享 `DATA_DIR`，网页重启不触发采集任务恢复。
 - 前端：`src/main.tsx` → `initializeFrontendExtensions` → 动态导入 `router.tsx` → `Layout` → 页面；首页 `/` 直接呈现 `pages/Dashboard.tsx`，访问认证由现有登录流程处理，共享 `QueryClient` 在 `main.tsx` 创建。
-- 桌面：`app/desktop.py` 启动或复用独立 collector，再启动网页线程和 pywebview；关闭窗口仅退出网页，`--stop-collector` 显式停止采集。打包清单在 `packaging/tsp.spec`。
 
 页面读取已配置的凭据与能力路由。凭据归属 `backend/app/secrets_store.py`，路由归属 `backend/app/services/preferences.py`；TickFlow / AI 密钥在后端配置，`api/settings.py` 仅返回配置状态并拒绝网页写入和清除。能力路由和 AI 非密钥选项通过 settings API 保存；手动数据同步集中在 `frontend/src/pages/Data.tsx`。
 

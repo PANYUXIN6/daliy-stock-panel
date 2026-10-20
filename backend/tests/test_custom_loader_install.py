@@ -1,6 +1,6 @@
 """loader.install_plugin 单元测试 — uv 安装必须显式指定目标环境。
 
-回归场景: dev.ps1 直接跑 backend/.venv/Scripts/python.exe 而不 activate venv,
+回归场景: 直接运行后端虚拟环境的 Python 而不 activate venv,
 后端进程的 VIRTUAL_ENV 为空; 此时 `uv pip install -r ...` 不传 --python 会落到
 PATH 上的基础解释器 (如 conda base, 常为只读) → 装错环境 + exit 2 (访问拒绝)。
 修复: uv 命令显式传 `--python sys.executable` 锁定后端自身 venv, 与 pip 回退

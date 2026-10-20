@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import logging
-import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -65,27 +64,22 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# 追加文件日志: uvicorn (含 --reload 开发模式) 默认只有 StreamHandler, 同步/管道等
-# 运行时日志仅出现在 dev 终端, 关掉或滚屏后即丢失, 排查「同步后日志没落」时无处可查。
-# 落盘到 data/backend.log 与桌面版 (desktop.py:_setup_logging → desktop.log) 行为对齐,
-# 事后可查。桌面版 (frozen) 已由 desktop.py 写 desktop.log, 此处跳过避免重复落盘。
-# RotatingFileHandler 防止长期运行/频繁 reload 导致文件无限增长。
-if not getattr(sys, "frozen", False):
-    try:
-        from logging.handlers import RotatingFileHandler
+# 追加轮转文件日志，保留服务器与本地开发的同步/管道诊断记录。
+try:
+    from logging.handlers import RotatingFileHandler
 
-        _log_path = settings.data_dir / "backend.log"
-        _log_path.parent.mkdir(parents=True, exist_ok=True)
-        _file_handler = RotatingFileHandler(
-            _log_path, maxBytes=10 * 1024 * 1024, backupCount=3,
-            mode="a", encoding="utf-8", errors="replace",
-        )
-        _file_handler.setFormatter(
-            logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
-        )
-        logging.getLogger().addHandler(_file_handler)
-    except Exception as _e:  # noqa: BLE001
-        logger.warning("文件日志初始化失败, 仅输出到终端: %s", _e)
+    _log_path = settings.data_dir / "backend.log"
+    _log_path.parent.mkdir(parents=True, exist_ok=True)
+    _file_handler = RotatingFileHandler(
+        _log_path, maxBytes=10 * 1024 * 1024, backupCount=3,
+        mode="a", encoding="utf-8", errors="replace",
+    )
+    _file_handler.setFormatter(
+        logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+    )
+    logging.getLogger().addHandler(_file_handler)
+except Exception as _e:  # noqa: BLE001
+    logger.warning("文件日志初始化失败, 仅输出到终端: %s", _e)
 
 
 @asynccontextmanager
@@ -197,7 +191,6 @@ async def _application_lifespan(app: FastAPI):
     try:
         from app.services.wecom_bot_service import WecomBotService
         wecom_bot_service = WecomBotService()
-        wecom_bot_service.set_app_state(app.state)
         app.state.wecom_bot_service = wecom_bot_service
         wecom_bot_service.boot_check()
     except Exception as e:  # noqa: BLE001
@@ -385,7 +378,7 @@ async def _web_lifespan(app: FastAPI):
     auth_service.bootstrap_from_env()
     from app.services.user_migration import migrate_legacy_private_data
     migrate_legacy_private_data(settings.data_dir, auth_service.get_store().first_admin_id())
-    store = DataStore(read_only=True)
+    store = DataStore()
     repo = KlineRepository(store)
     # 缺采集快照时返回空行情，不触发 repository 的历史重算/修复分支。
     repo.install_shared_snapshot({name: pl.DataFrame() for name in (

@@ -42,7 +42,7 @@ def daily_client(tmp_path, monkeypatch):
     stores = []
 
     def make_client(*, include_today: bool = True):
-        store = DataStore(tmp_path, read_only=True)
+        store = DataStore(tmp_path)
         stores.append(store)
         repo = KlineRepository(store)
         dates = [date(2026, 10, 7), *HISTORY]

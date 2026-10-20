@@ -1411,12 +1411,8 @@ class QuoteService:
                 self._broadcast_alerts(all_alerts)
                 logger.info("监控评估完成: %d 条通知", len(all_alerts))
 
-                # 系统通知 (可选通道, 由 preferences 开关控制)。
-                # cooldown 去重已在 MonitorRuleEngine 做过, 这里只负责转发。
-                self._maybe_send_system_notifications(all_alerts)
-
             # Webhook 推送 (飞书等外部 IM, 由规则 webhook_channels 指定渠道)。
-            # 紧随系统通知, 同样静默降级不阻断主流程。
+            # 渠道失败不阻断主流程。
             if rule_events:
                 self._maybe_send_webhook(rule_events, engine)
 
@@ -1456,7 +1452,7 @@ class QuoteService:
                             )
                             paper_events.extend(paper_auto.auto_order_events(created, account_id=acc_id))
                     # 成交/自动跟单下单推送 (V3): 复用监控中心既有管道 —— SSE toast /
-                    # 语音 (前端按 source 拼文案) / 系统通知 / alert_store 留痕 /
+                    # 语音 (前端按 source 拼文案) / alert_store 留痕 /
                     # Webhook。全部静默降级。
                     if paper_events:
                         self._broadcast_alerts(paper_events)
@@ -1465,7 +1461,6 @@ class QuoteService:
                             alert_store.append_many(data_dir, paper_events)
                         except Exception as e:  # noqa: BLE001
                             logger.warning("模拟盘成交留痕失败: %s", e)
-                        self._maybe_send_system_notifications(paper_events)
                         self._maybe_send_paper_webhook(paper_events)
                 except Exception as e:  # noqa: BLE001 — 可选模拟盘钩子隔离任意策略异常，不中断实时监控
                     logger.warning("模拟盘钩子失败 (不影响监控): %s", e, exc_info=True)
@@ -1836,46 +1831,6 @@ class QuoteService:
                 logger.info("模拟盘 Webhook 已提交 %d 条 (异步投递, 失败记 WARNING)", enqueued)
         except Exception as e:  # noqa: BLE001
             logger.warning("模拟盘 Webhook 提交异常 (不影响主流程): %s", e)
-
-    def _maybe_send_system_notifications(self, all_alerts: list[dict]) -> None:
-        """把告警转发到操作系统通知中心 (由 preferences 开关控制)。
-
-        - 开关关闭: 直接返回
-        - 开关开启: 逐条发系统通知; 失败静默, 不阻断主流程
-        - 去重: 复用 MonitorRuleEngine 的 cooldown, 此处不重复去重
-        - 批量策略事件 (symbol="") 聚合为一条通知, 避免刷屏
-        """
-        if not external_notifications_allowed():
-            return
-        try:
-            from app.services import notify_adapter, preferences
-
-            if not preferences.get_system_notify_enabled():
-                return
-
-            for ev in all_alerts:
-                # 通知标题: 用 source 分类 (策略/信号/价格/异动)
-                source = ev.get("source", "")
-                source_label = SOURCE_LABELS.get(source, source or "通知")
-
-                name = ev.get("name") or ""
-                symbol = ev.get("symbol") or ""
-                message = ev.get("message") or ""
-
-                # 正文: 优先用现成 message, 拼上 symbol/name 让用户一眼定位
-                body = f"{symbol} {name} {message}".strip() if symbol else message or name
-                # 补上触发时的现价/涨跌幅 (日期提醒无行情, 自然为空)
-                body = _body_with_quote(body, ev)
-
-                title = f"TickFlow · {source_label}"
-                notify_adapter.notify(title, body)
-        except Exception as e:  # noqa: BLE001
-            logger.debug("系统通知发送异常 (不影响告警主流程): %s", e)
-
-    @staticmethod
-    def _get_strategy_monitor():
-        """获取 StrategyMonitorService — 不再使用, 改用 _app_state 注入。"""
-        return None
 
     # ================================================================
     # enriched 增量计算

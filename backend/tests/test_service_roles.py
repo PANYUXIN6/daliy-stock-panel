@@ -139,7 +139,7 @@ def test_collector_initial_snapshot_includes_etf_and_index_without_stocks(tmp_pa
             self._on_warmup_done()
     monkeypatch.setattr(KlineRepository, 'refresh_cache', refresh)
     with TestClient(create_app('collector')):
-        reader = KlineRepository(DataStore(tmp_path, read_only=True))
+        reader = KlineRepository(DataStore(tmp_path))
         mirror = shared_runtime.QuoteMirror(reader)
         assert mirror.load_snapshot(SimpleNamespace())
         assert reader.get_enriched_latest_asset('etf')[0]['symbol'].to_list() == ['510300.SH']

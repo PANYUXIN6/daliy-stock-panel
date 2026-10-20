@@ -2094,16 +2094,6 @@ export interface WecomBotStatus {
   last_error: string
 }
 
-/** API Token 记录 (管理视图, 不含哈希) */
-export interface ApiTokenRecord {
-  id: string
-  name: string
-  scopes: string[]
-  created_at: string
-  last_used_at?: string | null
-  revoked: boolean
-}
-
 export type CollectionSyncRequest =
   | { kind: 'pipeline' }
   | { kind: 'adj_factor' }
@@ -2169,7 +2159,6 @@ export interface Preferences {
   sse_refresh_pages: Record<string, boolean>
   strategy_monitor_enabled: boolean
   strategy_monitor_ids: string[]
-  system_notify_enabled: boolean
   feishu_webhook_url?: string
   feishu_webhook_secret?: string
   wecom_webhook_url?: string
@@ -2377,22 +2366,6 @@ export const api = {
   /** RunningHub 模型列表(后端代理, 规避其网关按 Origin 过滤) */
   sponsorModels: () =>
     request<{ models: string[] }>('/api/settings/ai/sponsor-models'),
-
-  // ===== API Token 管理 (开放层; 仅 UI 会话可达) =====
-  apiTokensList: () =>
-    request<{ tokens: ApiTokenRecord[] }>('/api/settings/api-tokens'),
-
-  /** 创建 Token — 明文只在本次响应出现一次 */
-  apiTokenCreate: (name: string, scopes: string[]) =>
-    request<{ token: ApiTokenRecord; plaintext: string }>('/api/settings/api-tokens', {
-      method: 'POST',
-      body: JSON.stringify({ name, scopes }),
-    }),
-
-  apiTokenRevoke: (id: string) =>
-    request<{ status: string; id: string }>(`/api/settings/api-tokens/${encodeURIComponent(id)}`, {
-      method: 'DELETE',
-    }),
 
   preferences: () => request<Preferences>('/api/settings/preferences'),
   updateOrdinaryMinute: (enabled: boolean) =>
@@ -2604,11 +2577,6 @@ export const api = {
     }>('/api/settings/preferences/realtime-monitor', {
       method: 'PUT',
       body: JSON.stringify(cfg),
-    }),
-  updateSystemNotify: (enabled: boolean) =>
-    request<{ system_notify_enabled: boolean }>('/api/settings/preferences/system-notify', {
-      method: 'PUT',
-      body: JSON.stringify({ enabled }),
     }),
   updateFeishuWebhook: (url: string, secret: string = '') =>
     request<{ feishu_webhook_url: string; feishu_webhook_secret: string }>('/api/settings/preferences/feishu-webhook', {

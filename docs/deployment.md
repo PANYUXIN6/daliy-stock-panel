@@ -1,6 +1,6 @@
 # 部署指南
 
-本地开发、Docker 与服务器预发的运行和恢复方式。配置项详解见 [configuration.md](./configuration.md)。
+本项目仅维护 Linux 服务器版，通过浏览器访问。本文说明 macOS / Linux 本地开发、Docker 与服务器预发的运行和恢复方式。配置项详解见 [configuration.md](./configuration.md)。
 
 ## 本项目的环境与发布约定
 
@@ -146,10 +146,10 @@ docker compose up --build -d
 
 ```bash
 # 首次启动且尚无 .env 时，从 .env.example 复制并配置
-./dev.sh                   # Windows: .\dev.ps1
+./dev.sh
 ```
 
-`dev.sh` / `dev.ps1` 同时启动网页、采集和前端开发服务器，Ctrl-C 一并关闭。采集服务不启用代码热重载，网页 reload 不会终止采集任务；采集端口已占用时会报错，不强杀现有采集进程。默认:
+`dev.sh` 同时启动网页、采集和前端开发服务器，Ctrl-C 一并关闭。采集服务不启用代码热重载，网页 reload 不会终止采集任务；采集端口已占用时会报错，不强杀现有采集进程。默认:
 
 - 网页后端 → <http://localhost:3018> · 前端 → <http://localhost:3011> · 采集 → `127.0.0.1:3019`
 - 自定义端口:`BACKEND_PORT=8000 FRONTEND_PORT=5173 ./dev.sh`
@@ -192,21 +192,6 @@ docker compose restart web       # 不影响 collector 正在执行的任务
 
 采集服务重启后，未完成任务会标记为中断，用户可显式重试；不会由网页启动自动补齐。行情与指数使用已保存快照，网页每个进程仅保持一条采集事件连接，连接恢复后重新加载本地快照和视图。
 
-## 桌面版
-
-桌面窗口连接网页服务。首次启动会在本机启动独立采集监护进程；窗口关闭后采集继续运行，重开窗口复用原进程。采集异常退出由监护进程自动重启。日志在 `data/runtime/collector-launch.log` 与后端日志中。
-
-需要彻底停止后台采集时，关闭窗口后运行：
-
-```bash
-# 源码模式（backend/ 目录）
-uv run python -m app.desktop --stop-collector
-# 打包版：对安装目录中的可执行文件传同一参数
-TSP --stop-collector
-```
-
-下次打开桌面程序会重新启动采集。不要同时运行桌面采集和另一个使用同一 `DATA_DIR` 的 collector。
-
 ## 备份与恢复
 
 备份整个 `data/`（包括行情、用户配置、策略、报告和任务记录），同时保存 `.env`、`tiers.yaml` 与服务器覆盖配置。为获得一致备份，先停止服务，拷贝到独立备份目录，再启动。已接入自动发布的服务器预发使用当前版本入口，确保同时加载应用版本与 HTTPS 配置：
@@ -236,7 +221,7 @@ docker compose up -d
 
 如果运行时报 `avx2`/`fma` 缺失,或进程 `exit 132`,说明 CPU 不支持 AVX2 指令集(常见于老 VPS)。解决:
 
-- **Dev 源码启动**:在根目录 `.env` 设置后运行 `./dev.sh` 或 Windows 的 `.\dev.ps1`;即使已有 `.venv`,启动器也会同步兼容内核
+- **Dev 源码启动**:在根目录 `.env` 设置后运行 `./dev.sh`;即使已有 `.venv`,启动器也会同步兼容内核
 - **Docker**:在根目录 `.env` 设置后执行 `docker compose up --build`
 
 ```ini

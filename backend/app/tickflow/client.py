@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import logging
 
-from tickflow import AsyncTickFlow, TickFlow
+from tickflow import TickFlow
 
 from app import secrets_store
 
@@ -22,7 +22,6 @@ logger = logging.getLogger(__name__)
 # 单次请求最坏 4×30s + 退避 ≈ 127s。日志中标注此值, 便于在卡死时对照耗时。
 
 _sync_client: TickFlow | None = None
-_async_client: AsyncTickFlow | None = None
 _paid_realtime_client: TickFlow | None = None
 
 
@@ -67,20 +66,6 @@ def get_client() -> TickFlow:
     return _sync_client
 
 
-def get_async_client() -> AsyncTickFlow:
-    """异步客户端。FastAPI 请求路径上用。"""
-    global _async_client
-    if _async_client is None:
-        key = secrets_store.get_tickflow_key()
-        if _should_use_free_server():
-            _async_client = AsyncTickFlow.free()
-            logger.info("创建异步 SDK 客户端 (free-api, SDK超时=30s×重试3)")
-        else:
-            _async_client = AsyncTickFlow(api_key=key, base_url=_base_url())
-            logger.info("创建异步 SDK 客户端 (付费端点=%s, SDK超时=30s×重试3)", current_endpoint())
-    return _async_client
-
-
 def get_paid_realtime_client() -> TickFlow | None:
     """实时行情专用付费服务器客户端。
 
@@ -99,9 +84,8 @@ def get_paid_realtime_client() -> TickFlow | None:
 
 def reset_clients() -> None:
     """Key 变化后调用 — 让下一次 get_client() 拿新实例。"""
-    global _sync_client, _async_client, _paid_realtime_client
+    global _sync_client, _paid_realtime_client
     _sync_client = None
-    _async_client = None
     _paid_realtime_client = None
 
 

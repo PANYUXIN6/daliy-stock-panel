@@ -34,14 +34,8 @@ backend/app/static
 docs
 screenshots
 
-# ===== 桌面客户端打包(PyInstaller 专用, 与 Docker 部署无关) =====
-packaging
-backend/dist
-backend/build
-
 # ===== 开发脚本(本地启服务用, 镜像不用) =====
 dev.sh
-dev.ps1
 scripts
 
 # ===== 密钥 =====
@@ -50,5 +44,7 @@ scripts
 backend/.env
 
 # ===== 其他构建产物 =====
+backend/dist
+backend/build
 **/node_modules
 *.log

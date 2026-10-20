@@ -19,7 +19,7 @@ from app.tickflow.repository import DataStore, KlineRepository
 @pytest.fixture
 async def classification_app(tmp_path, monkeypatch):
     writer = KlineRepository(DataStore(tmp_path))
-    readers = [KlineRepository(DataStore(tmp_path, read_only=True)) for _ in range(2)]
+    readers = [KlineRepository(DataStore(tmp_path)) for _ in range(2)]
     app = FastAPI()
     app.include_router(ext_data.router)
     app.include_router(pipeline.router)

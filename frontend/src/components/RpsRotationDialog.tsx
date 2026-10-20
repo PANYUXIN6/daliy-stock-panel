@@ -335,7 +335,7 @@ export function RpsRotationDialog({ onClose, kind = 'concept' }: Props) {
             <button
               onClick={() => setReversed(r => !r)}
               className={cn(
-                'inline-flex items-center gap-1 px-2 py-1 rounded-btn text-[11px] transition-colors cursor-pointer border',
+                'inline-flex items-center gap-1 px-2 py-1 rounded-btn text-[11px] transition-colors cursor-pointer border disabled:opacity-50 disabled:cursor-not-allowed',
                 reversed
                   ? 'bg-accent/10 text-accent border-accent/30'
                   : 'border-border text-muted hover:text-secondary hover:bg-elevated',

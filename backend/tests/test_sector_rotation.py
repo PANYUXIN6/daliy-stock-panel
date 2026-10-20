@@ -582,6 +582,50 @@ def test_series_matrix_aligns_with_timeline_and_sectors(repo):
         assert max(values) == pytest.approx(point["leader_pct"], abs=1e-4)
 
 
+@pytest.mark.parametrize("kind, field", [("concept", "所属概念"), ("industry", "所属行业")])
+def test_sparse_minutes_do_not_report_universe_expansion_as_rotation(tmp_path, kind, field):
+    """早盘仅单股、尾盘才有全市场时，新增板块不能误报 100% 换血或排名跃升。"""
+    _reset_caches()
+    data_dir = tmp_path / "data"
+    symbols = [f"{i + 1:06d}.SZ" for i in range(12)]
+    names = [f"板块{i:02d}" for i in range(12)]
+    stamps = [datetime.fromisoformat(f"{DAY}T{time}:00") for time in ("09:30", "10:30", "11:30")]
+    rows = [{"symbol": symbols[0], "datetime": stamps[0], "close": 101.0}]
+    rows.extend({"symbol": symbol, "datetime": stamps[1], "close": 101.0 + i}
+                for i, symbol in enumerate(symbols))
+    minute_path = data_dir / "kline_minute" / f"date={DAY}" / "part.parquet"
+    minute_path.parent.mkdir(parents=True)
+    pl.DataFrame(rows).write_parquet(minute_path)
+    daily_path = data_dir / "kline_daily" / f"date={PREV}" / "part.parquet"
+    daily_path.parent.mkdir(parents=True)
+    pl.DataFrame({"symbol": symbols, "close": [100.0] * len(symbols)}).write_parquet(daily_path)
+    config = ExtConfig(id="ext_members", label="板块分类", mode="snapshot", fields=[
+        ExtField("symbol", "string", "代码"), ExtField(field, "string", field),
+    ])
+    ExtConfigStore(data_dir).upsert(config)
+    write_ext_parquet(pl.DataFrame({"symbol": symbols, field: names}), config, data_dir)
+    repo = SimpleNamespace(store=SimpleNamespace(data_dir=data_dir))
+
+    result = sector_rotation.build_sector_rotation(repo, kind=kind, sort_by="pct")
+
+    assert [p["rotation_available"] for p in result["timeline"]] == [False, False]
+    assert result["timeline"][-1]["rotation"] == 0.0
+    assert all(s["pct_prev"] is None and s["rank_change"] is None for s in result["sectors"])
+    # 前十均不包含早盘的单股板块，真实历史缺口保留 null，不能补成全天曲线。
+    assert all(row[0] is None for row in result["series"]["matrix"])
+
+    rows.extend({"symbol": symbol, "datetime": stamps[2], "close": 101.0 + i}
+                for i, symbol in enumerate(symbols))
+    pl.DataFrame(rows).write_parquet(minute_path)
+    sector_rotation.invalidate_cache()
+    recovered = sector_rotation.build_sector_rotation(repo, kind=kind, sort_by="pct")
+
+    assert recovered["timeline"][-1]["rotation_available"] is True
+    assert recovered["timeline"][-1]["rotation"] == 0.0
+    assert all(s["rank_change"] == 0 for s in recovered["sectors"])
+    _reset_caches()
+
+
 def test_rank_reference_counts_trading_minutes_across_lunch(tmp_path):
     """对照窗口按交易时间回看 1 小时, 午休不计: 13:10 的对照桶是 10:40
     (往前 60 个交易分钟), 不是只隔 1 个交易分钟的 11:30。

@@ -1,9 +1,5 @@
 import { motion } from 'framer-motion'
 import {
-  RadioTower,
-  Square,
-  GitFork,
-  Sparkles,
   Star,
   LineChart,
   ScanSearch,
@@ -13,28 +9,25 @@ import {
   FileText,
 } from 'lucide-react'
 import { PageHeader } from '@/components/PageHeader'
+import { Logo } from '@/components/Logo'
 
 interface Variant {
   id: string
   name: string
   tagline: string
   hint: string
-  icon: React.ComponentType<{ className?: string }>
-  iconAccent: string                  // tailwind text color
   nameClass: string                   // 文字本身样式(字号/字重/字距/字体)
   glow?: string                       // 名字下方的发光线条 hex
 }
 
 // 同一个名字“小帅工作台”在 4 种风格语言里的呈现
-// 长字符串自动用更小字号 + 更窄字距,免得撑爆卡片;但风格语言(字体/字重/配色/图标)保持不变
+// 各风格共用当前品牌图标，仅比较字体、字距和配色。
 const VARIANTS: Variant[] = [
   {
     id: 'pulsar',
     name: '小帅工作台',
     tagline: 'A-SHARE · SIGNAL TERMINAL',
-    hint: '脉冲星、雷达波纹 — 青绿强调色,字重黑体,中等字距',
-    icon: RadioTower,
-    iconAccent: 'text-[#3DD68C]',
+    hint: '青绿强调色,字重黑体,中等字距',
     nameClass: 'font-sans font-black text-[16px] leading-6 tracking-[0.10em]',
     glow: '#3DD68C',
   },
@@ -43,8 +36,6 @@ const VARIANTS: Variant[] = [
     name: '小帅工作台',
     tagline: 'MARKET · INTELLIGENCE',
     hint: 'Vantablack — 纯白单色,字重最重,字距最宽,monochrome 高级感',
-    icon: Square,
-    iconAccent: 'text-[#FAFAFA]',
     nameClass: 'font-sans font-black text-[16px] leading-6 tracking-[0.18em]',
     glow: '#FAFAFA',
   },
@@ -52,9 +43,7 @@ const VARIANTS: Variant[] = [
     id: 'helix',
     name: '小帅工作台',
     tagline: 'QUANT · TERMINAL',
-    hint: 'DNA 螺旋 — 紫色强调,等宽字体,赛博朋克经典意象',
-    icon: GitFork,
-    iconAccent: 'text-[#8B5CF6]',
+    hint: '紫色强调,等宽字体,赛博朋克风格',
     nameClass: 'font-mono font-bold text-[16px] leading-6 tracking-[0.08em]',
     glow: '#8B5CF6',
   },
@@ -63,8 +52,6 @@ const VARIANTS: Variant[] = [
     name: '小帅工作台',
     tagline: 'A-SHARE · DASHBOARD',
     hint: '极光 — 青色强调,细字优雅,适中字距,与涨跌语义色不冲突',
-    icon: Sparkles,
-    iconAccent: 'text-[#22D3EE]',
     nameClass: 'font-sans font-light text-[16px] leading-6 tracking-[0.12em]',
     glow: '#22D3EE',
   },
@@ -85,7 +72,7 @@ export function Branding() {
     <>
       <PageHeader
         title="视觉风格预览"
-        subtitle="小帅工作台的 4 种赛博朋克 + 高级感视觉处理 — 字重、字距、配色、图标各不同。挑你最喜欢的告诉我。"
+        subtitle="统一使用当前小猫图标，预览小帅工作台的 4 种字体、字距和配色。"
       />
 
       <div className="px-8 py-6">
@@ -98,7 +85,7 @@ export function Branding() {
         <div className="mt-8 rounded-card border border-border bg-surface p-5 text-sm text-secondary leading-relaxed max-w-2xl">
           <div className="font-medium text-foreground mb-2">挑哪个?</div>
           回复 <code className="font-mono text-accent">pulsar / vanta / helix / aurora</code> 任一,
-          我把该风格的字体、配色、图标、发光效果应用到真实侧栏。
+          我把该风格的字体、配色、发光效果应用到真实侧栏。
           也可以告诉我你想微调哪里(比如"用 VANTA 但换青色"),都行。
         </div>
       </div>
@@ -107,8 +94,6 @@ export function Branding() {
 }
 
 function Sample({ v }: { v: Variant }) {
-  const Icon = v.icon
-
   return (
     <motion.div
       initial={{ opacity: 0, y: 8 }}
@@ -128,7 +113,7 @@ function Sample({ v }: { v: Variant }) {
                 boxShadow: `0 0 12px ${v.glow}33`,
               }}
             >
-              <Icon className={`h-4 w-4 ${v.iconAccent}`} />
+              <Logo size={24} />
             </div>
             <div className={`${v.nameClass} text-foreground leading-none`}>
               {v.name}

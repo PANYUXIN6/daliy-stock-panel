@@ -45,6 +45,7 @@ import logging
 import threading
 import time
 from dataclasses import dataclass, field
+from datetime import date
 from typing import Any
 
 import polars as pl
@@ -102,6 +103,10 @@ class MinuteRefreshService:
         self._state = _RefreshState()
         self._round_lock = threading.Lock()  # 同时只允许一轮 (手动触发与定时轮互斥)
         self._empty_rounds = 0               # 连续空轮计数 (escalate 到全天修复)
+        # 普通单股分钟与全量分钟共用分区，文件最新时间不能证明已回补全市场历史。
+        # 每个进程、交易日和生效源先成功执行一次全天修复，再允许稳态增量。
+        self._full_round_key: tuple[date, str] | None = None
+        self._last_full_round_at: float | None = None
 
     # ------------------------------------------------------------------
     # 生命周期
@@ -265,12 +270,16 @@ class MinuteRefreshService:
             return (cn_now().replace(tzinfo=None) - mx).total_seconds() / 60
         return None
 
-    def _select_mode(self) -> str:
+    def _select_mode(self, provider_name: str | None = None) -> str:
         """选轮次模式: 稳态增量 (universe 单请求) vs 全天修复 (burst 脉冲)。
 
-        当日已有数据且覆盖滞后 ≤ _REPAIR_LAG_MINUTES (≈ 3 根余量) → 增量;
-        冷启动 / 断档超阈值 / 连续空轮 → 全天修复。
+        本进程已完成同交易日、同源全天修复且覆盖滞后 ≤ 3 分钟 → 增量;
+        冷启动 / 跨日 / 换源 / 断档超阈值 / 连续空轮 → 全天修复。
         """
+        if provider_name is None:
+            _, provider_name = self._resolve_custom()
+        if self._full_round_key != (cn_today(), provider_name):
+            return "full"
         if self._empty_rounds >= _EMPTY_ROUNDS_TO_REPAIR:
             return "full"
         lag = self._today_coverage_lag_minutes()
@@ -283,13 +292,22 @@ class MinuteRefreshService:
 
         t0 = time.perf_counter()
         custom, provider_name = self._resolve_custom()
-        mode = self._select_mode()
+        round_key = (cn_today(), provider_name)
+        mode = self._select_mode(provider_name)
         if mode == "increment" and custom is not None and not self._custom_supports_increment(custom):
             # 无廉价增量端点的源: 增量轮退化为修复轮 (全天批量幂等覆盖, 数据不丢)
             mode = "full"
         mode_label = "增量" if mode == "increment" else "全天修复"
+        full_round_complete = True
         from app.services.ordinary_minute import MINUTE_COLLECTION_LOCK
         with self._round_lock, MINUTE_COLLECTION_LOCK:
+            if mode == "full":
+                # 修复失败或分区持续滞后时，也不能按 6s 稳态节奏反复打全市场脉冲。
+                now = time.monotonic()
+                if self._last_full_round_at is not None and now - self._last_full_round_at < 60:
+                    return
+                self._last_full_round_at = now
+                self._full_round_key = None
             if mode == "increment":
                 # fetch 计时只覆盖网络取数; full 分支的 universe 维表读取不计入
                 fetch_started = time.perf_counter()
@@ -315,7 +333,7 @@ class MinuteRefreshService:
                     )
                 else:
                     capset = getattr(self._app_state, "capabilities", None) if self._app_state else None
-                    df, requests = kline_sync.fetch_intraday_full_market_burst(symbols, capset)
+                    df, requests, full_round_complete = kline_sync.fetch_intraday_full_market_burst(symbols, capset)
             fetch_ms = (time.perf_counter() - fetch_started) * 1000
             self._state.last_requests = requests
             if df.is_empty():
@@ -337,13 +355,15 @@ class MinuteRefreshService:
             _refresh_single_view(self._repo, "kline_minute")
             publish_data_update(self._repo.store.data_dir, ["minute"])
             write_ms = (time.perf_counter() - write_started) * 1000
+            if mode == "full" and full_round_complete:
+                self._full_round_key = round_key
 
         self._state.rounds += 1
         self._state.last_round_at = time.time()
         self._state.last_round_ms = (time.perf_counter() - t0) * 1000
         self._state.last_rows = written
         self._state.last_mode = mode
-        self._state.last_error = None
+        self._state.last_error = None if full_round_complete else "intraday full partially failed; repair pending"
         logger.info(
             "全量分钟[%s] 第 %d 轮: 取数 %.0fms (%d 请求, %d 标的), "
             "落盘 %.0fms (%d 行), 总计 %.0fms",

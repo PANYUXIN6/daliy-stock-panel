@@ -1,4 +1,4 @@
-"""Tick Stock Panel backend."""
+"""小帅工作台后端。"""
 
 import json
 import sys

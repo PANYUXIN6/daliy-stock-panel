@@ -5,7 +5,7 @@ authority_status: observed
 
 # 当前架构与数据流
 
-Tick Stock Panel 由 React 前端、FastAPI 后端和本地文件数据层组成。后端分为网页服务与唯一采集服务，采集服务持有调度、实时监控与任务执行，并把部分研究计算交给独立进程。本文描述源码中的主要关系；目录定位见 [仓库地图](REPO_MAP.md)，数据契约和修改要求见 [CONTRIBUTING.md](../CONTRIBUTING.md)。
+小帅工作台由 React 前端、FastAPI 后端和本地文件数据层组成。后端分为网页服务与唯一采集服务，采集服务持有调度、实时监控与任务执行，并把部分研究计算交给独立进程。本文描述源码中的主要关系；目录定位见 [仓库地图](REPO_MAP.md)，数据契约和修改要求见 [CONTRIBUTING.md](../CONTRIBUTING.md)。
 
 ## 系统关系
 

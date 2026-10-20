@@ -512,10 +512,10 @@ export function Layout() {
             />
             {!railMode && (
               <div
-                className="font-bold text-[11px] uppercase tracking-[0.14em] text-foreground whitespace-nowrap"
+                className="font-bold text-sm tracking-[0.08em] text-foreground whitespace-nowrap"
                 style={{ textShadow: `0 0 10px ${BRAND}44` }}
               >
-                Tick Stock Panel
+                小帅工作台
               </div>
             )}
             {/* 收起/展开 按钮 (桌面三态循环) / 移动端抽屉关闭按钮 */}

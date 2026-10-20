@@ -238,8 +238,8 @@ if _IS_MACOS:
         bundle_identifier="com.tickflow.stockpanel",
         version=APP_VERSION,   # → CFBundleShortVersionString / CFBundleVersion
         info_plist={
-            "CFBundleName": "Tick Stock Panel",
-            "CFBundleDisplayName": "TSP",
+            "CFBundleName": "小帅工作台",
+            "CFBundleDisplayName": "小帅工作台",
             "CFBundleVersion": APP_VERSION,
             "NSHighResolutionCapable": True,
             "LSMinimumSystemVersion": "10.13",

@@ -1,4 +1,4 @@
-# TSP · A 股量化工作台
+# 小帅工作台
 
 个人维护的行情、选股、回测与监控项目。后端使用 Python / FastAPI / Polars，前端使用 React / TypeScript；行情与研究数据保存在本机。
 

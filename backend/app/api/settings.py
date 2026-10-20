@@ -1304,7 +1304,7 @@ def test_webhook(req: WebhookTestIn) -> dict:
     """
     from app.services import preferences, webhook_adapter
 
-    title = "TickFlow Stock Panel 推送测试"
+    title = "小帅工作台推送测试"
     body = "如果你看到这条消息，说明推送配置正确 🎉"
 
     if req.channel == "feishu":

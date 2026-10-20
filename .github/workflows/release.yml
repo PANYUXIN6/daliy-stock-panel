@@ -188,7 +188,7 @@ jobs:
         run: |
           brew install create-dmg
           create-dmg \
-            --volname "Tick Stock Panel" \
+            --volname "小帅工作台" \
             --window-pos 200 120 \
             --window-size 600 400 \
             --icon-size 100 \
@@ -236,7 +236,7 @@ jobs:
 
             ### 📋 使用说明
             - **Windows**: 下载后双击运行, 按安装向导操作(无需管理员权限), 自动创建桌面/开始菜单快捷方式
-            - **macOS**: 双击 dmg 打开, 将 TSP 拖入 Applications 文件夹; 首次启动需右键→打开(绕过 Gatekeeper)
+            - **macOS**: 双击 dmg 打开, 将应用拖入 Applications 文件夹; 首次启动需右键→打开(绕过 Gatekeeper)
             - **Linux**: 解压后运行可执行文件
             - 数据存储在安装目录下的 `data/` 子文件夹, 卸载重装不丢数据
             - 内置 Polars 兼容内核, 新老 CPU (无 AVX2) 均可运行

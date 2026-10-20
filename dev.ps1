@@ -1,4 +1,4 @@
-# tickflow-stock-panel - one-shot launcher for web + collector + frontend (Windows / PowerShell)
+﻿# 小帅工作台 - one-shot launcher for web + collector + frontend (Windows / PowerShell)
 #
 # Usage:
 #   .\dev.ps1
@@ -178,10 +178,10 @@ if (-not (Test-Path (Join-Path $FrontendDir 'node_modules'))) {
     Log-Ok 'frontend deps installed'
 }
 
-# ===== 4. Banner (ASCII so it renders on any codepage) =====
+# ===== 4. Banner (UTF-8 BOM keeps Chinese compatible with Windows PowerShell) =====
 Write-Host ''
 Write-Host '+----------------------------------------------+' -ForegroundColor Blue
-Write-Host '|  tickflow-stock-panel                        |' -ForegroundColor Blue
+Write-Host '|  小帅工作台                                  |' -ForegroundColor Blue
 Write-Host '|                                              |' -ForegroundColor Blue
 Write-Host "|  backend   http://${DisplayHost}:$BackendPort"  -ForegroundColor Blue
 Write-Host "|  frontend  http://${DisplayHost}:$FrontendPort" -ForegroundColor Blue

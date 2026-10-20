@@ -95,7 +95,7 @@ async def _application_lifespan(app: FastAPI):
     auth_service.bootstrap_from_env()
     migrate_legacy_private_data(settings.data_dir, auth_service.get_store().first_admin_id())
     logger.info(
-        "Tick Stock Panel v%s starting (mode=%s)",
+        "小帅工作台 v%s starting (mode=%s)",
         __version__, tf_client.current_mode(),
     )
 
@@ -442,7 +442,7 @@ def create_app(role: str | None = None) -> FastAPI:
     if role not in {'web', 'collector'}:
         raise ValueError('service role must be web or collector')
     app = FastAPI(
-        title="Tick Stock Panel",
+        title="小帅工作台",
         version=__version__,
         description="A 股选股 + 回测面板 — TickFlow 适配",
         lifespan=lifespan,

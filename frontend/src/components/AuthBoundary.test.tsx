@@ -106,7 +106,7 @@ it('returns to login on a business request 401 without another status check', as
   vi.stubGlobal('fetch', vi.fn(async () => new Response('{}', { status: 401 })))
   await act(async () => { await sessionFetch('/api/watchlist') })
   expect(host.querySelector('[data-testid="business"]')).toBeNull()
-  expect(host.textContent).toContain('登录 Tick Stock Panel')
+  expect(host.textContent).toContain('登录小帅工作台')
   expect(mocks.status).toHaveBeenCalledOnce()
 })
 it('keeps business content after a forbidden response or network failure', async () => {
@@ -133,7 +133,7 @@ it('checks identity on an SSE error and returns to login if the session is inval
   await act(async () => stream.dispatchEvent(new Event('error')))
   expect(mocks.status).toHaveBeenCalledTimes(2)
   expect(host.querySelector('[data-testid="business"]')).toBeNull()
-  expect(host.textContent).toContain('登录 Tick Stock Panel')
+  expect(host.textContent).toContain('登录小帅工作台')
   expect(close).toHaveBeenCalledOnce()
 })
 it('unmounts private content immediately when any transport locks the session', async () => {
@@ -142,7 +142,7 @@ it('unmounts private content immediately when any transport locks the session', 
   expect(host.textContent).toContain('个人业务内容')
   await act(async () => lockSession())
   expect(host.querySelector('[data-testid="business"]')).toBeNull()
-  expect(host.textContent).toContain('登录 Tick Stock Panel')
+  expect(host.textContent).toContain('登录小帅工作台')
 })
 it('does not expose a browser setup form when the server is unconfigured', async () => {
   mocks.status.mockResolvedValue({ ...anonymous, configured: false })

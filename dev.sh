@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# tickflow-stock-panel — 一键启动网页、采集和前端
+# 小帅工作台 — 一键启动网页、采集和前端
 #
 # 用法:
 #   ./dev.sh                          # 默认 backend:3018  frontend:3011
@@ -189,7 +189,7 @@ prefix_awk() {
 
 echo
 echo -e "${BLUE}╭──────────────────────────────────────────────╮${NC}"
-echo -e "${BLUE}│${NC}  ${GREEN}tickflow-stock-panel${NC}                        ${BLUE}│${NC}"
+echo -e "${BLUE}│${NC}  ${GREEN}小帅工作台${NC}                                  ${BLUE}│${NC}"
 echo -e "${BLUE}│${NC}                                              ${BLUE}│${NC}"
 echo -e "${BLUE}│${NC}  backend   ${YELLOW}http://$DISPLAY_HOST:$BACKEND_PORT${NC}          ${BLUE}│${NC}"
 echo -e "${BLUE}│${NC}  frontend  ${YELLOW}http://$DISPLAY_HOST:$FRONTEND_PORT${NC}          ${BLUE}│${NC}"

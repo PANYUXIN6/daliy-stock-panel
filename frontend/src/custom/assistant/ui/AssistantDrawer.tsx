@@ -18,11 +18,9 @@ import { AnimatePresence, motion } from 'framer-motion'
 import {
   ArrowDown,
   Bot,
-  Database,
   FlaskConical,
   History,
   Plus,
-  Puzzle,
   SendHorizontal,
   Settings2,
   Sparkles,
@@ -368,7 +366,6 @@ const SUGGEST_GROUP_ICONS: Record<string, typeof TrendingUp> = {
   行情与大盘: TrendingUp,
   我的与个股: Star,
   策略与信号: FlaskConical,
-  数据与扩展: Database,
 }
 
 function EmptyState({ status, suggests }: { status: AssistantStatus | null; suggests: QuickSuggest[] }) {
@@ -429,6 +426,7 @@ function EmptyState({ status, suggests }: { status: AssistantStatus | null; sugg
   // 按后端 group 字段分区, 保持原始顺序; 未分组的建议归入「更多」。
   const groups = new Map<string, QuickSuggest[]>()
   for (const suggest of suggests) {
+    if (suggest.group === '数据与扩展') continue
     const key = suggest.group || '更多'
     groups.set(key, [...(groups.get(key) ?? []), suggest])
   }
@@ -468,17 +466,6 @@ function EmptyState({ status, suggests }: { status: AssistantStatus | null; sugg
           </div>
         )
       })}
-
-      <div className="rounded-card border border-dashed border-border bg-base/40 px-3.5 py-3 text-xs">
-        <div className="flex items-center gap-1.5 font-medium text-foreground">
-          <Puzzle className="h-3.5 w-3.5 text-accent" />
-          扩展内容同样可以问
-        </div>
-        <p className="mt-1 leading-relaxed text-secondary">
-          扩展数据表、自定义策略与信号等扩展内容都能问答互动, 比如「我的扩展数据表里有什么」「看看最新一张的数据」。
-          AI 助手本身也是一个 custom 扩展模块。
-        </p>
-      </div>
     </div>
   )
 }

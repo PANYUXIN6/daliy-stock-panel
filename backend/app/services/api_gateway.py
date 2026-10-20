@@ -13,8 +13,10 @@ from pathlib import Path
 
 from app.services import api_tokens
 
-# (method, 路径前缀, scope) — method 用 "*" 表示任意; 顺序敏感, 具体规则在前
-_RULES: list[tuple[str, str, str]] = [
+# (method, 路径前缀, scope) — method 用 "*" 表示任意; None 显式排除; 具体规则在前
+_RULES: list[tuple[str, str, str | None]] = [
+    # 详情补采与任务进度仅供网页会话，不属于分钟行情读取的开放契约。
+    ("*", "/api/kline/minute/fetch", None),
     # read:market — 行情读取
     ("GET", "/api/kline/instruments/search", "read:market"),
     ("GET", "/api/kline/daily", "read:market"),

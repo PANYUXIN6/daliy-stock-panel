@@ -3,6 +3,7 @@
 POST /api/custom/assistant/chat      NDJSON 事件流(协议见模块 __init__)
 GET  /api/custom/assistant/status     供应商配置状态(前端门控展示)
 GET  /api/custom/assistant/suggests   空会话快捷指令
+GET/PUT /api/custom/assistant/tool-permissions  管理员工具权限配置
 POST /api/custom/assistant/actions/{call_id}/decision
                                      动作工具确认/拒绝(确认卡按钮回调)
 """
@@ -16,6 +17,7 @@ from pydantic import BaseModel, Field
 from app.custom.assistant import actions as assistant_actions
 from app.custom.assistant import tools as assistant_tools
 from app.custom.assistant.chat_service import chat_stream
+from app.custom.assistant.permissions import get_tool_permissions, set_tool_permissions
 from app.services.ai_provider import (
     ai_configured,
     current_ai_model,
@@ -41,6 +43,11 @@ class ChatRequest(BaseModel):
 
 class ActionDecisionRequest(BaseModel):
     approve: bool
+
+
+class ToolPermissionsRequest(BaseModel):
+    model_config = {"extra": "forbid"}
+    permissions: dict[str, Literal["guest", "pro", "admin"]]
 
 
 def build_router() -> APIRouter:
@@ -85,6 +92,14 @@ def build_router() -> APIRouter:
     @router.get("/suggests")
     def suggests() -> dict:
         return {"suggests": assistant_tools.QUICK_SUGGESTS}
+
+    @router.get("/tool-permissions")
+    def tool_permissions() -> dict:
+        return get_tool_permissions()
+
+    @router.put("/tool-permissions")
+    def update_tool_permissions(req: ToolPermissionsRequest) -> dict:
+        return set_tool_permissions(req.permissions)
 
     @router.post("/actions/{call_id}/decision")
     async def action_decision(call_id: str, req: ActionDecisionRequest) -> dict:

@@ -169,7 +169,9 @@ AI 点数和模型用量通过独立事务账本 `auth/ai_credits.sqlite3` 管�
 
 定制模块通过独立注册表接线。前端当前开放 `layout.navigation.extra`、`stock-preview.footer`、`watchlist.toolbar`，类型以 [FrontendSlotContextMap](../frontend/src/extensions/types.ts) 为准；版本字段在扩展清单 `apiVersion` 上。前端在构建路由前完成校验并冻结注册表。后端提供路由、启动钩子和 [NotificationFormatter](../backend/app/extensions/contracts.py)，加载器隔离注册失败；应用构建时完成注册并冻结，核心服务初始化后再运行可选启动钩子，钩子不能追加注册。
 
-AI 助手由 `frontend/src/custom/assistant/` 和 `backend/app/custom/assistant/` 接入，调用现有查询和动作能力，写动作经过确认流程。其后端请求会注入 `app.state` 中的核心服务，前端使用自己的流式客户端和会话 store；`AiConfigEntry.tsx` 通过 DOM 与 portal 锚定设置入口。
+AI 助手由 `frontend/src/custom/assistant/` 和 `backend/app/custom/assistant/` 接入，调用现有查询和动作能力，写动作经过确认流程。其后端请求会注入 `app.state` 中的核心服务，前端使用自己的流式客户端和会话 store；`AiConfigEntry.tsx` 通过 DOM 与 portal 锚定设置入口。添加自选成功的实时工具事件由常驻 `AssistantLauncher` 订阅，失效自选清单及各参数的 enriched 查询，使已打开的自选页立即更新；失败和历史足迹不触发刷新。
+
+助手工具权限集中在 `custom/assistant/permissions.py`，默认游客可用 9 个、Pro 可用 15 个、管理员可用全部 24 个。管理员可在「设置 → AI → 助手工具权限」调整各工具的最低角色，Pro 继承游客权限；回测、信号目录、创建信号和持仓提醒固定仅管理员可用。添加自选默认向游客开放，仍须确认。配置经管理员专用 `GET/PUT /api/custom/assistant/tool-permissions` 原子保存至本环境的 `data/user_data/assistant_tool_permissions.json`，不随代码发布覆盖。每轮模型请求仅提供当前有权使用的工具 schema 与提示，确认前及实际执行前按最新会话和配置重验；配置损坏时普通账号工具停用，管理员保留修复入口。
 
 扩展类型、注册入口与验证方式见 [扩展说明](secondary-development.md)。
 

@@ -1,8 +1,7 @@
 """AI 助手工具层 — 核心工具目录透传 + 面向各页面能力的本地查询/动作工具。
 
 设计原则(为项目服务、有界):
-- 查询工具对应页面核心查询能力(行情/自选/看板/指数/板块轮动/市场
-  环境/异动/持仓提醒/信号库/财务/个股分析/因子值/跑策略), 全部只读。
+- 查询工具复用页面查询能力；执行选股策略时可能按需准备财务数据。
 - 动作工具(create_signal_strategy/add_to_watchlist, 及核心目录的
   run_backtest)有写副作用或重计算, 由 chat_service 的确认闸门把守
   (actions.py), 未经用户确认不会执行。
@@ -31,6 +30,8 @@ import polars as pl
 
 from app.market_time import cn_today
 from app.services import tool_catalog
+
+from .permissions import allowed_tool_names, require_tool_access
 
 logger = logging.getLogger(__name__)
 
@@ -1105,8 +1106,6 @@ def _get_sync_status(args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
     return out
 
 
-_ADMIN_TOOLS = frozenset({tool_catalog.RUN_BACKTEST, 'list_signals', 'create_signal_strategy', 'get_lots'})
-
 _LOCAL_TOOLS: dict[str, Callable[[dict[str, Any], ToolContext], Any]] = {
     "get_stock_quote": _get_stock_quote,
     "get_stock_daily": _get_stock_daily,
@@ -1241,13 +1240,13 @@ def _local_tool_schemas() -> list[dict[str, Any]]:
         ),
         _schema(
             "run_strategy",
-            "以最新交易日报酬面执行一个选股策略并返回命中标的列表(≤30 行)。strategy_id 可先用 list_strategies 查询。",
+            "以最新交易日报酬面执行一个选股策略并返回命中标的列表(≤30 行)。strategy_id 为策略目录中的标识。",
             {"strategy_id": {"type": "string", "description": "策略 id"}},
             ["strategy_id"],
         ),
         _schema(
             "get_factor_values",
-            "查询某因子在最新交易日的全市场取值排名(Top N), 附股票名称与今日涨跌幅。factor 用因子 id, 可先用 list_factors 查询。",
+            "查询某因子在最新交易日的全市场取值排名(Top N), 附股票名称与今日涨跌幅。factor 为因子目录中的标识。",
             {
                 "factor": {"type": "string", "description": "因子 id"},
                 "top": {"type": "integer", "description": "返回前 N 名 (5-50, 默认 30)"},
@@ -1311,7 +1310,7 @@ def _local_tool_schemas() -> list[dict[str, Any]]:
         ),
         _schema(
             "query_ext_table",
-            "读取一张扩展数据表的行数据。table 为表 id(先用 list_ext_tables 查); "
+            "读取一张扩展数据表的行数据。table 为扩展表 id; "
             "filter=字段:值1|值2 等值过滤(值间 OR); sort=字段 或 字段:desc 排序; "
             "时序表支持 start_date/end_date(YYYY-MM-DD)或 date 单日。limit 默认 20, 上限 100。",
             {
@@ -1336,8 +1335,10 @@ def _local_tool_schemas() -> list[dict[str, Any]]:
 
 
 def build_tool_schemas() -> list[dict[str, Any]]:
-    """核心工具目录(因子/策略/能力/回测) + 本模块的页面查询工具。"""
-    return [*tool_catalog.build_tool_schemas(), *_local_tool_schemas()]
+    """仅向模型提供当前会话和最新配置允许的工具。"""
+    allowed = allowed_tool_names()
+    return [schema for schema in [*tool_catalog.build_tool_schemas(), *_local_tool_schemas()]
+            if schema["function"]["name"] in allowed]
 
 
 async def execute_assistant_tool(name: str, args: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
@@ -1345,11 +1346,9 @@ async def execute_assistant_tool(name: str, args: dict[str, Any], ctx: ToolConte
 
     契约与核心 tool_catalog.execute_tool 一致: {"ok": bool, "result"|"error"}。
     """
-    from app.services.auth import AuthError, require_current_session
+    from app.services.auth import AuthError
     try:
-        user = require_current_session()
-        if name in _ADMIN_TOOLS and user['role'] != 'admin':
-            raise AuthError('此操作仅限管理员', 403, 'ADMIN_REQUIRED')
+        require_tool_access(name)
     except AuthError as exc:
         return {"ok": False, "error": exc.detail}
     handler = _LOCAL_TOOLS.get(name)
@@ -1357,9 +1356,7 @@ async def execute_assistant_tool(name: str, args: dict[str, Any], ctx: ToolConte
         try:
             def execute_local():
                 # The executor may have queued this action before the session was revoked.
-                user = require_current_session()
-                if name in _ADMIN_TOOLS and user['role'] != 'admin':
-                    raise AuthError('此操作仅限管理员', 403, 'ADMIN_REQUIRED')
+                require_tool_access(name)
                 return handler(dict(args or {}), ctx)
             result = await asyncio.to_thread(execute_local)
             return {"ok": True, "result": result}

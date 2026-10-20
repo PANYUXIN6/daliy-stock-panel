@@ -2300,6 +2300,21 @@ export interface SectorRotationUniverseItem {
 }
 
 export type UserRole = 'admin' | 'pro' | 'guest'
+export interface AssistantToolPermission {
+  name: string
+  label: string
+  description: string
+  group: string
+  min_role: UserRole
+  default_min_role: UserRole
+  locked: boolean
+  requires_confirmation: boolean
+}
+export interface AssistantToolPermissionsResponse {
+  tools: AssistantToolPermission[]
+  counts: Record<UserRole, number>
+  configuration_error: string | null
+}
 export interface User {
   id: string; username: string; is_initial_admin: boolean; role: UserRole; pro_expires_on: string | null
   is_active: boolean; must_change_password: boolean; created_at: string
@@ -2346,6 +2361,12 @@ export const api = {
   loginEvents: (userId = '', offset = 0) => request<{ events: LoginEvent[]; total: number }>(`/api/users/login-events?user_id=${encodeURIComponent(userId)}&offset=${offset}&limit=50`),
 
   settings: () => request<SettingsState>('/api/settings'),
+  assistantToolPermissions: () =>
+    request<AssistantToolPermissionsResponse>('/api/custom/assistant/tool-permissions', { quiet: true }),
+  saveAssistantToolPermissions: (permissions: Record<string, UserRole>) =>
+    request<AssistantToolPermissionsResponse>('/api/custom/assistant/tool-permissions', {
+      method: 'PUT', body: JSON.stringify({ permissions }), quiet: true,
+    }),
   /** 保存 AI 配置 */
   saveAiSettings: (ai: { provider?: string; base_url?: string; model?: string; reasoning_effort?: string; codex_command?: string; codex_reasoning_effort?: string; user_agent?: string; max_output_tokens?: number; context_window?: number; round_checkpoint?: number }) =>
     request<{ ok: boolean; ai_provider?: string; ai_model?: string; ai_openai_model?: string; ai_reasoning_effort?: string; ai_codex_model?: string; ai_codex_command?: string; ai_codex_reasoning_effort?: string; ai_configured?: boolean; ai_max_output_tokens?: number; ai_context_window?: number; ai_round_checkpoint?: number }>('/api/settings/ai', {

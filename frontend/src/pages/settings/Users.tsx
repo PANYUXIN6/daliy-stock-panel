@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { api, type User, type UserRole } from '@/lib/api'
+import { api, type AiUserUsage, type User, type UserRole } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { Modal } from '@/components/Modal'
 import { toast } from '@/components/Toast'
@@ -31,9 +31,9 @@ export function SettingsUsersPanel() {
   const change = useMutation({ mutationFn: async (action: () => Promise<unknown>) => action(), onSuccess: () => { void qc.invalidateQueries({ queryKey: ['users'] }); void qc.invalidateQueries({ queryKey: ['login-events'] }); setEditing(null); setResetting(null); setConfirmation(null); setPassword('') } })
   const open = (user: User | 'new') => { change.reset(); setEditing(user); setUsername(user === 'new' ? '' : user.username); setRole(user === 'new' ? 'guest' : user.role); setExpires(user === 'new' ? '' : user.pro_expires_on ?? ''); setPassword('') }
   return <section className="space-y-6 min-w-0">
-    <div><h2 className="text-base font-semibold text-foreground">用户管理</h2><p className="mt-1 text-xs text-muted">临时密码需由用户首次登录后更改。Pro 到期日按北京时间当天有效。</p></div>
-    <div className="flex flex-wrap gap-2"><input aria-label="搜索用户" placeholder="搜索用户名" value={search} onChange={e => { setSearch(e.target.value); setOffset(0) }} className={`${input} max-w-xs`} /><button className="rounded-btn bg-accent px-4 py-2 text-sm text-white" onClick={() => open('new')}>创建用户</button></div>
-    {users.isLoading ? <p className="text-muted">加载中…</p> : users.error ? <p role="alert" className="text-danger">{users.error.message}</p> : <div className="overflow-x-auto rounded-card border border-border"><table className="w-full min-w-[740px] text-left text-xs"><thead className="bg-elevated text-muted"><tr>{['用户 / 角色', '状态 / 到期日', '累计登录', '最近登录', '操作'].map(x => <th className="p-3" key={x}>{x}</th>)}</tr></thead><tbody>{users.data?.users.map(user => <tr key={user.id} className="border-t border-border text-secondary"><td className="p-3"><strong className="text-foreground">{user.username}</strong><div>{user.role}</div></td><td className="p-3">{user.is_active ? '启用' : '已禁用'}{user.must_change_password && ' · 待改密'}<div>{user.pro_expires_on ?? '—'}</div></td><td className="p-3">{user.login_count}</td><td className="p-3">{user.last_login_at ? new Date(user.last_login_at).toLocaleString('zh-CN') : '尚未登录'}<div>{user.last_login_ip}</div></td><td className="p-3"><div className="flex flex-wrap gap-2">{user.role === 'admin' ? <span className="text-muted">管理员账号受保护</span> : <><button onClick={() => open(user)} className="text-accent">编辑权限</button><button disabled={change.isPending} onClick={() => { if (user.is_active) { change.reset(); setConfirmation({ user, action: 'disable' }) } else change.mutate(() => api.updateUser(user.id, { is_active: true })) }}>{user.is_active ? '禁用' : '恢复'}</button><button onClick={() => { change.reset(); setResetting(user); setPassword('') }}>重置密码</button><button disabled={change.isPending} onClick={() => { change.reset(); setConfirmation({ user, action: 'revoke' }) }}>强制下线</button></>}<button onClick={() => { setEventUser(user.id); setEventOffset(0) }}>登录记录</button></div></td></tr>)}</tbody></table>{users.data?.total === 0 && <p className="p-6 text-sm text-muted">没有匹配的用户</p>}</div>}
+    <div><h2 className="text-base font-semibold text-foreground">用户管理</h2><p className="mt-1 text-xs text-muted">临时密码需由用户首次登录后更改。Pro 到期日按北京时间当天有效。</p><p className="mt-1 text-xs leading-relaxed text-muted">AI 用量按北京时间自然月统计；金额仅按已上报用量和已配置模型报价估算，不将预留费用计为实际用量。</p></div>
+    <div className="flex flex-wrap gap-2"><input aria-label="搜索用户" placeholder="搜索用户名" value={search} onChange={e => { setSearch(e.target.value); setOffset(0) }} className={`${input} max-w-xs`} /><button className="rounded-btn bg-accent px-4 py-2 text-sm text-white" onClick={() => open('new')}>创建用户</button><button type="button" disabled={users.isFetching} onClick={() => void users.refetch()} className="rounded-btn border border-border px-3 py-2 text-sm text-secondary hover:text-foreground disabled:opacity-50">{users.isFetching ? '刷新中…' : '刷新用量'}</button></div>
+    {users.isLoading ? <p className="text-muted">加载中…</p> : users.error ? <p role="alert" className="text-danger">{users.error.message}</p> : <div className="overflow-x-auto rounded-card border border-border"><table className="w-full min-w-[1000px] text-left text-xs"><thead className="bg-elevated text-muted"><tr>{['用户 / 角色', '状态 / 到期日', '本月 AI 用量', '累计登录', '最近登录', '操作'].map(x => <th className="p-3" key={x}>{x}</th>)}</tr></thead><tbody>{users.data?.users.map(user => <tr key={user.id} className="border-t border-border text-secondary"><td className="p-3"><strong className="text-foreground">{user.username}</strong><div>{user.role}</div></td><td className="p-3">{user.is_active ? '启用' : '已禁用'}{user.must_change_password && ' · 待改密'}<div>{user.pro_expires_on ?? '—'}</div></td><td className="p-3"><UserAiUsage usage={user.ai_usage} /></td><td className="p-3">{user.login_count}</td><td className="p-3">{user.last_login_at ? new Date(user.last_login_at).toLocaleString('zh-CN') : '尚未登录'}<div>{user.last_login_ip}</div></td><td className="p-3"><div className="flex flex-wrap gap-2">{user.role === 'admin' ? <span className="text-muted">管理员账号受保护</span> : <><button onClick={() => open(user)} className="text-accent">编辑权限</button><button disabled={change.isPending} onClick={() => { if (user.is_active) { change.reset(); setConfirmation({ user, action: 'disable' }) } else change.mutate(() => api.updateUser(user.id, { is_active: true })) }}>{user.is_active ? '禁用' : '恢复'}</button><button onClick={() => { change.reset(); setResetting(user); setPassword('') }}>重置密码</button><button disabled={change.isPending} onClick={() => { change.reset(); setConfirmation({ user, action: 'revoke' }) }}>强制下线</button></>}<button onClick={() => { setEventUser(user.id); setEventOffset(0) }}>登录记录</button></div></td></tr>)}</tbody></table>{users.data?.total === 0 && <p className="p-6 text-sm text-muted">没有匹配的用户</p>}</div>}
     <div className="flex gap-3 text-xs text-secondary"><button disabled={offset === 0} onClick={() => setOffset(Math.max(0, offset - 50))}>上一页</button><span>共 {users.data?.total ?? 0} 人</span><button disabled={offset + 50 >= (users.data?.total ?? 0)} onClick={() => setOffset(offset + 50)}>下一页</button></div>
     {change.error && !editing && !resetting && !confirmation && <p role="alert" className="text-sm text-danger">{change.error.message}</p>}
     <div className="flex items-center gap-3"><h3 className="text-sm font-semibold text-foreground">登录记录（保留 90 天）</h3>{eventUser && <button className="text-xs text-accent" onClick={() => { setEventUser(''); setEventOffset(0) }}>查看全部</button>}</div>
@@ -70,4 +70,24 @@ export function SettingsUsersPanel() {
       <button disabled={change.isPending} className="rounded-btn bg-accent px-4 py-2 text-sm text-white disabled:opacity-50">{change.isPending ? '保存中…' : '保存'}</button>
     </form></Modal>}
   </section>
+}
+
+function UserAiUsage({ usage }: { usage: AiUserUsage | undefined }) {
+  if (!usage) return <span className="text-muted">AI 用量暂不可用</span>
+  const noReportedUsage = usage.total_calls > 0 && usage.unreported_calls >= usage.total_calls
+  const noPricedUsage = usage.total_calls > 0 && usage.unreported_calls + usage.unpriced_calls >= usage.total_calls
+  const tokens = (count: number) => count.toLocaleString('zh-CN')
+  const amount = Number(usage.estimated_cost_cny)
+  const estimate = Number.isFinite(amount) ? amount.toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 6 }) : null
+  return <div className="min-w-[15rem] space-y-1 leading-relaxed">
+    <div className="text-[10px] text-muted">{usage.period} · {usage.total_calls} 次模型调用</div>
+    <div className="font-medium text-foreground">已用 {tokens(usage.used_points)}{usage.unlimited ? ' 点 · 不限额' : ` / ${tokens(usage.monthly_points ?? 0)} 点`}</div>
+    {usage.reserved_points > 0 && <div className="text-muted">预留 {tokens(usage.reserved_points)} 点</div>}
+    <div>已上报 tokens：{noReportedUsage ? '—' : tokens(usage.total_tokens)}</div>
+    <div className="text-[10px] text-muted">输入 {noReportedUsage ? '—' : tokens(usage.prompt_tokens)} · 输出 {noReportedUsage ? '—' : tokens(usage.completion_tokens)}</div>
+    <div>估算金额：{noPricedUsage || estimate === null ? '暂不可估算' : `¥${estimate}`}</div>
+    {usage.total_calls === 0 && <div className="text-[10px] text-muted">本月暂无 AI 调用</div>}
+    {usage.unreported_calls > 0 && <div className="text-[10px] text-warning">{usage.unreported_calls} 次调用未上报用量，未计入 tokens 和金额</div>}
+    {usage.unpriced_calls > 0 && <div className="text-[10px] text-warning">{usage.unpriced_calls} 次调用缺少可核算报价，未计入金额</div>}
+  </div>
 }

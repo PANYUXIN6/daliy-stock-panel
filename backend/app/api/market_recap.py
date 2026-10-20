@@ -16,12 +16,10 @@ import logging
 from datetime import date as date_cls
 
 from fastapi import APIRouter, HTTPException, Query, Request
-from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from app.services import auction_benchmark, dragon_tiger, market_recap_reports, preferences
 from app.services.market_recap import recap_market_stream
-from app.services.ndjson_heartbeat import with_heartbeat
 
 logger = logging.getLogger(__name__)
 
@@ -106,7 +104,10 @@ async def analyze_market(request: Request, req: AnalyzeRequest):
         except ValueError as exc:
             raise HTTPException(400, f"as_of 格式应为 YYYY-MM-DD,收到: {req.as_of}") from exc
 
+    from app.services.ai_credit_stream import CreditStreamingResponse, prepare_credit_task
     from app.services.analysis_archive import archive_analysis
+
+    credit_task = await prepare_credit_task(request, "market_recap")
 
     def archive(report):
         saved = market_recap_reports.save_report(report)
@@ -115,17 +116,12 @@ async def analyze_market(request: Request, req: AnalyzeRequest):
             _maybe_push_review(report["content"], report)
         return saved
 
-    async def stream_gen():
-        async for chunk in with_heartbeat(archive_analysis(
+    return CreditStreamingResponse(
+        archive_analysis(
             recap_market_stream(repo, quote_service, depth_service, as_of, req.focus),
             archive, repo.store.data_dir, "review", {"focus": req.focus},
-        )):
-            yield chunk + "\n"
-
-    return StreamingResponse(
-        stream_gen(),
-        media_type="application/x-ndjson",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        ),
+        credit_task=credit_task,
     )
 
 

@@ -11,7 +11,6 @@ from __future__ import annotations
 from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from app.custom.assistant import actions as assistant_actions
@@ -23,7 +22,6 @@ from app.services.ai_provider import (
     current_ai_provider,
     is_codex_cli_provider,
 )
-from app.services.ndjson_heartbeat import with_heartbeat
 
 
 class HistoryMessage(BaseModel):
@@ -55,9 +53,12 @@ def build_router() -> APIRouter:
         repo = getattr(request.app.state, "repo", None)
         data_dir = str(repo.store.data_dir) if repo is not None else None
         context = req.context.model_dump() if req.context else None
+        from app.services.ai_credit_stream import CreditStreamingResponse, prepare_credit_task
 
-        async def gen():
-            async for line in with_heartbeat(chat_stream(
+        credit_task = await prepare_credit_task(request, "assistant")
+
+        return CreditStreamingResponse(
+            chat_stream(
                 history=[m.model_dump() for m in req.messages],
                 context=context,
                 engine=engine,
@@ -67,13 +68,8 @@ def build_router() -> APIRouter:
                 depth_service=getattr(request.app.state, "depth_service", None),
                 capabilities=getattr(request.app.state, "capabilities", None),
                 financial_scheduler=getattr(request.app.state, "financial_scheduler", None),
-            )):
-                yield line + "\n"
-
-        return StreamingResponse(
-            gen(),
-            media_type="application/x-ndjson",
-            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+            ),
+            credit_task=credit_task,
         )
 
     @router.get("/status")

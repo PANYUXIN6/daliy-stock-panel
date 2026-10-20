@@ -1,4 +1,5 @@
 import { sessionFetch } from '@/lib/sessionRuntime'
+import { runAiGeneration } from '@/lib/aiGeneration'
 /**
  * AI 助手自包含 HTTP 客户端 — NDJSON 流式解析 + 状态/快捷指令查询。
  *
@@ -93,38 +94,45 @@ export async function* assistantChatStream(
   body: { messages: ChatHistoryMessage[]; context?: AssistantContext },
   signal?: AbortSignal,
 ): AsyncGenerator<AssistantEvent> {
-  const res = await sessionFetch('/api/custom/assistant/chat', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-    signal,
-  })
-  if (!res.ok) {
-    let detail = ''
-    try {
-      const parsed = JSON.parse(await res.text()) as { detail?: string; message?: string }
-      detail = parsed.detail ?? parsed.message ?? ''
-    } catch { /* 忽略解析失败, 走状态码文案 */ }
-    throw new Error(detail || `AI 助手请求失败: ${res.status}`)
-  }
-  if (!res.body) throw new Error('响应无 body')
-
-  const reader = res.body.getReader()
-  const decoder = new TextDecoder()
-  let buf = ''
-  for (;;) {
-    const { done, value } = await reader.read()
-    if (done) break
-    buf += decoder.decode(value, { stream: true })
-    const lines = buf.split('\n')
-    buf = lines.pop() ?? ''
-    for (const line of lines) {
-      const event = parseEventLine(line)
-      if (event) yield event
+  yield* runAiGeneration('assistant', async function* (creditHeaders) {
+    const res = await sessionFetch('/api/custom/assistant/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...creditHeaders },
+      body: JSON.stringify(body),
+      signal,
+    })
+    if (!res.ok) {
+      let detail = ''
+      try {
+        const parsed = JSON.parse(await res.text()) as { detail?: string; message?: string }
+        detail = parsed.detail ?? parsed.message ?? ''
+      } catch { /* 忽略解析失败, 走状态码文案 */ }
+      throw new Error(detail || `AI 助手请求失败: ${res.status}`)
     }
-  }
-  const tail = parseEventLine(buf)
-  if (tail) yield tail
+    if (!res.body) throw new Error('响应无 body')
+
+    const reader = res.body.getReader()
+    const decoder = new TextDecoder()
+    let buf = ''
+    try {
+      for (;;) {
+        const { done, value } = await reader.read()
+        if (done) break
+        buf += decoder.decode(value, { stream: true })
+        const lines = buf.split('\n')
+        buf = lines.pop() ?? ''
+        for (const line of lines) {
+          const event = parseEventLine(line)
+          if (event) yield event
+        }
+      }
+      const tail = parseEventLine(buf)
+      if (tail) yield tail
+    } finally {
+      try { await reader.cancel() } catch { /* 连接已关闭 */ }
+      reader.releaseLock()
+    }
+  }, signal)
 }
 
 function parseEventLine(line: string): AssistantEvent | null {

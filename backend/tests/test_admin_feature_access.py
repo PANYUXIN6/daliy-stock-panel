@@ -72,12 +72,18 @@ def test_feature_routes_require_admin(tmp_path, monkeypatch, service_role, role)
 def test_rotation_analysis_is_available_to_authenticated_users(
     tmp_path, monkeypatch, service_role, role,
 ):
+    from app import secrets_store
     from app.api import rps
     from app.config import settings
     from app.main import create_app
-    from app.services import collector_proxy
+    from app.services import ai_provider, collector_proxy
 
     monkeypatch.setattr(settings, 'data_dir', tmp_path)
+    monkeypatch.setattr(ai_provider, 'ai_configured', lambda: True)
+    monkeypatch.setattr(ai_provider, 'current_ai_model', lambda: 'deepseek-flash')
+    monkeypatch.setattr(ai_provider, 'current_ai_provider', lambda: 'openai_compat')
+    monkeypatch.setattr(secrets_store, 'get_ai_config',
+                        lambda key, default=None: 'https://api.deepseek.com' if key == 'ai_base_url' else default)
 
     async def no_proxy(request, call_next):
         return await call_next(request)

@@ -6,17 +6,20 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { Review } from './Review'
 import { resetReview, setViewingReport } from '@/lib/reviewStore'
-const mocks = vi.hoisted(() => ({ publication: vi.fn(), generate: vi.fn(), save: vi.fn() }))
+import { AuthContext } from '@/lib/auth'
+import { creditsFixture, guestUser } from '@/test/aiCredits'
+const mocks = vi.hoisted(() => ({ publication: vi.fn(), generate: vi.fn(), save: vi.fn(), credits: vi.fn() }))
 vi.mock('@/lib/api', () => ({ api: {
   reviewPublication: mocks.publication,
   dragonTiger: async () => ({ state: 'no_data', stocks: [] }),
   reviewReportsList: async () => ({ reports: [{ id: 'old', as_of: '2026-10-08', content: '历史报告', created_at: '2026-10-08T16:00:00' }] }),
   reviewReportSave: mocks.save,
+  aiCredits: mocks.credits,
 }, friendlyStreamError: (s: string) => s }))
 vi.mock('@/lib/useSharedQueries', () => ({ usePreferences: () => ({ data: {} }) }))
 vi.mock('@/components/StockPreviewDialog', () => ({ StockPreviewDialog: () => null }))
 vi.mock('@/lib/reviewStore', async importOriginal => ({ ...(await importOriginal<object>()), startReviewGeneration: mocks.generate }))
-beforeEach(() => { vi.clearAllMocks(); resetReview() })
+beforeEach(() => { vi.clearAllMocks(); resetReview(); mocks.credits.mockResolvedValue(creditsFixture()) })
 afterEach(() => { vi.useRealTimers() })
 async function settle() {
   for (let i = 0; i < 5; i++) await act(async () => {
@@ -31,12 +34,12 @@ it('shows unpublished status while keeping history and manual AI generation avai
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   const host = document.createElement('div'); const root = createRoot(host)
   try {
-    await act(async () => root.render(<MemoryRouter><QueryClientProvider client={qc}><Review /></QueryClientProvider></MemoryRouter>))
+    await act(async () => root.render(<AuthContext.Provider value={guestUser}><MemoryRouter><QueryClientProvider client={qc}><Review /></QueryClientProvider></MemoryRouter></AuthContext.Provider>))
     await settle()
     expect(host.textContent).toContain('当日复盘尚未更新')
     expect(host.textContent).toContain('2026-10-08')
     expect(mocks.generate).not.toHaveBeenCalled()
-    const button = [...host.querySelectorAll('button')].find(b => b.textContent === '生成复盘')!
+    const button = [...host.querySelectorAll('button')].find(b => b.textContent?.startsWith('生成复盘 ·'))!
     expect(button.disabled).toBe(false)
     await act(async () => button.click()); await settle()
     expect(mocks.generate).toHaveBeenCalledTimes(1)
@@ -56,7 +59,7 @@ it('changes the publication date at Beijing midnight and uses the selected histo
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   const host = document.createElement('div'); const root = createRoot(host)
   try {
-    await act(async () => root.render(<MemoryRouter><QueryClientProvider client={qc}><Review /></QueryClientProvider></MemoryRouter>))
+    await act(async () => root.render(<AuthContext.Provider value={guestUser}><MemoryRouter><QueryClientProvider client={qc}><Review /></QueryClientProvider></MemoryRouter></AuthContext.Provider>))
     await settle()
     expect(host.textContent).toContain('昨日情绪')
     await act(async () => { await vi.advanceTimersByTimeAsync(1_000) }); await settle()

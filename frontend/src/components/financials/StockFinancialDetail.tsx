@@ -15,6 +15,8 @@ import { Skeleton } from '@/components/data/Skeleton'
 import { startAnalysis, findLatestHistoryReport, openHistoryReport } from '@/lib/aiReportStore'
 import { toast } from '@/components/Toast'
 import type { FinancialTable } from '@/lib/api'
+import { useAiFeature } from '@/lib/useAiCredits'
+import { AiCreditHint } from '@/components/AiCreditHint'
 
 interface Props {
   symbol: string
@@ -123,6 +125,7 @@ function formatValue(v: number | null | undefined, fmt: FmtType): string {
 }
 
 export function StockFinancialDetail({ symbol, name }: Props) {
+  const quota = useAiFeature('financial_analysis')
   const [tab, setTab] = useState<TabKey>('metrics')
   // AI 分析:点击时检查历史,若已有同标的报告则二次确认
   const [checking, setChecking] = useState(false)
@@ -149,6 +152,7 @@ export function StockFinancialDetail({ symbol, name }: Props) {
   }
 
   const doAnalysis = async () => {
+    if (!quota.available) { toast(quota.reason || '当前 AI 额度不可用', 'error'); return }
     const r = await startAnalysis(symbol, name)
     if (r.error) toast(r.error, 'error')
   }
@@ -211,11 +215,12 @@ export function StockFinancialDetail({ symbol, name }: Props) {
             onClick={handleAiClick}
             disabled={checking}
             className="inline-flex items-center gap-1 px-2.5 py-1 rounded-btn text-[11px] font-medium border border-purple-400/30 bg-purple-400/10 text-purple-300 hover:bg-purple-400/20 hover:border-purple-400/40 transition-all shrink-0 disabled:opacity-50"
-            title="AI 财务分析"
+            title={quota.reason ? `${quota.reason}；仍可查看已有历史报告` : `AI 财务分析 · ${quota.priceLabel}`}
           >
             {checking ? <Loader2 className="h-3 w-3 animate-spin" /> : <Sparkles className="h-3 w-3" />}
-            AI 财务分析
+            AI 财务分析 · {quota.priceLabel}
           </button>
+          <AiCreditHint feature="financial_analysis" className="basis-full" />
           {latestPeriod && (
             <div className="flex flex-wrap items-center gap-1.5 basis-full sm:basis-auto text-xs text-secondary">
               <CalendarDays className="h-3.5 w-3.5" />
@@ -372,10 +377,12 @@ export function StockFinancialDetail({ symbol, name }: Props) {
                 </button>
                 <button
                   onClick={() => { doAnalysis(); setConfirmReport(null) }}
-                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-btn bg-gradient-to-r from-purple-500/80 to-fuchsia-500/80 text-white text-xs font-medium hover:from-purple-500 hover:to-fuchsia-500 transition-all"
+                  disabled={!quota.available}
+                  title={quota.reason || undefined}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-btn bg-gradient-to-r from-purple-500/80 to-fuchsia-500/80 text-white text-xs font-medium hover:from-purple-500 hover:to-fuchsia-500 transition-all disabled:opacity-40 disabled:cursor-not-allowed"
                 >
                   <Sparkles className="h-3.5 w-3.5" />
-                  重新分析
+                  重新分析 · {quota.priceLabel}
                 </button>
               </div>
             </motion.div>

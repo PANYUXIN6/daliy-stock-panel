@@ -4,11 +4,18 @@ import { createRoot, type Root } from 'react-dom/client'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { SettingsUsersPanel } from './Users'
+import type { AiUserUsage } from '@/lib/api'
 
 const mocks = vi.hoisted(() => ({ list: vi.fn(), events: vi.fn(), create: vi.fn(), update: vi.fn(), reset: vi.fn(), revoke: vi.fn(), toast: vi.fn() }))
 vi.mock('@/lib/api', () => ({ api: { users: mocks.list, loginEvents: mocks.events, createUser: mocks.create, updateUser: mocks.update, resetUserPassword: mocks.reset, revokeUserSession: mocks.revoke } }))
 vi.mock('@/components/Toast', () => ({ toast: mocks.toast }))
 const alice = { id: 'a', username: 'alice', role: 'guest', pro_expires_on: null, is_active: true, must_change_password: false, login_count: 9, last_login_at: null, last_login_ip: null }
+function usage(values: Partial<AiUserUsage> = {}): AiUserUsage {
+  return { period: '2026-10', monthly_points: 60, used_points: 0, reserved_points: 0,
+    remaining_points: 60, unlimited: false, prompt_tokens: 0, completion_tokens: 0,
+    total_tokens: 0, estimated_cost_cny: '0', unreported_calls: 0, unpriced_calls: 0,
+    total_calls: 0, ...values }
+}
 let host: HTMLDivElement; let root: Root; let qc: QueryClient
 beforeEach(() => {
   Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true })
@@ -123,4 +130,65 @@ it('only allows viewing login history for the admin account', async () => {
   await act(async () => adminRow.querySelector<HTMLButtonElement>('button')!.click())
   await settle()
   expect(mocks.events).toHaveBeenLastCalledWith('admin-id', 0)
+})
+
+it('shows monthly points, reported input/output tokens and estimated cost without treating reservations as usage', async () => {
+  mocks.list.mockResolvedValue({ users: [{ ...alice, ai_usage: usage({
+    used_points: 8, reserved_points: 3, remaining_points: 49,
+    prompt_tokens: 12_500, completion_tokens: 3_500, total_tokens: 16_000,
+    estimated_cost_cny: '0.053', unreported_calls: 1, unpriced_calls: 1, total_calls: 3,
+  }) }], total: 1 })
+  await render()
+  const cell = [...host.querySelectorAll('td')].find(node => node.textContent?.includes('2026-10'))!
+  expect(cell.textContent).toContain('已用 8 / 60 点')
+  expect(cell.textContent).toContain('预留 3 点')
+  expect(cell.textContent).toContain('已上报 tokens：16,000')
+  expect(cell.textContent).toContain('输入 12,500 · 输出 3,500')
+  expect(cell.textContent).toContain('估算金额：¥0.053')
+  expect(cell.textContent).toContain('1 次调用未上报用量，未计入 tokens 和金额')
+  expect(cell.textContent).toContain('1 次调用缺少可核算报价，未计入金额')
+})
+
+it('distinguishes zero usage from missing reports and unpriced calls while displaying admin usage without charging points', async () => {
+  mocks.list.mockResolvedValue({ users: [
+    { ...alice, ai_usage: usage() },
+    { ...alice, id: 'missing', username: 'missing', ai_usage: usage({ total_calls: 2, unreported_calls: 2 }) },
+    { ...alice, id: 'unpriced', username: 'unpriced', ai_usage: usage({ total_calls: 1, unpriced_calls: 1, prompt_tokens: 800, completion_tokens: 200, total_tokens: 1000 }) },
+    { ...alice, id: 'mixed', username: 'mixed', ai_usage: usage({ total_calls: 2, unreported_calls: 1, unpriced_calls: 1, prompt_tokens: 800, completion_tokens: 200, total_tokens: 1000 }) },
+    { ...alice, id: 'admin', username: 'admin', role: 'admin', ai_usage: usage({ unlimited: true, monthly_points: null, remaining_points: null, total_calls: 1, prompt_tokens: 500, completion_tokens: 100, total_tokens: 600, estimated_cost_cny: '0.0012' }) },
+  ], total: 5 })
+  await render()
+  const rows = [...host.querySelectorAll('tbody tr')]
+  const row = (name: string) => rows.find(node => node.querySelector('strong')?.textContent === name)!
+  expect(row('alice').textContent).toContain('已上报 tokens：0')
+  expect(row('alice').textContent).toContain('估算金额：¥0.00')
+  expect(row('alice').textContent).toContain('本月暂无 AI 调用')
+  expect(row('missing').textContent).toContain('已上报 tokens：—')
+  expect(row('missing').textContent).toContain('输入 — · 输出 —')
+  expect(row('missing').textContent).toContain('估算金额：暂不可估算')
+  expect(row('unpriced').textContent).toContain('已上报 tokens：1,000')
+  expect(row('unpriced').textContent).toContain('估算金额：暂不可估算')
+  expect(row('mixed').textContent).toContain('已上报 tokens：1,000')
+  expect(row('mixed').textContent).toContain('估算金额：暂不可估算')
+  expect(row('mixed').textContent).not.toContain('估算金额：¥0.00')
+  expect(row('mixed').textContent).toContain('1 次调用未上报用量')
+  expect(row('mixed').textContent).toContain('1 次调用缺少可核算报价')
+  expect(row('admin').textContent).toContain('已用 0 点 · 不限额')
+  expect(row('admin').textContent).toContain('已上报 tokens：600')
+  expect(row('admin').textContent).toContain('估算金额：¥0.0012')
+  expect([...row('admin').querySelectorAll('button')].map(button => button.textContent)).toEqual(['登录记录'])
+})
+
+it('shows loading and service errors instead of inventing user usage', async () => {
+  let reject!: (error: Error) => void
+  mocks.list.mockImplementationOnce(() => new Promise((_resolve, fail) => { reject = fail }))
+  await render()
+  expect(host.textContent).toContain('加载中…')
+  expect(host.textContent).not.toContain('本月暂无 AI 调用')
+  await act(async () => reject(new Error('用户用量读取失败'))); await settle()
+  expect(host.querySelector('[role="alert"]')?.textContent).toBe('用户用量读取失败')
+  expect(host.textContent).not.toContain('已上报 tokens：0')
+  await click('刷新用量')
+  expect(host.querySelector('[role="alert"]')).toBeNull()
+  expect(host.textContent).toContain('alice')
 })

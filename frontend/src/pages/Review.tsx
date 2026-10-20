@@ -27,6 +27,8 @@ import { MarkdownRenderer } from '@/components/financials/MarkdownRenderer'
 import { toast } from '@/components/Toast'
 import { usePreferences } from '@/lib/useSharedQueries'
 import { useReviewState } from '@/lib/useReviewStore'
+import { useAiFeature } from '@/lib/useAiCredits'
+import { AiCreditHint } from '@/components/AiCreditHint'
 import {
   startReviewGeneration, resetReview, isReviewGenerating, cancelReviewGeneration,
   type ReviewPhase,
@@ -66,6 +68,7 @@ function fmtArchivedAt(iso: string): string {
 // Phase 类型复用 store 的定义(单一来源)
 
 export function Review() {
+  const quota = useAiFeature('market_recap')
   const qc = useQueryClient()
   const [today, setToday] = useState(() => new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Shanghai' }).format(new Date()))
   useEffect(() => {
@@ -187,13 +190,13 @@ export function Review() {
 
   // 主流程:生成复盘(委托给全局 store,流在后台独立运行)
   const generate = useCallback(() => {
-    if (isReviewGenerating()) return
+    if (isReviewGenerating() || !quota.available) return
     setViewing(null)
     resetReview()
     startReviewGeneration(asOf, focus, () => {
       onGenerationDone().catch(() => { /* 静默 */ })
     })
-  }, [asOf, focus, onGenerationDone])
+  }, [asOf, focus, onGenerationDone, quota.available])
 
   // 复制全文到剪贴板(viewing 优先,与主区域显示一致)
   const copyContent = useCallback(async () => {
@@ -267,9 +270,10 @@ export function Review() {
             </button>
             <button
               onClick={generate}
-              disabled={isGenerating}
+              disabled={isGenerating || !quota.available}
+              title={quota.reason || undefined}
               className={cn(
-                'inline-flex items-center gap-1.5 rounded-btn px-3.5 py-1.5 text-xs font-medium transition-all',
+                'inline-flex items-center gap-1.5 rounded-btn px-3.5 py-1.5 text-xs font-medium transition-all disabled:opacity-50 disabled:cursor-not-allowed',
                 isGenerating
                   ? 'border border-accent/40 bg-accent/10 text-accent cursor-not-allowed'
                   : 'bg-accent text-white shadow-sm shadow-accent/25 hover:bg-accent/90 hover:shadow hover:shadow-accent/30',
@@ -278,7 +282,7 @@ export function Review() {
               {isGenerating ? (
                 <><RefreshCw className="h-3.5 w-3.5 animate-spin" />生成中…</>
               ) : (
-                <><Sparkles className="h-3.5 w-3.5" />生成复盘</>
+                <><Sparkles className="h-3.5 w-3.5" />生成复盘 · {quota.priceLabel}</>
               )}
             </button>
           </div>
@@ -287,6 +291,7 @@ export function Review() {
 
       <div className="min-h-full bg-[radial-gradient(circle_at_15%_-5%,rgba(59,130,246,0.10),transparent_30%),radial-gradient(circle_at_85%_5%,rgba(139,92,246,0.08),transparent_30%)] px-4 py-4 sm:px-6">
         <div className="mx-auto max-w-[1280px] space-y-3">
+          <AiCreditHint feature="market_recap" />
 
           {publication.isLoading && !data ? (
             <div className="flex h-24 items-center justify-center text-sm text-muted">加载复盘状态…</div>
@@ -326,6 +331,9 @@ export function Review() {
                   onCopy={copyContent}
                   onDownload={downloadContent}
                   onRegenerate={generate}
+                  generationAllowed={quota.available}
+                  generationPrice={quota.priceLabel}
+                  generationReason={quota.reason}
                   reportEndRef={reportEndRef}
                 />
                 <HistoryPanel
@@ -685,6 +693,7 @@ function MarketSummaryBar({ data }: { data: OverviewMarket }) {
 // ================================================================
 function ReportPanel({
   phase, content, error, isGenerating, viewing, reportDate, onCopy, onDownload, onRegenerate, reportEndRef,
+  generationAllowed, generationPrice, generationReason,
 }: {
   phase: ReviewPhase
   content: string
@@ -695,6 +704,9 @@ function ReportPanel({
   onCopy: () => void
   onDownload: () => void
   onRegenerate: () => void
+  generationAllowed: boolean
+  generationPrice: string
+  generationReason: string | null
   reportEndRef: React.RefObject<HTMLDivElement>
 }) {
   if (phase === 'error') {
@@ -707,9 +719,11 @@ function ReportPanel({
         <div className="max-w-md text-center text-xs text-secondary">{error || '请检查 AI 配置后重试'}</div>
         <button
           onClick={onRegenerate}
-          className="mt-1 inline-flex items-center gap-1.5 rounded-btn bg-accent/15 px-3 py-1.5 text-xs text-accent transition-colors hover:bg-accent/20"
+          disabled={!generationAllowed}
+          title={generationReason || undefined}
+          className="mt-1 inline-flex items-center gap-1.5 rounded-btn bg-accent/15 px-3 py-1.5 text-xs text-accent transition-colors hover:bg-accent/20 disabled:opacity-50 disabled:cursor-not-allowed"
         >
-          <RefreshCw className="h-3.5 w-3.5" />重新生成
+          <RefreshCw className="h-3.5 w-3.5" />重新生成 · {generationPrice}
         </button>
       </div>
     )

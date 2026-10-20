@@ -8,6 +8,7 @@
 // ===== Query Key 工厂 =====
 
 export const QK = {
+  aiCredits: (userId: string) => ['ai-credits', userId] as const,
   users: (search = '', offset = 0) => ['users', search, offset] as const,
   loginEvents: (userId = '', offset = 0) => ['login-events', userId, offset] as const,
   // 全局 / 共享 (Layout 预取)

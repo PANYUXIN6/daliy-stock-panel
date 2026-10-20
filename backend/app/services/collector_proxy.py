@@ -15,6 +15,7 @@ _OWNER_PREFIXES = (
     '/api/pipeline', '/api/backtest', '/api/strategies', '/api/monitor-rules',
     '/api/settings', '/api/capabilities', '/api/custom/assistant',
     '/api/factors', '/api/custom-signals',
+    '/api/ai/credits',
 )
 _OWNER_READS = {'/api/data/status', '/api/financials/execution-status', '/api/financials/collection-options', '/api/screener/cached',
                 '/api/screener/cached-summary', '/api/screener/strategies'}

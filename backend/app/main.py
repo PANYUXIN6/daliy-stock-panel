@@ -102,6 +102,9 @@ async def _application_lifespan(app: FastAPI):
     from app.services.pipeline_jobs import job_store
     job_store.recover_interrupted()
 
+    from app.services.ai_credits import get_credit_store
+    get_credit_store(settings.data_dir).recover_interrupted()
+
     # 数据层
     store = DataStore()
     repo = KlineRepository(store)
@@ -471,6 +474,8 @@ def create_app(role: str | None = None) -> FastAPI:
     # 路由
     app.include_router(core_router)
     app.include_router(auth_api.router)
+    from app.api.ai_credits import router as ai_credits_router
+    app.include_router(ai_credits_router)
     from app.api.users import router as users_router
     app.include_router(users_router)
     app.include_router(kline.router)
@@ -512,6 +517,15 @@ def create_app(role: str | None = None) -> FastAPI:
     # 业务代码用 capset.require(Cap.X) 断言能力,缺失时抛 CapabilityDenied;
     # 若不注册 handler 会冒泡成 500 Internal Server Error,对前端不友好且语义错误。
     from fastapi.responses import JSONResponse
+
+    from app.services.ai_credits import CreditError
+
+    @app.exception_handler(CreditError)
+    async def handle_credit_error(request, exc):
+        return JSONResponse(
+            {"detail": exc.detail, "code": exc.code}, status_code=exc.status,
+            headers={"Cache-Control": "no-store"},
+        )
 
     from app.tickflow.capabilities import CapabilityDenied
 

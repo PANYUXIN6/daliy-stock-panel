@@ -12,6 +12,7 @@ vi.mock('@/lib/api', () => ({ api: {
   financialStatus: async () => ({ tables: {} }), financialCollectionOptions: mocks.options,
 } }))
 vi.mock('@/lib/aiReportStore', () => ({ startAnalysis: vi.fn(), findLatestHistoryReport: vi.fn(), openHistoryReport: vi.fn() }))
+vi.mock('@/lib/useAiCredits', () => ({ useAiFeature: () => ({ available: false, priceLabel: '5 点', reason: '额度未加载' }) }))
 
 const host = document.createElement('div')
 const qc = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } })

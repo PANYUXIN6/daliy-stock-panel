@@ -1,4 +1,6 @@
 import { sessionFetch } from '@/lib/sessionRuntime'
+import { fetchAiCredits, runAiGeneration } from './aiGeneration'
+export type { AiCredits, AiFeature } from './aiGeneration'
 // 后端 API 客户端 — 全项目统一入口
 //
 // Dev: Vite 按启动脚本解析出的 BACKEND_HOST/BACKEND_PORT 代理 /api
@@ -2303,11 +2305,28 @@ export interface User {
   is_active: boolean; must_change_password: boolean; created_at: string
   last_login_at: string | null; last_login_ip: string | null; login_count: number
 }
+export interface AiUserUsage {
+  period: string
+  monthly_points: number | null
+  used_points: number
+  reserved_points: number
+  remaining_points: number | null
+  unlimited: boolean
+  prompt_tokens: number
+  completion_tokens: number
+  total_tokens: number
+  estimated_cost_cny: string
+  unreported_calls: number
+  unpriced_calls: number
+  total_calls: number
+}
+export type ManagedUser = User & { ai_usage: AiUserUsage }
 export interface AuthStatus { configured: boolean; authenticated: boolean; user: User | null; expires_at: string | null }
 export interface LoginEvent { id: number; user_id: string | null; username: string; occurred_at: string; ip: string; user_agent: string; success: boolean; reason: string }
 
 // ===== API surface =====
 export const api = {
+  aiCredits: fetchAiCredits,
   health: () => request<{ status: string; version: string; mode: string }>('/health'),
 
   // ===== Auth (访问认证) =====
@@ -2319,7 +2338,7 @@ export const api = {
   authChangePassword: (oldPassword: string, newPassword: string) => request<AuthStatus>('/api/auth/change-password', {
     method: 'POST', body: JSON.stringify({ old_password: oldPassword, new_password: newPassword }), quiet: true,
   }),
-  users: (search = '', offset = 0) => request<{ users: User[]; total: number }>(`/api/users?search=${encodeURIComponent(search)}&offset=${offset}&limit=50`),
+  users: (search = '', offset = 0) => request<{ users: ManagedUser[]; total: number }>(`/api/users?search=${encodeURIComponent(search)}&offset=${offset}&limit=50`),
   createUser: (value: { username: string; password: string; role: UserRole; pro_expires_on?: string | null }) => request<{ user: User }>('/api/users', { method: 'POST', body: JSON.stringify(value) }),
   updateUser: (id: string, value: { role?: UserRole; pro_expires_on?: string | null; is_active?: boolean }) => request<{ user: User }>(`/api/users/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify(value) }),
   resetUserPassword: (id: string, password: string) => request<{ ok: boolean }>(`/api/users/${encodeURIComponent(id)}/reset-password`, { method: 'POST', body: JSON.stringify({ password }) }),
@@ -3616,44 +3635,51 @@ export const api = {
     content?: string
     message?: string
   }> {
-    const res = await sessionFetch('/api/financials/analyze', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ symbol, focus: focus ?? '' }),
-    })
-    if (!res.ok) {
-      let detail = ''
-      try { const j = JSON.parse(await res.text()); detail = j.detail ?? j.message ?? '' } catch { /* ignore */ }
-      const msg = detail || `${res.status} ${res.statusText}`
-      toast(msg, 'error')
-      throw new Error(msg)
-    }
-    if (!res.body) throw new Error('响应无 body')
-
-    const reader = res.body.getReader()
-    const decoder = new TextDecoder()
-    let buf = ''
-    for (;;) {
-      const { done, value } = await reader.read()
-      if (done) break
-      buf += decoder.decode(value, { stream: true })
-      // 按行分割(保留最后不完整的行在 buf)
-      const lines = buf.split('\n')
-      buf = lines.pop() ?? ''
-      for (const line of lines) {
-        const s = line.trim()
-        if (!s) continue
-        try {
-          yield JSON.parse(s)
-        } catch {
-          // 忽略无法解析的行
-        }
+    yield* runAiGeneration('financial_analysis', async function* (creditHeaders) {
+      const res = await sessionFetch('/api/financials/analyze', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...creditHeaders },
+        body: JSON.stringify({ symbol, focus: focus ?? '' }),
+      })
+      if (!res.ok) {
+        let detail = ''
+        try { const j = JSON.parse(await res.text()); detail = j.detail ?? j.message ?? '' } catch { /* ignore */ }
+        const msg = detail || `${res.status} ${res.statusText}`
+        toast(msg, 'error')
+        throw new Error(msg)
       }
-    }
-    // 处理残余
-    if (buf.trim()) {
-      try { yield JSON.parse(buf.trim()) } catch { /* ignore */ }
-    }
+      if (!res.body) throw new Error('响应无 body')
+
+      const reader = res.body.getReader()
+      const decoder = new TextDecoder()
+      let buf = ''
+      try {
+        for (;;) {
+          const { done, value } = await reader.read()
+          if (done) break
+          buf += decoder.decode(value, { stream: true })
+          // 按行分割(保留最后不完整的行在 buf)
+          const lines = buf.split('\n')
+          buf = lines.pop() ?? ''
+          for (const line of lines) {
+            const s = line.trim()
+            if (!s) continue
+            try {
+              yield JSON.parse(s)
+            } catch {
+              // 忽略无法解析的行
+            }
+          }
+        }
+        // 处理残余
+        if (buf.trim()) {
+          try { yield JSON.parse(buf.trim()) } catch { /* ignore */ }
+        }
+      } finally {
+        try { await reader.cancel() } catch { /* 连接已关闭 */ }
+        reader.releaseLock()
+      }
+    })
   },
 
   // ===== 个股分析 =====
@@ -3690,38 +3716,45 @@ export const api = {
     content?: string
     message?: string
   }> {
-    const res = await sessionFetch('/api/stock-analysis/analyze', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ symbol, focus: focus ?? '' }),
-    })
-    if (!res.ok) {
-      let detail = ''
-      try { const j = JSON.parse(await res.text()); detail = j.detail ?? j.message ?? '' } catch { /* ignore */ }
-      const msg = detail || `${res.status} ${res.statusText}`
-      toast(msg, 'error')
-      throw new Error(msg)
-    }
-    if (!res.body) throw new Error('响应无 body')
-
-    const reader = res.body.getReader()
-    const decoder = new TextDecoder()
-    let buf = ''
-    for (;;) {
-      const { done, value } = await reader.read()
-      if (done) break
-      buf += decoder.decode(value, { stream: true })
-      const lines = buf.split('\n')
-      buf = lines.pop() ?? ''
-      for (const line of lines) {
-        const s = line.trim()
-        if (!s) continue
-        try { yield JSON.parse(s) } catch { /* ignore */ }
+    yield* runAiGeneration('stock_analysis', async function* (creditHeaders) {
+      const res = await sessionFetch('/api/stock-analysis/analyze', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...creditHeaders },
+        body: JSON.stringify({ symbol, focus: focus ?? '' }),
+      })
+      if (!res.ok) {
+        let detail = ''
+        try { const j = JSON.parse(await res.text()); detail = j.detail ?? j.message ?? '' } catch { /* ignore */ }
+        const msg = detail || `${res.status} ${res.statusText}`
+        toast(msg, 'error')
+        throw new Error(msg)
       }
-    }
-    if (buf.trim()) {
-      try { yield JSON.parse(buf.trim()) } catch { /* ignore */ }
-    }
+      if (!res.body) throw new Error('响应无 body')
+
+      const reader = res.body.getReader()
+      const decoder = new TextDecoder()
+      let buf = ''
+      try {
+        for (;;) {
+          const { done, value } = await reader.read()
+          if (done) break
+          buf += decoder.decode(value, { stream: true })
+          const lines = buf.split('\n')
+          buf = lines.pop() ?? ''
+          for (const line of lines) {
+            const s = line.trim()
+            if (!s) continue
+            try { yield JSON.parse(s) } catch { /* ignore */ }
+          }
+        }
+        if (buf.trim()) {
+          try { yield JSON.parse(buf.trim()) } catch { /* ignore */ }
+        }
+      } finally {
+        try { await reader.cancel() } catch { /* 连接已关闭 */ }
+        reader.releaseLock()
+      }
+    })
   },
 
   // ===== 大盘复盘 =====
@@ -3770,45 +3803,47 @@ export const api = {
     content?: string
     message?: string
   }> {
-    const res = await sessionFetch('/api/market-recap/analyze', {
-      method: 'POST',
-      signal,
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ as_of: asOf ?? null, focus: focus ?? '' }),
-    })
-    if (!res.ok) {
-      let detail = ''
-      try { const j = JSON.parse(await res.text()); detail = j.detail ?? j.message ?? '' } catch { /* ignore */ }
-      const msg = detail || `${res.status} ${res.statusText}`
-      toast(msg, 'error')
-      throw new Error(msg)
-    }
-    if (!res.body) throw new Error('响应无 body')
+    yield* runAiGeneration('market_recap', async function* (creditHeaders) {
+      const res = await sessionFetch('/api/market-recap/analyze', {
+        method: 'POST',
+        signal,
+        headers: { 'Content-Type': 'application/json', ...creditHeaders },
+        body: JSON.stringify({ as_of: asOf ?? null, focus: focus ?? '' }),
+      })
+      if (!res.ok) {
+        let detail = ''
+        try { const j = JSON.parse(await res.text()); detail = j.detail ?? j.message ?? '' } catch { /* ignore */ }
+        const msg = detail || `${res.status} ${res.statusText}`
+        toast(msg, 'error')
+        throw new Error(msg)
+      }
+      if (!res.body) throw new Error('响应无 body')
 
-    const reader = res.body.getReader()
-    const decoder = new TextDecoder()
-    let buf = ''
-    try {
-      for (;;) {
-        const { done, value } = await reader.read()
-        if (done) break
-        buf += decoder.decode(value, { stream: true })
-        const lines = buf.split('\n')
-        buf = lines.pop() ?? ''
-        for (const line of lines) {
-          const s = line.trim()
-          if (!s) continue
-          try { yield JSON.parse(s) } catch { /* ignore */ }
+      const reader = res.body.getReader()
+      const decoder = new TextDecoder()
+      let buf = ''
+      try {
+        for (;;) {
+          const { done, value } = await reader.read()
+          if (done) break
+          buf += decoder.decode(value, { stream: true })
+          const lines = buf.split('\n')
+          buf = lines.pop() ?? ''
+          for (const line of lines) {
+            const s = line.trim()
+            if (!s) continue
+            try { yield JSON.parse(s) } catch { /* ignore */ }
+          }
         }
+        if (buf.trim()) {
+          try { yield JSON.parse(buf.trim()) } catch { /* ignore */ }
+        }
+      } finally {
+        // 包括显式取消及调用方提前退出；已中止的 fetch 可能令 cancel 拒绝，仍须解锁。
+        try { await reader.cancel() } catch { /* aborted response */ }
+        reader.releaseLock()
       }
-      if (buf.trim()) {
-        try { yield JSON.parse(buf.trim()) } catch { /* ignore */ }
-      }
-    } finally {
-      // 包括显式取消及调用方提前退出；已中止的 fetch 可能令 cancel 拒绝，仍须解锁。
-      try { await reader.cancel() } catch { /* aborted response */ }
-      reader.releaseLock()
-    }
+    }, signal)
   },
 
   /** AI 概念轮动分析 — 流式 NDJSON。 */
@@ -3819,38 +3854,45 @@ export const api = {
     content?: string
     message?: string
   }> {
-    const res = await sessionFetch('/api/rps/rotation-analyze', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ days, focus: focus ?? '', kind: kind ?? 'concept', level: level ?? null }),
-    })
-    if (!res.ok) {
-      let detail = ''
-      try { const j = JSON.parse(await res.text()); detail = j.detail ?? j.message ?? '' } catch { /* ignore */ }
-      const msg = detail || `${res.status} ${res.statusText}`
-      toast(msg, 'error')
-      throw new Error(msg)
-    }
-    if (!res.body) throw new Error('响应无 body')
-
-    const reader = res.body.getReader()
-    const decoder = new TextDecoder()
-    let buf = ''
-    for (;;) {
-      const { done, value } = await reader.read()
-      if (done) break
-      buf += decoder.decode(value, { stream: true })
-      const lines = buf.split('\n')
-      buf = lines.pop() ?? ''
-      for (const line of lines) {
-        const s = line.trim()
-        if (!s) continue
-        try { yield JSON.parse(s) } catch { /* ignore */ }
+    yield* runAiGeneration(kind === 'industry' ? 'industry_rotation' : 'concept_rotation', async function* (creditHeaders) {
+      const res = await sessionFetch('/api/rps/rotation-analyze', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...creditHeaders },
+        body: JSON.stringify({ days, focus: focus ?? '', kind: kind ?? 'concept', level: level ?? null }),
+      })
+      if (!res.ok) {
+        let detail = ''
+        try { const j = JSON.parse(await res.text()); detail = j.detail ?? j.message ?? '' } catch { /* ignore */ }
+        const msg = detail || `${res.status} ${res.statusText}`
+        toast(msg, 'error')
+        throw new Error(msg)
       }
-    }
-    if (buf.trim()) {
-      try { yield JSON.parse(buf.trim()) } catch { /* ignore */ }
-    }
+      if (!res.body) throw new Error('响应无 body')
+
+      const reader = res.body.getReader()
+      const decoder = new TextDecoder()
+      let buf = ''
+      try {
+        for (;;) {
+          const { done, value } = await reader.read()
+          if (done) break
+          buf += decoder.decode(value, { stream: true })
+          const lines = buf.split('\n')
+          buf = lines.pop() ?? ''
+          for (const line of lines) {
+            const s = line.trim()
+            if (!s) continue
+            try { yield JSON.parse(s) } catch { /* ignore */ }
+          }
+        }
+        if (buf.trim()) {
+          try { yield JSON.parse(buf.trim()) } catch { /* ignore */ }
+        }
+      } finally {
+        try { await reader.cancel() } catch { /* 连接已关闭 */ }
+        reader.releaseLock()
+      }
+    })
   },
 
   // ===== Strategy Engine =====

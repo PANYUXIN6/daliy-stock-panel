@@ -9,7 +9,7 @@ from app.services import ai_provider
 
 
 @pytest.fixture
-def client():
+def client(authenticated_actor):
     app = FastAPI()
     app.include_router(router)
     with TestClient(app) as test_client:

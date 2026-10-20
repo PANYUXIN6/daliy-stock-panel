@@ -6,12 +6,10 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Query, Request
-from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from app.services import rps_rotation
 from app.services.concept_rotation_analyzer import analyze_rotation_stream
-from app.services.ndjson_heartbeat import with_heartbeat
 
 router = APIRouter(prefix="/api/rps", tags=["rps"])
 
@@ -60,17 +58,11 @@ async def analyze_rotation(request: Request, req: AnalyzeRequest):
     days = max(7, min(30, req.days))
     kind = "industry" if req.kind == "industry" else "concept"
     level = req.level if (kind == "industry" and req.level in (1, 2, 3)) else None
+    from app.services.ai_credit_stream import CreditStreamingResponse, prepare_credit_task
 
-    async def stream_gen():
-        async for chunk in with_heartbeat(
-            analyze_rotation_stream(
-                repo, days, req.focus, quote_service, depth_service, kind, level,
-            ),
-        ):
-            yield chunk + "\n"
+    credit_task = await prepare_credit_task(request, f"{kind}_rotation")
 
-    return StreamingResponse(
-        stream_gen(),
-        media_type="application/x-ndjson",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    return CreditStreamingResponse(
+        analyze_rotation_stream(repo, days, req.focus, quote_service, depth_service, kind, level),
+        credit_task=credit_task,
     )

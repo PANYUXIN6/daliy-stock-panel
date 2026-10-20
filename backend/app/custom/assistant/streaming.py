@@ -25,6 +25,12 @@ from openai import AsyncOpenAI
 from app import secrets_store
 from app.config import settings
 from app.services.ai_capacity import limited_ai
+from app.services.ai_metering import (
+    metering_active,
+    prepare_metered_call,
+    require_complete_finish,
+    retry_metered_request,
+)
 from app.services.ai_provider import (
     OPENAI_PROVIDER,
     current_ai_model,
@@ -56,6 +62,9 @@ def _retry_kwargs(exc: Exception, kwargs: dict[str, Any]) -> dict[str, Any] | No
         return None
     text = f"{getattr(exc, 'body', '')} {exc}".lower()
     retry = dict(kwargs)
+    if "stream_options" in retry and any(hint in text for hint in ("stream_options", "include_usage")):
+        retry.pop("stream_options")
+        return retry
     if "temperature" in retry and "temperature" in text:
         retry.pop("temperature")
         return retry
@@ -65,7 +74,7 @@ def _retry_kwargs(exc: Exception, kwargs: dict[str, Any]) -> dict[str, Any] | No
     return None
 
 
-def _client(timeout: float) -> AsyncOpenAI:
+def _client(timeout: float, *, base_url: str | None = None) -> AsyncOpenAI:
     ai_key = secrets_store.get_ai_key()
     if not ai_key:
         raise RuntimeError("AI API Key 未配置, 请在设置页配置")
@@ -73,10 +82,10 @@ def _client(timeout: float) -> AsyncOpenAI:
     return AsyncOpenAI(
         api_key=ai_key,
         base_url=normalize_openai_base_url(
-            secrets_store.get_ai_config("ai_base_url", settings.ai_base_url),
+            base_url if base_url is not None else secrets_store.get_ai_config("ai_base_url", settings.ai_base_url),
         ),
         timeout=timeout,
-        max_retries=2,
+        max_retries=0 if metering_active() else 2,
         default_headers={"User-Agent": user_agent},
     )
 
@@ -90,24 +99,40 @@ async def stream_openai_round(
     timeout: float = 240.0,
 ) -> AsyncIterator[dict[str, Any]]:
     """执行一轮流式补全: yield 文本 delta, 最后 yield 一个 round_end 事件。"""
-    client = _client(timeout)
     model = current_ai_model()
+    base_url = secrets_store.get_ai_config("ai_base_url", settings.ai_base_url)
     kwargs = _build_kwargs(temperature)
-    kwargs["tools"] = list(tools)
+    if tools:
+        kwargs["tools"] = list(tools)
 
+    include_usage = True
+    transport_retries = 0
     while True:
+        permit = prepare_metered_call(
+            model=model, base_url=base_url, messages=messages, tools=tools,
+            max_tokens=kwargs.get("max_tokens"),
+        )
+        request_kwargs = permit.request_kwargs(kwargs, stream=True, include_usage=include_usage) if permit else kwargs
         try:
+            client = _client(timeout, base_url=base_url) if permit else _client(timeout)
             stream = await client.chat.completions.create(
                 model=model,
                 messages=[dict(m) for m in messages],
                 stream=True,
-                **kwargs,
+                **request_kwargs,
             )
             break
-        except Exception as exc:
-            retry = _retry_kwargs(exc, kwargs)
+        except BaseException as exc:
+            if permit:
+                permit.settle(success=False)
+            retry = _retry_kwargs(exc, request_kwargs) if isinstance(exc, Exception) else None
             if retry is not None:
+                if "stream_options" in request_kwargs and "stream_options" not in retry:
+                    include_usage = False
                 kwargs = retry
+                continue
+            if isinstance(exc, Exception) and permit and await retry_metered_request(exc, transport_retries):
+                transport_retries += 1
                 continue
             raise
 
@@ -116,9 +141,12 @@ async def stream_openai_round(
     finish_reason = ""
     calls: dict[int, dict[str, Any]] = {}
     ordered: list[dict[str, Any]] = []
+    success = False
 
     try:
         async for chunk in stream:
+            if permit:
+                permit.record_usage(getattr(chunk, "usage", None))
             choices = getattr(chunk, "choices", None) or []
             if not choices:
                 continue
@@ -162,22 +190,24 @@ async def stream_openai_round(
                     if getattr(fn, "arguments", None):
                         entry["arguments"] += str(fn.arguments)
 
+        if permit:
+            require_complete_finish(finish_reason, allow_tools=bool(calls))
+        if not calls and finish_reason in _LENGTH_FINISH_REASONS:
+            raise RuntimeError("AI 输出达到长度上限, 内容不完整; 请提高输出 Token 上限后重试")
+        if not calls and not content_seen:
+            if reasoning_seen:
+                raise RuntimeError("AI 仅返回推理内容, 未生成正文; 请检查模型配置或改用非推理模型")
+            raise RuntimeError("AI 服务未返回正文内容; 请检查模型配置或稍后重试")
+        success = True
     finally:
-        with anyio.CancelScope(shield=True):
-            await stream.close()
+        try:
+            with anyio.CancelScope(shield=True):
+                await stream.close()
+        except BaseException:
+            success = False
+            raise
+        finally:
+            if permit:
+                permit.settle(success=success)
 
-    if calls:
-        yield {
-            "type": "round_end",
-            "tool_calls": ordered,
-            "finish_reason": finish_reason,
-        }
-        return
-
-    if finish_reason in _LENGTH_FINISH_REASONS:
-        raise RuntimeError("AI 输出达到长度上限, 内容不完整; 请提高输出 Token 上限后重试")
-    if not content_seen:
-        if reasoning_seen:
-            raise RuntimeError("AI 仅返回推理内容, 未生成正文; 请检查模型配置或改用非推理模型")
-        raise RuntimeError("AI 服务未返回正文内容; 请检查模型配置或稍后重试")
-    yield {"type": "round_end", "tool_calls": [], "finish_reason": finish_reason}
+    yield {"type": "round_end", "tool_calls": ordered, "finish_reason": finish_reason}

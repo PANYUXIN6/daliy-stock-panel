@@ -14,6 +14,7 @@ from pathlib import Path
 
 import polars as pl
 
+from app.services.ai_prompt_data import TABLE_FORMAT_HINT, tabular_records
 from app.services.financial_sync import FINANCIAL_TABLES, get_financial_df
 
 logger = logging.getLogger(__name__)
@@ -126,12 +127,14 @@ _SYSTEM_PROMPT = """你是一位拥有 15 年 A 股投研经验的资深财务�
 
 def _build_user_prompt(fins: dict[str, list[dict]], symbol: str, focus: str) -> str:
     """构建用户消息:标的代码 + 数据 JSON + 可选关注点。"""
-    data_json = json.dumps(fins, ensure_ascii=False, indent=2)
+    data_json = json.dumps({table: tabular_records(rows) for table, rows in fins.items()},
+                           ensure_ascii=False, separators=(",", ":"))
     lines = [
         f"标的标准代码: {symbol}",
         f"数据概览: {_summarize(fins)}",
         "",
         "以下是该标的最新财务数据(JSON 格式,金额单位为元,比率类指标为百分点):",
+        TABLE_FORMAT_HINT,
         "```json",
         data_json,
         "```",

@@ -190,20 +190,34 @@ def get_auction_benchmark(data_dir: Path, target: date_cls | None = None) -> dic
     return _respond(data_dir, day, cached, cached.get("state") or "ok")
 
 
-def sync_auction_benchmark(data_dir: Path, target: date_cls | None = None) -> dict:
-    """collector 更新当日竞价名单；读取端不隐式拉取或补齐。"""
-    from app.services.shared_runtime import publish_data_update
+def prepare_auction_benchmark(data_dir: Path, target: date_cls | None = None) -> dict:
+    """预取竞价名单，不写缓存、不发布更新，也不读取日线计算收益。
 
+    目标日期随返回值固定，后台取数跨日期后也不会落到另一天的缓存中。
+    上游失败继续抛出，调用方可保留既有缓存而不发布半成品。
+    """
     day = target or cn_today()
     provider = _provider()
     if provider is None:
-        payload = {"state": "source_unavailable", "requested_date": day.isoformat()}
-    else:
-        data = provider.short_term_benchmark(day.isoformat())
-        payload = _base_payload(data_dir, day, data)
+        return {"state": "source_unavailable", "requested_date": day.isoformat()}
+    data = provider.short_term_benchmark(day.isoformat())
+    return _base_payload(data_dir, day, data)
+
+
+def commit_auction_benchmark(prepared: dict, data_dir: Path) -> dict:
+    """由采集主线程提交预取结果，再用已就绪的本地日线计算展示收益。"""
+    from app.services.shared_runtime import publish_data_update
+
+    day = date_cls.fromisoformat(prepared["requested_date"])
+    payload = prepared
     _store_cache(_cache_path(data_dir, day), payload)
     publish_data_update(data_dir, ["auction_benchmark"])
     return get_auction_benchmark(data_dir, day)
+
+
+def sync_auction_benchmark(data_dir: Path, target: date_cls | None = None) -> dict:
+    """collector 更新当日竞价名单；读取端不隐式拉取或补齐。"""
+    return commit_auction_benchmark(prepare_auction_benchmark(data_dir, target), data_dir)
 
 
 def _respond(

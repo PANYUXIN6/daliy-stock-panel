@@ -15,11 +15,14 @@
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import math
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 
+from app.market_time import cn_today
 from app.services.ext_data import (
     ExtConfig,
     ExtConfigStore,
@@ -211,16 +214,10 @@ async def _fetch_json(url: str) -> list[dict]:
     )
 
 
-async def _seed_one(config: ExtConfig, flatten, data_dir: Path) -> int:
-    """拉取 + 转换 + 写入单个预设。返回写入行数。"""
-    from datetime import date
-
-    raw = await _fetch_json(config.pull.url)
-    rows = flatten(raw)
-    if not rows:
-        raise ValueError(f"接口返回 0 行: {config.pull.url}")
-    n = rows_to_parquet(rows, config, data_dir, snapshot_date=date.today())
-    return n
+@dataclass(frozen=True)
+class PreparedPreset:
+    config: ExtConfig
+    rows: list[dict]
 
 
 # ---------------------------------------------------------------------------
@@ -266,19 +263,32 @@ async def fetch_preset(config_id: str, data_dir: Path) -> int:
         ValueError: config_id 不是内置预设
         Exception: 网络请求/解析/写入失败 (由 API 层转 HTTP 错误)
     """
+    return commit_prepared_preset(await prepare_preset(config_id, data_dir), data_dir)
+
+
+async def prepare_preset(config_id: str, data_dir: Path) -> PreparedPreset:
+    """只请求和转换单表，不修改共享配置或文件，供管道的网络预取使用。"""
     config = get_preset(config_id)
     if config is None:
         raise ValueError(f"未知的内置预设: {config_id}")
 
     flatten = _flatten_concept_rows if config_id == "ext_gn_ths" else _flatten_industry_rows
 
-    # 确保 config.json 存在 (用户可能从未启动过 ensure_builtin_presets)
-    store = ExtConfigStore(data_dir)
-    if store.get(config_id) is None:
-        store.upsert(config)
+    raw = await _fetch_json(config.pull.url)
+    rows = flatten(raw)
+    if not rows:
+        raise ValueError(f"接口返回 0 行: {config.pull.url}")
+    return PreparedPreset(config, rows)
 
-    n = await _seed_one(config, flatten, data_dir)
-    logger.info("内置扩展表 %s 手动拉取成功: %d 行", config_id, n)
+
+def commit_prepared_preset(prepared: PreparedPreset, data_dir: Path) -> int:
+    """由所属任务线程提交单表；保留用户已保存的配置。"""
+    config = prepared.config
+    store = ExtConfigStore(data_dir)
+    if store.get(config.id) is None:
+        store.upsert(config)
+    n = rows_to_parquet(prepared.rows, config, data_dir, snapshot_date=cn_today())
+    logger.info("内置扩展表 %s 拉取并提交成功: %d 行", config.id, n)
     return n
 
 
@@ -287,11 +297,18 @@ async def sync_classifications(
     results: dict[str, int],
     on_progress: Callable[[str, int, str], None],
 ) -> dict[str, int]:
-    """板块模块顺序同步两表, 保留已写行数供任务退出时发布部分结果。"""
+    """两路纯取数并发，主线程顺序写入，保留部分结果和取消检查点。"""
     presets = _presets()
+    on_progress("classifications", 0, "并行获取概念与行业分类…")
+    prepared = await asyncio.gather(
+        *(prepare_preset(config.id, data_dir) for config in presets), return_exceptions=True,
+    )
     for index, config in enumerate(presets):
         on_progress("classifications", int(index * 95 / len(presets)), f"同步{config.label}…")
-        results[config.id] = await fetch_preset(config.id, data_dir)
+        outcome = prepared[index]
+        if isinstance(outcome, BaseException):
+            raise outcome
+        results[config.id] = commit_prepared_preset(outcome, data_dir)
         # 先记录已写入数据, 再让进度回调检查取消, 保证取消也会发布本表。
         on_progress("classifications", int((index + 1) * 95 / len(presets)), f"{config.label}同步完成, {results[config.id]} 行")
     on_progress("done", 100, "概念与行业分类同步完成")

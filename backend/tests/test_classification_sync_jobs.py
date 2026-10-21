@@ -123,21 +123,21 @@ async def test_second_classification_failure_keeps_first_table_readable(classifi
 async def test_classification_cancel_preserves_written_table_and_reuses_shared_job(classification_app, monkeypatch):
     state = classification_app
     written, release = Event(), Event()
-    original = ext_presets.fetch_preset
+    original = ext_presets.commit_prepared_preset
     calls = []
 
     async def fetch(url):
         return [{"symbol": "600000.SH", "name": "示例", "concepts": ["机器人", "人工智能"]}]
 
-    async def held_fetch(config_id, root):
-        calls.append(config_id)
-        rows = await original(config_id, root)
+    def held_commit(prepared, root):
+        calls.append(prepared.config.id)
+        rows = original(prepared, root)
         written.set()
         assert release.wait(3)
         return rows
 
     monkeypatch.setattr(ext_presets, "_fetch_json", fetch)
-    monkeypatch.setattr(ext_presets, "fetch_preset", held_fetch)
+    monkeypatch.setattr(ext_presets, "commit_prepared_preset", held_commit)
     before = (await state.client.get("/api/data/status")).json()["storage"]["ext_data_files"]
     assert before == 0
     response = await state.client.post("/api/ext-data/presets/sync")

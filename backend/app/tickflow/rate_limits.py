@@ -19,8 +19,7 @@ T = TypeVar("T")
 SAFETY_RPM_FACTOR = 0.8
 
 # 进程级共享限速器: 按 rpm 分桶的「下一个可用时刻」表 (Lock 守护)。
-# 限制: sleep_between_batches(index=0) 只登记槽位、不 sleep, 因此多个调用方若同时以
-# index=0 启动, 仍可能瞬时突发超过单能力 rpm。后续 index>0 批次会按同一时间轴排队。
+# 首批与后续批次都等待预约时刻，避免多个调用方同时启动时绕过共享预算。
 # 预算只在本进程内共享；多个 probe 或批量 sync 进程仍需错峰，不是账户级限频。
 _slot_lock = threading.Lock()
 _next_slot: dict[int, float] = {}
@@ -98,19 +97,12 @@ def chunked(items: list[T], batch_size: int | None) -> list[list[T]]:
 def sleep_between_batches(index: int, rpm: int | None, *, default_interval: float = 0.0) -> None:
     """Pace batches via the process-local shared slot table.
 
-    - index == 0: reserve a slot but do **not** sleep (documented first-batch burst).
-    - index > 0: wait until the reserved slot time.
-
-    Concurrent callers that all pass index=0 can still burst above rpm; only later
-    batches and single-pipeline callers get full spacing. The slot table is not
-    shared across processes, so concurrent probe/sync processes need coordination.
+    Every batch, including a new caller's first batch, waits for its reserved slot.
+    The first request on an idle budget proceeds immediately. The slot table is
+    not shared across processes, so concurrent probe/sync processes need coordination.
     """
     interval = batch_interval(rpm, default=default_interval)
     if interval <= 0:
-        return
-    if index <= 0:
-        # First batch: reserve only (no sleep). Concurrent index=0 calls may burst.
-        _reserve_slot(rpm or -1, interval)
         return
     wait = _reserve_slot(rpm or -1, interval)
     if wait > 0:

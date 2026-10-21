@@ -7,6 +7,7 @@ import { useQuery } from '@tanstack/react-query'
 import { motion } from 'framer-motion'
 import { useQuoteStream, useQuoteStreamStatus } from '@/lib/useQuoteStream'
 import { ToastContainer } from '@/components/Toast'
+import { DataSyncIndicator } from '@/components/data/DataSyncIndicator'
 import { AlertToastContainer } from '@/components/AlertToast'
 import { AiAnalysisHost } from '@/components/financials/AiAnalysisHost'
 import { AiReportBubble } from '@/components/financials/AiReportBubble'
@@ -25,7 +26,6 @@ import {
   Tags,
   BarChart3,
   Sparkles,
-  CheckCircle2,
   ChevronRight,
   ChevronDown,
   Sun,
@@ -305,27 +305,10 @@ export function Layout() {
   // 标签页隐藏时 TanStack 默认暂停轮询 — 转圈提示只在页面可见时有意义, 不再强制后台轮询
   const { data: pipelineJobs } = useQuery({
     queryKey: QK.pipelineJobs,
-    queryFn: () => api.pipelineJobs(1),
+    queryFn: () => api.pipelineJobs(15),
     enabled: user?.role === 'admin',
     refetchInterval: (query) => (query.state.data?.active_id ? 2000 : 15000),
   })
-  const isDataSyncing = !!pipelineJobs?.active_id
-
-  // 数据同步完成的"瞬时反馈": isDataSyncing 从 true→false 时显示绿色对勾,
-  // 闪烁约 3 秒后自动消失。
-  const [dataSyncJustDone, setDataSyncJustDone] = useState(false)
-  const prevSyncingRef = useRef(false)
-  useEffect(() => {
-    // 仅在"刚结束"(true→false)且非首次挂载时触发
-    if (prevSyncingRef.current && !isDataSyncing) {
-      setDataSyncJustDone(true)
-      const t = setTimeout(() => setDataSyncJustDone(false), 3000)
-      prevSyncingRef.current = isDataSyncing
-      return () => clearTimeout(t)
-    }
-    prevSyncingRef.current = isDataSyncing
-  }, [isDataSyncing])
-
   const version = versionData?.version
   const realtimeEnabled = prefs?.realtime_quotes_enabled ?? false
   // 自选实时模式限制提示: 可手动关闭, 不持久化 (刷新后恢复显示)
@@ -609,12 +592,8 @@ export function Layout() {
                             {badge}
                           </span>
                         )}
-                        {/* 数据同步状态: 同步中转圈, 刚完成显示绿色对勾闪烁 3 秒 */}
-                        {to === '/data' && isDataSyncing && !railMode && (
-                          <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-accent" />
-                        )}
-                        {to === '/data' && !isDataSyncing && dataSyncJustDone && !railMode && (
-                          <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-bull animate-pulse" />
+                        {to === '/data' && !railMode && (
+                          <DataSyncIndicator activeId={pipelineJobs?.active_id ?? null} jobs={pipelineJobs?.jobs ?? []} />
                         )}
                         {/* 监控中心徽标: 仅非监控页且有未读时显示 */}
                         {to === '/monitor' && !railMode && <MonitorBadge active={isActive} />}

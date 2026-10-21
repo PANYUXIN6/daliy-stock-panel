@@ -9,7 +9,8 @@ from __future__ import annotations
 import gc
 import logging
 from collections.abc import Callable
-from datetime import datetime, timedelta
+from dataclasses import dataclass
+from datetime import date, datetime, timedelta
 
 import polars as pl
 
@@ -25,6 +26,80 @@ logger = logging.getLogger(__name__)
 
 # exchanges.get_instruments 查询的交易所(沪深京)
 _EXCHANGES = ["SH", "SZ", "BJ"]
+
+# 只预取短窗口的少量核心指数，首次历史回填继续逐批取数、加工和落盘。
+INDEX_PREFETCH_MAX_DAYS = 14
+INDEX_PREFETCH_MAX_SYMBOLS = 4
+
+
+@dataclass(frozen=True)
+class PreparedIndexDaily:
+    frames: tuple[pl.DataFrame, ...]
+    coverage: DailyCoverage | None = None
+
+
+def prepare_index_daily(
+    capset: CapabilitySet,
+    symbols: list[str],
+    start_date: datetime,
+    end_date: datetime,
+    *,
+    on_chunk_done: Callable[[int, int], None] | None = None,
+    coverage_day: date | None = None,
+) -> PreparedIndexDaily:
+    """纯网络取数与规范化，不访问仓库、加工指标或写入文件。"""
+    symbols = sorted(set(symbols))
+    if end_date < start_date or end_date - start_date > timedelta(days=INDEX_PREFETCH_MAX_DAYS):
+        raise ValueError("指数预取仅支持不超过 14 天的有效窗口；历史回填应使用流式同步")
+    if len(symbols) > INDEX_PREFETCH_MAX_SYMBOLS:
+        raise ValueError("指数预取最多包含 4 个核心指数")
+    coverage = DailyCoverage(coverage_day) if coverage_day is not None else None
+    if not symbols or not capset.has(Cap.KLINE_DAILY_BATCH):
+        return PreparedIndexDaily((), coverage)
+    limit = resolve_limit(capset, Cap.KLINE_DAILY_BATCH)
+    chunks = chunked(symbols, min_batch(preferences.get_index_daily_batch_size(), limit))
+    frames: list[pl.DataFrame] = []
+    for index, chunk in enumerate(chunks):
+        sleep_between_batches(index, limit.rpm)
+        raw = kline_sync.sync_daily_batch(
+            chunk, batch_size=None, start_time=start_date, end_time=end_date,
+            **({"coverage": coverage} if coverage is not None else {}),
+        )
+        if not raw.is_empty():
+            frames.append(raw)
+        if on_chunk_done:
+            on_chunk_done(index + 1, len(chunks))
+    return PreparedIndexDaily(tuple(frames), coverage)
+
+
+def _commit_index_daily_batch(raw: pl.DataFrame, repo: KlineRepository) -> int:
+    repo.append_index_daily(raw)
+    enriched = compute_enriched(raw, factors=None, instruments=None)
+    repo.append_index_enriched(enriched)
+    return raw.height
+
+
+def commit_prepared_index_daily(
+    prepared: PreparedIndexDaily,
+    repo: KlineRepository,
+    *,
+    coverage: DailyCoverage | None = None,
+    on_chunk_done: Callable[[int, int], None] | None = None,
+) -> int:
+    """由管道所属线程串行提交预取结果，完整保留本轮覆盖和失败证据。"""
+    if coverage is not None and prepared.coverage is not None:
+        if coverage.day != prepared.coverage.day:
+            raise ValueError("指数预取覆盖证据的日期与提交日期不一致")
+        coverage.active.update(prepared.coverage.active)
+        coverage.halted.update(prepared.coverage.halted)
+        coverage.failed.update(prepared.coverage.failed)
+    total = 0
+    for index, raw in enumerate(prepared.frames):
+        total += _commit_index_daily_batch(raw, repo)
+        if on_chunk_done:
+            on_chunk_done(index + 1, len(prepared.frames))
+    repo.refresh_index_views()
+    return total
 
 
 def _quotes_to_index_instruments(resp) -> pl.DataFrame:
@@ -244,14 +319,11 @@ def sync_and_persist_index_daily(
         if raw.is_empty():
             continue
 
-        repo.append_index_daily(raw)
-        enriched = compute_enriched(raw, factors=None, instruments=None)
-        repo.append_index_enriched(enriched)
-        total_rows += raw.height
+        total_rows += _commit_index_daily_batch(raw, repo)
         logger.info("index/etf daily synced: %d/%d chunks, +%d rows", i + 1, len(chunks), raw.height)
         if on_chunk_done:
             on_chunk_done(i + 1, len(chunks))
-        del raw, enriched
+        del raw
         gc.collect()
     repo.refresh_index_views()
     return total_rows

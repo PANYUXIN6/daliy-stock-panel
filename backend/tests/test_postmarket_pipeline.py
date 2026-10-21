@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import date, datetime, timedelta
+from threading import Event, get_ident
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
@@ -14,7 +15,9 @@ from app.indicators.pipeline import run_pipeline as calculate_indicators
 from app.jobs import daily_pipeline
 from app.market_time import CN_TZ
 from app.services import (
+    auction_benchmark,
     data_integrity,
+    dragon_tiger,
     ext_presets,
     market_mainline,
     pipeline_jobs,
@@ -33,6 +36,7 @@ from app.tickflow.repository import DataStore, KlineRepository
 
 DAY = date(2026, 10, 16)
 SYMBOLS = ["600000.SH", "000001.SZ"]
+SYNC_BOARDS = daily_pipeline._sync_recap_boards
 
 
 def bars(symbols=SYMBOLS, day=DAY):
@@ -108,10 +112,22 @@ def closing(tmp_path, monkeypatch):
         ))
         return len(controls.index_symbols)
 
-    async def classifications(data_dir, results, on_progress):
-        steps.append("classifications")
-        results.update({"ext_gn_ths": 2, "ext_hy_ths": 2})
-        return results
+    def prepare_index(capset, symbols, start_date, end_date, *, coverage_day, **kwargs):
+        coverage = DailyCoverage(coverage_day)
+        frame = bars(controls.index_symbols)
+        coverage.observe(frame)
+        return daily_pipeline.index_sync.PreparedIndexDaily((frame,), coverage)
+
+    def commit_index(prepared, repo, *, coverage, **kwargs):
+        return index(repo, None, coverage=coverage, symbols_override=list(CORE_INDEX_SYMBOLS))
+
+    async def prepare_classification(config_id, data_dir):
+        return SimpleNamespace(config=SimpleNamespace(id=config_id, label=config_id))
+
+    def commit_classification(prepared, data_dir):
+        if prepared.config.id == "ext_gn_ths":
+            steps.append("classifications")
+        return 2
 
     def environment(repo, data_dir, **kwargs):
         steps.append("regime")
@@ -131,13 +147,18 @@ def closing(tmp_path, monkeypatch):
     monkeypatch.setattr(daily_pipeline, "run_pipeline", indicators)
     monkeypatch.setattr(daily_pipeline.index_sync, "sync_index_instruments", lambda *_, **__: 4)
     monkeypatch.setattr(daily_pipeline.index_sync, "sync_and_persist_index_daily", index)
-    monkeypatch.setattr(ext_presets, "sync_classifications", classifications)
+    monkeypatch.setattr(daily_pipeline.index_sync, "prepare_index_daily", prepare_index)
+    monkeypatch.setattr(daily_pipeline.index_sync, "commit_prepared_index_daily", commit_index)
+    monkeypatch.setattr(ext_presets, "prepare_preset", prepare_classification)
+    monkeypatch.setattr(ext_presets, "commit_prepared_preset", commit_classification)
+    monkeypatch.setattr(auction_benchmark, "prepare_auction_benchmark", lambda *_: {})
+    monkeypatch.setattr(dragon_tiger, "prepare_dragon_tiger", lambda *_: {})
     monkeypatch.setattr(regime_builder, "compute_regime_incremental", environment)
     monkeypatch.setattr(market_mainline, "compute_mainline_incremental", mainline)
     monkeypatch.setattr(user_runtime, "settle_user_accounts", lambda *_: steps.append("paper") or {})
     monkeypatch.setattr(daily_pipeline.kline_sync, "sync_and_persist_minute", lambda *_, **__: steps.append("minute") or 0)
     monkeypatch.setattr(daily_pipeline, "_push_phase_change_alert", lambda *_: None)
-    monkeypatch.setattr(daily_pipeline, "_sync_recap_boards", lambda *_: steps.append("boards"))
+    monkeypatch.setattr(daily_pipeline, "_sync_recap_boards", lambda *_, **__: steps.append("boards"))
     monkeypatch.setattr(review_publication, "publish_review_if_ready", lambda *_: steps.append("publication"))
     repo = SimpleNamespace(store=SimpleNamespace(data_dir=tmp_path), latest_daily_date=lambda: DAY,
                            refresh_cache=lambda: steps.append("cache"), refresh_index_views=lambda: None,
@@ -157,11 +178,124 @@ def test_automatic_order_forces_core_inputs_and_environment_but_keeps_manual_pre
                "regime", "concept", "industry", "paper", "minute", "depth", "boards", "publication"]
     assert [step for step in steps if step != "cache"] == ordered
     assert steps.index("cache") < steps.index("regime")
+    assert steps.count("cache") == 1  # 最终刷新由 API 任务边界负责，此处不重复加载股票缓存。
     assert result["postmarket_date"] == DAY.isoformat()
     assert result["readiness"]["daily"]["active"] == 2
     assert result["readiness"]["indices"]["active"] == 4
     assert result["readiness"]["enriched"]["symbols"] == 2
     assert preferences.get_pipeline_regime_enabled() is False
+
+
+def test_pure_index_and_classification_fetch_overlap_indicators_but_commit_on_owner_thread(closing, monkeypatch):
+    repo, caps, steps, _ = closing
+    (repo.store.data_dir / "kline_index_enriched" / f"date={DAY}").mkdir(parents=True)
+    calculating = Event()
+    fetching_index = Event()
+    fetching_concept = Event()
+    owner = get_ident()
+    prepare_index = daily_pipeline.index_sync.prepare_index_daily
+    commit_index = daily_pipeline.index_sync.commit_prepared_index_daily
+    prepare_preset = ext_presets.prepare_preset
+    commit_preset = ext_presets.commit_prepared_preset
+    indicators = daily_pipeline.run_pipeline
+
+    def index_fetch(*args, **kwargs):
+        assert get_ident() != owner
+        fetching_index.set()
+        assert calculating.wait(5)
+        return prepare_index(*args, **kwargs)
+
+    async def classification_fetch(config_id, data_dir):
+        assert get_ident() != owner
+        if config_id == "ext_gn_ths":
+            fetching_concept.set()
+        assert calculating.wait(5)
+        return await prepare_preset(config_id, data_dir)
+
+    def compute(**kwargs):
+        calculating.set()
+        assert fetching_index.wait(5) and fetching_concept.wait(5)
+        return indicators(**kwargs)
+
+    def index_commit(*args, **kwargs):
+        assert get_ident() == owner and "enriched" in steps
+        return commit_index(*args, **kwargs)
+
+    def classification_commit(*args, **kwargs):
+        assert get_ident() == owner and "indices" in steps
+        return commit_preset(*args, **kwargs)
+
+    monkeypatch.setattr(daily_pipeline.index_sync, "prepare_index_daily", index_fetch)
+    monkeypatch.setattr(daily_pipeline.index_sync, "commit_prepared_index_daily", index_commit)
+    monkeypatch.setattr(ext_presets, "prepare_preset", classification_fetch)
+    monkeypatch.setattr(ext_presets, "commit_prepared_preset", classification_commit)
+    monkeypatch.setattr(daily_pipeline, "run_pipeline", compute)
+    result = daily_pipeline.run_now(repo, caps, postmarket=True)
+    assert result["readiness"]["indices"]["active"] == 4
+    assert steps.index("enriched") < steps.index("indices") < steps.index("regime")
+    assert "publication" in steps
+
+
+def test_required_index_prefetch_failure_cannot_reuse_cached_inputs(closing, monkeypatch):
+    repo, caps, steps, _ = closing
+    (repo.store.data_dir / "kline_index_enriched" / f"date={DAY}").mkdir(parents=True)
+    monkeypatch.setattr(daily_pipeline.index_sync, "prepare_index_daily", Mock(side_effect=ValueError("指数取数失败")))
+    with pytest.raises(daily_pipeline.PipelineStageError, match="指数取数失败"):
+        daily_pipeline.run_now(repo, caps, postmarket=True)
+    assert "indices" not in steps and "regime" not in steps and "publication" not in steps
+
+
+def test_classification_prefetch_failure_preserves_first_commit_but_blocks_publication(closing, monkeypatch):
+    repo, caps, steps, _ = closing
+    prepare = ext_presets.prepare_preset
+
+    async def fetch(config_id, data_dir):
+        if config_id == "ext_hy_ths":
+            raise ValueError("行业取数失败")
+        return await prepare(config_id, data_dir)
+
+    monkeypatch.setattr(ext_presets, "prepare_preset", fetch)
+    with pytest.raises(ValueError, match="行业取数失败"):
+        daily_pipeline.run_now(repo, caps, postmarket=True)
+    assert "classifications" in steps and "regime" not in steps and "publication" not in steps
+
+
+def test_optional_board_prefetch_error_is_reported_without_blocking_core_publication(closing, monkeypatch):
+    from app.services import trading_day
+
+    repo, caps, steps, _ = closing
+    monkeypatch.setattr(trading_day, "is_trading_day", lambda **_: True)
+    monkeypatch.setattr(daily_pipeline, "_sync_recap_boards", SYNC_BOARDS)
+    monkeypatch.setattr(auction_benchmark, "prepare_auction_benchmark", Mock(side_effect=ValueError("上游尚未发布")))
+    monkeypatch.setattr(dragon_tiger, "prepare_dragon_tiger", lambda *_: {
+        "state": "source_unavailable", "requested_date": DAY.isoformat(),
+    })
+    result = daily_pipeline.run_now(repo, caps, postmarket=True)
+    assert result["board_status"]["auction"] == {"state": "error", "error": "上游尚未发布"}
+    assert result["board_status"]["dragon_tiger"]["state"] == "source_unavailable"
+    assert "publication" in steps
+
+
+@pytest.mark.parametrize("problem", ["paper", "publication"])
+def test_task_failure_is_attributed_to_the_actual_stage_not_successful_cleanup(closing, monkeypatch, problem):
+    repo, caps, _, _ = closing
+    store = JobStore(store_dir=repo.store.data_dir / "jobs")
+    job_id, _ = store.create()
+    store.start(job_id)
+    if problem == "paper":
+        monkeypatch.setattr(user_runtime, "settle_user_accounts", Mock(side_effect=ValueError("结算失败")))
+        expected = "paper_settle"
+    else:
+        monkeypatch.setattr(review_publication, "publish_review_if_ready", Mock(side_effect=ValueError("发布失败")))
+        expected = "publish_review"
+    with pytest.raises((daily_pipeline.PipelineStageError, ValueError)):
+        daily_pipeline.run_now(repo, caps, postmarket=True,
+                               on_progress=lambda *args, **kwargs: store.progress(job_id, *args, **kwargs))
+    tasks = store.get(job_id)["tasks"]
+    assert tasks[expected]["status"] == "failed"
+    assert tasks["refresh_views"]["status"] == "succeeded"
+    if problem == "publication":
+        assert tasks["sync_boards"]["status"] == "succeeded"
 
 
 @pytest.mark.parametrize("problem", ["daily", "enriched", "indices"])

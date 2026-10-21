@@ -4181,6 +4181,20 @@ export const api = {
 }
 
 // ===== Pipeline =====
+export type PipelineTaskStatus = 'pending' | 'running' | 'succeeded' | 'failed' | 'skipped' | 'cancelled'
+export interface PipelineTask {
+  id?: string
+  label?: string
+  status: PipelineTaskStatus
+  progress?: number
+  started_at?: string | null
+  finished_at?: string | null
+  last_progress_at?: string | null
+  duration_s?: number | null
+  message?: string | null
+  error?: string | null
+}
+
 export interface PipelineJob {
   id: string
   request_key?: string | null
@@ -4192,6 +4206,11 @@ export interface PipelineJob {
   started_at: string | null
   finished_at: string | null
   duration_s: number | null
+  last_progress_at?: string | null
+  /** 独立子任务状态，可同时有多个运行中任务；历史记录可能没有此字段。 */
+  tasks?: Record<string, PipelineTask>
+  stage_timings?: Record<string, number>
+  outcome?: 'succeeded' | 'failed' | 'cancelled' | null
   result: {
     universe_size?: number
     daily_days?: number

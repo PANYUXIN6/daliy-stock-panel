@@ -21,6 +21,7 @@ import threading
 import uuid
 from collections.abc import Callable
 from contextlib import suppress
+from copy import deepcopy
 from datetime import UTC, datetime
 from pathlib import Path
 from time import time_ns
@@ -29,6 +30,18 @@ from typing import Any, Literal, TypeVar
 logger = logging.getLogger(__name__)
 
 JobStatus = Literal["pending", "running", "succeeded", "failed"]
+TaskStatus = Literal["pending", "running", "succeeded", "failed", "skipped", "cancelled"]
+_TASK_TERMINAL = {"succeeded", "failed", "skipped", "cancelled"}
+
+
+def _now_iso() -> str:
+    return datetime.utcnow().isoformat(timespec="milliseconds") + "Z"
+
+
+def _elapsed_seconds(start: str | None, end: str) -> float:
+    if not start:
+        return 0.0
+    return round(max(0.0, (_parse_utc(end) - _parse_utc(start)).total_seconds()), 3)
 
 # 卡死判定阈值(秒)。语义是「进度停滞」而非「总时长」:
 # running 期间只要 progress() 还在上报(每个分块都会回调), 就永远不算卡死 ——
@@ -128,6 +141,7 @@ class JobStore:
         self._store_dir = store_dir
         self._active_jobs: dict[str, dict[str, Any]] = {}   # running/pending
         self._active_id: str | None = None
+        self._stage_started_at: dict[str, str] = {}
         self._lock = threading.Lock()
         self._store_dir.mkdir(parents=True, exist_ok=True)
         if recover:
@@ -212,6 +226,7 @@ class JobStore:
             if not j.get("id") or orig_status not in ("pending", "running"):
                 continue
             j["status"] = "failed"
+            j["outcome"] = "failed"
             j["error"] = "后端重启,任务中断(启动时补录)"
             try:
                 stat = f.stat()
@@ -219,14 +234,15 @@ class JobStore:
                 if "created_at_ns" not in j:
                     j["created_at_ns"] = stat.st_mtime_ns
                 mtime = datetime.fromtimestamp(stat.st_mtime, tz=UTC)
-                end = mtime.strftime("%Y-%m-%dT%H:%M:%SZ")
+                end = mtime.isoformat(timespec="milliseconds").replace("+00:00", "Z")
             except (OSError, OverflowError, ValueError):
-                end = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+                end = _now_iso()
             # mtime 早于 started_at(时钟回拨等)时夹住, 避免 duration 为负
-            if j.get("started_at") and end < j["started_at"]:
+            if j.get("started_at") and _parse_utc(end) < _parse_utc(j["started_at"]):
                 end = j["started_at"]
             j["finished_at"] = end
             j["duration_s"] = _duration_s(j)
+            self._finish_tasks(j, "failed", end)
             logger.warning(
                 "job_store: 补录中断任务 %s (上个进程遗留 %s 记录)",
                 j["id"],
@@ -274,7 +290,7 @@ class JobStore:
             job_id = uuid.uuid4().hex[:10]
             # last_progress_at 锚定创建时刻: pending 阶段(executor 排队/等重任务槽)
             # 也要有「已知存活」基准, 否则从未上报进度的排队任务永远不进 reap 视野。
-            created_at = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+            created_at = _now_iso()
             job = {
                 "id": job_id,
                 "created_at_ns": time_ns(),
@@ -283,6 +299,9 @@ class JobStore:
                 "stage": "init",
                 "progress": 0,
                 "stage_pct": 0,
+                "tasks": {},
+                "stage_timings": {},
+                "outcome": None,
                 "log": [],
                 "started_at": None,
                 "last_progress_at": created_at,
@@ -293,6 +312,7 @@ class JobStore:
                 "timeout_s": timeout_s,
             }
             self._active_jobs[job_id] = job
+            self._stage_started_at[job_id] = created_at
             self._active_id = job_id
             # pending 即落盘: 进程在 start() 前死亡时记录也不丢
             self._delete_oldest()
@@ -306,7 +326,8 @@ class JobStore:
             if not j:
                 return
             j["status"] = "running"
-            j["started_at"] = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+            j["started_at"] = _now_iso()
+            self._stage_started_at[job_id] = j["started_at"]
             # 心跳基准初始化为启动时刻: start() 到首次 progress() 之间的
             # 初始化阶段(解析标的池等)同样计入停滞计时。
             j["last_progress_at"] = j["started_at"]
@@ -319,7 +340,10 @@ class JobStore:
             if not j:
                 return
             j["status"] = "succeeded"
-            j["finished_at"] = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+            j["outcome"] = "succeeded"
+            j["finished_at"] = _now_iso()
+            self._finish_stage(j, j["finished_at"])
+            self._finish_tasks(j, "succeeded", j["finished_at"])
             j["progress"] = 100
             j["result"] = result
             j["duration_s"] = _duration_s(j)
@@ -334,7 +358,10 @@ class JobStore:
             if not j:
                 return
             j["status"] = "failed"
-            j["finished_at"] = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+            j["outcome"] = "cancelled" if error == "用户手动取消" else "failed"
+            j["finished_at"] = _now_iso()
+            self._finish_stage(j, j["finished_at"])
+            self._finish_tasks(j, j["outcome"], j["finished_at"])
             j["error"] = error
             j["duration_s"] = _duration_s(j)
             if self._active_id == job_id:
@@ -345,7 +372,15 @@ class JobStore:
     # ===== progress =====
 
     def progress(self, job_id: str, stage: str, pct: int, msg: str,
-                 stage_pct: int | None = None, skip_log: bool = False) -> None:
+                 stage_pct: int | None = None, skip_log: bool = False, *,
+                 task_id: str | None = None, task_status: TaskStatus | None = None,
+                 task_progress: int | None = None, task_label: str | None = None,
+                 task_error: str | None = None) -> None:
+        """Update primary progress or a concurrent task without replacing the primary stage.
+
+        Explicit task updates use their own lifecycle; stage switches never infer that
+        a concurrent task completed. ``skip_log`` suppresses their duplicate log entry.
+        """
         with self._lock:
             j = self._active_jobs.get(job_id)
             if not j:
@@ -355,21 +390,33 @@ class JobStore:
                 if cancelled is not None and cancelled.is_set():
                     raise JobCancelledError(job_id)
                 return
-            j["stage"] = stage
-            j["progress"] = max(0, min(100, int(pct)))
-            j["last_progress_at"] = datetime.utcnow().isoformat(timespec="seconds") + "Z"
-            if stage_pct is not None:
-                j["stage_pct"] = max(0, min(100, int(stage_pct)))
-            elif j["stage"] != stage:
-                j["stage_pct"] = 0
+            now = _now_iso()
+            j["progress"] = max(j["progress"], max(0, min(100, int(pct))))
+            j["last_progress_at"] = now
+            if task_id is None:
+                if j["stage"] != stage:
+                    self._finish_stage(j, now)
+                    self._stage_started_at[job_id] = now
+                    j["stage_pct"] = 0
+                j["stage"] = stage
+                if stage_pct is not None:
+                    j["stage_pct"] = max(0, min(100, int(stage_pct)))
+            else:
+                self._update_task(j, task_id, now, status=task_status,
+                                  progress=task_progress if task_progress is not None else stage_pct,
+                                  label=task_label, message=msg, error=task_error)
             entry = {
-                "ts": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+                "ts": now,
                 "stage": stage,
                 "msg": msg,
             }
+            if task_id is not None:
+                entry["task_id"] = task_id
             if skip_log:
                 entry["_skip"] = True
-            if skip_log and j["log"] and j["log"][-1].get("stage") == stage and j["log"][-1].get("_skip"):
+            if task_id is not None and skip_log:
+                pass
+            elif skip_log and j["log"] and j["log"][-1].get("stage") == stage and j["log"][-1].get("_skip"):
                 j["log"][-1] = entry
             else:
                 j["log"].append(entry)
@@ -381,6 +428,69 @@ class JobStore:
         if ev is not None and ev.is_set():
             raise JobCancelledError(job_id)
 
+    def _finish_stage(self, job: dict[str, Any], now: str) -> None:
+        started = self._stage_started_at.pop(job["id"], None)
+        if started is not None:
+            timings = job.setdefault("stage_timings", {})
+            stage = job["stage"]
+            timings[stage] = round(timings.get(stage, 0.0) + _elapsed_seconds(started, now), 3)
+
+    @staticmethod
+    def _update_task(job: dict[str, Any], task_id: str, now: str, *,
+                     status: TaskStatus | None, progress: int | None, label: str | None,
+                     message: str, error: str | None) -> None:
+        tasks = job.setdefault("tasks", {})
+        task = tasks.setdefault(task_id, {
+            "id": task_id, "label": label or task_id, "status": "pending", "progress": 0,
+            "started_at": None, "finished_at": None, "last_progress_at": now,
+            "duration_s": None, "message": "", "error": None,
+        })
+        # A late worker callback must not resurrect an already terminal task.
+        if task["status"] in _TASK_TERMINAL:
+            return
+        state = status or "running"
+        if label is not None:
+            task["label"] = label
+        task.update(status=state, last_progress_at=now, message=message)
+        if error is not None:
+            task["error"] = error
+        if task["started_at"] is None and state not in {"pending", "skipped"}:
+            task["started_at"] = now
+        if progress is not None:
+            task["progress"] = max(task["progress"], max(0, min(100, int(progress))))
+        if state == "succeeded":
+            task["progress"] = 100
+        if state in _TASK_TERMINAL:
+            task["finished_at"] = now
+            task["duration_s"] = _elapsed_seconds(task["started_at"], now)
+
+    @staticmethod
+    def _finish_tasks(job: dict[str, Any], outcome: str, now: str) -> None:
+        for task in job.get("tasks", {}).values():
+            if task["status"] in _TASK_TERMINAL:
+                continue
+            if outcome == "succeeded":
+                state = "skipped" if task["status"] == "pending" else "succeeded"
+            else:
+                state = "skipped" if task["status"] == "pending" and outcome != "cancelled" else "cancelled"
+            task.update(status=state, finished_at=now, last_progress_at=now,
+                        duration_s=_elapsed_seconds(task["started_at"], now))
+            if state == "succeeded":
+                task["progress"] = 100
+
+    def _snapshot(self, job: dict[str, Any]) -> dict[str, Any]:
+        snapshot = deepcopy(job)
+        now = _now_iso()
+        for task in snapshot.get("tasks", {}).values():
+            if task["status"] == "running":
+                task["duration_s"] = _elapsed_seconds(task["started_at"], now)
+        started = self._stage_started_at.get(job["id"])
+        if started:
+            timings = snapshot.setdefault("stage_timings", {})
+            stage = job["stage"]
+            timings[stage] = round(timings.get(stage, 0.0) + _elapsed_seconds(started, now), 3)
+        return snapshot
+
     # ===== query =====
 
     def get(self, job_id: str) -> dict[str, Any] | None:
@@ -390,14 +500,15 @@ class JobStore:
             # 内存中的活跃 job 优先
             j = self._active_jobs.get(job_id)
             if j:
-                return j
+                return self._snapshot(j)
             # 否则从磁盘读
             return self._read_file(job_id)
 
     def list_recent(self, limit: int = 20) -> list[dict[str, Any]]:
         # 合并: 内存中的活跃 job + 磁盘文件
-        all_jobs: list[dict[str, Any]] = list(self._active_jobs.values())
-        all_jobs.extend(self._job_files_sorted())
+        with self._lock:
+            all_jobs = [self._snapshot(job) for job in self._active_jobs.values()]
+            all_jobs.extend(self._job_files_sorted())
         # 同秒按持久化创建时间排序；相同id的排序键一致，保留前面的内存快照。
         seen: set[str] = set()
         result: list[dict[str, Any]] = []
@@ -412,7 +523,8 @@ class JobStore:
         return result
 
     def active_id(self) -> str | None:
-        return self._active_id
+        with self._lock:
+            return self._active_id
 
     def reap_stale(self, timeout_s: int | None = None) -> None:
         """回收卡死的 running job, 以及排队超时的 pending job。判定:
@@ -506,6 +618,7 @@ class JobStore:
         """清空所有任务（内存 + 磁盘文件 + 取消标志）。"""
         with self._lock:
             self._active_jobs.clear()
+            self._stage_started_at.clear()
             self._active_id = None
             for f in self._store_dir.glob("*.json"):
                 with suppress(OSError):
@@ -527,6 +640,10 @@ def _summary(j: dict[str, Any]) -> dict[str, Any]:
         "duration_s": j["duration_s"],
         "result": j["result"],
         "error": j["error"],
+        "outcome": j.get("outcome"),
+        "last_progress_at": j.get("last_progress_at"),
+        "tasks": deepcopy(j.get("tasks", {})),
+        "stage_timings": deepcopy(j.get("stage_timings", {})),
     }
 
 
@@ -536,7 +653,7 @@ def _duration_s(j: dict[str, Any]) -> float | None:
     try:
         s = datetime.fromisoformat(j["started_at"])
         e = datetime.fromisoformat(j["finished_at"])
-        return round((e - s).total_seconds(), 2)
+        return round(max(0.0, (e - s).total_seconds()), 2)
     except Exception:  # noqa: BLE001
         return None
 

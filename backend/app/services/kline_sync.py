@@ -1689,7 +1689,7 @@ def sync_and_persist_minute(
     前复权 (旧行为); 已迁移 → adjust='none' 原始价落盘, 复权读取时投影。
     使用 start_time / end_time 区间拉取, 确保所有标的覆盖同一时间段。
     on_chunk_done(current, total) 每个 chunk 完成后回调。
-    普通同步首次回溯 days 自然日，已有数据从最新时间增量更新。
+    普通同步首次回溯 days 自然日，已有数据回补最新数据日，再更新到现在。
     extend_backward=True 或 force_full_days=True 的窗口按 days 个交易日估算，
     使用自然日区间拉取，不保证精确交易日数量；单标的手动采集走 ordinary_minute。
     """
@@ -1732,7 +1732,7 @@ def sync_and_persist_minute(
             start_time = now - timedelta(days=calendar_days)
             end_time = now
     else:
-        # 默认增量模式: 首次拉取回溯 N 天, 已有数据则从最新时间增量补到今天
+        # 默认模式: 首次回溯 N 天；已有数据时重采最新数据日，再补到现在。
         # force_full_days=True: 按交易日数估算回溯窗口，不走增量。
         last_dt = _latest_minute_datetime(repo)
         if force_full_days:
@@ -1740,7 +1740,9 @@ def sync_and_persist_minute(
             calendar_days = int(days * 7 / 5) + 5
             start_time = now - timedelta(days=calendar_days)
         elif last_dt:
-            start_time = last_dt
+            # 单股补采与全市场同步共用分钟分区；某股最新时间不能证明其他
+            # 股票已有当天历史。至少重叠最新数据日，避免只拉到尾盘几根。
+            start_time = last_dt.replace(hour=0, minute=0, second=0, microsecond=0)
         else:
             start_time = now - timedelta(days=days)
         end_time = now

@@ -6,6 +6,7 @@ import polars as pl
 import pytest
 from test_financial_demand import env as env
 
+from app.data_providers.base import ProviderFinancialDataUnavailableError
 from app.services import financial_demand as demand
 from app.tickflow.capabilities import CapabilitySet
 
@@ -166,3 +167,156 @@ def test_range_is_passed_to_custom_source_and_legacy_signature_is_compatible(mon
     monkeypatch.setattr(custom, "get_provider", lambda source: SimpleNamespace(get_financials=legacy))
     assert financial_sync._fetch_table("income", ["600000.SH"], CapabilitySet(), False,
                                        start_date=date(2024, 10, 18), end_date=date(2026, 10, 18)).height == 2
+
+
+def metric_rows(periods):
+    return pl.DataFrame([{"symbol": "600000.SH", "source": "fuyao", "period_end": period,
+                          "roe": 12.3, "date_basis": "observed"} for period in periods])
+
+
+def missing_metrics(frame, periods):
+    return ProviderFinancialDataUnavailableError(
+        frame, {"600000.SH": "private upstream error"}, missing_periods={"600000.SH": periods},
+    )
+
+
+@pytest.mark.parametrize("empty", [False, True])
+def test_partial_metrics_are_saved_and_reported_then_retry_can_complete_same_day(env, authenticated_actor, empty):
+    import json
+
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from app.api import financials
+
+    frame = pl.DataFrame() if empty else metric_rows(["2026-06-30", "2025-12-31"])
+    env.fetch.side_effect = missing_metrics(frame, ["2026-09-30"])
+    app = FastAPI()
+    app.include_router(financials.router)
+    app.state.repo, app.state.capabilities = env.repo, CapabilitySet()
+    payload = {"symbol": "600000.SH", "table": "metrics"}
+    receipt = env.root / "financials/demand/metrics/600000.SH.json"
+    with TestClient(app) as client:
+        partial = client.post("/api/financials/fetch", json=payload)
+        assert partial.status_code == 200, partial.text
+        assert partial.json()["complete"] is False
+        assert partial.json()["rows"] == len(frame)
+        assert partial.json()["missing_periods"] == ["2026-09-30"]
+        assert "private upstream" not in partial.text
+        saved = json.loads(receipt.read_text())
+        assert "recent_checked_on" not in saved and "checked_on" not in saved
+        # 浏览或刷新只读本地缺期信息；不能再次访问数据源。
+        local = client.get("/api/financials/metrics", params={"symbol": "600000.SH"}).json()
+        assert len(local["data"]) == len(frame)
+        assert local["missing_periods"] == ["2026-09-30"]
+        assert local["history_start"] == "2024-10-18"
+        assert env.fetch.call_count == 1
+        # 部分结果不能让同日重试误命中完整缓存。
+        assert client.post("/api/financials/fetch", json=payload).json()["complete"] is False
+        assert env.fetch.call_count == 2
+        env.fetch.side_effect = None
+        env.fetch.return_value = metric_rows(["2026-09-30", "2026-06-30", "2025-12-31"])
+        completed = client.post("/api/financials/fetch", json=payload).json()
+        assert completed["complete"] is True and completed["missing_periods"] == []
+        assert completed["reused"] is False
+        assert json.loads(receipt.read_text())["recent_checked_on"] == "2026-10-18"
+        local = client.get("/api/financials/metrics", params={"symbol": "600000.SH"}).json()
+        assert len(local["data"]) == 3 and local["missing_periods"] == []
+        assert client.post("/api/financials/fetch", json=payload).json()["reused"] is True
+        assert env.fetch.call_count == 3
+
+
+def test_partial_older_year_keeps_cursor_until_missing_quarter_is_filled(env):
+    demand.fetch_stock_history(env.root, CapabilitySet(), "600000.SH", "metrics")
+    env.fetch.side_effect = missing_metrics(metric_rows(["2023-12-31"]), ["2024-03-31"])
+    before = date(2024, 10, 18)
+    result = demand.fetch_stock_history(env.root, CapabilitySet(), "600000.SH", "metrics", before=before)
+    assert result["complete"] is False
+    assert demand.history_start(env.root, "metrics", "600000.SH") == before.isoformat()
+    stored = pl.read_parquet(env.root / "financials/metrics/part.parquet")
+    assert "2023-12-31" in stored["period_end"].to_list()
+    # 近期或无范围的计算取数不应清除其范围外的旧缺期。
+    env.fetch.side_effect = None
+    env.fetch.return_value = metric_rows(["2026-06-30"])
+    demand.fetch_stock_history(env.root, CapabilitySet(), "600000.SH", "metrics")
+    demand.fetch_stock(env.root, CapabilitySet(), "600000.SH", "metrics")
+    assert demand.missing_periods(env.root, "metrics", "600000.SH") == ["2024-03-31"]
+    assert demand.history_start(env.root, "metrics", "600000.SH") == before.isoformat()
+    # 原游标下继续补采同一年，成功后才允许向更早年度前进。
+    env.fetch.side_effect = None
+    env.fetch.return_value = metric_rows(["2024-03-31", "2023-12-31"])
+    result = demand.fetch_stock_history(env.root, CapabilitySet(), "600000.SH", "metrics", before=before)
+    assert result["complete"] is True and not result["reused"]
+    assert demand.history_start(env.root, "metrics", "600000.SH") == "2023-10-18"
+    assert demand.missing_periods(env.root, "metrics", "600000.SH") == []
+
+
+def test_page_partial_success_never_satisfies_strict_computation_and_source_switch(env, monkeypatch):
+    error = missing_metrics(metric_rows(["2026-06-30"]), ["2026-09-30"])
+    env.fetch.side_effect = error
+    demand.fetch_stock_history(env.root, CapabilitySet(), "600000.SH", "metrics")
+    # 即使日期范围相同，计算入口仍保留缺数失败语义。
+    with pytest.raises(ProviderFinancialDataUnavailableError):
+        demand.fetch_stock(env.root, CapabilitySet(), "600000.SH", "metrics",
+                           start_date=date(2024, 10, 18), end_date=date(2026, 10, 18))
+    assert env.fetch.call_count == 2
+    monkeypatch.setattr(demand.preferences, "get_financial_provider", lambda: "another")
+    assert demand.missing_periods(env.root, "metrics", "600000.SH") == []
+
+
+def test_concurrent_page_and_strict_request_do_not_share_partial_success(env):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+
+    barrier = Barrier(2)
+    def fetch(*args, **kwargs):
+        barrier.wait(timeout=5)
+        raise missing_metrics(metric_rows(["2026-06-30"]), ["2026-09-30"])
+    env.fetch.side_effect = fetch
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        page = pool.submit(demand.fetch_stock_history, env.root, CapabilitySet(), "600000.SH", "metrics")
+        strict = pool.submit(demand.fetch_stock, env.root, CapabilitySet(), "600000.SH", "metrics",
+                             start_date=date(2024, 10, 18), end_date=date(2026, 10, 18))
+        assert page.result(timeout=5)["complete"] is False
+        with pytest.raises(ProviderFinancialDataUnavailableError):
+            strict.result(timeout=5)
+    assert env.fetch.call_count == 2
+
+
+def test_unstructured_missing_error_is_not_silently_accepted_as_partial_success(env):
+    env.fetch.side_effect = ProviderFinancialDataUnavailableError(
+        metric_rows(["2026-06-30"]), {"600000.SH": "missing report"},
+    )
+    with pytest.raises(ProviderFinancialDataUnavailableError):
+        demand.fetch_stock_history(env.root, CapabilitySet(), "600000.SH", "metrics")
+    assert not (env.root / "financials/metrics/part.parquet").exists()
+
+
+@pytest.mark.parametrize("failure", ["network", "cancel", "auth", "foreign", "invalid_period"])
+def test_partial_fetch_still_checks_failures_cancellation_auth_and_scope_before_writes(env, failure):
+    from threading import Event
+
+    from app.services.pipeline_jobs import JobCancelledError
+
+    cancel = Event()
+    frame = metric_rows(["2026-06-30"])
+    periods = ["2026-09-30"]
+    if failure == "foreign":
+        frame = frame.with_columns(pl.lit("600999.SH").alias("symbol"))
+    if failure == "invalid_period":
+        periods = ["2027-09-30"]
+    error = missing_metrics(frame, periods)
+
+    def fetch(*args, **kwargs):
+        if failure == "cancel":
+            cancel.set()
+        raise RuntimeError("network failed") if failure == "network" else error
+
+    env.fetch.side_effect = fetch
+    check = Mock(side_effect=PermissionError("session revoked")) if failure == "auth" else None
+    with pytest.raises((RuntimeError, ValueError, PermissionError, JobCancelledError)):
+        demand.fetch_stock_history(env.root, CapabilitySet(), "600000.SH", "metrics",
+                                   before_write=check, cancel_event=cancel)
+    assert not (env.root / "financials/metrics/part.parquet").exists()
+    assert not (env.root / "financials/versions/metrics/part.parquet").exists()
+    assert not (env.root / "financials/demand/metrics/600000.SH.json").exists()

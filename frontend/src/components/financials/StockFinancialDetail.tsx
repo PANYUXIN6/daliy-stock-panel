@@ -186,8 +186,13 @@ export function StockFinancialDetail({ symbol, name }: Props) {
   )
   const fieldDefs = FIELD_DEFS[tab]
   const historyStart = current.data?.history_start
+  const missingPeriods = current.data?.missing_periods ?? []
   const collectMore = () => {
     if (!fetch.isPending && historyStart) fetch.mutate({ symbol, table: tab, before: historyStart })
+  }
+  const retryMissing = () => {
+    if (historyStart && missingPeriods.some(period => period < historyStart)) collectMore()
+    else collect()
   }
 
   // 头部报告期信息取最新一期(优先用当前 tab,兜底用 metrics)
@@ -259,6 +264,16 @@ export function StockFinancialDetail({ symbol, name }: Props) {
       <div className="p-4">
         {fetchError && <p role="alert" className="mb-3 text-xs text-danger">{fetchError}</p>}
         {current.isError && <p role="alert" className="mb-3 text-xs text-danger">{current.error.message}</p>}
+        {missingPeriods.length > 0 && (
+          <div role="status" className="mb-4 flex flex-wrap items-start gap-2 rounded-btn border border-warning/30 bg-warning/10 p-3 text-xs text-warning">
+            <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+            <p className="min-w-0 flex-1 break-words">数据源暂未提供以下报告期：{missingPeriods.join('、')}。可稍后重试补齐。</p>
+            {canFetch && <button type="button" onClick={retryMissing} disabled={fetch.isPending || current.isFetching}
+              className="shrink-0 rounded-btn border border-warning/40 px-2 py-1 hover:bg-warning/10 disabled:opacity-50">
+              {fetching ? '正在重试…' : '重试补齐'}
+            </button>}
+          </div>
+        )}
         {current.isLoading ? (
           <div className="space-y-2">
             {Array.from({ length: 6 }).map((_, i) => (
@@ -319,7 +334,7 @@ export function StockFinancialDetail({ symbol, name }: Props) {
                   {fetchingMore ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ChevronDown className="h-3.5 w-3.5" />}
                   {fetchingMore ? '正在采集前 1 年…' : '采集更多（前 1 年）'}
                 </button>
-                {pendingHere && fetch.isSuccess && fetch.variables?.before && fetch.data?.rows === 0 && (
+                {pendingHere && fetch.isSuccess && fetch.variables?.before && fetch.data?.rows === 0 && fetch.data?.complete !== false && (
                   <p role="status" className="text-[11px] text-muted">该年度未返回财务数据，可继续向前查询。</p>
                 )}
               </div>

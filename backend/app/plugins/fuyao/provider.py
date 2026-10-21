@@ -1171,7 +1171,11 @@ class FuyaoProvider:
             result.append(row)
         frame = pl.DataFrame(result, infer_schema_length=None) if result else pl.DataFrame()
         if missing:
-            raise ProviderFinancialDataUnavailableError(frame, missing)
+            missing_periods: dict[str, list[str]] = {}
+            for key in missing:
+                sym, _report, income_row = reports[key]
+                missing_periods.setdefault(sym, []).append(_iso_of_ms(income_row.get("period_end_ms")))
+            raise ProviderFinancialDataUnavailableError(frame, missing, missing_periods=missing_periods)
         return frame
 
     def _financial_metrics(

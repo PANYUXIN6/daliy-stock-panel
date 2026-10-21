@@ -137,7 +137,7 @@ def get_shares(request: Request, symbol: str | None = None):
 
 
 def _table_data(request: Request, table: str, symbol: str | None) -> dict:
-    from app.services.financial_demand import history_start
+    from app.services.financial_demand import history_start, missing_periods
     data_dir = request.app.state.repo.store.data_dir
     df = get_financial_df(data_dir, table)
     if not df.is_empty() and symbol:
@@ -146,6 +146,7 @@ def _table_data(request: Request, table: str, symbol: str | None) -> dict:
     if symbol:
         try:
             result["history_start"] = history_start(data_dir, table, symbol, df)
+            result["missing_periods"] = missing_periods(data_dir, table, symbol)
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
     return result

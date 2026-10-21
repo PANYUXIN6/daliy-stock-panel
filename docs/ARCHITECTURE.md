@@ -42,7 +42,9 @@ web 的 `_web_lifespan` 创建只读 `DataStore`、`KlineRepository` 和 [QuoteM
 
 ## 历史数据与指标
 
-盘后管道由 collector 默认在北京时间 16:00 自动发起，也可由数据页通过 [api/pipeline.py](../backend/app/api/pipeline.py) 手动发起。自动入口 [postmarket.py](../backend/app/services/postmarket.py) 只在本地日历确认的交易日运行，未完成时当天每 15 分钟重试；成功任务按持久化记录去重，手动取消后当天暂停。自动管道同步完整维表、正式日线、除权因子、指标和核心指数，通过当日覆盖与数值验收后，顺序同步分类、增量计算环境／情绪／主线，再结算模拟盘、处理可选分钟／盘口／榜单并发布复盘；ETF 与分钟保持原开关，A 股／核心指数／环境是自动任务固定范围。依赖、完成条件和边界见 [盘后同步顺序约定](postmarket-pipeline.md)。释放执行槽后按已有开关与日期规则触发周度挖掘。collector 内的任务管理负责去重、唯一写入槽、进度与协作式取消；管道执行协调实时行情暂停，完成或失败后的清理路径刷新仓库缓存；仅写独立财务表的长任务不暂停实时行情。单股日线／分钟获取、指数同步与候选财务核验复用同一 `JobStore`，接口返回 `job_id`，查询与取消仍走 `/api/pipeline/jobs`。
+盘后管道由 collector 默认在北京时间 16:00 自动发起，也可由数据页通过 [api/pipeline.py](../backend/app/api/pipeline.py) 手动发起。自动入口 [postmarket.py](../backend/app/services/postmarket.py) 只在本地日历确认的交易日运行，未完成时当天每 15 分钟重试；成功任务按持久化记录去重，手动取消后当天暂停。自动管道同步完整维表、正式日线、除权因子、指标和核心指数，通过当日覆盖与数值验收后，顺序提交分类、增量计算环境／情绪／主线，再结算模拟盘、处理可选分钟／盘口／榜单并发布复盘；ETF 与分钟保持原开关，A 股／核心指数／环境是自动任务固定范围。依赖、完成条件和边界见 [盘后同步顺序约定](postmarket-pipeline.md)。释放执行槽后按已有开关与日期规则触发周度挖掘。collector 内的任务管理负责去重、唯一写入槽、进度与协作式取消；管道执行协调实时行情暂停，完成或失败后的清理路径刷新仓库缓存；仅写独立财务表的长任务不暂停实时行情。单股日线／分钟获取、指数同步与候选财务核验复用同一 `JobStore`，接口返回 `job_id`，查询与取消仍走 `/api/pipeline/jobs`。
+
+[pipeline_prefetch.py](../backend/app/services/pipeline_prefetch.py) 在自动任务的日线与因子就绪后，以最多两个工作线程预取近端核心指数、概念／行业分类、竞价风向标和龙虎榜，与股票指标计算重叠。指数窗口最多 14 个自然日，深历史沿用原分批路径；预取线程不访问仓库写入、DuckDB 或指标计算，主线程按原验收依赖等待并提交。取消时停止未开始的预取，等待在途请求退出再释放任务槽。环境前的缓存刷新和任务边界最终刷新保留，自动成功路径不在复盘发布前重复全量加载股票指标。供应商限频继续生效，TickFlow 首批也等待进程内预约槽；预算不跨进程共享。
 
 数据源选择来自 [preferences.py](../backend/app/services/preferences.py)。`TickFlowProvider` 定义在 `data_providers/tickflow_provider.py`，但当前日线、除权、分钟和实时主链仍由 `kline_sync.py`、`quote_service.py` 等服务调用 `tickflow/client.py` 的 SDK 客户端；不能把适配类当作这些流程的统一入口。YAML 源和 `plugin.yaml` 插件由 [custom/loader.py](../backend/app/data_providers/custom/loader.py) 发现并供自定义源分支调用。字段、时间和资产类型在取数边界归一化后落入共享存储。能力矩阵由 [CAPABILITY_REGISTRY](../backend/app/data_providers/capabilities.py) 与各源声明构建，前端通过 `usable` 判断当前能力。
 
@@ -104,7 +106,7 @@ collector 的 [QuoteService](../backend/app/services/quote_service.py) 默认每
 | 日线、分钟、除权、维表、财务 | 对应 Parquet 目录；`DataStore` 视图及 `KlineRepository` 的最新日、历史窗口和实时聚合缓存 |
 | 专有榜单与调度日历 | `dragon_tiger/date=YYYY-MM-DD.json`、`auction_benchmark/date=YYYY-MM-DD.json` 保存当日及历史榜单；`calendar/trading_days.json` 保存调度日历，collector 更新、各查询只读 |
 | 跨服务行情与复盘 | `runtime/quotes.zip` 保存行情快照；`runtime/data_update.json` 保存更新标记；`market_recap/date=YYYY-MM-DD.json` 保存已发布复盘 |
-| 采集任务 | `job_store/<id>.json` 保存创建／运行／终态，运行中进度由 collector 内存持有，web 查询与取消转发到 collector |
+| 采集任务 | `job_store/<id>.json` 保存创建／运行／终态，运行中进度由 collector 内存持有；`tasks` 独立记录主阶段及预取子任务的进度、状态与耗时，`stage_timings` 记录阶段累计耗时，`outcome` 区分成功／失败／手动取消；web 查询与取消转发到 collector |
 | 策略源码、参数与结果 | `users/<user_id>/strategies/{custom,ai,composite}` 保存个人策略；维护者可信模板位于 `strategies/templates`；`strategy/config.py` 管个人参数；`users/<user_id>/user_data/strategy_cache.json` 管个人结果，监控引擎还保存盘中结果 |
 | 自选、规则、告警与偏好 | 对应服务管理用户文件；告警在 `users/<user_id>/user_data/alerts.jsonl`，运行中规则与冷却状态由监控引擎管理 |
 | 自定义因子 | `users/<user_id>/user_data/custom_factors/`；`factors/store.py` 持久化，`factors/registry.py` 管运行时注册 |
@@ -151,13 +153,19 @@ AI 点数和模型用量通过独立事务账本 `auth/ai_credits.sqlite3` 管�
 
 核心前端请求和类型集中在 [lib/api.ts](../frontend/src/lib/api.ts)，查询键与共享查询主要在 `queryKeys.ts`、`useSharedQueries.ts`。页面路由按需加载，`Layout` 负责跨页面状态与行情订阅。慢变查询可由 localStorage 恢复，但挂载后仍按查询策略刷新；快变行情不在持久化白名单。
 
+个股分析的 `AnalysisKChart` 与普通日 K 详情共用 `lib/bullBearLine.ts` 绘制多空线，默认开启并提供独立技术指标开关，不加入关键价位或告警枚举。数值直接来自日 K 的 `bull_bear_line`（典型价格的 10 周期 EMA），前端只负责逐段红涨绿跌和平走红色展示，缺值不跨段连接，最新行缺值时不沿用旧值。
+
+行业／概念页的 `SectorRotationCard` 经 `/api/sector-rotation` 读取本地最新日期的分钟聚合，普通分钟历史和盘中全量分钟落盘共用这份输入。`sector_rotation.py` 从当日全部已出现板块构建候选，最新桶缺行情时保留历史曲线、当前涨幅／排名／综合分置空；`coverage` 返回分类总数、当日已覆盖数、最新桶已覆盖数。前端据此展示覆盖不足与未更新状态，引导数据页补采，不将上一交易日混入当前日期；结果沿用既有 30 秒缓存和分钟更新查询失效。
+
 首页由 [router.tsx](../frontend/src/router.tsx) 在认证边界通过后挂载 `Layout` 和 `Dashboard`。页面只读取后端配置。Key 由 [secrets_store.py](../backend/app/secrets_store.py) 读取本地凭据及环境后备值，路由由 [preferences.py](../backend/app/services/preferences.py) 读取。TickFlow / AI 密钥仅由后端配置，settings API 只暴露配置状态，拒绝网页替换或清除；能力路由和 AI 非密钥选项通过设置页修改。
 
 采集、共享数据重算和缓存维护主要集中在 [Data.tsx](../frontend/src/pages/Data.tsx)：指数日 K、单标的分钟、概念／行业预设、历史环境与主线、实时采集开关与手动获取、五档盘口更新、共享缓存重建均复用现有接口。[Regime.tsx](../frontend/src/pages/Regime.tsx) 在历史查询成功但结果为空时，也提供管理员“环境分析”按钮，复用 `POST /api/regime/recompute` 根据全部本地历史生成环境、情绪周期与主线，完成后按既有数据集查询前缀失效缓存；加载失败时仅提供读取重试，普通用户提示联系管理员。管道任务通过 `active_id` 恢复；分钟维护与候选财务核验复用 `useCollectorJob`，单股财务获取使用独立的按需请求。盘后同步默认由 collector 在交易日 16:00 发起，数据页保留手动入口；盘前基础资料与交易日历维护保持原调度。数据维护与共享系统设置由后端校验 admin 权限；各账号仍可修改自己的个人偏好。
 
-页面常用同步按行情与基础数据、分钟历史、板块分类三个模块组织。财务维护仅显示本地覆盖并导航到个股财务页，不提供全市场更新或断点续采按钮；旧 `/api/financials/sync/{table}` HTTP 入口返回 410。既有底层批次同步保留供内部兼容，不由页面或调度启动。板块分类动作 `POST /api/ext-data/presets/sync` 复用既有预设转换，概念与行业串行写入，共用 JobStore、写入槽、容量与取消机制；执行退出时对实际写入统一刷新并发布，部分失败或取消也保留已保存结果且任务终态如实报告。原单表接口保持可用。扩展 PullScheduler 使用独立定时路径。
+数据页按任务真实状态展示多个并行子任务、中文阶段、批次日志、耗时和最后更新时间；总百分比按阶段推进，不表示剩余时间。结束详情保留到用户关闭，也可从历史重开；同页已关闭 ID 不受陈旧 `active_id` 自动恢复影响。数据状态高频轮询依据实际运行状态和指标预热，查看终态详情不加快轮询，也不冻结任务列表更新。进度查询失败保留任务并提供重新获取入口。管理员侧边栏按真实终态区分成功、失败和手动取消，不把任务停止一律显示为成功。
 
-财务由 [financial_demand.py](../backend/app/services/financial_demand.py) 统一编排。所有已登录用户可调用 `POST /api/financials/fetch` 获取一股一表，默认按北京时间当天向前两年的报告期范围取数；传入本地 GET 返回的 `history_start` 作为 `before` 时，仅查询该边界之前的一年（含起日、不含 `before`）。各表独立向前补采，已有更长历史继续保留。`GET /api/financials/collection-options` 由 collector 返回当前源支持的表。单股请求在工作线程完成，页面显示等待、错误和成功后的本地刷新。同数据目录、数据源、股票、表及日期范围共享在途结果，以 `financials/demand/{table}/{symbol}.json` 保存源、检查日期与历史查询边界；近两年同日复用，更早区间成功后复用，重启后保留边界。空历史年度返回零行并允许继续向前查询；网络、限流、缺数错误不移动边界。网络在锁外，提交在共享财务写锁内重新读取、保存完整版本、合并浏览表并原子替换，再保存边界、发布 `financials` 更新并失效存储统计及前端查询，不修改全市场断点或完成时间。Fuyao 三大报表使用日期范围接口，核心指标根据区间内已披露报告逐期获取，历史指标不使用当前估值反推 BPS；不支持股本。其他源可用可选 `financial_tables` 限制表范围。显式计算任务仍按原依赖窗口准备历史，不把页面近两年成功记录当作整段计算历史已齐全。
+页面常用同步按行情与基础数据、分钟历史、板块分类三个模块组织。财务维护仅显示本地覆盖并导航到个股财务页，不提供全市场更新或断点续采按钮；旧 `/api/financials/sync/{table}` HTTP 入口返回 410。既有底层批次同步保留供内部兼容，不由页面或调度启动。板块分类动作 `POST /api/ext-data/presets/sync` 复用既有预设转换，概念与行业两路纯取数并发、顺序写入，共用 JobStore、写入槽、容量与取消机制；执行退出时对实际写入统一刷新并发布，部分失败或取消也保留已保存结果且任务终态如实报告。原单表接口保持可用。扩展 PullScheduler 使用独立定时路径。
+
+财务由 [financial_demand.py](../backend/app/services/financial_demand.py) 统一编排。所有已登录用户可调用 `POST /api/financials/fetch` 获取一股一表，默认按北京时间当天向前两年的报告期范围取数；传入本地 GET 返回的 `history_start` 作为 `before` 时，仅查询该边界之前的一年（含起日、不含 `before`）。各表独立向前补采，已有更长历史继续保留。`GET /api/financials/collection-options` 由 collector 返回当前源支持的表。单股请求在工作线程完成，页面显示等待、错误和成功后的本地刷新。同数据目录、数据源、股票、表、日期范围及部分成功模式共享在途结果，以 `financials/demand/{table}/{symbol}.json` 保存源、检查日期、历史查询边界和待补报告期；近两年同日复用，更早区间完整成功后复用，重启后保留边界。空历史年度返回零行并允许继续向前查询；网络、限流等取数错误不移动边界。供应商明确报告缺失季度时，页面可保存其余完整报告并返回 `complete=false`、`missing_periods`；缺期持久化后由本地 GET 展示，阻止对应范围误命中完整缓存，向前补采的游标保持至该年度补齐。计算入口仍要求完整结果。网络在锁外，提交在共享财务写锁内重新读取、保存完整版本、合并浏览表并原子替换，再保存边界、发布 `financials` 更新并失效存储统计及前端查询，不修改全市场断点或完成时间。Fuyao 三大报表使用日期范围接口，核心指标根据区间内已披露报告逐期获取，历史指标不使用当前估值反推 BPS；不支持股本。其他源可用可选 `financial_tables` 限制表范围。显式计算任务仍按原依赖窗口准备历史，不把页面近两年成功记录当作整段计算历史已齐全。
 
 显式策略命令从有效参数、评分、叠加条件及组合子策略解析财务依赖，按股票池准备对应表，再按既有版本生效时间附加因子。断层策略先筛价格缺口，跳空只准备所选日期的候选，回踩先检查共同价格条件，再准备历史缺口候选。渐进批量执行将财务失败隔离到依赖策略。因子研究、公式试算与保存前试算按面板中的股票与注册表递归依赖准备输入；回测、优化、步进和挖掘在 `run_worker_task` 的父 collector 中准备，独立 worker 不取数。源未提供所需数据时明确报错；历史窗口与历史版本可得性受源限制，计算继续沿用点时门控，缺失不填零。财务 GET、普通刷新和实时行情／监控路径不触发采集。
 

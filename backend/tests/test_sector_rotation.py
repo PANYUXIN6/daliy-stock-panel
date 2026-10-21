@@ -626,6 +626,164 @@ def test_sparse_minutes_do_not_report_universe_expansion_as_rotation(tmp_path, k
     _reset_caches()
 
 
+@pytest.fixture(params=[("industry", "所属行业"), ("concept", "所属概念")], ids=["industry", "concept"])
+def sparse_tail_repo(tmp_path, request):
+    """当天先有十二个板块，之后只有计算机单股持续补采到最新桶。"""
+    _reset_caches()
+    kind, field = request.param
+    data_dir = tmp_path / "data"
+    symbols = [f"{i:06d}.SZ" for i in range(1, 12)] + ["300333.SZ"]
+    names = [f"板块{i:02d}" for i in range(1, 12)] + ["计算机"]
+    rows = [
+        {"symbol": symbol, "datetime": datetime.fromisoformat(f"{DAY}T09:30:00"),
+         "close": 101.0 + i, "amount": 1000.0}
+        for i, symbol in enumerate(symbols)
+    ]
+    rows.extend(
+        {"symbol": "300333.SZ", "datetime": datetime.fromisoformat(f"{DAY}T{stamp}:00"),
+         "close": 112.0, "amount": 1000.0}
+        for stamp in ("09:35", "09:40", "09:45", "09:50", "09:55", "10:00", "10:05", "10:10")
+    )
+    minute_path = data_dir / "kline_minute" / f"date={DAY}" / "part.parquet"
+    minute_path.parent.mkdir(parents=True)
+    pl.DataFrame(rows).write_parquet(minute_path)
+    daily_path = data_dir / "kline_daily" / f"date={PREV}" / "part.parquet"
+    daily_path.parent.mkdir(parents=True)
+    pl.DataFrame({"symbol": symbols, "close": [100.0] * len(symbols)}).write_parquet(daily_path)
+    config = ExtConfig(id="ext_members", label="板块分类", mode="snapshot", fields=[
+        ExtField("symbol", "string", "代码"), ExtField(field, "string", field),
+    ])
+    ExtConfigStore(data_dir).upsert(config)
+    write_ext_parquet(pl.DataFrame({"symbol": symbols, field: names}), config, data_dir)
+    flow_config = ExtConfig(id="ext_flow", label="资金流", mode="snapshot", fields=[
+        ExtField("symbol", "string", "代码"), ExtField("净流入", "float", "净流入"),
+    ])
+    ExtConfigStore(data_dir).upsert(flow_config)
+    write_ext_parquet(
+        pl.DataFrame({"symbol": symbols, "净流入": [float(i + 1) * 100 for i in range(len(symbols))]}),
+        flow_config, data_dir,
+    )
+    yield SimpleNamespace(store=SimpleNamespace(data_dir=data_dir)), kind, names
+    _reset_caches()
+
+
+@pytest.mark.parametrize("sort_by", ["activity", "score", "pct", "rank_change", "momentum", "flow"])
+@pytest.mark.parametrize("flow_field", [None, "ext_flow.净流入"])
+def test_sparse_latest_bucket_preserves_day_sectors(sparse_tail_repo, sort_by, flow_field):
+    """单股更新不能删除其他板块历史，也不能把历史涨幅填成当前涨幅。"""
+    repo, kind, names = sparse_tail_repo
+    result = sector_rotation.build_sector_rotation(
+        repo, kind=kind, sort_by=sort_by, flow_field=flow_field, auto_rows=20,
+    )
+
+    assert result["status"] == "ok"
+    assert result["as_of"] == "10:10"
+    assert {item["name"] for item in result["sectors"]} == set(names)
+    assert set(result["series"]["sectors"]) == set(names)
+    assert result["coverage"] == {"known_sectors": 12, "day_sectors": 12, "latest_sectors": 1}
+    assert result["flow_available"] is bool(flow_field)
+    sectors = {item["name"]: item for item in result["sectors"]}
+    current = sectors["计算机"]
+    assert current["pct_now"] == pytest.approx(0.12)
+    assert current["rank_now"] == 1
+    assert current["n_members_with_bars"] == 1
+    # 保留历史候选不能改变最新桶有效板块的归一化评分口径。
+    assert current["score"] == pytest.approx(50.0)
+    matrix = dict(zip(result["series"]["sectors"], result["series"]["matrix"], strict=True))
+    for name in names:
+        assert matrix[name][0] is not None
+        if name == "计算机":
+            assert matrix[name][-1] == pytest.approx(0.12)
+            continue
+        assert matrix[name][-1] is None
+        assert sectors[name]["n_members_with_bars"] == 0
+        for field in ("pct_now", "rank_now", "rank_change", "score"):
+            assert sectors[name][field] is None, (name, field)
+    if sort_by == "activity":
+        # 原有板块已不在最近六个桶中，仍应追加到自动候选末尾。
+        assert result["series"]["sectors"][0] == "计算机"
+
+
+def test_sparse_latest_bucket_keeps_display_limits_and_custom_names(sparse_tail_repo):
+    repo, kind, names = sparse_tail_repo
+    limited = sector_rotation.build_sector_rotation(
+        repo, kind=kind, sort_by="score", top=5, auto_rows=7,
+    )
+    assert len(limited["sectors"]) == 5
+    assert len(limited["series"]["sectors"]) == 7
+    assert limited["coverage"] == {"known_sectors": 12, "day_sectors": 12, "latest_sectors": 1}
+
+    custom = sector_rotation.build_sector_rotation(
+        repo, kind=kind, series_names=[names[0], "计算机", "不存在", names[0]],
+        exclude_sectors=[names[0]],
+    )
+    assert custom["series"]["sectors"] == [names[0], "计算机"]
+    assert custom["series"]["matrix"][0][0] is not None
+    assert custom["series"]["matrix"][0][-1] is None
+    excluded = sector_rotation.build_sector_rotation(
+        repo, kind=kind, sort_by="score", auto_rows=3, exclude_sectors=[names[0]],
+    )
+    assert names[0] not in excluded["series"]["sectors"]
+    assert len(excluded["series"]["sectors"]) == 3
+
+
+@pytest.mark.parametrize("auto_rows", [6, 10, 12])
+def test_momentum_split_does_not_treat_missing_latest_bars_as_weak(sparse_tail_repo, auto_rows):
+    """十个可比板块中取强弱两端，两个仅有历史的板块不挤掉真实走弱板块。"""
+    repo, kind, names = sparse_tail_repo
+    path = repo.store.data_dir / "kline_minute" / f"date={DAY}" / "part.parquet"
+    early_time = datetime.fromisoformat(f"{DAY}T09:30:00")
+    early = pl.read_parquet(path).filter(pl.col("datetime") == early_time).sort("symbol").with_columns(
+        pl.lit(100.0).alias("close"),
+    )
+    latest = early.head(10).with_columns(
+        pl.lit(datetime.fromisoformat(f"{DAY}T10:30:00")).alias("datetime"),
+        pl.Series("close", [float(95 + i) for i in range(10)]),
+    )
+    pl.concat([early, latest]).write_parquet(path)
+    sector_rotation.invalidate_cache()
+
+    result = sector_rotation.build_sector_rotation(
+        repo, kind=kind, sort_by="momentum", auto_rows=auto_rows,
+    )
+
+    comparable = list(reversed(names[:10]))
+    if auto_rows == 6:
+        expected = comparable[:3] + comparable[-3:]
+    elif auto_rows == 10:
+        expected = comparable
+    else:
+        expected = comparable + names[10:]
+    assert result["series"]["sectors"] == expected
+    assert result["coverage"] == {"known_sectors": 12, "day_sectors": 12, "latest_sectors": 10}
+    sectors = {item["name"]: item for item in result["sectors"]}
+    assert sectors[names[0]]["pct_now"] == pytest.approx(-0.05)
+    assert sectors[names[0]]["pct_prev"] == 0.0
+    assert sectors[names[-1]]["pct_now"] is None
+
+
+def test_new_day_with_single_stock_does_not_reuse_previous_day_sectors(sparse_tail_repo):
+    repo, kind, _ = sparse_tail_repo
+    previous = sector_rotation.build_sector_rotation(repo, kind=kind, sort_by="score", auto_rows=20)
+    assert len(previous["series"]["sectors"]) == 12
+    next_day = "2026-09-14"
+    path = repo.store.data_dir / "kline_minute" / f"date={next_day}" / "part.parquet"
+    path.parent.mkdir()
+    pl.DataFrame([{
+        "symbol": "300333.SZ", "datetime": datetime.fromisoformat(f"{next_day}T09:35:00"),
+        "close": 112.0, "amount": 1000.0,
+    }]).write_parquet(path)
+    sector_rotation.invalidate_cache()
+
+    current = sector_rotation.build_sector_rotation(repo, kind=kind, sort_by="score", auto_rows=20)
+
+    assert current["date"] == next_day
+    assert current["series"]["buckets"] == ["09:35"]
+    assert current["series"]["sectors"] == ["计算机"]
+    assert [item["name"] for item in current["sectors"]] == ["计算机"]
+    assert current["coverage"] == {"known_sectors": 12, "day_sectors": 1, "latest_sectors": 1}
+
+
 def test_rank_reference_counts_trading_minutes_across_lunch(tmp_path):
     """对照窗口按交易时间回看 1 小时, 午休不计: 13:10 的对照桶是 10:40
     (往前 60 个交易分钟), 不是只隔 1 个交易分钟的 11:30。

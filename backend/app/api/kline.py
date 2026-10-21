@@ -963,7 +963,7 @@ async def sync_minute(request: Request):
     """手动触发分钟 K 同步(全市场)。返回 pipeline job_id 可轮询进度。
 
     body 可选: { "days": int, "extend": bool }。
-    普通同步首次回溯 days 自然日，已有数据从最新时间增量更新；不传则用偏好设置。
+    普通同步首次回溯 days 自然日，已有数据回补最新数据日并更新至今；不传则用偏好设置。
     extend=True（或 days>=365）从本地最早时间向前扩展约 days 个交易日，
     无本地数据则从当前时间回溯；区间采用自然日估算，不保证精确交易日数量。
     """
@@ -1335,9 +1335,10 @@ async def repair_daily(request: Request):
             qs = getattr(request.app.state, "quote_service", None)
 
             def progress(stage: str, pct: int, msg: str,
-                         stage_pct: int | None = None, skip_log: bool = False) -> None:
+                         stage_pct: int | None = None, skip_log: bool = False,
+                         **task_fields) -> None:
                 job_store.progress(job_id, stage, pct, msg,
-                                   stage_pct=stage_pct, skip_log=skip_log)
+                                   stage_pct=stage_pct, skip_log=skip_log, **task_fields)
 
             def _run() -> dict:
                 # 修正运行期间暂停实时行情, 防止覆写同一批 parquet 竞态

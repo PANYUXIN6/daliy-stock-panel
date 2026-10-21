@@ -378,8 +378,9 @@ def launch_integrity_repair(app_state, start_date: date, reason: str) -> tuple[s
     qs = getattr(app_state, "quote_service", None)
 
     def progress(stage: str, pct: int, msg: str,
-                 stage_pct: int | None = None, skip_log: bool = False) -> None:
-        job_store.progress(job_id, stage, pct, msg, stage_pct=stage_pct, skip_log=skip_log)
+                 stage_pct: int | None = None, skip_log: bool = False,
+                 **task_fields) -> None:
+        job_store.progress(job_id, stage, pct, msg, stage_pct=stage_pct, skip_log=skip_log, **task_fields)
 
     def _run() -> dict:
         # 修复期间暂停实时取数, 防止覆写同一批 parquet 竞态

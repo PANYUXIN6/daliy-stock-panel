@@ -1,5 +1,7 @@
-import { CheckCircle2, XCircle, Loader2, AlertCircle } from 'lucide-react'
+import { Ban, CheckCircle2, XCircle, Loader2, AlertCircle } from 'lucide-react'
 import { formatDuration } from '@/lib/format'
+import { pipelineOutcome } from '@/lib/pipelineFeedback'
+import type { PipelineJobSummary } from '@/lib/api'
 
 export function SectionTitle({ icon: Icon, children }: { icon: React.ComponentType<{ className?: string }>; children: React.ReactNode }) {
   return (
@@ -10,13 +12,15 @@ export function SectionTitle({ icon: Icon, children }: { icon: React.ComponentTy
   )
 }
 
-export function HistoryRow({ job, onClick }: { job: any; onClick: () => void }) {
+export function HistoryRow({ job, onClick }: { job: PipelineJobSummary; onClick: () => void }) {
+  const cancelled = pipelineOutcome(job) === 'cancelled'
   const statusIcon = {
     succeeded: { icon: CheckCircle2, color: 'text-bear' },
     failed:    { icon: XCircle, color: 'text-danger' },
     running:   { icon: Loader2, color: 'text-accent', spinning: true },
     pending:   { icon: Loader2, color: 'text-muted', spinning: true },
-  }[job.status as 'succeeded'] ?? { icon: AlertCircle, color: 'text-muted' }
+    cancelled: { icon: Ban, color: 'text-muted' },
+  }[cancelled ? 'cancelled' : job.status] ?? { icon: AlertCircle, color: 'text-muted' }
   const Icon = statusIcon.icon
 
   return (
@@ -55,7 +59,7 @@ export function HistoryRow({ job, onClick }: { job: any; onClick: () => void }) 
           ) : null
         })()}
         {job.error && (
-          <div className="text-xs text-danger truncate max-w-xs">{job.error}</div>
+          <div className={`text-xs truncate max-w-xs ${cancelled ? 'text-muted' : 'text-danger'}`}>{cancelled ? '已取消：用户手动取消' : job.error}</div>
         )}
       </div>
     </button>

@@ -1,8 +1,8 @@
-"""盘中板块切换监控 — 基于全量分钟数据的实时轮动走势。
+"""盘中板块切换监控 — 基于本地分钟数据的轮动走势。
 
 数据来源 (零新增数据源, 全部复用现有资产):
-  - 全市场当日分钟K: data/kline_minute/date=X/part.parquet (全量分钟能力落盘,
-    MinuteRefreshService 盘中持续增量写入), 直读单日分区 4 列, 不走仓库层批量接口
+  - 本地当日分钟K: data/kline_minute/date=X/part.parquet (普通分钟与全量分钟
+    采集共用), 直读单日分区必要列, 不走仓库层批量接口; 不保证覆盖全市场
   - 板块成分映射: rps_rotation._load_concept_map_df (概念/行业二选一, 600s 缓存)
   - 资金流向: 用户选择的扩展数据列 ("表id.列名", 运行时参数不写死),
     读该扩展表最新分区按板块聚合成分股数值
@@ -275,12 +275,14 @@ def _rank_for_mode(
 ) -> list[str]:
     """自动榜按所选维度返回板块名降序列表 (未做排除/成员数过滤)。
 
-    activity 量额缺失时退化综合分; flow 在扩展列不可用时退化综合分;
+    activity 量额缺失时退化综合分, 无近期量额的当日板块追加末尾;
+    flow 在扩展列不可用时退化综合分;
     pct/rank_change 的无值板块排最后; score 直接用 sectors 的既有排序。
     """
     if sort_by == "activity":
         if has_amount and activity_map:
-            return [n for n, _ in sorted(activity_map.items(), key=lambda kv: kv[1], reverse=True)]
+            ranked = [n for n, _ in sorted(activity_map.items(), key=lambda kv: kv[1], reverse=True)]
+            return ranked + [item["name"] for item in sectors if item["name"] not in activity_map]
         return [item["name"] for item in sectors]
     if sort_by == "flow" and flow_available:
         return [
@@ -352,6 +354,9 @@ def build_sector_rotation(
         (全市场板块, 最新在前, 封顶 120 条; dir=up 转强/down 转弱) /
       sectors: [{name, pct_now, pct_prev, rank_now, rank_prev, rank_change,
                  flow, score, n_members, n_members_with_bars}] 按 score 降序截 top 条 /
+        候选保留当日曾有分钟数据的板块; 最新桶无行情时当前涨幅、排名与评分为 null /
+      coverage: {known_sectors, day_sectors, latest_sectors}
+        分类中已知板块数、当日有行情板块数、最新桶有行情板块数; 不代表成分覆盖完整 /
       series: {buckets: [HH:MM], sectors: [展示板块名], matrix: [[各桶板块涨幅]]}
         展示板块与分钟桶涨幅矩阵, 供前端热力图/走势线; 展示板块 = series_names
         (自定义监控, ≤20, 不过滤) 或活跃榜 (sort_by 维度降序, 先剔除排除名单与
@@ -562,20 +567,24 @@ def _compute(repo, data_dir: Path, kind: str, flow_field: str | None, top: int, 
             .iter_rows(named=True)
         }
     all_names = sorted({name for item in per_bucket for name in item["names"]})
-    names = per_bucket[-1]["names"]
-    pcts_now = dict(zip(names, per_bucket[-1]["pct"], strict=True))
+    latest_names = per_bucket[-1]["names"]
+    # 单股补采会独自推进最新桶。保留当日其他板块的历史候选，当前值仍只取最新桶，
+    # 不把之前的涨幅、排名或评分填入缺失桶。
+    names = all_names
+    pcts_now = dict(zip(latest_names, per_bucket[-1]["pct"], strict=True))
     pct_values = [pcts_now.get(name) for name in names]
     pct_norm = _normalize_0_100(pct_values)
-    flow_values = [flow_by_member.get(name) for name in names] if flow_available else [None] * len(names)
+    # 当前综合分仍仅在最新桶有行情的板块之间归一化，历史候选不改变评分基准。
+    flow_values = [
+        flow_by_member.get(name) if name in pcts_now else None for name in names
+    ] if flow_available else [None] * len(names)
     flow_norm = _normalize_0_100(flow_values) if flow_available else [None] * len(names)
 
     sectors = []
     for i, name in enumerate(names):
-        score = (
-            0.5 * pct_norm[i] + 0.5 * flow_norm[i]
-            if flow_available and flow_norm[i] is not None
-            else pct_norm[i]
-        )
+        score = pct_norm[i]
+        if score is not None and flow_available and flow_norm[i] is not None:
+            score = 0.5 * score + 0.5 * flow_norm[i]
         sectors.append({
             "name": name,
             "pct_now": _r4(pcts_now.get(name)),
@@ -619,12 +628,21 @@ def _compute(repo, data_dir: Path, kind: str, flow_field: str | None, top: int, 
             n for n in ranked
             if _auto_eligible(n, members_count_by_sector.get(n, 0), exclude_sectors)
         ]
-        if sort_by == "momentum" and len(eligible) > auto_rows:
-            # 强弱切换维度对半取样: 前半=走强组, 后半=走弱组 (中部平庸板块跳过)。
-            # 否则 TopN 全是走强板块, 热力图看不到强弱对比
-            half = (auto_rows + 1) // 2
-            rest = auto_rows - half
-            display_names = eligible[:half] + (eligible[-rest:] if rest > 0 else [])
+        if sort_by == "momentum":
+            # 强弱对半只在当前与对照桶均有行情的板块中取样。不可比的历史候选
+            # 仅在名额不足时追加，不能因排在队尾而被误当作走弱组。
+            comparable = {
+                item["name"] for item in sectors
+                if item["pct_now"] is not None and item["pct_prev"] is not None
+            }
+            comparable_names = [name for name in eligible if name in comparable]
+            if len(comparable_names) > auto_rows:
+                half = (auto_rows + 1) // 2
+                rest = auto_rows - half
+                display_names = comparable_names[:half] + (comparable_names[-rest:] if rest > 0 else [])
+            else:
+                unavailable = [name for name in eligible if name not in comparable]
+                display_names = comparable_names + unavailable[:auto_rows - len(comparable_names)]
         else:
             display_names = eligible[:auto_rows]
         if len(display_names) < auto_rows:
@@ -645,6 +663,11 @@ def _compute(repo, data_dir: Path, kind: str, flow_field: str | None, top: int, 
         "flow_available": flow_available,
         "bucket_minutes": bucket_minutes,
         "member_count": member_count,
+        "coverage": {
+            "known_sectors": member_count,
+            "day_sectors": len(all_names),
+            "latest_sectors": len(latest_names),
+        },
         "default_exclude_sectors": list(_DEFAULT_EXCLUDE_SECTORS),
         "max_auto_members": _MAX_AUTO_MEMBERS,
         "as_of": per_bucket[-1]["bucket"].strftime("%H:%M"),

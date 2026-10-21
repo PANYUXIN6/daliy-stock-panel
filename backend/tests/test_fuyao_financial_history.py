@@ -89,6 +89,7 @@ def test_historical_metric_missing_period_is_an_error_instead_of_partial_success
         provider.get_financials("metrics", ["600519.SH"], False,
                                start_date=date(2024, 10, 18), end_date=date(2026, 10, 18))
     assert caught.value.data["period_end"].to_list() == ["2026-06-30"]
+    assert caught.value.missing_periods == {"600519.SH": ["2025-06-30"]}
 
 
 @pytest.mark.parametrize("table", financial_sync.FINANCIAL_TABLES)

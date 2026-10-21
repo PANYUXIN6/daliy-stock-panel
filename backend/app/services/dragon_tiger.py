@@ -117,21 +117,31 @@ def get_dragon_tiger(data_dir: Path, target: date_cls | None = None) -> dict:
     return {"state": "no_data", "requested_date": day.isoformat()}
 
 
-def sync_dragon_tiger(data_dir: Path, target: date_cls | None = None) -> dict:
-    """collector 显式更新三榜，包含当日结果。"""
-    from app.services.shared_runtime import publish_data_update
-
+def prepare_dragon_tiger(data_dir: Path, target: date_cls | None = None) -> dict:
+    """预取完整三榜，不写本地缓存；任一榜失败均保留既有结果。"""
     day = target or cn_today()
     provider = _provider()
     if provider is None:
-        payload = {"state": "source_unavailable", "requested_date": day.isoformat()}
-    else:
-        raw = _fetch_boards(provider, day)
-        payload = {"state": "ok", "requested_date": day.isoformat(),
-                   "trade_date": raw["all"].get("trade_date"), **raw}
+        return {"state": "source_unavailable", "requested_date": day.isoformat()}
+    raw = _fetch_boards(provider, day)
+    return {"state": "ok", "requested_date": day.isoformat(),
+            "trade_date": raw["all"].get("trade_date"), **raw}
+
+
+def commit_dragon_tiger(prepared: dict, data_dir: Path) -> dict:
+    """由采集主线程统一提交三榜并通知读取方，保持上游真实日期。"""
+    from app.services.shared_runtime import publish_data_update
+
+    day = date_cls.fromisoformat(prepared["requested_date"])
+    payload = prepared
     _store_cache(_cache_path(data_dir, day), payload)
     publish_data_update(data_dir, ["dragon_tiger"])
     return payload
+
+
+def sync_dragon_tiger(data_dir: Path, target: date_cls | None = None) -> dict:
+    """collector 显式更新三榜，包含当日结果。"""
+    return commit_dragon_tiger(prepare_dragon_tiger(data_dir, target), data_dir)
 
 
 def build_recap_context(data_dir: Path) -> str:

@@ -99,8 +99,8 @@ async def _submit_job(repo, quote_service, make_run, *, request_key=None, datase
         return {"job_id": job_id, "reused": True}
 
     def progress(stage: str, pct: int, msg: str, stage_pct: int | None = None,
-                 skip_log: bool = False) -> None:
-        job_store.progress(job_id, stage, pct, msg, stage_pct=stage_pct, skip_log=skip_log)
+                 skip_log: bool = False, **task_fields) -> None:
+        job_store.progress(job_id, stage, pct, msg, stage_pct=stage_pct, skip_log=skip_log, **task_fields)
 
     if with_cancel_event:
         from app.services.pipeline_jobs import get_cancel_event

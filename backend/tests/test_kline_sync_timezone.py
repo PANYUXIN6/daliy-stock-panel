@@ -47,7 +47,7 @@ def test_fetch_minute_single_window_is_beijing_wall_clock(monkeypatch):
     assert (end.date(), end.hour, end.minute) == (date(2026, 8, 14), 15, 5)
 
 
-def _capture_minute_window(monkeypatch, tmp_path, local_dt: datetime, **kwargs) -> dict:
+def _capture_minute_window(monkeypatch, tmp_path, local_dt: datetime | None, **kwargs) -> dict:
     """桩掉 sync_and_persist_minute 的外部依赖, 只截获传给取数层的时间窗口。
 
     local_dt 模拟 kline_minute 里的极值 (落盘口径为北京墙钟 naive)。
@@ -78,7 +78,7 @@ def _capture_minute_window(monkeypatch, tmp_path, local_dt: datetime, **kwargs) 
 
 
 def test_sync_and_persist_minute_incremental_window_is_beijing_wall_clock(monkeypatch, tmp_path):
-    """增量分钟同步: 起点取自本地分钟 K 的北京墙钟, 终点必须同口径。
+    """增量分钟同步回补最新数据日, 起止点均按北京墙钟解释。
 
     终点用服务器本地墙钟时, _datetime_to_ms 会把两端按同一本地时区换算 →
     UTC 容器上起点(北京 14:30)反而晚于终点, 一个请求都发不出去, 分钟 K 永远
@@ -94,7 +94,42 @@ def test_sync_and_persist_minute_incremental_window_is_beijing_wall_clock(monkey
     assert start < end
     assert datetime.fromtimestamp(
         kline_sync._datetime_to_ms(start) / 1000, tz=CN_TZ
-    ) == local_latest.replace(tzinfo=CN_TZ)
+    ) == datetime(2026, 8, 14, tzinfo=CN_TZ)
+
+
+def test_initial_minute_sync_keeps_calendar_day_lookback(monkeypatch, tmp_path):
+    now = datetime(2026, 10, 20, 23, tzinfo=CN_TZ)
+    monkeypatch.setattr(kline_sync, "cn_now", lambda: now)
+
+    captured = _capture_minute_window(monkeypatch, tmp_path, None, days=3)
+
+    assert captured["start_time"] == now - timedelta(days=3)
+    assert captured["end_time"] == now
+
+
+def test_forced_minute_sync_keeps_full_lookback(monkeypatch, tmp_path):
+    now = datetime(2026, 10, 20, 23, tzinfo=CN_TZ)
+    monkeypatch.setattr(kline_sync, "cn_now", lambda: now)
+
+    captured = _capture_minute_window(
+        monkeypatch, tmp_path, datetime(2026, 10, 20, 14, 59),
+        days=3, force_full_days=True,
+    )
+
+    assert captured["start_time"] == now - timedelta(days=int(3 * 7 / 5) + 5)
+    assert captured["end_time"] == now
+
+
+def test_initial_minute_extension_keeps_trading_day_estimate(monkeypatch, tmp_path):
+    now = datetime(2026, 10, 20, 23, tzinfo=CN_TZ)
+    monkeypatch.setattr(kline_sync, "cn_now", lambda: now)
+
+    captured = _capture_minute_window(
+        monkeypatch, tmp_path, None, days=5, extend_backward=True,
+    )
+
+    assert captured["start_time"] == now - timedelta(days=7)
+    assert captured["end_time"] == now
 
 
 def test_sync_and_persist_minute_extend_backward_window_is_beijing_wall_clock(monkeypatch, tmp_path):

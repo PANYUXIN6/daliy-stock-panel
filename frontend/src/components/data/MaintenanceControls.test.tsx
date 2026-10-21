@@ -29,12 +29,13 @@ const mocks = vi.hoisted(() => ({
   updatePipelineRegimeEnabled: vi.fn(),
   collectionSyncCheck: vi.fn(), pipelineAdjFactorRun: vi.fn(), intradayRefresh: vi.fn(),
   updateOrdinaryMinute: vi.fn(), syncMinute: vi.fn(), extDataPresetsSync: vi.fn(), dataClear: vi.fn(),
+  pipelineJobs: vi.fn(), regimeCoverage: vi.fn(),
+  repairDaily: vi.fn(), extendHistory: vi.fn(), rebuildEnriched: vi.fn(),
+  updateIndexDailyBatchSize: vi.fn(), updateEnrichedBatchSize: vi.fn(),
 }))
 vi.mock('@/lib/api', () => ({ api: {
   ...mocks,
   settings: async () => ({ mode: 'api_key' }),
-  regimeCoverage: async () => ({ rows: 0 }),
-  pipelineJobs: async () => ({ jobs: [] }),
   extDataList: async () => ({ items: [] }),
   dataSources: async () => ({ builtin: [], plugins: [], custom: [] }),
   quoteInterval: async () => ({ interval: 30, min_interval: 6, max_interval: 60 }),
@@ -49,6 +50,7 @@ beforeEach(() => {
   Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true })
   vi.resetAllMocks()
   window.scrollTo = vi.fn()
+  Element.prototype.scrollIntoView = vi.fn()
   mocks.financialStatus.mockResolvedValue({ available: false, tables: {} })
   mocks.financialExecutionStatus.mockResolvedValue({ last_sync: {}, syncing: false, active_job_id: null })
   mocks.collectionSyncCheck.mockResolvedValue({ requires_confirmation: false, message: null, last_synced_at: null })
@@ -69,9 +71,16 @@ beforeEach(() => {
   mocks.preferences.mockResolvedValue({ minute_sync_days: 5, minute_sync_segment_days: 20 })
   mocks.capabilities.mockResolvedValue({ capabilities: { 'kline.daily.batch': true } })
   mocks.dataStatus.mockResolvedValue({ instruments: { rows: 1 }, storage: {} })
+  mocks.pipelineJobs.mockResolvedValue({ active_id: null, jobs: [] })
+  mocks.regimeCoverage.mockResolvedValue({ rows: 0 })
   mocks.pipelineRun.mockResolvedValue({ job_id: 'pipeline-new' })
   mocks.syncMinute.mockResolvedValue({ job_id: 'minutes-batch-new', status: 'started' })
   mocks.extDataPresetsSync.mockResolvedValue({ job_id: 'classifications-new', reused: false })
+  mocks.repairDaily.mockResolvedValue({ status: 'started', job_id: 'repair-new' })
+  mocks.extendHistory.mockResolvedValue({ status: 'started', job_id: 'extend-new' })
+  mocks.rebuildEnriched.mockResolvedValue({ status: 'started', job_id: 'enriched-new' })
+  mocks.updateIndexDailyBatchSize.mockResolvedValue({ index_daily_batch_size: 250 })
+  mocks.updateEnrichedBatchSize.mockResolvedValue({ enriched_batch_size: 1000 })
   mocks.updateInstrumentsSchedule.mockResolvedValue({ hour: 9, minute: 11 })
   mocks.updateDepthPollingInterval.mockResolvedValue({ depth_polling_interval: 30 })
   mocks.runLimitLadderFix.mockResolvedValue({ ok: true, count: 10, msg: '已更新 10 只标的的盘口' })
@@ -119,7 +128,7 @@ it('单标的分钟采集明确本地日历交易日口径并保持参数，失�
   const onJobStart = vi.fn()
   await render(<MinuteSyncConfig hasCap onJobStart={onJobStart} />)
   expect(host.textContent).toContain('随全量同步已关闭')
-  expect(host.textContent).toContain('批量分钟历史首次回溯 5 自然日；已有数据从最新时间增量更新到现在')
+  expect(host.textContent).toContain('批量分钟历史首次回溯 5 自然日；已有数据回补最新数据日，并更新到现在')
   expect(host.textContent).toContain('按本地交易日历采集指定标的最近 1 ~ 30 个交易日')
   expect(host.textContent).toContain('交易日数')
   await input(host.querySelector<HTMLInputElement>('input[placeholder="600000.SH"]')!, ' 600519.SH ')
@@ -254,6 +263,319 @@ it.each([['financial:all', false], ['pipeline', true]])('后台任务 %s 的行�
   expect(host.textContent?.includes('数据同步期间暂停行情采集')).toBe(paused)
 })
 
+it('并发任务按各自真实状态高亮卡片，预取完成不冒充指数落盘完成', async () => {
+  qc.setQueryData(QK.pipelineJobs, { active_id: 'parallel', jobs: [] })
+  mocks.pipelineJob.mockResolvedValue({ id: 'parallel', status: 'running', stage: 'compute_enriched', progress: 70, stage_pct: 60, log: [], tasks: {
+    compute_enriched: { status: 'running', label: '计算技术指标', progress: 60 },
+    sync_index: { status: 'running', label: '同步核心指数', progress: 20 },
+    prefetch_index: { status: 'succeeded', label: '预取核心指数', progress: 100 },
+    sync_daily: { status: 'succeeded', progress: 100 },
+  } })
+  await render(<Data />)
+  const card = (title: string) => [...host.querySelectorAll('h3')].find(node => node.textContent === title)?.parentElement?.parentElement
+  expect(card('Enriched')?.className).toContain('border-accent/50')
+  expect(card('指数')?.className).toContain('border-accent/50')
+  expect(card('日 K')?.className).toContain('border-bear/30')
+  await act(async () => qc.setQueryData(QK.pipelineJob('parallel'), { id: 'parallel', status: 'running', stage: 'compute_regime', progress: 90, stage_pct: 0, log: [], tasks: {
+    compute_enriched: { status: 'succeeded', progress: 100 },
+    sync_index: { status: 'pending', progress: 0 },
+    prefetch_index: { status: 'succeeded', progress: 100 },
+  } }))
+  await settle()
+  expect(card('指数')?.className).not.toContain('border-bear/30')
+})
+
+it('进度查询失败显示可重试提示，恢复后继续展示同一后台任务', async () => {
+  mocks.pipelineJob.mockRejectedValueOnce(new Error('采集服务暂时不可用'))
+  await render(<Data />)
+  await act(async () => button('同步行情与基础数据').click())
+  await settle()
+  expect(host.textContent).toContain('后台任务可能仍在执行')
+  await act(async () => button('重试获取进度').click())
+  await settle()
+  expect(mocks.pipelineJob).toHaveBeenLastCalledWith('pipeline-new')
+  expect(host.textContent).toContain('pipeline-new')
+  expect(host.textContent).not.toContain('后台任务可能仍在执行')
+})
+
+it('失败详情保留供查看，停止请求失败在确认框中显示原因', async () => {
+  mocks.pipelineJob.mockResolvedValue({ id: 'pipeline-new', status: 'failed', stage: 'sync_daily', progress: 30, stage_pct: 20, log: [], error: '当日正式日线尚未齐全' })
+  await render(<Data />)
+  await act(async () => button('同步行情与基础数据').click())
+  await settle()
+  vi.useFakeTimers()
+  try {
+    await act(async () => vi.advanceTimersByTime(6000))
+    expect(host.textContent).toContain('当日正式日线尚未齐全')
+    expect(host.querySelector('[aria-label="关闭任务详情"]')).not.toBeNull()
+  } finally {
+    vi.useRealTimers()
+  }
+  await act(async () => qc.setQueryData(QK.pipelineJob('pipeline-new'), { id: 'pipeline-new', status: 'running', stage: 'sync_daily', progress: 30, stage_pct: 20, log: [] }))
+  await settle()
+  mocks.pipelineJobCancel.mockRejectedValueOnce(new Error('取消请求未送达'))
+  await act(async () => button('停止').click())
+  await settle()
+  await act(async () => button('确认停止').click())
+  await settle()
+  expect(host.querySelector('[role="alert"]')?.textContent).toContain('停止同步失败：取消请求未送达')
+})
+
+it('保留终态详情期间发现新的后台重试任务，自动切到新进度；关闭终态后不重复恢复旧任务', async () => {
+  qc.setQueryData(QK.pipelineJobs, { active_id: 'first', jobs: [] })
+  mocks.pipelineJob.mockImplementation(async (id: string) => ({ id, status: id === 'first' ? 'failed' : 'running', stage: 'sync_daily', progress: 30, stage_pct: 20, log: [], error: id === 'first' ? '等待正式行情发布' : null }))
+  await render(<Data />)
+  expect(host.textContent).toContain('等待正式行情发布')
+  await act(async () => qc.setQueryData(QK.pipelineJobs, { active_id: 'retry', jobs: [] }))
+  await settle()
+  expect(mocks.pipelineJob).toHaveBeenLastCalledWith('retry')
+  expect(host.textContent).toContain('retry')
+  await act(async () => {
+    qc.setQueryData(QK.pipelineJob('retry'), { id: 'retry', status: 'succeeded', stage: 'done', progress: 100, log: [] })
+    qc.setQueryData(QK.pipelineJobs, { active_id: null, jobs: [] })
+  })
+  await settle()
+  await act(async () => host.querySelector<HTMLButtonElement>('[aria-label="关闭任务详情"]')!.click())
+  await act(async () => { await new Promise(resolve => setTimeout(resolve, 350)) })
+  expect(host.querySelector('[aria-label="关闭任务详情"]')).toBeNull()
+  expect(button('同步行情与基础数据').disabled).toBe(false)
+})
+
+it('任务详情已结束而列表 active_id 尚未刷新时，关闭后不恢复同一任务，新任务仍能恢复', async () => {
+  mocks.pipelineJobs.mockResolvedValue({ active_id: 'finished', jobs: [] })
+  mocks.pipelineJob.mockImplementation(async (id: string) => ({ id, status: id === 'finished' ? 'succeeded' : 'running',
+    stage: id === 'finished' ? 'done' : 'sync_daily', progress: 100, log: [] }))
+  await render(<Data />)
+  expect(host.querySelector('[aria-label="关闭任务详情"]')).not.toBeNull()
+  await act(async () => host.querySelector<HTMLButtonElement>('[aria-label="关闭任务详情"]')!.click())
+  await act(async () => { await new Promise(resolve => setTimeout(resolve, 350)) })
+  expect(host.querySelector('[aria-label="关闭任务详情"]')).toBeNull()
+  expect(button('同步行情与基础数据').disabled).toBe(false)
+  await act(async () => qc.setQueryData(QK.pipelineJobs, { active_id: 'next', jobs: [] }))
+  await settle()
+  expect(mocks.pipelineJob).toHaveBeenLastCalledWith('next')
+  expect(host.textContent).toContain('next')
+})
+
+it.each(['retained', 'history'] as const)('终态详情 %s 不会启动高频数据轮询，历史与环境仍按空闲节奏刷新', async mode => {
+  const finished = { id: 'finished', status: 'succeeded', stage: 'done', progress: 100, log: [],
+    started_at: '2026-10-21T08:00:00Z', finished_at: '2026-10-21T08:01:00Z', duration_s: 60, result: null, error: null }
+  mocks.dataStatus.mockResolvedValue({ instruments: { rows: 1 }, storage: {}, indicators_ready: true })
+  mocks.pipelineJob.mockResolvedValue(finished)
+  mocks.pipelineRun.mockResolvedValue({ job_id: 'finished' })
+  mocks.pipelineJobs.mockResolvedValue({ active_id: mode === 'retained' ? 'finished' : null, jobs: [finished] })
+  vi.useFakeTimers()
+  try {
+    await act(async () => root.render(<MemoryRouter><QueryClientProvider client={qc}><Data /></QueryClientProvider></MemoryRouter>))
+    for (let i = 0; i < 8; i++) await act(async () => vi.advanceTimersByTimeAsync(1))
+    if (mode === 'retained') {
+      await act(async () => button('同步行情与基础数据').click())
+      for (let i = 0; i < 8; i++) await act(async () => vi.advanceTimersByTimeAsync(1))
+    } else {
+      const historyButton = [...host.querySelectorAll('button')].find(item => item.querySelector('div.font-mono')?.textContent === 'finished')!
+      await act(async () => historyButton.click())
+      for (let i = 0; i < 8; i++) await act(async () => vi.advanceTimersByTimeAsync(1))
+    }
+    expect(host.querySelector('[aria-label="关闭任务详情"]')).not.toBeNull()
+    const dataCalls = mocks.dataStatus.mock.calls.length
+    await act(async () => vi.advanceTimersByTimeAsync(6500))
+    expect(mocks.dataStatus).toHaveBeenCalledTimes(dataCalls)
+    const historyCalls = mocks.pipelineJobs.mock.calls.length
+    const regimeCalls = mocks.regimeCoverage.mock.calls.length
+    await act(async () => vi.advanceTimersByTimeAsync(60_000))
+    expect(mocks.pipelineJobs.mock.calls.length).toBeGreaterThan(historyCalls)
+    expect(mocks.regimeCoverage.mock.calls.length).toBeGreaterThan(regimeCalls)
+  } finally {
+    vi.clearAllTimers()
+    vi.useRealTimers()
+  }
+})
+
+it.each(['pending', 'running'] as const)('真实 %s 任务继续每两秒刷新数据状态', async status => {
+  mocks.dataStatus.mockResolvedValue({ instruments: { rows: 1 }, storage: {}, indicators_ready: true })
+  mocks.pipelineJob.mockResolvedValue({ id: 'active', status, stage: 'sync_daily', progress: 10, log: [] })
+  mocks.pipelineJobs.mockResolvedValue({ active_id: 'active', jobs: [] })
+  vi.useFakeTimers()
+  try {
+    await act(async () => root.render(<MemoryRouter><QueryClientProvider client={qc}><Data /></QueryClientProvider></MemoryRouter>))
+    for (let i = 0; i < 8; i++) await act(async () => vi.advanceTimersByTimeAsync(1))
+    const dataCalls = mocks.dataStatus.mock.calls.length
+    await act(async () => vi.advanceTimersByTimeAsync(6500))
+    expect(mocks.dataStatus.mock.calls.length).toBeGreaterThanOrEqual(dataCalls + 3)
+  } finally {
+    vi.clearAllTimers()
+    vi.useRealTimers()
+  }
+})
+
+it('列表暂时保留已删除任务时，404不会造成反复恢复与请求', async () => {
+  mocks.pipelineJobs.mockResolvedValue({ active_id: 'removed', jobs: [] })
+  mocks.pipelineJob.mockRejectedValue(new Error('404 job not found'))
+  await render(<Data />)
+  await settle()
+  expect(mocks.pipelineJob).toHaveBeenCalledExactlyOnceWith('removed')
+  expect(host.querySelector('[aria-label="关闭任务详情"]')).toBeNull()
+  expect(button('同步行情与基础数据').disabled).toBe(false)
+})
+
+it.each(['succeeded', 'failed'] as const)('保留 %s 详情时，修正与重算维护仍可用', async status => {
+  mocks.pipelineJobs.mockResolvedValue({ active_id: 'finished', jobs: [] })
+  mocks.pipelineJob.mockResolvedValue({ id: 'finished', status, stage: 'done', progress: 100, log: [] })
+  await render(<Data />)
+  expect(host.querySelector('[aria-label="关闭任务详情"]')).not.toBeNull()
+  await act(async () => button('修正数据').click())
+  await settle()
+  expect(button('开始修正').disabled).toBe(false)
+  const repairTitle = [...host.querySelectorAll('h3')].find(node => node.textContent === '日 K · 修正 / 补数据')!
+  await act(async () => repairTitle.parentElement!.querySelector<HTMLButtonElement>('button')!.click())
+  await settle()
+  const enrichedTitle = [...host.querySelectorAll('h3')].find(node => node.textContent === 'Enriched')!
+  await act(async () => enrichedTitle.parentElement!.querySelector<HTMLButtonElement>('[title="设置"]')!.click())
+  await settle()
+  expect(button('全量计算').disabled).toBe(false)
+})
+
+it('列表摘要已知为终态时，不将陈旧 active_id 当作运行中的任务恢复', async () => {
+  mocks.pipelineJobs.mockResolvedValue({ active_id: 'finished', jobs: [{ id: 'finished', status: 'succeeded' }] })
+  await render(<Data />)
+  expect(mocks.pipelineJob).not.toHaveBeenCalled()
+  expect(button('同步行情与基础数据').disabled).toBe(false)
+})
+
+async function selectHistoricalJob() {
+  const finished = { id: 'historical', status: 'succeeded', stage: 'done', progress: 100, log: [], result: null, error: null }
+  mocks.capabilityMatrix.mockResolvedValue({ capabilities: [
+    { id: 'daily', usable: true }, { id: 'minute', usable: true }, { id: 'adj_factor', usable: true }, { id: 'financial', usable: true },
+  ] })
+  mocks.dataStatus.mockResolvedValue({ instruments: { rows: 1 }, storage: {},
+    daily: { rows: 20, earliest_date: '2025-10-01', latest_date: '2026-10-01' },
+    index_daily: { rows: 20, earliest_date: '2025-10-01', latest_date: '2026-10-01' },
+    financials: { rows: 1, tables: { shares: { rows: 1 } } },
+  })
+  mocks.pipelineJobs.mockResolvedValue({ active_id: null, jobs: [finished] })
+  mocks.pipelineJob.mockImplementation(async (id: string) => id === 'historical' ? finished : {
+    id, status: 'running', stage: 'sync_daily', progress: 10, stage_pct: 10, log: [], result: null, error: null,
+  })
+  await render(<Data />)
+  const entry = [...host.querySelectorAll('button')].find(item => item.querySelector('div.font-mono')?.textContent === 'historical')!
+  await act(async () => entry.click())
+  await settle()
+  expect(host.querySelector('[aria-label="关闭任务详情"]')).not.toBeNull()
+}
+
+async function openDataSettings(title: string) {
+  const heading = [...host.querySelectorAll('h3')].find(node => node.textContent === title)!
+  await act(async () => heading.parentElement!.querySelector<HTMLButtonElement>('[title="设置"]')!.click())
+  await settle()
+}
+
+it.each([
+  ['repair', 'repair-new'], ['extend', 'extend-new'], ['enriched', 'enriched-new'],
+  ['turnover', 'enriched-new'], ['minute', 'minute-new'], ['adj', 'adj-new'],
+] as const)('查看历史详情后显式启动 %s，立即跟踪新任务并恢复后续任务跟踪', async (entry, jobId) => {
+  await selectHistoricalJob()
+  if (entry === 'repair') {
+    await act(async () => button('修正数据').click())
+    await settle()
+    await act(async () => button('开始修正').click())
+  } else if (entry === 'extend') {
+    await openDataSettings('日 K')
+    await act(async () => button('获取数据').click())
+  } else if (entry === 'enriched' || entry === 'turnover') {
+    await openDataSettings(entry === 'enriched' ? 'Enriched' : '财务数据')
+    await act(async () => button(entry === 'enriched' ? '全量计算' : '重新计算并覆盖').click())
+  } else if (entry === 'minute') {
+    await openDataSettings('分钟 K')
+    await input(host.querySelector<HTMLInputElement>('input[placeholder="600000.SH"]')!, '600000.SH')
+    await act(async () => button('获取单标的').click())
+  } else {
+    await openDataSettings('除权因子')
+    await act(async () => button('全历史同步除权因子').click())
+  }
+  await settle()
+  expect(mocks.pipelineJob).toHaveBeenLastCalledWith(jobId)
+  expect(host.querySelector('[title="停止当前同步任务"]')).not.toBeNull()
+  expect(host.textContent).toContain(jobId)
+  await act(async () => qc.setQueryData(QK.pipelineJob(jobId), {
+    id: jobId, status: 'succeeded', stage: 'done', progress: 100, log: [], result: null, error: null,
+  }))
+  await settle()
+  await act(async () => qc.setQueryData(QK.pipelineJobs, { active_id: 'scheduled-next', jobs: [] }))
+  await settle()
+  expect(mocks.pipelineJob).toHaveBeenLastCalledWith('scheduled-next')
+})
+
+it.each(['succeeded', 'failed'] as const)('终态详情保留时指数 %s 参数仍能修改和保存', async status => {
+  mocks.pipelineJobs.mockResolvedValue({ active_id: 'finished', jobs: [] })
+  mocks.pipelineJob.mockResolvedValue({ id: 'finished', status, stage: 'done', progress: 100, log: [], result: null, error: null })
+  await render(<Data />)
+  await openDataSettings('指数')
+  for (const text of ['−', '+', '月', '年', '保存']) expect(button(text).disabled).toBe(false)
+  const batch = host.querySelector<HTMLInputElement>('input[type="number"]')!
+  expect(batch.disabled).toBe(false)
+  const range = button('+').parentElement!
+  await act(async () => button('+').click())
+  expect(range.querySelector('div')?.textContent).toBe('7')
+  await act(async () => button('−').click())
+  expect(range.querySelector('div')?.textContent).toBe('6')
+  await act(async () => button('年').click())
+  expect(button('年').className).toContain('bg-accent/15')
+  await act(async () => button('月').click())
+  expect(button('月').className).toContain('bg-accent/15')
+  await input(batch, '250')
+  await act(async () => button('保存').click())
+  await settle()
+  expect(mocks.updateIndexDailyBatchSize).toHaveBeenCalledExactlyOnceWith(250)
+  await act(async () => button('获取数据').click())
+  await settle()
+  expect(mocks.syncIndexDaily).toHaveBeenCalledOnce()
+})
+
+it.each(['pending', 'running'] as const)('真实 %s 任务执行时指数参数继续禁止修改', async status => {
+  mocks.pipelineJobs.mockResolvedValue({ active_id: 'active', jobs: [] })
+  mocks.pipelineJob.mockResolvedValue({ id: 'active', status, stage: 'sync_daily', progress: 10, log: [], result: null, error: null })
+  await render(<Data />)
+  await openDataSettings('指数')
+  for (const text of ['−', '+', '月', '年', '保存', '获取数据']) expect(button(text).disabled).toBe(true)
+  expect(host.querySelector<HTMLInputElement>('input[type="number"]')!.disabled).toBe(true)
+  expect(mocks.syncIndexDaily).not.toHaveBeenCalled()
+  expect(mocks.updateIndexDailyBatchSize).not.toHaveBeenCalled()
+})
+
+it('指数请求提交中继续禁止改参数和重复保存，成功后跟踪返回的新任务', async () => {
+  let resolve: (value: { job_id: string }) => void = () => {}
+  mocks.syncIndexDaily.mockImplementationOnce(() => new Promise(resolvePromise => { resolve = resolvePromise }))
+  await selectHistoricalJob()
+  await openDataSettings('指数')
+  await act(async () => button('获取数据').click())
+  await settle()
+  for (const text of ['−', '+', '月', '年', '保存', '获取中…']) expect(button(text).disabled).toBe(true)
+  expect(host.querySelector<HTMLInputElement>('input[type="number"]')!.disabled).toBe(true)
+  await act(async () => resolve({ job_id: 'index-new' }))
+  await settle()
+  expect(mocks.pipelineJob).toHaveBeenLastCalledWith('index-new')
+  expect(host.querySelector('[title="停止当前同步任务"]')).not.toBeNull()
+})
+
+it('指数批次大小保存中禁止重复保存和编辑，完成后恢复配置', async () => {
+  let resolve: (value: { index_daily_batch_size: number }) => void = () => {}
+  mocks.updateIndexDailyBatchSize.mockImplementationOnce(() => new Promise(resolvePromise => { resolve = resolvePromise }))
+  await selectHistoricalJob()
+  await openDataSettings('指数')
+  const batch = host.querySelector<HTMLInputElement>('input[type="number"]')!
+  await input(batch, '250')
+  await act(async () => button('保存').click())
+  await settle()
+  expect(button('保存中…').disabled).toBe(true)
+  expect(batch.disabled).toBe(true)
+  await act(async () => button('保存中…').click())
+  expect(mocks.updateIndexDailyBatchSize).toHaveBeenCalledExactlyOnceWith(250)
+  await act(async () => resolve({ index_daily_batch_size: 250 }))
+  await settle()
+  expect(button('保存').disabled).toBe(false)
+  expect(batch.disabled).toBe(false)
+})
+
 it('数据页展示盘前与交易日盘后自动同步时间，手动维护仍可用', async () => {
   mocks.capabilities.mockResolvedValue({ capabilities: { 'kline.daily.batch': true, 'adj_factor': true, 'kline.minute.batch': true } })
   mocks.preferences.mockResolvedValue({
@@ -311,13 +633,13 @@ it.each([
   }
 })
 
-it.each([false, true])('数据页分钟批量提示首次自然日回溯与增量更新，随行情同步为 %s', async (minuteAuto) => {
+it.each([false, true])('数据页分钟批量提示首次自然日回溯与最新数据日回补，随行情同步为 %s', async (minuteAuto) => {
   mocks.preferences.mockResolvedValue({ minute_sync_days: 7, minute_sync_enabled: minuteAuto })
   mocks.capabilityMatrix.mockResolvedValue({ capabilities: [{ id: 'daily', usable: true }, { id: 'minute', usable: true }] })
   await render(<Data />)
   const card = (title: string) => [...host.querySelectorAll('h3')]
     .find(node => node.textContent === title)!.parentElement!.parentElement!
-  const range = '首次回溯 7 自然日；已有数据从最新时间增量更新到现在'
+  const range = '首次回溯 7 自然日；已有数据回补最新数据日，并更新到现在'
   expect(card('分钟历史数据').textContent).toContain(range)
   expect(card('分钟历史数据').textContent).toContain('可独立更新，不受随行情同步开关影响')
   if (minuteAuto) {

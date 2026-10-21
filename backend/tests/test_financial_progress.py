@@ -187,5 +187,5 @@ def test_generic_progress_preserves_existing_shared_future_slot(custom, monkeypa
         assert financial_sync._fetch_table("income", [str(i) for i in range(125)], CapabilitySet()).height == 125
     finally:
         provider.close()
-    # 首批沿现有不等待契约；之后必须等其他同 rpm 调用已预约的未来槽。
-    assert requests == [0., 10.5, 11.]
+    # 首批也必须等待同 rpm 调用已经预约的未来槽，避免并发任务启动时突发。
+    assert requests == [10., 10.5, 11.]

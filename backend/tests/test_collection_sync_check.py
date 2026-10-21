@@ -77,7 +77,7 @@ def test_minute_confirmation_describes_actual_window_units(local, kind, result_f
     assert result["requires_confirmation"] is True
     assert unit in result["message"]
     if kind == "minute_batch":
-        assert "已有数据从最新时间增量更新" in result["message"]
+        assert "已有数据回补最新数据日并更新至今" in result["message"]
     assert path.read_bytes() == before
 
 

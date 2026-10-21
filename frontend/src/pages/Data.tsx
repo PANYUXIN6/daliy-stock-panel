@@ -22,7 +22,7 @@ import {
 } from 'lucide-react'
 import { Link } from 'react-router-dom'
 import { EndpointTestDialog } from '@/components/EndpointTestDialog'
-import { api, type ExtDataConfig } from '@/lib/api'
+import { api, type ExtDataConfig, type PipelineJob } from '@/lib/api'
 import {
   useCapabilities,
   useCapabilityMatrix,
@@ -69,34 +69,12 @@ import { EditExtDialog } from '@/components/ext-data/EditExtDialog'
 export function Data() {
   const qc = useQueryClient()
   const [activeJobId, setActiveJobId] = useState<string | null>(null)
-  const startTime = useRef<number | null>(null)
+  const trackingLiveJob = useRef(true)
+  const dismissedJobIds = useRef(new Set<string>())
   const topRef = useRef<HTMLDivElement>(null)
 
   const caps = useCapabilities()
   const settings = useSettings()
-
-  const status = useDataStatus({
-    refetchInterval: (query) => {
-      const data = query.state.data
-      // 指标异步预热中 或 有活跃 job → 加快轮询到 2s
-      if (activeJobId || data?.indicators_ready === false) return 2_000
-      return 30_000
-    },
-  })
-
-  // 市场环境(regime) 覆盖画像 —— 走独立接口(/api/regime/coverage), 不在 data/status 内。
-  // 同步任务完成后刷新一次; 平时 30s 轮询与 status 对齐。
-  const regimeCoverage = useQuery({
-    queryKey: QK.regimeCoverage,
-    queryFn: () => api.regimeCoverage(),
-    refetchInterval: activeJobId ? false : 30_000,
-  })
-
-  const history = useQuery({
-    queryKey: QK.pipelineJobs,
-    queryFn: () => api.pipelineJobs(15),
-    refetchInterval: activeJobId ? false : 60_000,
-  })
 
   const job = useQuery({
     queryKey: QK.pipelineJob(activeJobId ?? ''),
@@ -107,20 +85,48 @@ export function Data() {
       return j && (j.status === 'succeeded' || j.status === 'failed') ? false : 1_000
     },
   })
+  const selectedJobRunning = job.data?.status === 'pending' || job.data?.status === 'running'
+  const history = useQuery({
+    queryKey: QK.pipelineJobs,
+    queryFn: () => api.pipelineJobs(15),
+    refetchInterval: selectedJobRunning ? false : 60_000,
+  })
+  const liveId = history.data?.active_id
+  const liveJob = liveId ? qc.getQueryData<PipelineJob>(QK.pipelineJob(liveId))
+    ?? history.data?.jobs.find(item => item.id === liveId) : undefined
+  const liveJobFinished = !!liveId && (dismissedJobIds.current.has(liveId)
+    || liveJob?.status === 'succeeded' || liveJob?.status === 'failed')
+  const backgroundJobRunning = !!liveId && !liveJobFinished
+    && (liveJob?.status === 'pending' || liveJob?.status === 'running')
+  const hasRunningJob = selectedJobRunning || backgroundJobRunning
 
-  const startSync = useMutation({
-    mutationFn: api.pipelineRun,
-    onSuccess: ({ job_id }) => {
-      setActiveJobId(job_id)
-      startTime.current = Date.now()
+  const status = useDataStatus({
+    refetchInterval: (query) => {
+      const data = query.state.data
+      // 详情可保留终态或历史任务；只有真实运行中／指标预热才加快轮询。
+      if (hasRunningJob || data?.indicators_ready === false) return 2_000
+      return 30_000
     },
   })
 
+  // 市场环境(regime) 覆盖画像 —— 走独立接口(/api/regime/coverage), 不在 data/status 内。
+  // 同步任务完成后刷新一次; 平时 30s 轮询与 status 对齐。
+  const regimeCoverage = useQuery({
+    queryKey: QK.regimeCoverage,
+    queryFn: () => api.regimeCoverage(),
+    refetchInterval: hasRunningJob ? false : 30_000,
+  })
+
   const trackModuleJob = ({ job_id }: { job_id: string }) => {
+    dismissedJobIds.current.delete(job_id)
+    trackingLiveJob.current = true
     setActiveJobId(job_id)
-    startTime.current = Date.now()
     void qc.invalidateQueries({ queryKey: QK.pipelineJobs })
   }
+  const startSync = useMutation({
+    mutationFn: api.pipelineRun,
+    onSuccess: trackModuleJob,
+  })
   const syncMinuteHistory = useMutation({
     mutationFn: (days: number) => api.syncMinute(days, false),
     onSuccess: trackModuleJob,
@@ -188,10 +194,9 @@ export function Data() {
 
   const syncIndexDaily = useMutation({
     mutationFn: (days: number) => api.syncIndexDaily(days),
-    onSuccess: ({ job_id }) => {
-      setActiveJobId(job_id)
+    onSuccess: result => {
+      trackModuleJob(result)
       setOpenSettings(null)
-      startTime.current = Date.now()
     },
   })
 
@@ -359,28 +364,32 @@ export function Data() {
         qc.invalidateQueries({ queryKey: ['watchlist-enriched'] })
         qc.invalidateQueries({ queryKey: ['kline-batch'] })
       }
-      const t = setTimeout(() => setActiveJobId(null), 5_000)
-      return () => clearTimeout(t)
     }
   }, [job.data?.id, job.data?.status])
 
   useEffect(() => {
     if (job.isError && /404/.test(String((job.error as any)?.message ?? ''))) {
+      if (activeJobId) dismissedJobIds.current.add(activeJobId)
       setActiveJobId(null)
     }
-  }, [job.isError, job.error])
+  }, [job.isError, job.error, activeJobId])
 
   useEffect(() => {
-    if (!activeJobId && history.data?.active_id) {
-      setActiveJobId(history.data.active_id)
+    const liveId = history.data?.active_id
+    const cached = liveId ? qc.getQueryData<PipelineJob>(QK.pipelineJob(liveId))
+      ?? history.data?.jobs.find(item => item.id === liveId) : undefined
+    if (trackingLiveJob.current && liveId && !dismissedJobIds.current.has(liveId)
+      && cached?.status !== 'succeeded' && cached?.status !== 'failed' && liveId !== activeJobId
+      && (!activeJobId || job.data?.status === 'succeeded' || job.data?.status === 'failed')) {
+      setActiveJobId(liveId)
     }
-  }, [history.data?.active_id])
+  }, [history.data?.active_id, history.data?.jobs, activeJobId, job.data?.status, qc])
 
   const s = status.data
   const isLoading = status.isLoading
   const isRunning = !!activeJobId && (!job.data || job.data.status === 'running' || job.data.status === 'pending')
   const isStarting = startSync.isPending || syncMinuteHistory.isPending || syncClassifications.isPending || pipelineConfirmation.busy
-  const collectionBusy = isRunning || isStarting || !!history.data?.active_id || syncIndexDaily.isPending || indexConfirmation.busy || refreshQuotes.isPending || quoteConfirmation.busy || updateDepth.isPending || depthConfirmation.busy
+  const collectionBusy = isRunning || isStarting || (!!liveId && !liveJobFinished) || syncIndexDaily.isPending || indexConfirmation.busy || refreshQuotes.isPending || quoteConfirmation.busy || updateDepth.isPending || depthConfirmation.busy
   const financialRunning = isRunning && job.data?.request_key?.startsWith('financial:') === true
   const minuteHistoryDays = prefs.data?.minute_sync_days ?? 5
   const hasData = !!(s?.instruments?.rows || s?.daily?.rows)
@@ -432,36 +441,56 @@ export function Data() {
     // regime 软失败时入 skipped_stages 的是 'regime'(非 stage 名), 也映射到该卡片
     regime: 'regime',
   }
-  const activeCard = isRunning && job.data ? STAGE_CARD[job.data.stage] ?? null : null
+  const tasks = Object.entries(job.data?.tasks ?? {})
+  const hasTaskStates = tasks.length > 0
+  const cardTasks = new Map<string, typeof tasks[number][1][]>()
+  for (const [id, task] of tasks) {
+    const card = STAGE_CARD[id]
+    if (card) cardTasks.set(card, [...(cardTasks.get(card) ?? []), task])
+  }
+  const activeCards = new Set(hasTaskStates
+    ? [...cardTasks].filter(([, items]) => isRunning && items.some(task => task.status === 'running')).map(([card]) => card)
+    : isRunning && job.data && STAGE_CARD[job.data.stage] ? [STAGE_CARD[job.data.stage]] : [])
+  const cardProgress = (card: string) => {
+    if (!hasTaskStates) return activeCards.has(card) ? job.data?.stage_pct ?? 0 : 0
+    const running = (cardTasks.get(card) ?? []).filter(task => task.status === 'running')
+    return running.length ? Math.round(running.reduce((sum, task) => sum + (task.progress ?? 0), 0) / running.length) : 0
+  }
 
   const skippedCards = new Set(
     (job.data?.result?.skipped_stages ?? [])
       .map(s => STAGE_CARD[s])
       .filter(Boolean) as string[]
   )
+  for (const [card, items] of cardTasks) {
+    if (items.every(task => task.status === 'skipped')) skippedCards.add(card)
+  }
 
   const prevStageRef = useRef<string | null>(null)
-  const [doneStages, setDoneStages] = useState<Set<string>>(new Set())
+  const [legacyDoneStages, setLegacyDoneStages] = useState<Set<string>>(new Set())
+  const doneStages = hasTaskStates
+    ? new Set([...cardTasks].filter(([, items]) => items.some(task => task.status === 'succeeded') && items.every(task => task.status === 'succeeded' || task.status === 'skipped')).map(([card]) => card))
+    : legacyDoneStages
   useEffect(() => {
     if (!job.data?.stage) return
     const stage = job.data.stage
     if (stage === prevStageRef.current) return
     const prev = prevStageRef.current
-    if (prev && STAGE_CARD[prev]) {
-      setDoneStages((s) => new Set(s).add(STAGE_CARD[prev]))
+    if (!hasTaskStates && prev && STAGE_CARD[prev]) {
+      setLegacyDoneStages((s) => new Set(s).add(STAGE_CARD[prev]))
     }
     prevStageRef.current = stage
     qc.invalidateQueries({ queryKey: QK.dataStatus })
-  }, [job.data?.stage])
+  }, [job.data?.stage, hasTaskStates])
 
   useEffect(() => {
-    if (!activeJobId) {
-      setDoneStages(new Set())
-      prevStageRef.current = null
-    }
+    setLegacyDoneStages(new Set())
+    prevStageRef.current = null
   }, [activeJobId])
 
   const handleJobClick = useCallback((id: string) => {
+    trackingLiveJob.current = false
+    dismissedJobIds.current.delete(id)
     setActiveJobId(id)
     requestAnimationFrame(() => {
       topRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
@@ -479,10 +508,10 @@ export function Data() {
             stats={s?.instruments}
             isInstrument
             loading={isLoading}
-            active={activeCard === 'instruments'}
+            active={activeCards.has('instruments')}
             done={doneStages.has('instruments')}
             skipped={skippedCards.has('instruments')}
-            stagePct={activeCard === 'instruments' ? (job.data?.stage_pct ?? 0) : 0}
+            stagePct={cardProgress('instruments')}
             tierKey="instruments"
             capLimits={mergedCaps}
             auto
@@ -496,10 +525,10 @@ export function Data() {
             hint="增量同步 · 全市场"
             stats={s?.daily}
             loading={isLoading}
-            active={activeCard === 'daily'}
+            active={activeCards.has('daily')}
             done={doneStages.has('daily')}
             skipped={skippedCards.has('daily')}
-            stagePct={activeCard === 'daily' ? (job.data?.stage_pct ?? 0) : 0}
+            stagePct={cardProgress('daily')}
             tierKey="daily"
             capLimits={mergedCaps}
             customProvider={routeProviderDisplay(matrix.data, 'daily')}
@@ -516,10 +545,10 @@ export function Data() {
             hint="增量同步 · 全市场"
             stats={s?.adj_factor}
             loading={isLoading}
-            active={activeCard === 'adj_factor'}
+            active={activeCards.has('adj_factor')}
             done={doneStages.has('adj_factor')}
             skipped={skippedCards.has('adj_factor')}
-            stagePct={activeCard === 'adj_factor' ? (job.data?.stage_pct ?? 0) : 0}
+            stagePct={cardProgress('adj_factor')}
             tierKey="adj_factor"
             capLimits={mergedCaps}
             customProvider={routeProviderDisplay(matrix.data, 'adj_factor')}
@@ -536,10 +565,10 @@ export function Data() {
             hint="复权 OHLCV + 技术指标"
             stats={s?.enriched}
             loading={isLoading}
-            active={activeCard === 'enriched'}
+            active={activeCards.has('enriched')}
             done={doneStages.has('enriched')}
             skipped={skippedCards.has('enriched')}
-            stagePct={activeCard === 'enriched' ? (job.data?.stage_pct ?? 0) : 0}
+            stagePct={cardProgress('enriched')}
             tierKey="enriched"
             capLimits={mergedCaps}
             auto
@@ -557,10 +586,10 @@ export function Data() {
             hint="CN_Index · 独立存储"
             stats={indexOverviewStats}
             loading={isLoading}
-            active={activeCard === 'index_daily'}
+            active={activeCards.has('index_daily')}
             done={doneStages.has('index_daily')}
             skipped={skippedCards.has('index_daily')}
-            stagePct={activeCard === 'index_daily' ? (job.data?.stage_pct ?? 0) : 0}
+            stagePct={cardProgress('index_daily')}
             tierKey="daily"
             capLimits={mergedCaps}
             auto={indexAuto}
@@ -602,10 +631,10 @@ export function Data() {
             hint="全市场同步"
             stats={s?.minute}
             loading={isLoading}
-            active={activeCard === 'minute'}
+            active={activeCards.has('minute')}
             done={doneStages.has('minute')}
             skipped={skippedCards.has('minute')}
-            stagePct={activeCard === 'minute' ? (job.data?.stage_pct ?? 0) : 0}
+            stagePct={cardProgress('minute')}
             tierKey="minute"
             capLimits={mergedCaps}
             customProvider={routeProviderDisplay(matrix.data, 'minute')}
@@ -638,10 +667,10 @@ export function Data() {
             hint="每日环境状态 · 本地计算"
             stats={regimeCoverage.data ?? null}
             loading={regimeCoverage.isLoading}
-            active={activeCard === 'regime'}
+            active={activeCards.has('regime')}
             done={doneStages.has('regime')}
             skipped={skippedCards.has('regime')}
-            stagePct={activeCard === 'regime' ? (job.data?.stage_pct ?? 0) : 0}
+            stagePct={cardProgress('regime')}
             tierKey="regime"
             capLimits={mergedCaps}
             auto={prefs.data?.pipeline_regime_enabled === true}
@@ -669,7 +698,7 @@ export function Data() {
             )}
             {isRunning && !!activeJobId && (
               <button
-                onClick={() => setShowStopConfirm(true)}
+                onClick={() => { stopSync.reset(); setShowStopConfirm(true) }}
                 title="停止当前同步任务"
                 className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-btn bg-danger/12 border border-danger/30 text-danger text-xs font-medium hover:bg-danger/20 transition-all duration-150"
               >
@@ -800,10 +829,19 @@ export function Data() {
               transition={{ duration: 0.25, ease: [0.16, 1, 0.3, 1] }}
               className="overflow-hidden"
             >
-              <ActiveJobCard job={job.data} />
+              <ActiveJobCard job={job.data} onDismiss={() => {
+                if (activeJobId) dismissedJobIds.current.add(activeJobId)
+                trackingLiveJob.current = true
+                setActiveJobId(null)
+              }} />
             </motion.div>
           )}
         </AnimatePresence>
+
+        {job.isError && activeJobId && <div role="alert" className="rounded-btn border border-danger/40 bg-danger/5 px-3 py-2 text-xs text-danger">
+          任务状态暂时获取失败，后台任务可能仍在执行。
+          <button type="button" onClick={() => void job.refetch()} className="ml-2 underline">重试获取进度</button>
+        </div>}
 
         <div>
           <SectionTitle icon={RefreshCw}>模块同步</SectionTitle>
@@ -813,7 +851,7 @@ export function Data() {
               {
                 title: '行情与基础数据',
                 description: '股票基础资料、日 K、复权与指标，以及范围内的指数、ETF 和盘后榜单。',
-                detail: minuteAuto ? `同时更新分钟 K：首次回溯 ${minuteHistoryDays} 自然日；已有数据从最新时间增量更新到现在` : '按已配置的数据范围更新',
+                detail: minuteAuto ? `同时更新分钟 K：首次回溯 ${minuteHistoryDays} 自然日；已有数据回补最新数据日，并更新到现在` : '按已配置的数据范围更新',
                 available: !prefs.isLoading && !prefs.isError,
                 pending: startSync.isPending,
                 settings: 'pipeline-scope',
@@ -822,7 +860,7 @@ export function Data() {
               },
               {
                 title: '分钟历史数据',
-                description: `首次回溯 ${minuteHistoryDays} 自然日；已有数据从最新时间增量更新到现在，供本地分时图和研究使用。`,
+                description: `首次回溯 ${minuteHistoryDays} 自然日；已有数据回补最新数据日，并更新到现在，供本地分时图和研究使用。`,
                 detail: '可独立更新，不受随行情同步开关影响',
                 available: hasMinuteCap && !prefs.isLoading && !prefs.isError,
                 pending: syncMinuteHistory.isPending,
@@ -1184,9 +1222,9 @@ export function Data() {
           <SettingsModal title="日 K · 向前扩展历史" onClose={() => setOpenSettings(null)}>
             <ExtendHistoryPanel
               hasCap={hasDailyBatchCap}
-              isRunning={!!activeJobId}
+              isRunning={collectionBusy}
               earliestDate={s?.daily?.earliest_date ?? null}
-              onStart={() => setOpenSettings(null)}
+              onStart={(jobId) => { trackModuleJob({ job_id: jobId }); setOpenSettings(null) }}
             />
           </SettingsModal>
         )}
@@ -1197,9 +1235,9 @@ export function Data() {
           <SettingsModal title="日 K · 修正 / 补数据" onClose={() => setShowRepair(false)}>
             <RepairDailyPanel
               hasCap={hasDailyBatchCap}
-              isRunning={!!activeJobId}
+              isRunning={collectionBusy}
               latestDate={s?.daily?.latest_date ?? null}
-              onStart={() => setShowRepair(false)}
+              onStart={(jobId) => { trackModuleJob({ job_id: jobId }); setShowRepair(false) }}
             />
           </SettingsModal>
         )}
@@ -1209,8 +1247,8 @@ export function Data() {
         {openSettings === 'enriched' && (
           <SettingsModal title="Enriched · 计算设置" onClose={() => setOpenSettings(null)}>
             <EnrichedRebuildPanel
-              isRunning={!!activeJobId}
-              onStart={(jobId) => { setActiveJobId(jobId); setOpenSettings(null) }}
+              isRunning={collectionBusy}
+              onStart={(jobId) => { trackModuleJob({ job_id: jobId }); setOpenSettings(null) }}
             />
           </SettingsModal>
         )}
@@ -1222,10 +1260,10 @@ export function Data() {
             <FinancialSyncPanel />
             <div className="mt-5 pt-4 border-t border-border">
               <EnrichedRebuildPanel
-                isRunning={!!activeJobId}
+                isRunning={collectionBusy}
                 purpose="turnover"
                 historicalShareRows={s?.financials?.tables?.shares?.rows ?? 0}
-                onStart={(jobId) => { setActiveJobId(jobId); setOpenSettings(null) }}
+                onStart={(jobId) => { trackModuleJob({ job_id: jobId }); setOpenSettings(null) }}
               />
             </div>
           </SettingsModal>
@@ -1269,7 +1307,7 @@ export function Data() {
                   <div className="flex items-center">
                     <button
                       onClick={() => setIndexExtendValue(v => Math.max(1, v - 1))}
-                      disabled={!hasDailyBatchCap || !!activeJobId || syncIndexDaily.isPending}
+                      disabled={!hasDailyBatchCap || collectionBusy}
                       className="h-6 w-6 flex items-center justify-center rounded-l-btn bg-elevated border border-border text-secondary hover:bg-border/50 disabled:opacity-30 transition-colors text-xs"
                     >−</button>
                     <div className="h-6 w-8 flex items-center justify-center border-y border-border text-[11px] font-mono tabular-nums text-foreground bg-base">
@@ -1277,7 +1315,7 @@ export function Data() {
                     </div>
                     <button
                       onClick={() => setIndexExtendValue(v => Math.min(indexExtendUnit === 'year' ? 10 : 36, v + 1))}
-                      disabled={!hasDailyBatchCap || !!activeJobId || syncIndexDaily.isPending}
+                      disabled={!hasDailyBatchCap || collectionBusy}
                       className="h-6 w-6 flex items-center justify-center rounded-r-btn bg-elevated border border-border text-secondary hover:bg-border/50 disabled:opacity-30 transition-colors text-xs"
                     >+</button>
                   </div>
@@ -1287,7 +1325,7 @@ export function Data() {
                       <button
                         key={u}
                         onClick={() => { setIndexExtendUnit(u); if (u === 'year' && indexExtendValue > 10) setIndexExtendValue(1); if (u === 'month' && indexExtendValue > 36) setIndexExtendValue(6) }}
-                        disabled={!hasDailyBatchCap || !!activeJobId || syncIndexDaily.isPending}
+                        disabled={!hasDailyBatchCap || collectionBusy}
                         className={`px-2 py-0.5 text-[10px] font-medium transition-colors disabled:opacity-40 ${
                           indexExtendUnit === u ? 'bg-accent/15 text-accent' : 'text-secondary hover:bg-elevated'
                         }`}
@@ -1314,7 +1352,7 @@ export function Data() {
                         max={10000}
                         value={indexBatchInput}
                         onChange={e => setIndexBatchInput(e.target.value)}
-                        disabled={updateIndexBatchSize.isPending || !!activeJobId || syncIndexDaily.isPending}
+                        disabled={updateIndexBatchSize.isPending || collectionBusy}
                         className="w-20 px-2 py-1 rounded-btn bg-elevated border border-border text-xs font-mono text-foreground outline-none focus:border-accent disabled:opacity-40"
                       />
                       <button
@@ -1323,7 +1361,7 @@ export function Data() {
                           setIndexBatchInput(String(size))
                           updateIndexBatchSize.mutate(size)
                         }}
-                        disabled={updateIndexBatchSize.isPending || !!activeJobId || syncIndexDaily.isPending}
+                        disabled={updateIndexBatchSize.isPending || collectionBusy}
                         className="px-2.5 py-1 rounded-btn bg-elevated border border-border text-xs text-secondary hover:text-foreground disabled:opacity-40 transition-colors"
                       >
                         {updateIndexBatchSize.isPending ? '保存中…' : '保存'}
@@ -1367,7 +1405,7 @@ export function Data() {
       <AnimatePresence>
         {openSettings === 'minute' && (
           <SettingsModal title="分钟 K · 同步设置" onClose={() => setOpenSettings(null)}>
-            <MinuteSyncConfig hasCap={hasMinuteCap} disabled={collectionBusy} onJobStart={(jobId) => { setActiveJobId(jobId); setOpenSettings(null) }} />
+            <MinuteSyncConfig hasCap={hasMinuteCap} disabled={collectionBusy} onJobStart={(jobId) => { trackModuleJob({ job_id: jobId }); setOpenSettings(null) }} />
           </SettingsModal>
         )}
       </AnimatePresence>
@@ -1379,7 +1417,7 @@ export function Data() {
               hasCap={hasAdjCap}
               disabled={collectionBusy}
               providerDisplay={routeProviderDisplay(matrix.data, 'adj_factor')}
-              onJobStart={(jobId) => { setActiveJobId(jobId); setOpenSettings(null) }}
+              onJobStart={(jobId) => { trackModuleJob({ job_id: jobId }); setOpenSettings(null) }}
             />
           </SettingsModal>
         )}
@@ -1422,6 +1460,7 @@ export function Data() {
                   </div>
                 </div>
               </div>
+              {stopSync.isError && <div role="alert" className="mt-3 rounded-btn border border-danger/40 bg-danger/5 px-3 py-2 text-xs text-danger">停止同步失败：{stopSync.error.message}</div>}
               <div className="flex items-center justify-end gap-2 mt-5">
                 <button
                   onClick={() => setShowStopConfirm(false)}

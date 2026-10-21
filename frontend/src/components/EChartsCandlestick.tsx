@@ -4,6 +4,7 @@ import { fmtPct } from '@/lib/format'
 import * as echarts from 'echarts'
 import type { ECharts, EChartsOption } from 'echarts'
 import type { PriceGap } from '@/lib/api'
+import { buildBullBearLineSeries, BULL_BEAR_UP, BULL_BEAR_DOWN } from '@/lib/bullBearLine'
 
 export interface OHLC {
   date: string
@@ -370,9 +371,6 @@ const COMPACT_THRESHOLD = 60
 
 /** 加入自选日竖线颜色 (蓝色虚线, 与同花顺的标注观感一致) */
 const ADDED_DATE_COLOR = '#3B82F6'
-
-const BULL_BEAR_UP = '#FF0000'
-const BULL_BEAR_DOWN = '#08FF16'
 
 function bullBearInfoHTML(data: OHLC[], index: number): string {
   const value = data[index]?.bull_bear_line
@@ -754,29 +752,7 @@ function buildOption(
   }
 
   if (activeIndicators.includes('bull_bear_line')) {
-    const segments: number[][] = []
-    for (let index = 1; index < data.length; index++) {
-      const value = data[index].bull_bear_line
-      const previous = data[index - 1].bull_bear_line
-      if (value == null || previous == null || !Number.isFinite(value) || !Number.isFinite(previous)) continue
-      segments.push([index - 1, previous, index, value, value < previous ? 1 : 0])
-    }
-    // 逐段着色，孤立的一根下跌也能显示绿色；缺值时不跨空档连接。
-    series.push({
-      name: '多空线', type: 'custom', data: segments,
-      dimensions: ['start', 'previous', 'end', 'value', 'falling'],
-      encode: { x: [0, 2], y: [1, 3] },
-      silent: true, animation: false, clip: true, z: 3,
-      renderItem: (_params: any, api: any) => {
-        const start = api.coord([api.value(0), api.value(1)])
-        const end = api.coord([api.value(2), api.value(3)])
-        return {
-          type: 'line',
-          shape: { x1: start[0], y1: start[1], x2: end[0], y2: end[1] },
-          style: { stroke: api.value(4) ? BULL_BEAR_DOWN : BULL_BEAR_UP, lineWidth: 3 },
-        }
-      },
-    })
+    series.push(buildBullBearLineSeries(data.map(row => row.bull_bear_line)))
   }
 
   // 加入自选日标注: 蓝色竖虚线从该根K线的下沿连到主图底端的「自选」标签。

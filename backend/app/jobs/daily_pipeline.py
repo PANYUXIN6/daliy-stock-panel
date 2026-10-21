@@ -175,6 +175,44 @@ def _resolve_universe(capset: CapabilitySet, repo=None) -> list[str]:
     return sorted(base)
 
 
+def _index_window_start(data_dir: Path, today: _date, override: _date | None,
+                        stale: _date | None) -> _date:
+    from datetime import timedelta
+
+    dates = sorted(p.name[5:] for p in (data_dir / "kline_index_enriched").glob("date=*")
+                   if p.is_dir())
+    start = override or (_date.fromisoformat(dates[-1]) if dates else today - timedelta(days=365))
+    return min(start, stale) if stale is not None else start
+
+
+def _prepare_postmarket_inputs(prefetch, repo, capset, today: _date,
+                               index_start: _date) -> None:
+    """只并发轻量取数；历史指数、仓库写入、指标计算均留在管道线程。"""
+    import asyncio
+    from datetime import datetime
+
+    from app.services import auction_benchmark, dragon_tiger, ext_presets
+    from app.services.index_const import CORE_INDEX_SYMBOLS
+
+    if 0 <= (today - index_start).days <= 14:
+        prefetch.submit("prefetch_index", "预取核心指数", lambda: index_sync.prepare_index_daily(
+            capset, list(CORE_INDEX_SYMBOLS),
+            datetime.combine(index_start, datetime.min.time(), tzinfo=CN_TZ),
+            datetime.combine(today, datetime.min.time(), tzinfo=CN_TZ), coverage_day=today,
+        ))
+    for config_id, task_id, label in (
+        ("ext_gn_ths", "prefetch_concept", "预取概念分类"),
+        ("ext_hy_ths", "prefetch_industry", "预取行业分类"),
+    ):
+        prefetch.submit(task_id, label, lambda config_id=config_id: asyncio.run(
+            ext_presets.prepare_preset(config_id, repo.store.data_dir),
+        ))
+    prefetch.submit("prefetch_auction", "预取竞价风向标", lambda:
+                    auction_benchmark.prepare_auction_benchmark(repo.store.data_dir, today))
+    prefetch.submit("prefetch_dragon_tiger", "预取龙虎榜", lambda:
+                    dragon_tiger.prepare_dragon_tiger(repo.store.data_dir, today))
+
+
 def run_instruments_sync(repo: KlineRepository) -> dict:
     """盘前同步个股维表。
 
@@ -228,6 +266,33 @@ def run_now(
     postmarket: bool = False,
     target_date: _date | None = None,
 ) -> dict:
+    from app.services.pipeline_prefetch import PipelinePrefetch, PipelineProgress
+
+    progress = PipelineProgress(on_progress or _noop)
+    prefetch = PipelinePrefetch(progress)
+    try:
+        return _run_now(repo, capset, progress, override_start_date,
+                        postmarket=postmarket, target_date=target_date, prefetch=prefetch)
+    except BaseException as exc:
+        from app.services.pipeline_jobs import JobCancelledError
+
+        with suppress(JobCancelledError):
+            progress.finish("cancelled" if isinstance(exc, JobCancelledError) else "failed", str(exc))
+        raise
+    finally:
+        prefetch.close()
+
+
+def _run_now(
+    repo: KlineRepository,
+    capset: CapabilitySet,
+    on_progress: ProgressCb,
+    override_start_date: _date | None = None,
+    *,
+    postmarket: bool = False,
+    target_date: _date | None = None,
+    prefetch,
+) -> dict:
     """立即执行一次盘后管道,支持进度回调。
 
     跳过的 stage **不 emit**,避免前端把"无 capability"的卡片错误标记为 active/done。
@@ -238,7 +303,7 @@ def run_now(
     postmarket: 自动盘后任务强制同步 A 股、核心指数与环境，并验收当日正式数据。
     target_date: 排队任务的目标北京日期，跨日期后不执行。
     """
-    emit = on_progress or _noop
+    emit = on_progress
     skipped: list[str] = []
     # 阶段软失败累积: 下列阶段 try/except 吞异常以不中断管道, 但失败即代表数据可能陈旧。
     # 管道末尾若非空则抛 PipelineStageError, 让任务终态如实标记为 failed(而非误报成功)。
@@ -317,6 +382,8 @@ def run_now(
     pull_a_share = postmarket or _prefs.get_pipeline_pull_a_share()
     if not pull_a_share and not override_start_date:
         emit("sync_daily", 45, "已跳过 A 股日K同步(拉取内容未勾选)")
+        emit.finish("skipped")
+        skipped.append("sync_daily")
         logger.info("sync_daily: skipped (pipeline_pull_a_share=False)")
     elif override_start_date:
         # 数据修正: 强制用传入日期作起点 batch 拉取, 忽略实时行情覆写分支。
@@ -484,7 +551,12 @@ def run_now(
         _invalidate("adj_factor")
     else:
         skipped.append("sync_adj")
+        emit.task("sync_adj", "同步除权因子", "skipped", message="数据源不支持除权因子")
         logger.info("sync_adj skipped: no ADJ_FACTOR capability")
+
+    index_start = _index_window_start(repo.store.data_dir, today, override_start_date, index_stale_day)
+    if postmarket:
+        _prepare_postmarket_inputs(prefetch, repo, capset, today, index_start)
 
     # Step 2: 计算 enriched
     #   判断策略:
@@ -573,6 +645,7 @@ def run_now(
         emit("compute_enriched", 88, f"enriched 完成,{len(affected_symbols)} 只个股")
     else:
         written_enriched = 0
+        emit.task("compute_enriched", "计算技术指标", "skipped", message="日线与除权因子均无变化")
         logger.info("compute_enriched: skip (no new daily, no adj_factor changes)")
     _refresh_single_view(repo, "kline_enriched")
     _invalidate("enriched")
@@ -603,36 +676,30 @@ def run_now(
                 emit("sync_index", 88, "同步指数维表…")
                 index_count = index_sync.sync_index_instruments(repo, pull_index=True, pull_etf=False)
                 emit("sync_index", 88, f"指数维表完成,{index_count} 只")
-                index_dir = repo.store.data_dir / "kline_index_enriched"
-                index_dates = sorted(
-                    d.name[5:] for d in index_dir.glob("date=*")
-                    if d.is_dir() and d.name.startswith("date=")
-                ) if index_dir.exists() else []
                 # 数据修正模式下用传入起点; 否则用本地指数最新日期补到今天;
                 # 完整性修复时起点再提前到最早坏日 (实时写过今天的指数分区时,
                 # "最新日期=今天"会让停机日的快照/缺口永久留存)
-                if override_start_date:
-                    index_start = override_start_date
-                else:
-                    index_start = _date.fromisoformat(index_dates[-1]) if index_dates else today - _td(days=365)
-                if index_stale_day is not None and index_start > index_stale_day:
-                    index_start = index_stale_day
-
                 def _index_chunk(cur: int, tot: int) -> None:
                     emit("sync_index", 88, f"指数日K批次 {cur}/{tot}",
                          stage_pct=int(100 * cur / tot) if tot else 100, skip_log=cur < tot)
 
                 from app.services.index_const import CORE_INDEX_SYMBOLS
 
-                written_index_daily = index_sync.sync_and_persist_index_daily(
-                    repo,
-                    capset,
-                    start_date=_dt.combine(index_start, _dt.min.time(), tzinfo=boundary_tz),
-                    end_date=_dt.combine(today, _dt.min.time(), tzinfo=boundary_tz),
-                    on_chunk_done=_index_chunk,
-                    **({"symbols_override": list(CORE_INDEX_SYMBOLS), "coverage": index_coverage}
-                       if postmarket else {}),
-                )
+                if prefetch.has("prefetch_index"):
+                    written_index_daily = index_sync.commit_prepared_index_daily(
+                        prefetch.result("prefetch_index"), repo,
+                        coverage=index_coverage, on_chunk_done=_index_chunk,
+                    )
+                else:
+                    written_index_daily = index_sync.sync_and_persist_index_daily(
+                        repo,
+                        capset,
+                        start_date=_dt.combine(index_start, _dt.min.time(), tzinfo=boundary_tz),
+                        end_date=_dt.combine(today, _dt.min.time(), tzinfo=boundary_tz),
+                        on_chunk_done=_index_chunk,
+                        **({"symbols_override": list(CORE_INDEX_SYMBOLS), "coverage": index_coverage}
+                           if postmarket else {}),
+                    )
                 emit("sync_index", 88, f"指数日K完成,{written_index_daily} 行")
                 _invalidate("index_instruments")
                 _invalidate("index_daily")
@@ -699,12 +766,16 @@ def run_now(
                 f"同步完成,指数 {index_count} 只/{written_index_daily} 行, ETF {etf_count} 只/{written_etf_daily} 行"
                 + (f", ETF复权 {etf_adj_symbols} 只" if etf_adj_symbols else ""),
             )
+            if any(error.startswith("ETF adj_factor:") for error in stage_errors):
+                emit.finish("failed", "; ".join(stage_errors))
         except Exception as e:  # noqa: BLE001
             logger.warning("sync_index/etf failed: %s", e)
             emit("sync_index", 89, f"指数/ETF同步失败:{e}")
             stage_errors.append(f"index/etf sync: {e}")
+            emit.finish("failed", str(e))
     else:
         skipped.append("sync_index")
+        emit.task("sync_index", "同步指数与ETF", "skipped", message="未启用或能力不可用")
 
     if coverage is not None:
         from app.services.index_const import CORE_INDEX_SYMBOLS
@@ -724,14 +795,12 @@ def run_now(
         # 环境计算优先使用内存范围；必须先刷新，避免聚合上一轮行情。
         repo.refresh_cache()
         emit("sync_classifications", 89, "同步概念与行业分类…")
-        import asyncio
-
         from app.services import ext_presets
         classifications: dict[str, int] = {}
-        asyncio.run(ext_presets.sync_classifications(
-            repo.store.data_dir, classifications,
-            lambda _stage, _pct, msg: emit("sync_classifications", 89, msg),
-        ))
+        for task_id in ("prefetch_concept", "prefetch_industry"):
+            prepared = prefetch.result(task_id)
+            classifications[prepared.config.id] = ext_presets.commit_prepared_preset(prepared, repo.store.data_dir)
+            emit("sync_classifications", 89, f"{prepared.config.label}同步完成，{classifications[prepared.config.id]} 行")
         # 概念映射有进程缓存，刷新后供本轮主线和复盘读取。
         from app.services.rps_rotation import invalidate_cache as invalidate_rotation_cache
         invalidate_rotation_cache()
@@ -746,6 +815,7 @@ def run_now(
     regime_enabled = postmarket or _prefs_regime.get_pipeline_regime_enabled()
     if not regime_enabled:
         skipped.append("regime")
+        emit.task("compute_regime", "计算市场环境", "skipped", message="手动同步未启用环境计算")
         logger.info("compute_regime skipped: user disabled (pipeline_regime_enabled=False)")
     else:
         try:
@@ -774,6 +844,7 @@ def run_now(
             logger.warning("compute_regime failed (soft): %s", e)
             stage_errors.append(f"compute_regime: {e}")
             skipped.append("regime")
+            emit.finish("failed", str(e))
 
     if postmarket:
         from app.services import regime_builder
@@ -792,6 +863,7 @@ def run_now(
     mainline_rows = 0
     if not regime_enabled:
         skipped.append("mainline")
+        emit.task("compute_mainline", "计算市场主线", "skipped", message="手动同步未启用环境计算")
     else:
         try:
             emit("compute_mainline", 93, "计算市场主线…")
@@ -809,6 +881,7 @@ def run_now(
             logger.warning("compute_mainline failed (soft): %s", e, exc_info=True)
             stage_errors.append(f"compute_mainline: {e}")
             skipped.append("mainline")
+            emit.finish("failed", str(e))
 
     # Step 2.8: 模拟盘结算: 顺延单按当日开盘/收盘撮合 → 除权调整 → 定版净值。
     # 幂等: 重跑同日不会重复成交/二次除权 (订单状态与 corp_action 台账守卫)。
@@ -823,6 +896,7 @@ def run_now(
     except Exception as e:  # noqa: BLE001 -- 独立阶段隔离，保留warning及原任务错误汇总
         logger.warning("paper_settle failed (soft): %s", e, exc_info=True)
         stage_errors.append(f"paper_settle: {e}")
+        emit.finish("failed", str(e))
 
     # Step 2.9: 分钟 K 同步(可选) — 未启用或无 capability 时静默跳过(不 emit)
     from app.services import preferences
@@ -830,8 +904,8 @@ def run_now(
     minute_days = preferences.get_minute_sync_days()
     written_minute = 0
     if minute_on and capset.has(Cap.KLINE_MINUTE_BATCH):
-        emit("sync_minute", 94, f"获取分钟K：首次回溯 {minute_days} 个自然日，已有数据从最新时间增量更新…")
-        logger.info("sync_minute: initial lookback %d calendar days, incremental when history exists", minute_days)
+        emit("sync_minute", 94, f"获取分钟K：首次回溯 {minute_days} 个自然日，已有数据回补最新数据日并更新至今…")
+        logger.info("sync_minute: initial lookback %d calendar days, replay latest stored day before updating", minute_days)
         minute_symbols = _resolve_minute_symbols(capset, repo)
         def _minute_chunk_progress(cur: int, tot: int, seg_label: str = "") -> None:
             emit("sync_minute", 94 + int(cur / tot),
@@ -848,6 +922,8 @@ def run_now(
         _invalidate("minute")
     else:
         skipped.append("sync_minute")
+        emit.task("sync_minute", "同步分钟K", "skipped",
+                  message="分钟同步未启用" if not minute_on else "普通分钟能力不可用")
         if minute_on:
             logger.info("sync_minute skipped: no KLINE_MINUTE_BATCH capability")
         else:
@@ -856,6 +932,7 @@ def run_now(
     # Step 3: 刷新视图
     emit("refresh_views", 95, "刷新 DuckDB 视图…")
     _refresh_views(repo)
+    emit.finish()
 
     _invalidate(None)  # 兜底:全清
 
@@ -889,14 +966,19 @@ def run_now(
     # 发布市场数据不依赖可选的 AI 文本生成，也不增加缺口补齐门禁。
     from app.services.review_publication import publish_review_if_ready
     state = _get_app_state()
-    repo.refresh_cache()
+    # 自动管道在验收后已刷新股票缓存；后续只写环境、分钟和榜单。
+    # 最终快照和通知统一由任务边界刷新，避免这里再全量加载一次股票指标。
+    if not postmarket:
+        repo.refresh_cache()
     if postmarket:
         depth = getattr(state, "depth_service", None)
         if depth is not None:
             emit("depth_finalize", 98, "更新盘后盘口快照…")
             depth.finalize()
     emit("sync_boards", 99, "更新竞价与龙虎榜…")
-    _sync_recap_boards(repo)
+    result["board_status"] = (_sync_recap_boards(repo, prefetch=prefetch, target_date=today)
+                              if postmarket else _sync_recap_boards(repo))
+    emit("publish_review", 99, "发布市场复盘快照…")
     publish_review_if_ready(repo, getattr(state, "quote_service", None), getattr(state, "depth_service", None))
     emit("done", 100, "完成")
     return result
@@ -1116,8 +1198,8 @@ def _run_tracked(fn, job_label: str) -> bool:
         return False
 
     def progress(stage: str, pct: int, msg: str, stage_pct: int | None = None,
-                 skip_log: bool = False) -> None:
-        job_store.progress(job_id, stage, pct, msg, stage_pct=stage_pct, skip_log=skip_log)
+                 skip_log: bool = False, **task_fields) -> None:
+        job_store.progress(job_id, stage, pct, msg, stage_pct=stage_pct, skip_log=skip_log, **task_fields)
 
     succeeded = False
     try:
@@ -1414,15 +1496,44 @@ def _register_review_job(scheduler, repo, hour: int, minute: int) -> None:
     )
 
 
-def _sync_recap_boards(repo) -> None:
+def _sync_recap_boards(repo, *, prefetch=None, target_date: _date | None = None) -> dict:
     from app.services import auction_benchmark, dragon_tiger, trading_day
     if trading_day.is_trading_day(data_dir=repo.store.data_dir) is not True:
-        return
-    for sync in (auction_benchmark.sync_auction_benchmark, dragon_tiger.sync_dragon_tiger):
+        return {}
+    day = target_date or cn_today()
+    results = {}
+    for name, task_id, label, sync, prepare, commit in (
+        ("auction", "prefetch_auction", "正式同步竞价风向标", auction_benchmark.sync_auction_benchmark,
+         auction_benchmark.prepare_auction_benchmark, auction_benchmark.commit_auction_benchmark),
+        ("dragon_tiger", "prefetch_dragon_tiger", "正式同步龙虎榜", dragon_tiger.sync_dragon_tiger,
+         dragon_tiger.prepare_dragon_tiger, dragon_tiger.commit_dragon_tiger),
+    ):
+        retry_task = None
         try:
-            sync(repo.store.data_dir)
-        except Exception:
+            if prefetch is not None and prefetch.has(task_id):
+                try:
+                    prepared = prefetch.result(task_id)
+                except Exception as exc:  # noqa: BLE001 -- 仅对预取异常重取一次，取消信号继续传播
+                    # 预取早于供应商发布时点时，正式阶段重新取一次；写盘失败不重取。
+                    retry_task = f"sync_{name}"
+                    prefetch.check_cancelled()
+                    prefetch.progress.task(retry_task, label, "running", message="预取失败，正式阶段重新取数")
+                    logger.info("%s 预取失败，正式阶段重新取数: %s", label, exc)
+                    prepared = prepare(repo.store.data_dir, day)
+                    prefetch.check_cancelled()
+                    prefetch.progress.task(retry_task, label, "running", 90, "重新取数完成，准备写入")
+                payload = commit(prepared, repo.store.data_dir)
+                if retry_task is not None:
+                    prefetch.progress.task(retry_task, label, "succeeded", 100, "正式阶段同步完成")
+            else:
+                payload = sync(repo.store.data_dir)
+            results[name] = {key: payload.get(key) for key in ("state", "requested_date", "trade_date")}
+        except Exception as exc:
+            if retry_task is not None:
+                prefetch.progress.task(retry_task, label, "failed", error=str(exc), message="正式阶段同步失败")
+            results[name] = {"state": "error", "error": str(exc)}
             logger.exception("复盘榜单后台更新失败")
+    return results
 
 
 def start_scheduler(repo: KlineRepository) -> AsyncIOScheduler:

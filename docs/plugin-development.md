@@ -134,6 +134,7 @@ provider 无需继承基类，需有 `name`、`config.datasets` 和 `close()`；
 - `start_date/end_date` 为可选 `datetime.date`，两端包含，限制报告期而非公告日。显式声明时在上游限界；旧签名由服务过滤返回结果，上游量与历史深度仍受源限制。
 - 可选 `get_financial_universe()` 返回 canonical 股票代码范围，供旧内部批次使用并记录到 `financials/universe.json`；按需入口不调用。未实现用本地维表，异常或空清单停止旧批次，不删除基础维表及历史报表。
 - 缺数、限流、网络错误必须传播，不能生成占位版本或记为当日成功。上游限流使用 `ProviderRateLimitError`，保留当前表原文件。
+- 已复核的单期缺数可抛 `ProviderFinancialDataUnavailableError(data, missing_symbols, missing_periods={symbol: ["YYYY-MM-DD"]})`，其中 `data` 仅含成功报告，报告期按 canonical 股票代码分组。页面按需获取保存这些完整报告并返回 `complete=false`、`missing_periods`，本地 GET 也返回待补报告期；缺期阻止对应范围命中完整缓存，较早年度保持原补采游标。计算入口仍传播该异常。未提供结构化报告期、网络失败或限流均不走部分成功路径。
 
 fuyao 当前提供 `income/balance_sheet/cash_flow/metrics`，无 `shares` 接口。三大报表回查源可返回的窗口（最近 20 期），`report_date_ms` 按实测更新日期保存；首次披露至更新之间的原版本仍可能缺失。指标接口仅提供最新期且无可信版本日期，从本地观察后使用，不虚构历史或用净利润除权益替代加权 ROE。估值反推 BPS 标为 `bps_basis=valuation_snapshot`，只供浏览；财报 PB 使用不复权价和可用财报 BPS，缺输入留空，不重算股本变动后的财报 BPS。
 

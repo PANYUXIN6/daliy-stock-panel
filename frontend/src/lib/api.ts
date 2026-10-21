@@ -119,6 +119,8 @@ export interface FinancialTableData<T> {
   data: T[]
   /** 当前数据源已检查的最早报告期边界，用于向前补一年。 */
   history_start?: string | null
+  /** 已确认暂不可用、后续仍需补齐的报告期。 */
+  missing_periods?: string[]
 }
 
 export interface FinancialStatus {
@@ -2117,7 +2119,7 @@ export interface Preferences {
   ordinary_minute_enabled: boolean
   watchlist_groups_in_nav: boolean
   minute_sync_enabled: boolean
-  /** 批量分钟首次回溯的自然日数；已有数据时从最新时间增量更新 */
+  /** 批量分钟首次回溯的自然日数；已有数据时回补最新数据日并更新至今 */
   minute_sync_days: number
   /** 分段大小按交易日数量估算为自然日区间 */
   minute_sync_segment_days: number
@@ -2264,6 +2266,12 @@ export interface SectorRotation {
   /** 自动活跃榜成员数上限 */
   max_auto_members?: number
   as_of?: string
+  /** 分类、当日曾有行情、最新分钟桶有行情的板块数；不代表分钟历史完整。 */
+  coverage?: {
+    known_sectors: number
+    day_sectors: number
+    latest_sectors: number
+  }
   timeline: SectorRotationPoint[]
   /** 0 轴穿越事件 (全市场板块, 最新在前, 封顶 120 条) */
   cross_events?: SectorCrossEvent[]
@@ -3567,7 +3575,7 @@ export const api = {
     request<{ tables: FinancialTable[] }>('/api/financials/collection-options'),
 
   financialFetch: (symbol: string, table: FinancialTable, before?: string) =>
-    request<{ symbol: string; table: FinancialTable; rows: number; reused: boolean; start_date: string; end_date: string }>('/api/financials/fetch', {
+    request<{ symbol: string; table: FinancialTable; rows: number; reused: boolean; complete: boolean; missing_periods: string[]; start_date: string; end_date: string }>('/api/financials/fetch', {
       method: 'POST', body: JSON.stringify({ symbol, table, before }), timeoutMs: COMPUTE_REQUEST_TIMEOUT_MS,
     }),
 
@@ -4173,6 +4181,20 @@ export const api = {
 }
 
 // ===== Pipeline =====
+export type PipelineTaskStatus = 'pending' | 'running' | 'succeeded' | 'failed' | 'skipped' | 'cancelled'
+export interface PipelineTask {
+  id?: string
+  label?: string
+  status: PipelineTaskStatus
+  progress?: number
+  started_at?: string | null
+  finished_at?: string | null
+  last_progress_at?: string | null
+  duration_s?: number | null
+  message?: string | null
+  error?: string | null
+}
+
 export interface PipelineJob {
   id: string
   request_key?: string | null
@@ -4184,6 +4206,11 @@ export interface PipelineJob {
   started_at: string | null
   finished_at: string | null
   duration_s: number | null
+  last_progress_at?: string | null
+  /** 独立子任务状态，可同时有多个运行中任务；历史记录可能没有此字段。 */
+  tasks?: Record<string, PipelineTask>
+  stage_timings?: Record<string, number>
+  outcome?: 'succeeded' | 'failed' | 'cancelled' | null
   result: {
     universe_size?: number
     daily_days?: number

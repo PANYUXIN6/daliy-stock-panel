@@ -23,7 +23,7 @@ export function RepairDailyPanel({ hasCap, isRunning, latestDate, onStart }: {
   hasCap: boolean
   isRunning: boolean
   latestDate: string | null
-  onStart: () => void
+  onStart: (jobId: string) => void
 }) {
   const qc = useQueryClient()
   const hasBatchCap = hasCap
@@ -33,8 +33,8 @@ export function RepairDailyPanel({ hasCap, isRunning, latestDate, onStart }: {
 
   const repair = useMutation({
     mutationFn: () => api.repairDaily(startDate),
-    onSuccess: () => {
-      onStart()
+    onSuccess: ({ job_id }) => {
+      onStart(job_id)
       qc.invalidateQueries({ queryKey: QK.pipelineJobs })
     },
   })

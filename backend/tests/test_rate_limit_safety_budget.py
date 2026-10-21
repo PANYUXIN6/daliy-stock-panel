@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-import time
+from concurrent.futures import ThreadPoolExecutor
+from types import SimpleNamespace
 
 from app.tickflow.capabilities import Cap, CapabilityLimits, CapabilitySet
 from app.tickflow.rate_limits import (
     SAFETY_RPM_FACTOR,
-    _next_slot,
-    _slot_lock,
     apply_safety_rpm,
     resolve_limit,
     sleep_between_batches,
@@ -36,24 +35,38 @@ def test_resolve_limit_can_skip_safety_for_diagnostics() -> None:
     assert lim.rpm == 60
 
 
-def test_two_first_batches_do_not_wait_even_when_slot_reserved() -> None:
-    """Known limitation: concurrent/serial index=0 calls do not sleep (first-batch burst).
+def test_two_first_batches_share_reserved_budget(monkeypatch) -> None:
+    from app.tickflow import rate_limits
 
-    Comments document that aggregate rpm is therefore not guaranteed when many
-    pipelines start with index=0; Phase 1 must avoid concurrent probe/sync.
-    """
-    with _slot_lock:
-        _next_slot.clear()
-    t0 = time.perf_counter()
+    clock = SimpleNamespace(now=0.)
+    sleeps = []
+    def sleep(seconds):
+        sleeps.append(seconds)
+        clock.now += seconds
+    monkeypatch.setattr(rate_limits, "time", SimpleNamespace(monotonic=lambda: clock.now, sleep=sleep))
+    monkeypatch.setattr(rate_limits, "_next_slot", {})
     sleep_between_batches(0, rpm=60)
     sleep_between_batches(0, rpm=60)
-    assert time.perf_counter() - t0 < 0.05
+    assert sleeps == [1.]
 
 
-def test_second_batch_waits_for_shared_slot() -> None:
-    with _slot_lock:
-        _next_slot.clear()
-    t0 = time.perf_counter()
+def test_second_batch_waits_for_shared_slot(monkeypatch) -> None:
+    from app.tickflow import rate_limits
+
+    sleeps = []
+    monkeypatch.setattr(rate_limits, "time", SimpleNamespace(monotonic=lambda: 0., sleep=sleeps.append))
+    monkeypatch.setattr(rate_limits, "_next_slot", {})
     sleep_between_batches(0, rpm=60)
     sleep_between_batches(1, rpm=60)
-    assert time.perf_counter() - t0 >= 0.9
+    assert sleeps == [1.]
+
+
+def test_concurrent_first_batches_reserve_distinct_slots(monkeypatch) -> None:
+    from app.tickflow import rate_limits
+
+    sleeps = []
+    monkeypatch.setattr(rate_limits, "time", SimpleNamespace(monotonic=lambda: 0., sleep=sleeps.append))
+    monkeypatch.setattr(rate_limits, "_next_slot", {})
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        list(pool.map(lambda _: sleep_between_batches(0, rpm=60), range(4)))
+    assert sorted(sleeps) == [1., 2., 3.]

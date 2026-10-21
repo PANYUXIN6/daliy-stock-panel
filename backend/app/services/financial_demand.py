@@ -16,6 +16,7 @@ from pathlib import Path
 
 import polars as pl
 
+from app.data_providers.base import ProviderFinancialDataUnavailableError
 from app.market_time import cn_today
 from app.services import financial_sync, preferences
 from app.services.fs_utils import atomic_write_text
@@ -61,7 +62,7 @@ def supported_tables(capset: CapabilitySet) -> list[str]:
 def fetch_stock(data_dir: Path, capset: CapabilitySet, symbol: str, table: str, *,
                 before_write: Callable[[], None] | None = None, cancel_event=None,
                 start_date: date | None = None, end_date: date | None = None,
-                allow_empty: bool = False) -> dict:
+                allow_empty: bool = False, allow_partial: bool = False) -> dict:
     """获取一股一表的指定范围或源支持历史；复用成功结果，失败可重试。"""
     symbol = validate_symbol(symbol)
     if table not in financial_sync.FINANCIAL_TABLES:
@@ -69,7 +70,7 @@ def fetch_stock(data_dir: Path, capset: CapabilitySet, symbol: str, table: str, 
     source = preferences.get_financial_provider()
     if table not in supported_tables(capset):
         raise ValueError("当前财务数据源不支持此项数据，请在设置中配置可用数据源")
-    key = (data_dir.resolve(), source, table, symbol, start_date, end_date)
+    key = (data_dir.resolve(), source, table, symbol, start_date, end_date, allow_partial)
     with _guard:
         future = _flights.get(key)
         leader = future is None
@@ -80,7 +81,7 @@ def fetch_stock(data_dir: Path, capset: CapabilitySet, symbol: str, table: str, 
         return {**future.result(), "reused": True}
     try:
         result = _fetch_and_merge(data_dir, capset, source, symbol, table, before_write, cancel_event,
-                                  start_date, end_date, allow_empty)
+                                  start_date, end_date, allow_empty, allow_partial)
         future.set_result(result)
         return result
     except BaseException as exc:
@@ -117,7 +118,19 @@ def history_start(data_dir: Path, table: str, symbol: str, frame: pl.DataFrame |
             oldest = rows["period_end"].cast(pl.String).drop_nulls().min()
             if oldest:
                 starts.append(oldest[:10])
-        return min(starts) if starts else None
+        if not starts:
+            return None
+        # 更早年度部分取数时保留补采入口，不能因已保存的旧记录跳过缺失季度。
+        pending_before = [before for before in saved.get("pending_periods", {}).values() if before]
+        return max(min(starts), max(pending_before)) if pending_before else min(starts)
+
+
+def missing_periods(data_dir: Path, table: str, symbol: str) -> list[str]:
+    """只读当前源的待补报告期，刷新页面后仍明确展示数据缺口。"""
+    symbol = validate_symbol(symbol)
+    with financial_sync.financial_write_lock:
+        saved = _receipt(data_dir, table, symbol, preferences.get_financial_provider())
+        return sorted(saved.get("pending_periods", {}), reverse=True)
 
 
 def fetch_stock_history(data_dir: Path, capset: CapabilitySet, symbol: str, table: str, *,
@@ -136,11 +149,11 @@ def fetch_stock_history(data_dir: Path, capset: CapabilitySet, symbol: str, tabl
         start, end = _years_before(before, 1), before - timedelta(days=1)
     return fetch_stock(data_dir, capset, symbol, table, before_write=before_write,
                        cancel_event=cancel_event, start_date=start, end_date=end,
-                       allow_empty=before is not None)
+                       allow_empty=before is not None, allow_partial=True)
 
 
 def _fetch_and_merge(data_dir, capset, source, symbol, table, before_write, cancel_event,
-                     start_date, end_date, allow_empty):
+                     start_date, end_date, allow_empty, allow_partial):
 
     # 源名称不作为路径组成部分，避免可配置源名越过数据目录。
     receipt = data_dir / "financials" / "demand" / table / f"{symbol}.json"
@@ -160,19 +173,35 @@ def _fetch_and_merge(data_dir, capset, source, symbol, table, before_write, canc
                             and (allow_empty or saved.get("recent_checked_on") == today))
             else:
                 reusable = saved.get("checked_on") == today
+            pending = saved.get("pending_periods", {})
+            reusable = reusable and not any(
+                not window or window["start_date"] <= period <= window["end_date"] for period in pending
+            )
             if reusable:
                 if window and "period_end" in rows.columns:
                     rows = rows.filter(pl.col("period_end").cast(pl.String).str.slice(0, 10)
                                        .is_between(pl.lit(window["start_date"]), pl.lit(window["end_date"])))
-                return {"symbol": symbol, "table": table, "rows": len(rows), "reused": True, **window}
+                return {"symbol": symbol, "table": table, "rows": len(rows), "reused": True,
+                        "complete": True, "missing_periods": [], **window}
     _check_cancel(cancel_event)
     range_args = {"start_date": start_date, "end_date": end_date} if window else {}
-    fetched = financial_sync._fetch_table(table, [symbol], capset, latest_only=False,
-                                         cancel_event=cancel_event, **range_args)
+    missing = []
+    try:
+        fetched = financial_sync._fetch_table(table, [symbol], capset, latest_only=False,
+                                             cancel_event=cancel_event, **range_args)
+    except ProviderFinancialDataUnavailableError as exc:
+        if not allow_partial or not exc.missing_periods.get(symbol):
+            raise
+        missing = sorted(set(exc.missing_periods[symbol]), reverse=True)
+        for period in missing:
+            if (date.fromisoformat(period).isoformat() != period
+                    or (window and not window["start_date"] <= period <= window["end_date"])):
+                raise ValueError("财务缺失报告期无效或超出请求范围，未保存") from exc
+        fetched = exc.data
     _check_cancel(cancel_event)
     if preferences.get_financial_provider() != source:
         raise ValueError("财务数据源已改变，请重新获取")
-    if fetched.is_empty() and not allow_empty:
+    if fetched.is_empty() and not allow_empty and not missing:
         raise ValueError("数据源未返回该股票的可用财务数据")
     if not fetched.is_empty() and not {"symbol", "period_end", "source"} <= set(fetched.columns):
         raise ValueError("财务数据缺少股票代码、报告期或来源，未保存")
@@ -185,7 +214,7 @@ def _fetch_and_merge(data_dir, capset, source, symbol, table, before_write, canc
             raise ValueError("财务数据报告期无效，未保存")
         fetched = fetched.filter(pl.col("period_end").cast(pl.String).str.slice(0, 10)
                                  .is_between(pl.lit(window["start_date"]), pl.lit(window["end_date"])))
-        if fetched.is_empty() and not allow_empty:
+        if fetched.is_empty() and not allow_empty and not missing:
             raise ValueError("数据源未返回该范围的可用财务数据")
     # 网络请求不占写锁；提交时重新读取，防不同股票同时获取丢失彼此的数据。
     with financial_sync.financial_write_lock:
@@ -204,11 +233,25 @@ def _fetch_and_merge(data_dir, capset, source, symbol, table, before_write, canc
             financial_sync._write_table(table, merged, data_dir, publish=False)
         saved = _receipt(data_dir, table, symbol, source)
         saved["source"] = source
+        pending = saved.get("pending_periods", {})
+        if window:
+            pending = {period: before for period, before in pending.items()
+                       if not window["start_date"] <= period <= window["end_date"]}
+        else:
+            # 不限日期的计算准备仍受源历史深度约束，只清除本轮实际返回的报告期。
+            returned = set(fetched["period_end"].cast(pl.String).str.slice(0, 10).to_list())
+            pending = {period: before for period, before in pending.items() if period not in returned}
+        retry_before = (end_date + timedelta(days=1)).isoformat() if allow_empty and end_date else None
+        pending.update(dict.fromkeys(missing, retry_before))
+        saved["pending_periods"] = pending
         if window:
             saved["history_start"] = min(saved.get("history_start", window["start_date"]), window["start_date"])
             saved["history_end"] = max(saved.get("history_end", window["end_date"]), window["end_date"])
             if not allow_empty:
-                saved["recent_checked_on"] = today
+                if missing:
+                    saved.pop("recent_checked_on", None)
+                else:
+                    saved["recent_checked_on"] = today
         else:
             saved["checked_on"] = today
         receipt.parent.mkdir(parents=True, exist_ok=True)
@@ -217,7 +260,8 @@ def _fetch_and_merge(data_dir, capset, source, symbol, table, before_write, canc
     from app.services.shared_runtime import publish_data_update
     invalidate_data_cache("financials", storage=True)
     publish_data_update(data_dir, ["financials"])
-    return {"symbol": symbol, "table": table, "rows": len(fetched), "reused": False, **window}
+    return {"symbol": symbol, "table": table, "rows": len(fetched), "reused": False,
+            "complete": not missing, "missing_periods": missing, **window}
 
 
 def _check_cancel(event):

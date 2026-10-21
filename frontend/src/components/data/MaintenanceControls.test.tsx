@@ -119,7 +119,7 @@ it('单标的分钟采集明确本地日历交易日口径并保持参数，失�
   const onJobStart = vi.fn()
   await render(<MinuteSyncConfig hasCap onJobStart={onJobStart} />)
   expect(host.textContent).toContain('随全量同步已关闭')
-  expect(host.textContent).toContain('批量分钟历史首次回溯 5 自然日；已有数据从最新时间增量更新到现在')
+  expect(host.textContent).toContain('批量分钟历史首次回溯 5 自然日；已有数据回补最新数据日，并更新到现在')
   expect(host.textContent).toContain('按本地交易日历采集指定标的最近 1 ~ 30 个交易日')
   expect(host.textContent).toContain('交易日数')
   await input(host.querySelector<HTMLInputElement>('input[placeholder="600000.SH"]')!, ' 600519.SH ')
@@ -311,13 +311,13 @@ it.each([
   }
 })
 
-it.each([false, true])('数据页分钟批量提示首次自然日回溯与增量更新，随行情同步为 %s', async (minuteAuto) => {
+it.each([false, true])('数据页分钟批量提示首次自然日回溯与最新数据日回补，随行情同步为 %s', async (minuteAuto) => {
   mocks.preferences.mockResolvedValue({ minute_sync_days: 7, minute_sync_enabled: minuteAuto })
   mocks.capabilityMatrix.mockResolvedValue({ capabilities: [{ id: 'daily', usable: true }, { id: 'minute', usable: true }] })
   await render(<Data />)
   const card = (title: string) => [...host.querySelectorAll('h3')]
     .find(node => node.textContent === title)!.parentElement!.parentElement!
-  const range = '首次回溯 7 自然日；已有数据从最新时间增量更新到现在'
+  const range = '首次回溯 7 自然日；已有数据回补最新数据日，并更新到现在'
   expect(card('分钟历史数据').textContent).toContain(range)
   expect(card('分钟历史数据').textContent).toContain('可独立更新，不受随行情同步开关影响')
   if (minuteAuto) {

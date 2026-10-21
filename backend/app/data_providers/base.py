@@ -23,10 +23,13 @@ class ProviderRateLimitError(RuntimeError):
 class ProviderFinancialDataUnavailableError(RuntimeError):
     """已复核的单股财务缺数，携带同批成功数据与缺数原因供断点同步留痕。"""
 
-    def __init__(self, data: pl.DataFrame, missing_symbols: dict[str, str]) -> None:
+    def __init__(self, data: pl.DataFrame, missing_symbols: dict[str, str], *,
+                 missing_periods: dict[str, list[str]] | None = None) -> None:
         super().__init__("财务数据确认缺失：" + "、".join(missing_symbols))
         self.data = data
         self.missing_symbols = missing_symbols
+        # canonical 股票代码 -> ISO 报告期；供按需浏览提示，不暴露供应商错误详情。
+        self.missing_periods = missing_periods or {}
 
 
 @dataclass(frozen=True)

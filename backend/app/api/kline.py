@@ -963,7 +963,7 @@ async def sync_minute(request: Request):
     """手动触发分钟 K 同步(全市场)。返回 pipeline job_id 可轮询进度。
 
     body 可选: { "days": int, "extend": bool }。
-    普通同步首次回溯 days 自然日，已有数据从最新时间增量更新；不传则用偏好设置。
+    普通同步首次回溯 days 自然日，已有数据回补最新数据日并更新至今；不传则用偏好设置。
     extend=True（或 days>=365）从本地最早时间向前扩展约 days 个交易日，
     无本地数据则从当前时间回溯；区间采用自然日估算，不保证精确交易日数量。
     """

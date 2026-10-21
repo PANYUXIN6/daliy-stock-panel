@@ -2119,7 +2119,7 @@ export interface Preferences {
   ordinary_minute_enabled: boolean
   watchlist_groups_in_nav: boolean
   minute_sync_enabled: boolean
-  /** 批量分钟首次回溯的自然日数；已有数据时从最新时间增量更新 */
+  /** 批量分钟首次回溯的自然日数；已有数据时回补最新数据日并更新至今 */
   minute_sync_days: number
   /** 分段大小按交易日数量估算为自然日区间 */
   minute_sync_segment_days: number

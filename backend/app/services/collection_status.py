@@ -218,7 +218,7 @@ def check_collection_sync(request: CollectionSyncRequest, repo, *, quote_service
     elif request.kind == "minute_batch":
         if result.get("minute_rows", 0) <= 0 or not _has_partition(data_dir, "kline_minute", session):
             return _response()
-        message = (f"按“首次回溯 {request.days} 个自然日、已有数据从最新时间增量更新”的配置，"
+        message = (f"按“首次回溯 {request.days} 个自然日、已有数据回补最新数据日并更新至今”的配置，"
                    f"同源同范围配置的分钟任务已在 {session} 收盘后完成，本地已有结果。上游仍可能修订数据，是否重新拉取？")
     else:
         tables = [table for enabled, table in ((context["pipeline_pull_a_share"], "kline_daily"),

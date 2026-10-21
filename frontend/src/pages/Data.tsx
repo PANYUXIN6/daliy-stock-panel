@@ -813,7 +813,7 @@ export function Data() {
               {
                 title: '行情与基础数据',
                 description: '股票基础资料、日 K、复权与指标，以及范围内的指数、ETF 和盘后榜单。',
-                detail: minuteAuto ? `同时更新分钟 K：首次回溯 ${minuteHistoryDays} 自然日；已有数据从最新时间增量更新到现在` : '按已配置的数据范围更新',
+                detail: minuteAuto ? `同时更新分钟 K：首次回溯 ${minuteHistoryDays} 自然日；已有数据回补最新数据日，并更新到现在` : '按已配置的数据范围更新',
                 available: !prefs.isLoading && !prefs.isError,
                 pending: startSync.isPending,
                 settings: 'pipeline-scope',
@@ -822,7 +822,7 @@ export function Data() {
               },
               {
                 title: '分钟历史数据',
-                description: `首次回溯 ${minuteHistoryDays} 自然日；已有数据从最新时间增量更新到现在，供本地分时图和研究使用。`,
+                description: `首次回溯 ${minuteHistoryDays} 自然日；已有数据回补最新数据日，并更新到现在，供本地分时图和研究使用。`,
                 detail: '可独立更新，不受随行情同步开关影响',
                 available: hasMinuteCap && !prefs.isLoading && !prefs.isError,
                 pending: syncMinuteHistory.isPending,

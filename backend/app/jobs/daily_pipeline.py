@@ -830,8 +830,8 @@ def run_now(
     minute_days = preferences.get_minute_sync_days()
     written_minute = 0
     if minute_on and capset.has(Cap.KLINE_MINUTE_BATCH):
-        emit("sync_minute", 94, f"获取分钟K：首次回溯 {minute_days} 个自然日，已有数据从最新时间增量更新…")
-        logger.info("sync_minute: initial lookback %d calendar days, incremental when history exists", minute_days)
+        emit("sync_minute", 94, f"获取分钟K：首次回溯 {minute_days} 个自然日，已有数据回补最新数据日并更新至今…")
+        logger.info("sync_minute: initial lookback %d calendar days, replay latest stored day before updating", minute_days)
         minute_symbols = _resolve_minute_symbols(capset, repo)
         def _minute_chunk_progress(cur: int, tot: int, seg_label: str = "") -> None:
             emit("sync_minute", 94 + int(cur / tot),

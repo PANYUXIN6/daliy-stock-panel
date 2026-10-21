@@ -2266,6 +2266,12 @@ export interface SectorRotation {
   /** 自动活跃榜成员数上限 */
   max_auto_members?: number
   as_of?: string
+  /** 分类、当日曾有行情、最新分钟桶有行情的板块数；不代表分钟历史完整。 */
+  coverage?: {
+    known_sectors: number
+    day_sectors: number
+    latest_sectors: number
+  }
   timeline: SectorRotationPoint[]
   /** 0 轴穿越事件 (全市场板块, 最新在前, 封顶 120 条) */
   cross_events?: SectorCrossEvent[]

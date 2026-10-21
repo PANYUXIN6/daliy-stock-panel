@@ -259,6 +259,10 @@ export function SectorRotationCard({ kind }: { kind: 'concept' | 'industry' }) {
     staleTime: 25_000,
   })
   const data = rotationQuery.data
+  const coverage = data?.coverage
+  const incompleteCoverage = !!coverage && (
+    coverage.day_sectors < coverage.known_sectors || coverage.latest_sectors < coverage.day_sectors
+  )
   // 编辑器展示名单: 未自定义时用后端内置名单预填 (响应缺省时为空)
   const effectiveExclude = excludeNames ?? (data?.default_exclude_sectors ?? [])
   const displayNames = data?.series?.sectors ?? []
@@ -837,6 +841,17 @@ export function SectorRotationCard({ kind }: { kind: 'concept' | 'industry' }) {
         </div>
       ) : (
         <>
+          {coverage && (
+            <div role="status" className={cn(
+              'mb-2 rounded-lg border px-2 py-1.5 text-[10px]',
+              incompleteCoverage ? 'border-amber-400/30 bg-amber-400/5 text-amber-500' : 'border-border/60 text-muted',
+            )}>
+              当日已采集 {coverage.day_sectors}/{coverage.known_sectors} 个{dimLabel}；最新时段更新 {coverage.latest_sectors} 个。
+              {incompleteCoverage && <>
+                {' '}覆盖不足，仅显示已采集数据；请前往 <a href="/data" className="underline underline-offset-2">数据 → 同步分钟历史数据</a> 补采。
+              </>}
+            </div>
+          )}
           {rowsMode !== 'custom' && excludeEditorOpen && (
             <div className="mb-2 rounded-lg border border-border/60 bg-elevated/30 p-2">
               <div className="flex flex-wrap items-center gap-1.5">
@@ -944,7 +959,7 @@ export function SectorRotationCard({ kind }: { kind: 'concept' | 'industry' }) {
 
           {incompleteSeriesCount > 0 && (
             <div role="status" className="mb-2 rounded-lg border border-amber-400/30 bg-amber-400/5 px-2 py-1.5 text-[10px] text-amber-500">
-              当前展示的 {incompleteSeriesCount} 个{dimLabel}存在分钟历史缺口，仅显示已采集时段；请补采 {data.date} 全市场分钟数据。
+              当前展示的 {incompleteSeriesCount} 个{dimLabel}存在分钟历史缺口，仅显示已采集时段；请前往 <a href="/data" className="underline underline-offset-2">数据 → 同步分钟历史数据</a> 补采 {data.date} 的分钟数据。
             </div>
           )}
           {displayMode === 'heatmap' ? (
@@ -1045,17 +1060,20 @@ export function SectorRotationCard({ kind }: { kind: 'concept' | 'industry' }) {
                       hoverName === sector.name && 'bg-accent/10',
                     )}
                   >
-                    <span className="truncate font-medium text-foreground" title={`${sector.name} · 成分 ${sector.n_members_with_bars}/${sector.n_members}`}>
-                      <span
-                        aria-hidden
-                        className="mr-1 inline-block h-1.5 w-1.5 rounded-full align-middle"
-                        style={{
-                          backgroundColor: displayNames.includes(sector.name)
-                            ? TREND_COLORS[displayNames.indexOf(sector.name) % TREND_COLORS.length]
-                            : 'transparent',
-                        }}
-                      />
-                      {sector.name}
+                    <span className="min-w-0 font-medium text-foreground" title={`${sector.name} · 成分 ${sector.n_members_with_bars}/${sector.n_members}`}>
+                      <span className="block truncate">
+                        <span
+                          aria-hidden
+                          className="mr-1 inline-block h-1.5 w-1.5 rounded-full align-middle"
+                          style={{
+                            backgroundColor: displayNames.includes(sector.name)
+                              ? TREND_COLORS[displayNames.indexOf(sector.name) % TREND_COLORS.length]
+                              : 'transparent',
+                          }}
+                        />
+                        {sector.name}
+                      </span>
+                      {sector.pct_now == null && <span className="block text-[9px] font-normal text-amber-500">本时段未更新</span>}
                     </span>
                     <span className={`text-right font-mono ${pctClass(sector.pct_now)}`}>{fmtPct(sector.pct_now)}</span>
                     <span className={`text-right font-mono ${pctClass(sector.pct_prev)}`}>{fmtPct(sector.pct_prev)}</span>

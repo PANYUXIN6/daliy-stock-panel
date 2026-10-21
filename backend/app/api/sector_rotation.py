@@ -1,4 +1,4 @@
-"""板块切换(盘中轮动) API — 基于全量分钟数据 + 扩展资金流。薄层, 计算在 services。"""
+"""板块切换(盘中轮动) API — 基于本地分钟数据与扩展资金流，计算在 services。"""
 from __future__ import annotations
 
 import json
@@ -26,11 +26,13 @@ def get_sector_rotation(
         description="自动榜排序维度: activity=近30分钟成交额, score=综合分, pct=现涨幅, rank_change=1h排名跃升, momentum=近1小时动量(走强→走弱), flow=扩展资金流",
     ),
 ):
-    """盘中板块切换走势: 全量分钟K聚合到板块, 涨幅 + 扩展资金流综合评分。
+    """盘中板块切换走势: 本地分钟K聚合到板块, 涨幅 + 扩展资金流综合评分。
 
     series_names 提供时展示矩阵仅含这些板块 (自定义监控, ≤20, 当日无行情的剔除, 不过滤),
     缺省为自动榜 (sort_by 维度降序, 先剔除排除名单与超成员数上限的板块,
     不足时回退不过滤)。
+    候选保留当日曾有分钟数据的板块；最新桶未更新的涨幅、排名和综合分为空，
+    coverage 分别报告分类总数、当日覆盖数和最新桶覆盖数，不混入其他日期。
     数据不可用时返回明确的 no_data/empty 状态与原因, 不静默。
     """
     names: list[str] | None = None

@@ -3,6 +3,7 @@ import { chartTheme, getTheme, useTheme } from '@/lib/theme'
 import * as echarts from 'echarts'
 import type { ECharts, EChartsOption } from 'echarts'
 import type { KlineRow, LevelSeries } from '@/lib/api'
+import { buildBullBearLineSeries, BULL_BEAR_UP, BULL_BEAR_DOWN } from '@/lib/bullBearLine'
 
 /**
  * 个股分析日 K 图表：主图叠加可切换的关键价位，下方显示成交量。
@@ -120,6 +121,7 @@ export function AnalysisKChart({
   // 主题: buildOption 内部用 CT() 动态取色, 这里只负责切换时触发重建
   const theme = useTheme()
   const [activeTypes, setActiveTypes] = useState<Set<LevelType>>(new Set(defaultLevelTypes))
+  const [showBullBearLine, setShowBullBearLine] = useState(true)
   /** 枢轴点显示到第几档:1=只P+R1/S1, 2=到R2/S2, 3=全档(R3/S3) */
   const [pivotRank, setPivotRank] = useState<1 | 2 | 3>(1)
   /** 双向联动高亮: hover 价位标签 ↔ hover 下方文字行。值为 levelKey, null=无高亮 */
@@ -314,6 +316,9 @@ export function AnalysisKChart({
     }
     seriesKeyMapRef.current = keyMap
 
+    // 技术指标独立于关键价位，追加到价位曲线之后以保持 hover 索引映射。
+    if (showBullBearLine) series.push(buildBullBearLineSeries(rows.map(row => row.bull_bear_line)))
+
     return {
       animation: false,
       backgroundColor: 'transparent',
@@ -381,7 +386,7 @@ export function AnalysisKChart({
     }
     chartInstRef.current.setOption(buildOption(), true)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [rows, levels, series, seriesDates, activeTypes, pivotRank, markers, ranges, height, theme, hoveredKey])
+  }, [rows, levels, series, seriesDates, activeTypes, showBullBearLine, pivotRank, markers, ranges, height, theme, hoveredKey])
 
   // resize
   useEffect(() => {
@@ -401,8 +406,34 @@ export function AnalysisKChart({
     })
   }
 
+  const bullBearValue = rows.at(-1)?.bull_bear_line
+  const previousBullBearValue = rows.at(-2)?.bull_bear_line
+  const validBullBearValue = bullBearValue != null && Number.isFinite(bullBearValue)
+  const bullBearColor = validBullBearValue && previousBullBearValue != null
+    && Number.isFinite(previousBullBearValue) && bullBearValue < previousBullBearValue
+    ? BULL_BEAR_DOWN : BULL_BEAR_UP
+
   return (
     <div className={className}>
+      <div className="mb-2 flex flex-wrap items-center gap-1.5">
+        <span className="mr-1 text-[10px] text-muted">技术指标</span>
+        <button
+          type="button"
+          aria-pressed={showBullBearLine}
+          onClick={() => setShowBullBearLine(value => !value)}
+          title="多空线：典型价格的10日EMA，上行及走平为红色，下行为绿色"
+          className={`inline-flex h-6 items-center gap-1 rounded-md border px-2 text-[10px] font-medium transition-all ${
+            showBullBearLine ? 'text-foreground' : 'border-border/30 bg-base/40 text-muted hover:border-border/60'
+          }`}
+          style={showBullBearLine ? { borderColor: `${BULL_BEAR_UP}66`, backgroundColor: `${BULL_BEAR_UP}1a` } : undefined}
+        >
+          <span aria-hidden className="h-1.5 w-1.5 rounded-full" style={{ backgroundColor: showBullBearLine ? BULL_BEAR_UP : '#52525B' }} />
+          多空线
+        </button>
+        {showBullBearLine && <span className="ml-1 text-[10px] font-mono" style={{ color: validBullBearValue ? bullBearColor : undefined }}>
+          多空线:{validBullBearValue ? bullBearValue.toFixed(2) : '—'}
+        </span>}
+      </div>
       {/* 价位开关按钮组 */}
       {levels && (
         <div className="flex flex-wrap items-center gap-1.5 mb-2">

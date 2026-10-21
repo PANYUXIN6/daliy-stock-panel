@@ -151,6 +151,10 @@ AI 点数和模型用量通过独立事务账本 `auth/ai_credits.sqlite3` 管�
 
 核心前端请求和类型集中在 [lib/api.ts](../frontend/src/lib/api.ts)，查询键与共享查询主要在 `queryKeys.ts`、`useSharedQueries.ts`。页面路由按需加载，`Layout` 负责跨页面状态与行情订阅。慢变查询可由 localStorage 恢复，但挂载后仍按查询策略刷新；快变行情不在持久化白名单。
 
+个股分析的 `AnalysisKChart` 与普通日 K 详情共用 `lib/bullBearLine.ts` 绘制多空线，默认开启并提供独立技术指标开关，不加入关键价位或告警枚举。数值直接来自日 K 的 `bull_bear_line`（典型价格的 10 周期 EMA），前端只负责逐段红涨绿跌和平走红色展示，缺值不跨段连接，最新行缺值时不沿用旧值。
+
+行业／概念页的 `SectorRotationCard` 经 `/api/sector-rotation` 读取本地最新日期的分钟聚合，普通分钟历史和盘中全量分钟落盘共用这份输入。`sector_rotation.py` 从当日全部已出现板块构建候选，最新桶缺行情时保留历史曲线、当前涨幅／排名／综合分置空；`coverage` 返回分类总数、当日已覆盖数、最新桶已覆盖数。前端据此展示覆盖不足与未更新状态，引导数据页补采，不将上一交易日混入当前日期；结果沿用既有 30 秒缓存和分钟更新查询失效。
+
 首页由 [router.tsx](../frontend/src/router.tsx) 在认证边界通过后挂载 `Layout` 和 `Dashboard`。页面只读取后端配置。Key 由 [secrets_store.py](../backend/app/secrets_store.py) 读取本地凭据及环境后备值，路由由 [preferences.py](../backend/app/services/preferences.py) 读取。TickFlow / AI 密钥仅由后端配置，settings API 只暴露配置状态，拒绝网页替换或清除；能力路由和 AI 非密钥选项通过设置页修改。
 
 采集、共享数据重算和缓存维护主要集中在 [Data.tsx](../frontend/src/pages/Data.tsx)：指数日 K、单标的分钟、概念／行业预设、历史环境与主线、实时采集开关与手动获取、五档盘口更新、共享缓存重建均复用现有接口。[Regime.tsx](../frontend/src/pages/Regime.tsx) 在历史查询成功但结果为空时，也提供管理员“环境分析”按钮，复用 `POST /api/regime/recompute` 根据全部本地历史生成环境、情绪周期与主线，完成后按既有数据集查询前缀失效缓存；加载失败时仅提供读取重试，普通用户提示联系管理员。管道任务通过 `active_id` 恢复；分钟维护与候选财务核验复用 `useCollectorJob`，单股财务获取使用独立的按需请求。盘后同步默认由 collector 在交易日 16:00 发起，数据页保留手动入口；盘前基础资料与交易日历维护保持原调度。数据维护与共享系统设置由后端校验 admin 权限；各账号仍可修改自己的个人偏好。

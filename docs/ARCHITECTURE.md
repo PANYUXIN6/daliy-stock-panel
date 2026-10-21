@@ -44,6 +44,8 @@ web 的 `_web_lifespan` 创建只读 `DataStore`、`KlineRepository` 和 [QuoteM
 
 盘后管道由 collector 默认在北京时间 16:00 自动发起，也可由数据页通过 [api/pipeline.py](../backend/app/api/pipeline.py) 手动发起。自动入口 [postmarket.py](../backend/app/services/postmarket.py) 只在本地日历确认的交易日运行，未完成时当天每 15 分钟重试；成功任务按持久化记录去重，手动取消后当天暂停。自动管道同步完整维表、正式日线、除权因子、指标和核心指数，通过当日覆盖与数值验收后，顺序提交分类、增量计算环境／情绪／主线，再结算模拟盘、处理可选分钟／盘口／榜单并发布复盘；ETF 与分钟保持原开关，A 股／核心指数／环境是自动任务固定范围。依赖、完成条件和边界见 [盘后同步顺序约定](postmarket-pipeline.md)。释放执行槽后按已有开关与日期规则触发周度挖掘。collector 内的任务管理负责去重、唯一写入槽、进度与协作式取消；管道执行协调实时行情暂停，完成或失败后的清理路径刷新仓库缓存；仅写独立财务表的长任务不暂停实时行情。单股日线／分钟获取、指数同步与候选财务核验复用同一 `JobStore`，接口返回 `job_id`，查询与取消仍走 `/api/pipeline/jobs`。
 
+自动股票池读取本轮维表的 `is_current` 标记。TickFlow 元数据同步在严格模式额外读取 `CN_Equity_A` 完整成员名单，标记退市、合并等历史非当前成员；名单不可用或成员缺少维表信息时，在写维表前失败。历史记录仍保留，普通盘前同步不继承旧成员证据；自定义源可声明 `ext.is_current`，缺省状态继续兼容。停牌股保留在当前股票池，正式日线覆盖仍需当日停牌证据，不按缺行豁免。
+
 [pipeline_prefetch.py](../backend/app/services/pipeline_prefetch.py) 在自动任务的日线与因子就绪后，以最多两个工作线程预取近端核心指数、概念／行业分类、竞价风向标和龙虎榜，与股票指标计算重叠。指数窗口最多 14 个自然日，深历史沿用原分批路径；预取线程不访问仓库写入、DuckDB 或指标计算，主线程按原验收依赖等待并提交。取消时停止未开始的预取，等待在途请求退出再释放任务槽。环境前的缓存刷新和任务边界最终刷新保留，自动成功路径不在复盘发布前重复全量加载股票指标。供应商限频继续生效，TickFlow 首批也等待进程内预约槽；预算不跨进程共享。
 
 数据源选择来自 [preferences.py](../backend/app/services/preferences.py)。`TickFlowProvider` 定义在 `data_providers/tickflow_provider.py`，但当前日线、除权、分钟和实时主链仍由 `kline_sync.py`、`quote_service.py` 等服务调用 `tickflow/client.py` 的 SDK 客户端；不能把适配类当作这些流程的统一入口。YAML 源和 `plugin.yaml` 插件由 [custom/loader.py](../backend/app/data_providers/custom/loader.py) 发现并供自定义源分支调用。字段、时间和资产类型在取数边界归一化后落入共享存储。能力矩阵由 [CAPABILITY_REGISTRY](../backend/app/data_providers/capabilities.py) 与各源声明构建，前端通过 `usable` 判断当前能力。

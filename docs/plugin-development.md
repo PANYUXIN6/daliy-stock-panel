@@ -146,6 +146,7 @@ fuyao 只读 GET 的连接、超时、远端断流最多尝试 3 次，共用 0.
 
 交易日盘后验收遵循 [盘后管道](postmarket-pipeline.md)。请求成功、旧分区和少量当天行均不等于全市场完整。
 
+- `get_instruments` 的 `ext.is_current` 可声明 Boolean 当前 A 股成员状态，`instrument_sync` 将其保存在维表。自动股票池只排除明确的 `false`；缺字段或 `None` 保持兼容，不根据名称、缺日线或历史最后交易日推测退市。名单中停牌股仍需目标日停牌证据。未实现 `get_instruments` 时沿用 TickFlow 元数据边界，自动任务会额外获取本轮 `CN_Equity_A` 完整成员名单；历史代码仍保留在维表。
 - 若日线已过滤停牌行，可实现 `get_daily_halted_symbols(day: date) -> set[str]`，只返回目标日有明确停牌证据的完整代码。缺行、旧数据或请求失败不能推断为停牌。无此方法仍兼容，无法解释的缺行会停止环境计算并稍后重试。
 - `get_adj_factors` 可选接受 `require_complete=False`。自动管道在支持时传 `True`，上游失败必须抛出，合法无事件才返回空表。旧签名仍支持。
 - 长驻 provider 的近期日线、因子缓存需检查上游版本。fuyao 每 5 分钟检查进程缓存，磁盘仍按 release 复用。

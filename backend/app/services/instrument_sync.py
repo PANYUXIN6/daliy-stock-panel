@@ -35,6 +35,8 @@ def _flatten_instruments(items: list[dict]) -> list[dict]:
             "type": item.get("type"),
         }
         ext = item.get("ext") or {}
+        # None 表示来源未声明当前成员状态，不能推断为退市或停牌。
+        row["is_current"] = ext.get("is_current")
         row["listing_date"] = ext.get("listing_date")
         row["total_shares"] = ext.get("total_shares")
         row["float_shares"] = ext.get("float_shares")
@@ -43,6 +45,28 @@ def _flatten_instruments(items: list[dict]) -> list[dict]:
         row["limit_down"] = ext.get("limit_down")
         rows.append(row)
     return rows
+
+
+def _mark_current_stocks(tf, rows: list[dict]) -> None:
+    """交易所维表含历史标的；用本轮完整 A 股成员名单标记当前范围。"""
+    try:
+        detail = tf.universes.get("CN_Equity_A")
+    except Exception as exc:
+        raise RuntimeError("当前 A 股成员名单同步失败") from exc
+    symbols = detail.get("symbols") if isinstance(detail, dict) else None
+    if not isinstance(symbols, list) or not symbols or any(
+        not isinstance(symbol, str) or not symbol for symbol in symbols
+    ):
+        raise RuntimeError("当前 A 股成员名单为空或无效")
+    current = set(symbols)
+    count = detail.get("symbol_count", len(symbols))
+    if len(current) != len(symbols) or count != len(current):
+        raise RuntimeError("当前 A 股成员名单数量不一致")
+    missing = current - {row["symbol"] for row in rows}
+    if missing:
+        raise RuntimeError(f"股票维表缺少 {len(missing)} 只当前 A 股成员")
+    for row in rows:
+        row["is_current"] = row["symbol"] in current
 
 
 def _fetch_instruments_via_provider(*, require_complete: bool = False) -> list[dict] | None:
@@ -98,11 +122,17 @@ def sync_instruments(data_dir: Path, *, require_complete: bool = False) -> int:
                 if require_complete:
                     raise RuntimeError(f"{ex} 股票维表同步失败") from e
                 logger.warning("get_instruments(%s) failed: %s", ex, e, exc_info=True)
+        if require_complete:
+            # 不用行情快照或旧池缓存推断成员，停牌股票也必须保留在验收范围。
+            # 校验失败不覆盖维表；下一次盘后重试重新获取名单。
+            _mark_current_stocks(tf, all_rows)
 
     if not all_rows:
         return 0
 
     df = pl.DataFrame(all_rows)
+    if "is_current" in df.columns:
+        df = df.with_columns(pl.col("is_current").cast(pl.Boolean, strict=True))
     df = df.with_columns(pl.lit(cn_today()).alias("as_of"))
 
     out = data_dir / "instruments" / "instruments.parquet"

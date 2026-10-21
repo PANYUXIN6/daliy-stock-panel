@@ -27,6 +27,9 @@ def stock_universe(repo, day: date) -> list[str]:
         frame = frame.filter(listed.is_null() | (listed <= day))
     if "type" in frame.columns:
         frame = frame.filter(pl.col("type").is_null() | (pl.col("type") == "stock"))
+    if "is_current" in frame.columns:
+        # 只排除来源明确声明的非当前成员；旧表／未声明状态的插件仍严格验收缺行。
+        frame = frame.filter(pl.col("is_current").fill_null(True))
     symbols = sorted(set(frame["symbol"].drop_nulls().to_list()))
     if not symbols:
         raise DailyCoverageError("当日 A 股股票池为空")

@@ -115,3 +115,51 @@ it('补采失败保留数据与游标，重试仍获取同一年', async () => {
   await act(async () => more().click()); await settle()
   expect(mocks.fetch).toHaveBeenLastCalledWith('600000.SH', 'metrics', '2024-10-18')
 })
+
+it('部分成功展示已保存指标与持久化缺期提示，重试补齐后清除提示', async () => {
+  mocks.options.mockResolvedValue({ tables: ['metrics'] })
+  mocks.read.mockResolvedValue({ data: [] })
+  mocks.fetch.mockImplementation(async () => {
+    mocks.read.mockResolvedValue({
+      data: [{ period_end: '2026-06-30', roe: 12.3 }], history_start: '2024-10-18',
+      missing_periods: ['2026-09-30'],
+    })
+    return { rows: 1, complete: false, missing_periods: ['2026-09-30'] }
+  })
+  await render()
+  await act(async () => [...host.querySelectorAll('button')].find(b => b.textContent === '获取该股核心指标')!.click())
+  await settle()
+  expect(host.textContent).toContain('12.30%')
+  expect(host.textContent).toContain('数据源暂未提供以下报告期：2026-09-30')
+  expect(host.querySelector('[role="alert"]')).toBeNull()
+  mocks.fetch.mockImplementation(async () => {
+    mocks.read.mockResolvedValue({ data: [{ period_end: '2026-09-30', roe: 14.5 }], missing_periods: [] })
+    return { rows: 1, complete: true, missing_periods: [] }
+  })
+  await act(async () => [...host.querySelectorAll('button')].find(b => b.textContent === '重试补齐')!.click())
+  await settle()
+  expect(mocks.fetch).toHaveBeenLastCalledWith('600000.SH', 'metrics')
+  expect(host.textContent).toContain('14.50%')
+  expect(host.textContent).not.toContain('暂未提供')
+})
+
+it('重载可见更早年度的缺期，重试仍取原年度，切股或切表不串提示', async () => {
+  mocks.options.mockResolvedValue({ tables: ['metrics', 'income'] })
+  mocks.read.mockResolvedValue({
+    data: [{ period_end: '2026-06-30', roe: 12.3 }], history_start: '2024-10-18',
+    missing_periods: ['2024-03-31'],
+  })
+  mocks.fetch.mockResolvedValue({ rows: 0, complete: false, missing_periods: ['2024-03-31'] })
+  await render()
+  expect(host.textContent).toContain('暂未提供以下报告期：2024-03-31')
+  await act(async () => [...host.querySelectorAll('button')].find(b => b.textContent === '重试补齐')!.click())
+  await settle()
+  expect(mocks.fetch).toHaveBeenLastCalledWith('600000.SH', 'metrics', '2024-10-18')
+  expect(host.textContent).not.toContain('该年度未返回财务数据')
+  mocks.read.mockResolvedValue({ data: [] })
+  await render('000001.SZ')
+  expect(host.textContent).not.toContain('2024-03-31')
+  await act(async () => [...host.querySelectorAll('button')].find(b => b.textContent === '利润表')!.click())
+  await settle()
+  expect(host.textContent).not.toContain('2024-03-31')
+})

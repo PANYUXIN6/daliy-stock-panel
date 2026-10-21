@@ -119,6 +119,8 @@ export interface FinancialTableData<T> {
   data: T[]
   /** 当前数据源已检查的最早报告期边界，用于向前补一年。 */
   history_start?: string | null
+  /** 已确认暂不可用、后续仍需补齐的报告期。 */
+  missing_periods?: string[]
 }
 
 export interface FinancialStatus {
@@ -3567,7 +3569,7 @@ export const api = {
     request<{ tables: FinancialTable[] }>('/api/financials/collection-options'),
 
   financialFetch: (symbol: string, table: FinancialTable, before?: string) =>
-    request<{ symbol: string; table: FinancialTable; rows: number; reused: boolean; start_date: string; end_date: string }>('/api/financials/fetch', {
+    request<{ symbol: string; table: FinancialTable; rows: number; reused: boolean; complete: boolean; missing_periods: string[]; start_date: string; end_date: string }>('/api/financials/fetch', {
       method: 'POST', body: JSON.stringify({ symbol, table, before }), timeoutMs: COMPUTE_REQUEST_TIMEOUT_MS,
     }),
 

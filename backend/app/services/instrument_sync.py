@@ -37,7 +37,9 @@ def _flatten_instruments(items: list[dict]) -> list[dict]:
         ext = item.get("ext") or {}
         # None 表示来源未声明当前成员状态，不能推断为退市或停牌。
         row["is_current"] = ext.get("is_current")
-        row["listing_date"] = ext.get("listing_date")
+        listing_date = ext.get("listing_date")
+        row["listing_date"] = (None if str(listing_date).startswith("1970-01-01")
+                               else listing_date)
         row["total_shares"] = ext.get("total_shares")
         row["float_shares"] = ext.get("float_shares")
         row["tick_size"] = ext.get("tick_size")

@@ -19,6 +19,7 @@ class DailyCoverage:
     active: set[str] = field(default_factory=set)
     halted: set[str] = field(default_factory=set)
     failed: set[str] = field(default_factory=set)
+    not_listed: set[str] = field(default_factory=set)
 
     def observe(self, frame: pl.DataFrame) -> None:
         required = {"symbol", "date", "open", "high", "low", "close", "volume", "amount"}
@@ -42,7 +43,7 @@ class DailyCoverage:
         self.active.update(active["symbol"].drop_nulls().to_list())
 
     def require(self, expected: list[str]) -> dict:
-        missing = sorted(set(expected) - self.active - self.halted)
+        missing = sorted(set(expected) - self.active - self.halted - self.not_listed)
         failed = sorted(set(expected) & self.failed)
         if missing or failed or not self.active:
             sample = ", ".join((missing or failed)[:10])
@@ -50,6 +51,9 @@ class DailyCoverage:
                 f"{self.day} 正式日线尚未齐全：缺少 {len(missing)} 只，"
                 f"取数失败 {len(failed)} 只" + (f"（{sample}）" if sample else "")
             )
-        return {"date": self.day.isoformat(), "expected": len(set(expected)),
-                "active": len(set(expected) & self.active),
-                "halted": len(set(expected) & self.halted - self.active)}
+        result = {"date": self.day.isoformat(), "expected": len(set(expected)),
+                  "active": len(set(expected) & self.active),
+                  "halted": len(set(expected) & self.halted - self.active)}
+        if self.not_listed:
+            result["not_listed"] = len(set(expected) & self.not_listed - self.active - self.halted)
+        return result

@@ -20,7 +20,7 @@
 | 顺序 | 阶段 | 执行与完成条件 |
 | --- | --- | --- |
 | 1 | 个股维表、股票池 | 重新同步当日完整股票维表，以本轮维表构建 A 股股票池，排除尚未上市及来源明确标记为非当前成员的历史标的。TickFlow 维表包含退市、合并等历史代码，须同时读取本轮 `CN_Equity_A` 完整成员名单并保存 `is_current`；不能用行情快照、旧池缓存或缺行推断成员。交易所或成员名单请求失败、名单为空／数量不符或当前成员缺少维表信息时，不覆盖旧维表并终止本轮。 |
-| 2 | 股票正式日线 | 通过当前日线数据源拉取官方历史日线，增量覆盖最新日期和已知缺口；首次仍按原管道回填一年。自动任务不能走实时快照覆写分支。立即核验本轮返回是否覆盖当日股票池，旧文件不能代替本轮取数成功。 |
+| 2 | 股票正式日线 | 通过当前日线数据源拉取官方历史日线，增量覆盖最新日期和已知缺口；首次仍按原管道回填一年。自动任务不能走实时快照覆写分支。立即核验本轮返回是否覆盖当日股票池；仅在有未解释缺行时，额外核对目标日停复牌与 IPO 日程，记录确认停牌和尚未上市的数量。旧文件不能代替本轮取数成功。 |
 | 3 | 除权因子 | 使用已配置的因子路由，与日线范围对齐；失败批次必须阻止本轮复权指标和环境计算，不能把网络失败当成“没有除权事件”。 |
 | 4 | 股票 Enriched 指标 | 正式日线与因子就绪后加工。当天已有实时指标分区也重新加工，覆盖仅成交量、成交额被修订的情形；历史受因子变更影响的标的沿用已有局部重算。 |
 | 5 | 核心指数、可选 ETF | 核心四指数使用 `index_const.py` 的权威清单，将预取结果或原分批同步结果顺序落盘并计算指标；ETF 继续按已有开关同步日线、因子和指标。股票、指数、ETF 保持独立存储。 |
@@ -40,6 +40,8 @@
 
 - 当前成员名单中的停牌股继续纳入股票池，不能按名称含“退”、ST 标记或末次交易日期猜测是否排除。历史标的仍保留在完整维表，供历史查询使用；`is_current` 仅表达本轮来源的成员状态，不用于历史回测筛选。普通盘前同步不额外请求名单、不继承上轮标记；自动任务每次均重新取得本轮成员证据。自定义维表可通过 `ext.is_current` 声明状态，缺列或空值保持原有兼容验收，只排除明确的 `false`。
 - 本轮正式日线中明确的零开盘／最高价或零成交量额记录，按现有停牌过滤口径记录为停牌证据，不参与市场涨跌和指标统计。缺行、空值、坏价格、昨天的数据和失败批次不能当成停牌。
+- 独立状态数据由 `data_providers/trading_status.py` 读取东方财富按日停复牌及 IPO 日程，仅用于解释自动任务本轮缺行，不替换已选择的日线／因子来源，也不生成行情行。停牌起止时刻须覆盖目标日 09:30–15:00；盘中临停、半天停牌以及复牌当天仍需日线。上市日期晚于目标日，或日程在查询时明确标为“待上市”，才可记为尚未上市；明确上市日期优先于待上市标签，上市当天仍须日线。空上市日期、`1970-01-01`、无历史行情本身均不能作豁免；维表同步将该占位日期保存为未知。
+- 状态查询在日线验收前同步完成，分页必须完整且数量一致。每轮重新请求，网络前后和应用证据前检查取消；来源失败、日期错误、互相冲突或仍无法解释的缺行继续阻止后续计算。原日线取数失败不得被状态豁免；没有有效正式日线时不靠状态名单宣称全市场就绪。状态证据只计入本次覆盖集合及任务摘要，不新增行情副本或跨任务状态缓存。仅自动任务缺行时联网，手动同步和 GET 浏览保持原有行为。
 - 预先过滤停牌行的 Python provider 可实现可选方法 `get_daily_halted_symbols(day: date) -> set[str]`，必须以目标交易日的正式数据为依据。未实现时仍可正常同步；如有无法解释的缺行，自动任务报告不完整并停止环境分析，不以猜测放行。
 - 自动任务缺少已选日线／因子能力时明确失败，不静默跨源回退。现有指数同步服务使用 TickFlow 的正式日线通道；该通道不可用时也不能用昨日指数或中性分伪装成当日就绪。
 - 支持 `get_adj_factors(..., require_complete=True)` 的 provider 在自动任务中须传播上游取数错误；合法的无除权事件仍可返回空表。旧 provider 不需要新增该参数，但仍必须遵循错误与空数据分开的契约。
@@ -57,10 +59,10 @@
 
 ## 代码与验证入口
 
-- 调度与验收：`backend/app/services/postmarket.py`、`daily_coverage.py`。
+- 调度与验收：`backend/app/services/postmarket.py`、`daily_coverage.py`；独立状态适配：`backend/app/data_providers/trading_status.py`。
 - 顺序编排：`backend/app/jobs/daily_pipeline.py::run_now(postmarket=True)`。
 - 有界预取：`backend/app/services/pipeline_prefetch.py`；纯取数与顺序提交分别由 `index_sync.py`、`ext_presets.py`、`auction_benchmark.py`、`dragon_tiger.py` 提供。
 - 共享任务边界：`backend/app/api/pipeline.py::trigger_pipeline_job`、`pipeline_jobs.py`。
-- 回归：`test_postmarket_pipeline.py`、`test_postmarket_universe.py`、`test_daily_sync_coverage.py`、`test_manual_collection_schedule.py`、`test_pipeline_capacity.py`、`test_fuyao_provider.py`。
+- 回归：`test_postmarket_pipeline.py`、`test_postmarket_universe.py`、`test_postmarket_trading_status.py`、`test_trading_status_provider.py`、`test_daily_sync_coverage.py`、`test_manual_collection_schedule.py`、`test_pipeline_capacity.py`、`test_fuyao_provider.py`。
 
 如调整执行顺序、完整性口径、重试／取消语义或自动范围，必须同步修改本文、相关测试、架构说明与仓库地图。

@@ -36,6 +36,37 @@ def stock_universe(repo, day: date) -> list[str]:
     return symbols
 
 
+def reconcile_daily_status(coverage: DailyCoverage, expected: list[str], *,
+                           check_cancel=None) -> None:
+    """仅在自动任务中，以独立交易状态证据解释本轮正式日线的缺行。"""
+    from app.data_providers import trading_status
+
+    check = check_cancel or (lambda: None)
+    check()
+    requested = set(expected)
+    if requested & coverage.failed or not coverage.active:
+        return
+    missing = requested - coverage.active - coverage.halted - coverage.not_listed
+    if not missing:
+        return
+    try:
+        status = trading_status.get_daily_trading_status(coverage.day, sorted(missing), check_cancel=check)
+    except trading_status.TradingStatusError as exc:
+        raise DailyCoverageError(f"{coverage.day} 正式日线缺行的交易状态核验失败：{exc}") from exc
+    check()
+    if status.day != coverage.day:
+        raise DailyCoverageError("交易状态证据日期与盘后目标日期不一致")
+    halted = missing & status.halted
+    not_listed = missing & status.not_listed
+    if halted & not_listed:
+        raise DailyCoverageError("交易状态证据冲突：同一标的同时为停牌和未上市")
+    coverage.halted.update(halted)
+    coverage.not_listed.update(not_listed)
+    logger.info("%s 缺行状态核验(%s)：确认停牌 %d 只，尚未上市 %d 只，未解释 %d 只",
+                coverage.day, status.source, len(halted), len(not_listed),
+                len(missing - halted - not_listed))
+
+
 def require_enriched(data_dir: Path, coverage: DailyCoverage, *, asset_type: str = "stock") -> dict:
     from app.enriched_generation import enriched_publication_incomplete
 

@@ -471,7 +471,15 @@ def _run_now(
         logger.info("sync_daily: [%s ~ %s] done", start_date, today)
     _invalidate("daily")
     if coverage is not None:
+        postmarket_service.reconcile_daily_status(
+            coverage, universe,
+            check_cancel=lambda: emit("sync_daily", 45, "核对当日停复牌与新股上市状态…", skip_log=True),
+        )
         readiness["daily"] = coverage.require(universe)
+        emit("sync_daily", 45,
+             f"{today} 正式日线验收通过：交易 {readiness['daily']['active']} 只，"
+             f"停牌 {readiness['daily']['halted']} 只，"
+             f"尚未上市 {readiness['daily'].get('not_listed', 0)} 只")
 
     # 完整性修复时删除股票 enriched 的坏分区: 增量重算只算 enriched 里不存在
     # 的日期, 盘中快照日分区已存在(虽是错的), 不删永远不会被重算。删除后

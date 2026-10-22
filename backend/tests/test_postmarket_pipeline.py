@@ -11,6 +11,7 @@ import polars as pl
 import pytest
 
 from app.api import pipeline
+from app.data_providers import trading_status
 from app.indicators.pipeline import run_pipeline as calculate_indicators
 from app.jobs import daily_pipeline
 from app.market_time import CN_TZ
@@ -58,7 +59,8 @@ def write(data_dir, table, frame):
 @pytest.fixture
 def closing(tmp_path, monkeypatch):
     steps = []
-    controls = SimpleNamespace(daily=bars(), bad_enriched=False, index_symbols=list(CORE_INDEX_SYMBOLS))
+    controls = SimpleNamespace(symbols=list(SYMBOLS), daily=bars(), bad_enriched=False,
+                               index_symbols=list(CORE_INDEX_SYMBOLS))
     monkeypatch.setattr(daily_pipeline, "cn_today", lambda: DAY)
     monkeypatch.setattr(daily_pipeline, "cn_now", lambda: datetime(2026, 10, 16, 16, tzinfo=CN_TZ))
     monkeypatch.setattr(preferences, "load", lambda: {
@@ -72,17 +74,19 @@ def closing(tmp_path, monkeypatch):
     monkeypatch.setattr(data_integrity, "scan_recent_integrity", lambda *_, **__: [])
     monkeypatch.setattr(daily_pipeline, "warn_if_enriched_too_thin", lambda *_: 250)
     monkeypatch.setattr(daily_pipeline, "_resolve_minute_symbols", lambda *_: SYMBOLS)
+    monkeypatch.setattr(trading_status, "get_daily_trading_status", lambda day, *_args, **_kwargs:
+                        trading_status.DailyTradingStatus(day=day))
 
     def instruments(data_dir, **kwargs):
         assert kwargs == {"require_complete": True}
         steps.append("instruments")
         path = data_dir / "instruments" / "instruments.parquet"
         path.parent.mkdir(parents=True, exist_ok=True)
-        pl.DataFrame({"symbol": SYMBOLS, "as_of": [DAY, DAY]}).write_parquet(path)
-        return len(SYMBOLS)
+        pl.DataFrame({"symbol": controls.symbols, "as_of": [DAY] * len(controls.symbols)}).write_parquet(path)
+        return len(controls.symbols)
 
     def daily(symbols, repo, capset, *, coverage, **kwargs):
-        assert symbols == SYMBOLS or set(symbols) == set(SYMBOLS)
+        assert set(symbols) == set(controls.symbols)
         assert kwargs["end_date"].date() == DAY
         steps.append("daily")
         coverage.observe(controls.daily)

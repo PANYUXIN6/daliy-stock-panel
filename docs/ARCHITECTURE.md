@@ -46,6 +46,8 @@ web 的 `_web_lifespan` 创建只读 `DataStore`、`KlineRepository` 和 [QuoteM
 
 自动股票池读取本轮维表的 `is_current` 标记。TickFlow 元数据同步在严格模式额外读取 `CN_Equity_A` 完整成员名单，标记退市、合并等历史非当前成员；名单不可用或成员缺少维表信息时，在写维表前失败。历史记录仍保留，普通盘前同步不继承旧成员证据；自定义源可声明 `ext.is_current`，缺省状态继续兼容。停牌股保留在当前股票池，正式日线覆盖仍需当日停牌证据，不按缺行豁免。
 
+自动任务取得正式日线后，`postmarket.reconcile_daily_status` 仅为未解释的缺行调用独立的 [交易状态适配器](../backend/app/data_providers/trading_status.py)，按目标日期核对东方财富停复牌区间与 IPO 日程。确认的全天停牌和尚未上市分别计入 `DailyCoverage.halted/not_listed`；当日上市／复牌、盘中临停、未知日期及实际取数失败仍须正式日线。状态分页、日期或网络异常阻止指标与环境计算。适配器每轮重新请求，沿用任务取消检查，不改变行情来源、仓库、generation 或发布缓存；状态结果仅随本次验收摘要保存。
+
 [pipeline_prefetch.py](../backend/app/services/pipeline_prefetch.py) 在自动任务的日线与因子就绪后，以最多两个工作线程预取近端核心指数、概念／行业分类、竞价风向标和龙虎榜，与股票指标计算重叠。指数窗口最多 14 个自然日，深历史沿用原分批路径；预取线程不访问仓库写入、DuckDB 或指标计算，主线程按原验收依赖等待并提交。取消时停止未开始的预取，等待在途请求退出再释放任务槽。环境前的缓存刷新和任务边界最终刷新保留，自动成功路径不在复盘发布前重复全量加载股票指标。供应商限频继续生效，TickFlow 首批也等待进程内预约槽；预算不跨进程共享。
 
 数据源选择来自 [preferences.py](../backend/app/services/preferences.py)。`TickFlowProvider` 定义在 `data_providers/tickflow_provider.py`，但当前日线、除权、分钟和实时主链仍由 `kline_sync.py`、`quote_service.py` 等服务调用 `tickflow/client.py` 的 SDK 客户端；不能把适配类当作这些流程的统一入口。YAML 源和 `plugin.yaml` 插件由 [custom/loader.py](../backend/app/data_providers/custom/loader.py) 发现并供自定义源分支调用。字段、时间和资产类型在取数边界归一化后落入共享存储。能力矩阵由 [CAPABILITY_REGISTRY](../backend/app/data_providers/capabilities.py) 与各源声明构建，前端通过 `usable` 判断当前能力。

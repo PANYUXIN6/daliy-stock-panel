@@ -5,6 +5,7 @@ import threading
 from pathlib import Path
 from types import SimpleNamespace
 
+from app.services.path_locks import path_lock
 from app.services.user_context import UserContext, current_user, user_data_dir, user_scope
 
 
@@ -15,8 +16,10 @@ class UserRuntimeRegistry:
         self._runtimes: dict[str, SimpleNamespace] = {}
 
     def get(self, user: UserContext):
-        with self._lock:
-            existing = self._runtimes.get(user.id)
+        root = self.state.repo.store.data_dir
+        with path_lock(user_data_dir(root, user.id) / '.runtime'):
+            with self._lock:
+                existing = self._runtimes.get(user.id)
             if existing is not None:
                 role_changed = existing.user.role != user.role
                 existing.user = user
@@ -64,7 +67,8 @@ class UserRuntimeRegistry:
                 runtime.mining_manager = mining_manager
                 runtime.sector_monitor_service = sector
                 runtime.strategy_monitor = StrategyMonitorService()
-                self._runtimes[user.id] = runtime
+                with self._lock:
+                    self._runtimes[user.id] = runtime
                 return runtime
 
     def invalidate_shared_strategy_state(self):
@@ -76,9 +80,37 @@ class UserRuntimeRegistry:
             runtime.paper_monitor_engine.invalidate_strategy_state()
 
     def recover_interrupted(self):
-        for runtime in self.active():
-            with user_scope(runtime.user):
-                runtime.mining_manager.recover_interrupted()
+        # Recovery needs persisted manifests, not an engine per registered account.
+        from app.services.auth import get_store
+        from app.services.mining_jobs import MiningRunStore
+        root = self.state.repo.store.data_dir
+        for row in get_store(root).list_active_users():
+            with user_scope(UserContext(row['id'], row['role'], root)):
+                MiningRunStore(root).recover_interrupted()
+
+    def background_active(self):
+        """Keep offline tasks running without constructing idle users' engines."""
+        from app.services import preferences
+        from app.services.auth import get_store
+        from app.strategy import monitor_rules, paper
+        root = self.state.repo.store.data_dir
+        result = []
+        for row in get_store(root).list_active_users():
+            user = UserContext(row['id'], row['role'], root)
+            with user_scope(user):
+                with self._lock:
+                    existing = self._runtimes.get(user.id)
+                has_paper = any(paper.accounts_base(root).glob('*/account.json'))
+                if existing is not None:
+                    runtime = self.get(user)  # Reconcile role changes before evaluating rules.
+                    if any(rule.get('enabled', True) for rule in runtime.monitor_engine.rules.values()) or has_paper:
+                        result.append(runtime)
+                elif has_paper or (user.role == 'admin' and (
+                    any(rule.get('enabled', True) for rule in monitor_rules.load_all(root))
+                    or (preferences.get_strategy_monitor_enabled() and preferences.get_strategy_monitor_ids())
+                )):
+                    result.append(self.get(user))
+        return result
 
     def shutdown(self):
         with self._lock:

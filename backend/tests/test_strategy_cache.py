@@ -16,6 +16,44 @@ def _result(*symbols: str) -> dict:
     }
 
 
+def test_summary_reuses_parse_and_detects_external_replace(tmp_path, monkeypatch):
+    import json
+    from unittest.mock import Mock
+
+    strategy_cache.write_cache(tmp_path, "2026-07-20", {"a": _result("A")})
+    loads = Mock(wraps=json.loads)
+    monkeypatch.setattr(strategy_cache.json, 'loads', loads)
+    first = strategy_cache.read_summary(tmp_path)
+    first['results']['a']['total'] = 999
+    full = strategy_cache.read_cache(tmp_path)
+    full['results']['a']['rows'].clear()
+    assert strategy_cache.read_summary(tmp_path)['results']['a']['total'] == 1
+    assert strategy_cache.read_cache(tmp_path)['results']['a']['rows']
+    assert loads.call_count == 1
+    path = strategy_cache._cache_path(tmp_path)
+    replacement = path.with_suffix('.external')
+    replacement.write_text(json.dumps({'as_of': '2026-07-20', 'results': {'b': _result('B', 'C')}}))
+    replacement.replace(path)
+    assert strategy_cache.read_summary(tmp_path)['results']['b']['total'] == 2
+    assert loads.call_count == 2
+
+
+def test_different_owners_do_not_share_file_lock_or_results(tmp_path, private_owner):
+    from concurrent.futures import ThreadPoolExecutor
+
+    from app.services.path_locks import path_lock
+    from app.services.user_context import UserContext, user_scope
+
+    def other_user():
+        with user_scope(UserContext('b' * 32, 'admin', tmp_path)):
+            strategy_cache.write_cache(tmp_path, '2026-07-20', {'other': _result('B')})
+            return strategy_cache.read_summary(tmp_path)
+    with ThreadPoolExecutor(1) as pool, path_lock(strategy_cache._cache_path(tmp_path)):
+        result = pool.submit(other_user).result(5)
+    assert set(result['results']) == {'other'}
+    assert strategy_cache.read_summary(tmp_path)['results'] == {}
+
+
 def test_same_day_partial_writes_merge_strategy_results(tmp_path):
     strategy_cache.write_cache(tmp_path, "2026-07-20", {"strategy_a": _result("000001.SZ")})
     strategy_cache.write_cache(tmp_path, "2026-07-20", {"strategy_b": _result("600000.SH")})
@@ -52,6 +90,30 @@ def test_new_date_resets_results_and_ever_rows(tmp_path):
     assert cached["as_of"] == "2026-07-21"
     assert set(cached["results"]) == {"strategy_b"}
     assert set(cached["today_ever_rows"]) == {"strategy_b"}
+
+
+def test_single_update_checks_date_after_waiting_for_concurrent_rollover(tmp_path):
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+    from contextvars import copy_context
+
+    from app.services.path_locks import path_lock
+
+    strategy_cache.write_cache(tmp_path, '2026-07-20', {'old': _result('A')})
+    started = threading.Event()
+    def update_previous_day():
+        started.set()
+        strategy_cache.write_cache(tmp_path, '2026-07-20', {'old': _result('H')}, same_date_only=True)
+    with ThreadPoolExecutor(1) as pool:
+        with path_lock(strategy_cache._cache_path(tmp_path)):
+            future = pool.submit(copy_context().run, update_previous_day)
+            assert started.wait(5)
+            strategy_cache.write_cache(tmp_path, '2026-07-21', {
+                'new': {**_result('B'), 'as_of': '2026-07-21'},
+            })
+            after_rollover = strategy_cache.read_cache(tmp_path)
+        future.result(5)
+    assert strategy_cache.read_cache(tmp_path) == after_rollover
 
 
 def _verified_result(confirmed: str, pending: str, checked_at: str) -> dict:

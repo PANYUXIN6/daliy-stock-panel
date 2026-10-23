@@ -78,8 +78,8 @@ def test_manager_captures_owner_for_threads_and_keeps_market_root_shared(tmp_pat
                 ids.append(manager.start({'same': True}, {})['run_id'])
         assert ids[0] != ids[1]
         for manager in managers:
-            for thread in list(manager._threads.values()):
-                thread.join(5)
+            for future in list(manager._futures.values()):
+                future.result(timeout=5)
         assert {item[0] for item in captured} == {'a' * 32, 'b' * 32}
         assert all(item[1]['owner']['id'] == item[0] for item in captured)
         assert all(item[1]['data_dir'] == str(tmp_path.resolve()) for item in captured)

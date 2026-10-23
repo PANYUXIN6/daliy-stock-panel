@@ -116,6 +116,21 @@ export function useQuoteStream(
     // 连续失败计数 (用于指数退避 + 到阈值弹一次 toast)
     let failCount = 0
     let toastFired = false
+    let lastScreenerRefresh = 0
+    let screenerRefreshTimer: ReturnType<typeof setTimeout> | undefined
+
+    const refreshScreenerQuotes = () => {
+      screenerRefreshTimer = undefined
+      if (!enabledRef.current || pagesRef.current?.['screener-cached'] === false) return
+      lastScreenerRefresh = Date.now()
+      const today = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Shanghai' }).format(new Date())
+      void qc.invalidateQueries({
+        predicate: ({ queryKey }) => queryKey[0] === QK.screenerCachedRoot[0] && (
+          (queryKey[1] === 'all' && queryKey[2] === today)
+          || (queryKey[1] === 'strategy' && queryKey[3] === today)
+        ),
+      })
+    }
 
     const connect = () => {
       _setStatus(failCount > 0 ? 'reconnecting' : _streamStatus)
@@ -139,6 +154,12 @@ export function useQuoteStream(
       es.addEventListener('quotes_updated', () => {
         // 实时行情未开启时不处理行情刷新
         if (!enabledRef.current) return
+        // 今日列表价格跟随行情；合并高频 tick，保留最后一次更新，历史与摘要不刷新。
+        if (screenerRefreshTimer === undefined && pagesRef.current?.['screener-cached'] !== false) {
+          const delay = Math.max(0, 6_000 - (Date.now() - lastScreenerRefresh))
+          if (delay === 0) refreshScreenerQuotes()
+          else screenerRefreshTimer = setTimeout(refreshScreenerQuotes, delay)
+        }
         // 根据用户配置过滤 invalidation
         const pages = pagesRef.current
         if (pages) {
@@ -268,6 +289,7 @@ export function useQuoteStream(
 
     return () => {
       clearTimeout(retryRef.current)
+      clearTimeout(screenerRefreshTimer)
       if (esRef.current) {
         esRef.current.close()
         esRef.current = null

@@ -177,6 +177,26 @@ class MiningRunStore:
                 self._run_dir(safe_run_id) / "manifest.json", safe_run_id
             )
 
+    def discard_unsubmitted(self, run_id: str) -> None:
+        """Roll back only pristine metadata after the scheduler rejects admission."""
+        safe_run_id = self._validate_run_id(run_id)
+        with _STORE_LOCK:
+            manifest = self._required_manifest(safe_run_id)
+            run_dir = self._run_dir(safe_run_id)
+            filenames = {"manifest.json", "summary.json", "events.jsonl"}
+            entries = list(run_dir.iterdir())
+            if ((self.runs_root / safe_run_id).is_symlink()
+                    or manifest["status"] != "queued" or manifest.get("started_at")
+                    or manifest.get("artifacts") or self.read_summary(safe_run_id)
+                    or any(event["type"] != "queued" for event in self.read_events(safe_run_id))
+                    or {entry.name for entry in entries} != filenames
+                    or any(entry.is_symlink() or not entry.is_file() for entry in entries)):
+                raise MiningRunValidationError("cannot discard a mining run with execution data")
+            # No recursive deletion: an unexpected file or artifact must fail closed.
+            for name in ("events.jsonl", "summary.json", "manifest.json"):
+                (run_dir / name).unlink()
+            run_dir.rmdir()
+
     def transition_status(
         self,
         run_id: str,

@@ -1039,6 +1039,14 @@ class KlineRepository:
 
         return df_hist, agg_a
 
+    def invalidate_etf_enriched_cache(self) -> None:
+        """本地 ETF 指标重建后失效派生快照；下次访问按现有路径懒加载。"""
+        with self._lock:
+            self._etf_enriched_cache = None
+            self._etf_enriched_cache_date = None
+            self._etf_live_agg_cache = None
+            self._etf_live_agg_cache_date = None
+
     def _refresh_etf_enriched(self) -> None:
         """从 ETF enriched parquet 加载最新日到内存缓存。"""
         try:
@@ -1172,14 +1180,14 @@ class KlineRepository:
             self._name_map_cache = None
             logger.info("ETF instruments 缓存已加载: %d 只", len(df_all))
 
-    def get_enriched_latest(self) -> tuple[pl.DataFrame, date | None]:
+    def get_enriched_latest(self, *, refresh: bool = True) -> tuple[pl.DataFrame, date | None]:
         """返回缓存的 enriched 最新日 DataFrame + 日期。如无缓存则懒加载。
 
-        后台预热期间 (_enriched_warming=True) 返回空表, 不触发同步重算 ——
+        refresh=False 或后台预热期间返回空表, 不触发同步重算 ——
         否则首次访问会把异步化想避免的 50s+ 计算拉回同步路径。
         """
         if self._enriched_cache is None:
-            if self._enriched_warming:
+            if not refresh or self._enriched_warming:
                 return pl.DataFrame(), None
             self._refresh_enriched()
         if self._enriched_cache is None:
@@ -1194,7 +1202,7 @@ class KlineRepository:
         flush 焐热, 未焐热(无 ETF 实时数据)时返回空表, 本轮跳过 ETF 评估即可。
         """
         if asset_type == "stock":
-            return self.get_enriched_latest()
+            return self.get_enriched_latest(refresh=refresh)
         if asset_type == "etf":
             if self._etf_enriched_cache is None and refresh:
                 self._refresh_etf_enriched()
@@ -2247,8 +2255,8 @@ class KlineRepository:
             "kline_daily_enriched": "stock",
             "kline_etf_enriched": "etf",
         }.get(table)
-        # recover=True: 外部进程残留的僵死 publishing 标记不应阻塞实时/管道
-        # enriched 落盘, 首次写入即接管自愈; 活进程的发布仍会抛错保护竞态。
+        # 仅接管已知单分区原子写入的遗留；多分区/旧版未知状态等待完整重建。
+        # 活跃发布由跨进程租约保护，不因心跳过期或进程号重用而被接管。
         publication = (
             EnrichedPublication(self.store.data_dir, generation_asset, recover=True)
             if generation_asset is not None
@@ -2322,8 +2330,12 @@ class KlineRepository:
         if publication is None:
             self._atomic_write_parquet(merged, out)
         else:
-            publication.write_parquet(merged, out)
-            publication.commit()
+            try:
+                publication.write_parquet(merged, out)
+                publication.commit()
+            except BaseException:
+                publication.abandon()
+                raise
 
     def get_live_daily_quote_timestamps(self, asset_type: str, day: date) -> dict[str, int]:
         """只读指定当天原始分区的时间戳，供收盘确认避免覆盖较新快照。"""

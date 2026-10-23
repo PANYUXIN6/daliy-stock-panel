@@ -29,6 +29,22 @@ def _marker_path(data_dir: Path, asset_type: str) -> Path:
     return Path(data_dir) / f".matrix_generation_{asset_type}.json"
 
 
+def _publication_lease(data_dir: Path, asset_type: str) -> BinaryIO:
+    """Hold a separate flock for the whole publication, including computation gaps."""
+    path = Path(data_dir) / f".matrix_publication_{asset_type}.lock"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    stream = path.open("a+b")
+    try:
+        if stream.tell() == 0:
+            stream.write(b"0")
+            stream.flush()
+        _try_lock_file(stream)
+    except BaseException:
+        stream.close()
+        raise
+    return stream
+
+
 def _writer_lock(data_dir: Path, asset_type: str) -> threading.RLock:
     key = (str(Path(data_dir).resolve()), asset_type)
     with _WRITER_LOCKS_GUARD:
@@ -161,7 +177,9 @@ def _is_ready_payload(payload: dict[str, Any]) -> bool:
     )
 
 
-def _publication_claim_is_running(payload: dict[str, Any]) -> bool:
+def _publication_claim_is_running(
+    payload: dict[str, Any], data_dir: Path, asset_type: str,
+) -> bool:
     """标记指向的发布是否仍在推进: 进程内活跃对象存在, 或属主进程仍存活。
 
     owner_pid 等于当前进程但无活跃对象视为可接管 (同进程上一次尝试的遗留),
@@ -169,26 +187,29 @@ def _publication_claim_is_running(payload: dict[str, Any]) -> bool:
     """
     if _ACTIVE_PUBLICATIONS.get(str(payload.get("publication_id"))) is not None:
         return True
+    if payload.get("lease"):
+        try:
+            stream = _publication_lease(data_dir, asset_type)
+        except EnrichedGenerationUnavailableError:
+            return True
+        stream.close()
+        return False
     owner_pid = payload.get("owner_pid")
     return owner_pid != os.getpid() and _process_is_alive(owner_pid)
 
 
-def _orphaned_publishing_claim(payload: dict[str, Any]) -> bool:
-    """标记是否指向确定已死的发布: 属主是其他进程且已退出。
+def _orphaned_publishing_claim(
+    payload: dict[str, Any], data_dir: Path, asset_type: str,
+) -> bool:
+    """仅新格式明确声明未写入、且租约已释放的发布可由读取方恢复。
 
-    owner_pid 等于当前进程但无活跃对象时保守不判孤儿 —— 同进程异常遗留的
-    publishing 标记意味着磁盘可能处于部分修改状态 (如清库删了一半), 读取方
-    恢复 ready 会放行读取半修改数据; 必须由下一个写入方接管重发布。
+    旧标记未记录写入进度，即使属主已退出也可能有半批分区，必须完整重建。
     """
-    if _ACTIVE_PUBLICATIONS.get(str(payload.get("publication_id"))) is not None:
+    if payload.get("lease") is not True or payload.get("dirty") is not False:
         return False
-    owner_pid = payload.get("owner_pid")
-    return (
-        isinstance(owner_pid, int)
-        and owner_pid > 0
-        and owner_pid != os.getpid()
-        and not _process_is_alive(owner_pid)
-    )
+    if payload.get("full_rebuild_required"):
+        return False
+    return not _publication_claim_is_running(payload, data_dir, asset_type)
 
 
 def get_enriched_generation(
@@ -206,7 +227,7 @@ def get_enriched_generation(
             )
     elif _is_ready_payload(payload):
         return payload["generation"]
-    elif not _orphaned_publishing_claim(payload):
+    elif not _orphaned_publishing_claim(payload, data_dir, asset_type):
         # 发布仍在推进, 或为同进程异常遗留 (无法证明属主已死): 读取保持 fail-closed。
         raise EnrichedGenerationUnavailableError(
             "enriched data is being published; retry after the update finishes"
@@ -220,17 +241,32 @@ def get_enriched_generation(
             return generation
         if _is_ready_payload(payload):
             return payload["generation"]
-        if not _orphaned_publishing_claim(payload):
+        if not _orphaned_publishing_claim(payload, data_dir, asset_type):
             raise EnrichedGenerationUnavailableError(
                 "enriched data is being published; retry after the update finishes"
             )
-        # 属主已死的 publishing 标记永远不会 commit, 读取方持续失败直到某个
-        # 写入方碰巧接管 (dev 热重载杀掉发布进程即产生这种孤儿)。恢复为 ready
-        # 并换新 generation: 磁盘可能残留部分替换的文件, 新 generation 让按代
-        # 缓存全部失效, 避免把混合状态混入旧快照 —— 与写入方 recover 接管同语义。
+        # 只释放确定未写入的遗留发布，并使等待期间的缓存重新核对代号。
         generation = uuid.uuid4().hex
         _write_marker(path, _ready_payload(generation))
         return generation
+
+
+def recover_stale_publications(
+    data_dir: Path, asset_types: tuple[str, ...] = ("stock", "etf"),
+) -> list[str]:
+    """Recover only untouched abandoned publications; partial writes await rebuild."""
+    recovered = []
+    for asset_type in asset_types:
+        try:
+            payload = _read_marker(_marker_path(data_dir, asset_type))
+            if payload and not _is_ready_payload(payload) and _orphaned_publishing_claim(
+                payload, data_dir, asset_type,
+            ):
+                get_enriched_generation(data_dir, asset_type)
+                recovered.append(asset_type)
+        except EnrichedGenerationUnavailableError:
+            continue
+    return recovered
 
 
 def enriched_publication_incomplete(
@@ -272,14 +308,18 @@ class EnrichedPublication:
         asset_type: str = "stock",
         *,
         recover: bool = False,
+        full_rebuild: bool = False,
     ) -> None:
         self.data_dir = Path(data_dir)
         self.asset_type = asset_type
         self.recover = recover
+        self.full_rebuild = full_rebuild
         self._publishing = False
         self._changed = False
         self._base_generation: str | None = None
         self._publication_id = uuid.uuid4().hex
+        self._lease: BinaryIO | None = None
+        self._base_incomplete = False
 
     def begin(self) -> None:
         with _exclusive_generation_lock(self.data_dir, self.asset_type):
@@ -288,17 +328,43 @@ class EnrichedPublication:
     def mark_changed(self) -> None:
         if not self._publishing:
             raise RuntimeError("enriched publication has not started")
+        with _exclusive_generation_lock(self.data_dir, self.asset_type):
+            self._mark_dirty(full_rebuild_required=True)
+
+    def _mark_dirty(self, *, full_rebuild_required: bool = False) -> None:
+        path = _marker_path(self.data_dir, self.asset_type)
+        current = _read_marker(path)
+        if current is None or current.get("publication_id") != self._publication_id:
+            raise EnrichedGenerationUnavailableError("enriched publication ownership was lost")
         self._changed = True
+        if not current.get("dirty") or (full_rebuild_required and not current.get("full_rebuild_required")):
+            current["dirty"] = True
+            current["full_rebuild_required"] = bool(
+                current.get("full_rebuild_required") or full_rebuild_required or self.full_rebuild
+            )
+            _write_marker(path, current)
+
+    def _release(self) -> None:
+        self._publishing = False
+        self._changed = False
+        _ACTIVE_PUBLICATIONS.pop(self._publication_id, None)
+        if self._lease is not None:
+            self._lease.close()
+            self._lease = None
 
     def abandon(self) -> None:
-        if not self._publishing or self._changed:
-            return
         path = _marker_path(self.data_dir, self.asset_type)
-        with _exclusive_generation_lock(self.data_dir, self.asset_type):
-            current = _read_marker(path)
-            if current is not None and current.get("publication_id") == self._publication_id:
-                _write_marker(path, _ready_payload(str(self._base_generation)))
-        self._publishing = False
+        try:
+            if self._publishing and not self._changed and not self._base_incomplete:
+                with _exclusive_generation_lock(self.data_dir, self.asset_type):
+                    current = _read_marker(path)
+                    if current is not None and current.get("publication_id") == self._publication_id:
+                        _write_marker(path, _ready_payload(str(self._base_generation)))
+        except (OSError, EnrichedGenerationUnavailableError):
+            # Preserve the original failure; a clean marker can be recovered later.
+            pass
+        finally:
+            self._release()
 
     def write_parquet(self, df: pl.DataFrame, out: Path) -> None:
         out.parent.mkdir(parents=True, exist_ok=True)
@@ -310,14 +376,16 @@ class EnrichedPublication:
                 os.fsync(stream.fileno())
             with _exclusive_generation_lock(self.data_dir, self.asset_type):
                 self._claim_or_verify()
+                # Persist before replacement so a crash cannot make partial data readable.
+                self._mark_dirty()
                 os.replace(temporary, out)
                 _fsync_directory(out.parent)
-                self._changed = True
         finally:
             temporary.unlink(missing_ok=True)
 
     def commit(self) -> str | None:
         if not self._changed:
+            self.abandon()
             return None
         if not self._publishing:
             # 本次是同一发布对象的重复提交: 上一次 commit 已落盘并复位
@@ -338,7 +406,7 @@ class EnrichedPublication:
                 )
             generation = uuid.uuid4().hex
             _write_marker(path, _ready_payload(generation))
-        self._publishing = False
+        self._release()
         # 待发布内容已全部落盘, 复位脏标记: 多日期分区写入复用同一发布对象,
         # 无变化分区会再调 commit() (空提交) — 不复位会以过期脏标记命中
         # ownership 校验而误抛 "ownership was lost" (Issue #417)。
@@ -348,11 +416,13 @@ class EnrichedPublication:
 
     def _claim_or_verify(self) -> None:
         path = _marker_path(self.data_dir, self.asset_type)
+        marker_invalid = False
         try:
             current = _read_marker(path)
         except EnrichedGenerationUnavailableError:
-            if not self.recover:
+            if not self.recover or not self.full_rebuild:
                 raise
+            marker_invalid = True
             current = None
         if self._publishing:
             if current is None or current.get("publication_id") != self._publication_id:
@@ -360,9 +430,8 @@ class EnrichedPublication:
                     "enriched publication ownership was lost"
                 )
             return
-        _ACTIVE_PUBLICATIONS[self._publication_id] = self
-        if current is not None and current.get("state", "ready") != "ready":
-            if _publication_claim_is_running(current):
+        if current is not None and not _is_ready_payload(current):
+            if _publication_claim_is_running(current, self.data_dir, self.asset_type):
                 raise EnrichedGenerationUnavailableError(
                     "another enriched publication is active"
                 )
@@ -370,15 +439,33 @@ class EnrichedPublication:
                 raise EnrichedGenerationUnavailableError(
                     "another enriched publication is incomplete"
                 )
+            if (
+                current.get("full_rebuild_required")
+                or current.get("lease") is not True
+                or not isinstance(current.get("dirty"), bool)
+            ) and not self.full_rebuild:
+                raise EnrichedGenerationUnavailableError("enriched data requires a full rebuild")
+        self._base_incomplete = marker_invalid or bool(current and not _is_ready_payload(current))
         generation = None if current is None else current.get("generation")
         if not isinstance(generation, str) or not generation:
             generation = uuid.uuid4().hex
         self._base_generation = generation
-        _write_marker(path, {
-            "state": "publishing",
-            "generation": generation,
-            "publication_id": self._publication_id,
-            "owner_pid": os.getpid(),
-            "updated_at_ns": time.time_ns(),
-        })
+        self._lease = _publication_lease(self.data_dir, self.asset_type)
+        try:
+            _write_marker(path, {
+                "state": "publishing",
+                "generation": generation,
+                "publication_id": self._publication_id,
+                "owner_pid": os.getpid(),
+                "updated_at_ns": time.time_ns(),
+                "lease": True,
+                "dirty": self._base_incomplete,
+                "full_rebuild_required": self._base_incomplete and (
+                    self.full_rebuild or bool(current and current.get("full_rebuild_required"))
+                ),
+            })
+        except BaseException:
+            self._release()
+            raise
+        _ACTIVE_PUBLICATIONS[self._publication_id] = self
         self._publishing = True

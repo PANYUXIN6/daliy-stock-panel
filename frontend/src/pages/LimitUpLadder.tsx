@@ -19,6 +19,7 @@ import { useCapabilities, usePreferences } from '@/lib/useSharedQueries'
 import { SealedBadge } from '@/components/SealedBadge'
 import { useDialogBackdrop } from '@/lib/useDialogBackdrop'
 import type { ExtColumnDisplayConfig } from '@/lib/watchlist-columns'
+import { StrengthLadder } from '@/components/StrengthLadder'
 
 // ===== Ext 字段配置 =====
 
@@ -143,8 +144,8 @@ function fmtSealAmount(v: number): string {
 // ===== 板块标识 =====
 
 function boardTag(symbol: string): { label: string; cls: string } | null {
-  if (/^(300|301)/.test(symbol)) return { label: '创', cls: 'text-[#f97316] bg-[#f97316]/12 border-[#f97316]/25' }
-  if (/^688/.test(symbol))       return { label: '科', cls: 'text-cyan-400 bg-cyan-400/12 border-cyan-400/25' }
+  if (/^(300|301|302)/.test(symbol)) return { label: '创', cls: 'text-[#f97316] bg-[#f97316]/12 border-[#f97316]/25' }
+  if (/^(688|689)/.test(symbol))       return { label: '科', cls: 'text-cyan-400 bg-cyan-400/12 border-cyan-400/25' }
   if (/\.BJ$/.test(symbol))      return { label: '北', cls: 'text-purple-400 bg-purple-400/12 border-purple-400/25' }
   return null
 }
@@ -680,11 +681,11 @@ function matchFilter(stock: LimitLadderStock, key: FilterKey): boolean {
     case 'failed':
       return stock.status === 'failed'
     case 'main':
-      return !/^(300|301|688)/.test(s) && !/\.BJ$/.test(s) && !n.includes('ST')
+      return !/^(300|301|302|688|689)/.test(s) && !/\.BJ$/.test(s) && !n.includes('ST')
     case 'chinext':
-      return /^(300|301)/.test(s)
+      return /^(300|301|302)/.test(s)
     case 'star':
-      return /^688/.test(s)
+      return /^(688|689)/.test(s)
     case 'bj':
       return /\.BJ$/.test(s)
     case 'st':
@@ -1459,8 +1460,23 @@ function ExtConfigDialog({ fields, onSave, onClose }: {
 // ===== 主页面 =====
 
 export function LimitUpLadder() {
-  const isAdmin = useCurrentUser()?.role === 'admin'
+  const [mode, setMode] = useState<'limit' | 'strength'>('limit')
   const [asOf, setAsOf] = useState('')
+  return <div className="flex h-full min-h-0 flex-col">
+    <nav aria-label="梯队类型" className="flex shrink-0 gap-1 border-b border-border px-4 py-2">
+      {([{ id: 'limit', label: '连板 / 连跌' }, { id: 'strength', label: '趋势强度' }] as const).map(tab => (
+        <button type="button" key={tab.id} aria-pressed={mode === tab.id} onClick={() => setMode(tab.id)}
+          className={`rounded px-3 py-1.5 text-xs ${mode === tab.id ? 'bg-accent/15 text-accent' : 'text-secondary hover:bg-surface'}`}>{tab.label}</button>
+      ))}
+    </nav>
+    <div className="min-h-0 flex-1">
+      {mode === 'strength' ? <StrengthLadder asOf={asOf} onDateChange={setAsOf} /> : <LimitBoardLadder asOf={asOf} setAsOf={setAsOf} />}
+    </div>
+  </div>
+}
+
+function LimitBoardLadder({ asOf, setAsOf }: { asOf: string; setAsOf: (value: string) => void }) {
+  const isAdmin = useCurrentUser()?.role === 'admin'
   const [direction, setDirection] = useState<Direction>(() => storage.limitLadderDirection.get('up'))
   const [sealMode, setSealMode] = useState<'vol' | 'amount'>(() => storage.limitLadderSealMode.get('vol'))
   const [filterKeys, setFilterKeys] = useState<Set<FilterKey>>(loadFilterKeys)

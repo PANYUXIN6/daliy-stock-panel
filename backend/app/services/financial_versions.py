@@ -13,6 +13,7 @@ from zoneinfo import ZoneInfo
 
 import polars as pl
 
+from app.services.financial_snapshot import read_table
 from app.services.fs_utils import atomic_write_parquet
 
 _CHINA = ZoneInfo("Asia/Shanghai")
@@ -33,7 +34,8 @@ def read_versions(
         return pl.DataFrame()
     selected = sorted(set(columns) & set(pl.read_parquet_schema(path))) if columns is not None else None
     if symbol is None:
-        return pl.read_parquet(path, columns=selected)
+        frame = read_table(path)
+        return frame.select(selected) if selected is not None else frame
     frame = pl.scan_parquet(path).filter(pl.col("symbol") == symbol)
     if selected is not None:
         frame = frame.select(selected)

@@ -3,11 +3,18 @@ from __future__ import annotations
 
 import math
 from bisect import bisect_right
+from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
+from pathlib import Path
 
 import polars as pl
 
-from app.indicators.earnings_breakout import compute_earnings_breakout
+from app.indicators.earnings_breakout import (
+    compute_earnings_breakout,
+    compute_prepared_earnings_breakout,
+    pullback_price_candidates,
+)
+from app.indicators.pipeline import filter_halt_days
 from app.services import preferences
 from app.services.trading_day import calendar_status
 
@@ -21,6 +28,46 @@ PULLBACK_COLUMNS = [
     "signal_earnings_9", "signal_earnings_42",
     "earnings_9_event_date", "earnings_42_event_date",
 ]
+
+
+@dataclass
+class EarningsPriceSnapshot:
+    """One command's immutable market inputs; never stored in shared/user caches."""
+
+    data_dir: Path | None = None
+    as_of: date | None = None
+    symbols: frozenset[str] = frozenset()
+    prices: pl.DataFrame = field(default_factory=pl.DataFrame)
+    pullback: dict[str, pl.DataFrame] = field(default_factory=dict)
+
+    def capture(self, repo, frame: pl.DataFrame, as_of: date) -> pl.DataFrame:
+        self.data_dir = repo.store.data_dir.resolve()
+        self.as_of = as_of
+        self.symbols = frozenset(frame["symbol"].unique().to_list())
+        prices = repo.get_daily_batch(sorted(self.symbols), date(1990, 1, 1), as_of, columns=PRICE_COLUMNS)
+        if set(PRICE_COLUMNS) <= set(frame.columns):
+            prices = _overlay_prices(prices, frame.select(PRICE_COLUMNS))
+        self.prices = filter_halt_days(prices).sort(["symbol", "date"]) if not prices.is_empty() else prices
+        self.pullback.clear()
+        return self.prices
+
+    def matches(self, repo, end: date) -> bool:
+        return self.data_dir == repo.store.data_dir.resolve() and self.as_of == end
+
+    def prepare_pullback_candidates(self, targets: pl.DataFrame) -> pl.DataFrame:
+        candidates = pullback_price_candidates(self.prices, targets, prepared=self.pullback)
+        if self.pullback:
+            # Retain the prepared frames' OHLCV buffers, not a second complete copy.
+            self.prices = pl.concat([frame.select(PRICE_COLUMNS) for frame in self.pullback.values()],
+                                    rechunk=False)
+        return candidates
+
+
+def _overlay_prices(prices: pl.DataFrame, live: pl.DataFrame) -> pl.DataFrame:
+    if prices.is_empty():
+        return live
+    return pl.concat([prices.join(live.select("symbol", "date"), on=["symbol", "date"], how="anti"), live],
+                     how="diagonal_relaxed")
 
 
 def _day(value) -> date | None:
@@ -115,9 +162,9 @@ def report_events(versions: pl.DataFrame, calendar: dict, end: date, *,
     return events, len(reports)
 
 
-def filter_pullback_signals(repo, frame: pl.DataFrame) -> pl.DataFrame:
+def filter_pullback_signals(repo, frame: pl.DataFrame, *, price_snapshot: EarningsPriceSnapshot | None = None) -> pl.DataFrame:
     """只返回输入中的9或42回踩行，保持现有回踩策略口径。"""
-    selected = _filter_earnings_signals(repo, frame, gap=False)
+    selected = _filter_earnings_signals(repo, frame, gap=False, price_snapshot=price_snapshot)
     if selected.is_empty():
         return selected
     return selected.with_columns(
@@ -128,12 +175,13 @@ def filter_pullback_signals(repo, frame: pl.DataFrame) -> pl.DataFrame:
     )
 
 
-def filter_gap_signals(repo, frame: pl.DataFrame) -> pl.DataFrame:
+def filter_gap_signals(repo, frame: pl.DataFrame, *, price_snapshot: EarningsPriceSnapshot | None = None) -> pl.DataFrame:
     """只返回业绩断层形成日，对应主图“断”，不附加回踩条件。"""
-    return _filter_earnings_signals(repo, frame, gap=True)
+    return _filter_earnings_signals(repo, frame, gap=True, price_snapshot=price_snapshot)
 
 
-def _filter_earnings_signals(repo, frame: pl.DataFrame, *, gap: bool) -> pl.DataFrame:
+def _filter_earnings_signals(repo, frame: pl.DataFrame, *, gap: bool,
+                           price_snapshot: EarningsPriceSnapshot | None = None) -> pl.DataFrame:
     """跳空与回踩共用财报事件及价格计算，返回输入日期内的命中行。
 
     财务与价格各批量读取一次；按股计算只在内存中进行。输入行情覆盖同日存储行，
@@ -162,21 +210,31 @@ def _filter_earnings_signals(repo, frame: pl.DataFrame, *, gap: bool) -> pl.Data
             events_by_symbol[symbol] = {_day(event["date"]) for event in events}
     if not events_by_symbol:
         return frame.head(0)
-    prices = repo.get_daily_batch(list(events_by_symbol), date(1990, 1, 1), end,
-                                 columns=PRICE_COLUMNS)
+    reused = price_snapshot if price_snapshot is not None and price_snapshot.matches(repo, end) else None
+    if reused is None:
+        prices = repo.get_daily_batch(list(events_by_symbol), date(1990, 1, 1), end, columns=PRICE_COLUMNS)
+    else:
+        prices = reused.prices.filter(pl.col("symbol").is_in(list(events_by_symbol))) if not reused.prices.is_empty() else reused.prices
+        missing = set(events_by_symbol) - reused.symbols
+        if missing:
+            extra = repo.get_daily_batch(sorted(missing), date(1990, 1, 1), end, columns=PRICE_COLUMNS)
+            prices = pl.concat([prices, extra], how="diagonal_relaxed")
     # 只使用调用方输入的前复权OHLCV，既补实时尾部，也不把结果回写行情缓存。
     live = frame.filter(pl.col("symbol").is_in(list(events_by_symbol))).select(
         [column for column in PRICE_COLUMNS if column in frame.columns]
     )
-    if prices.is_empty():
-        prices = live
-    else:
-        prices = pl.concat([prices.join(live.select("symbol", "date"),
-                                        on=["symbol", "date"], how="anti"), live],
-                           how="diagonal_relaxed")
+    prices = _overlay_prices(prices, live)
     hits = []
     for (symbol,), bars in prices.partition_by("symbol", as_dict=True).items():
-        calculated = compute_earnings_breakout(bars, events_by_symbol[symbol])
+        prepared = reused.pullback.get(symbol) if reused is not None else None
+        # The final history window can override more than the current candle.
+        # Reuse only identical OHLCV; changed callers retain the normal calculation.
+        valid_bars = filter_halt_days(bars).sort("date")
+        if (prepared is not None and set(PRICE_COLUMNS) <= set(valid_bars.columns)
+                and prepared.select(PRICE_COLUMNS).equals(valid_bars.select(PRICE_COLUMNS))):
+            calculated = compute_prepared_earnings_breakout(prepared, events_by_symbol[symbol])
+        else:
+            calculated = compute_earnings_breakout(bars, events_by_symbol[symbol])
         if calculated.is_empty():
             continue
         condition = (pl.col("earnings_gap") if gap else

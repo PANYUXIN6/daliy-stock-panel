@@ -51,7 +51,8 @@ except ImportError:
     prange = range
 
 _MATRIX_CACHE_VERSION = 1
-_DIRECT_MATRIX_LOADER_VERSION = 4
+_DIRECT_MATRIX_LOADER_VERSION = 6  # 混合分区时间戳读取修正，不能复用旧矩阵。
+_VOLUME_TIME_FACTOR = "_volume_time_factor"
 _MATRIX_AXIS_INDEX_VERSION = 1
 _ARROW_BATCH_SIZE = 131_072
 _SCORE_ASSET_CHUNK_SIZE = 256
@@ -621,6 +622,16 @@ def build_market_data_matrix(
             # strategies that estimate market value from historical raw prices.
             fields[column] = np.array(close, copy=True)
 
+    # 日线快照的量比过滤不应依赖用户是否启用了量比评分列。
+    # 保留独立时间因子；原始成交量仍用于成交模拟和历史均量。
+    if timestamp_col == "date" and "quote_ts" in panel.columns:
+        from app.indicators.volume_ratio import volume_time_factor
+
+        timed = panel.with_columns(volume_time_factor(panel).alias(_VOLUME_TIME_FACTOR))
+        fields[_VOLUME_TIME_FACTOR] = _float_matrix(
+            timed, _VOLUME_TIME_FACTOR, shape, time_id, asset_id, 1.0, 1.0,
+        )
+
     names = [""] * len(symbol_values)
     if "name" in panel.columns:
         row_names = panel["name"].fill_null("").cast(pl.Utf8).to_numpy()
@@ -732,6 +743,13 @@ def load_market_data_matrix_from_parquet(
         format="parquet",
         partitioning=partitioning,
     )
+    # Arrow 默认按首个分区推断 schema；旧分区缺列或全空时，仍须读取
+    # 新分区的盘中时间戳。声明毫秒时间戳类型，让旧分区在扫描时补 null。
+    read_schema = pa.unify_schemas([
+        dataset.schema,
+        pa.schema([("quote_ts", pa.int64())]),
+    ])
+    dataset = dataset.replace_schema(read_schema)
     _validate_matrix_dataset_schema(dataset)
 
     if cache_root is None:
@@ -902,6 +920,8 @@ def _resolve_matrix_storage_fields(
     )
     instrument_columns = set(instruments.columns) if instruments is not None else set()
     matrix_fields = set(parquet_fields)
+    if "quote_ts" in available:
+        matrix_fields.add(_VOLUME_TIME_FACTOR)
     vector_fields = {
         name
         for name in ("total_shares", "float_shares")
@@ -1356,6 +1376,8 @@ def _scan_matrix_values(
         "volume",
         *parquet_fields,
     ]
+    if _VOLUME_TIME_FACTOR in fields and "quote_ts" not in scan_columns:
+        scan_columns.append("quote_ts")
     scanner = dataset.scanner(
         columns=scan_columns,
         filter=filter_expr,
@@ -1386,6 +1408,12 @@ def _scan_matrix_values(
                 null_fill=0.0 if name == "volume" else np.nan,
             )
             target[time_ids, asset_ids] = values
+        if _VOLUME_TIME_FACTOR in fields:
+            from app.indicators.volume_ratio import volume_time_factor
+
+            snapshot = pl.from_arrow(batch.select(["date", "quote_ts"]))
+            factors = snapshot.select(volume_time_factor(snapshot)).to_series().to_numpy()
+            fields[_VOLUME_TIME_FACTOR][time_ids, asset_ids] = factors
 
 
 def _populate_matrix_derived_arrays(
@@ -1802,6 +1830,8 @@ def _slice_and_project_market_data_matrix(
     if missing:
         raise ValueError(f"matrix disk cache missing requested fields: {sorted(missing)}")
     projected_values: dict[str, np.ndarray] = {}
+    if _VOLUME_TIME_FACTOR in sliced.fields:
+        projected_values[_VOLUME_TIME_FACTOR] = sliced.fields[_VOLUME_TIME_FACTOR]
     for name in sorted(requested_fields):
         values = sliced.fields[name]
         if name in sliced.vector_fields:
@@ -2537,6 +2567,8 @@ class RealtimeMarketDataMatrix:
         build_count: int = 1,
     ) -> None:
         self.field_columns = frozenset(field_columns)
+        if "datetime" not in panel.columns and "quote_ts" not in panel.columns:
+            panel = panel.with_columns(pl.lit(None, dtype=pl.Int64).alias("quote_ts"))
         self.market = _writable_market_copy(
             build_market_data_matrix(panel, field_columns=self.field_columns)
         )
@@ -2552,6 +2584,8 @@ class RealtimeMarketDataMatrix:
             raise ValueError("live matrix update requires date or datetime")
         if latest_panel[timestamp_col].n_unique() != 1:
             raise ValueError("live matrix update must contain exactly one timestamp")
+        if timestamp_col == "date" and "quote_ts" not in latest_panel.columns:
+            latest_panel = latest_panel.with_columns(pl.lit(None, dtype=pl.Int64).alias("quote_ts"))
 
         latest = build_market_data_matrix(
             latest_panel,
@@ -3880,7 +3914,9 @@ def _compute_matrix_feature(market: MarketDataMatrix, name: str) -> np.ndarray:
             np.isfinite(previous_volume),
             window,
         )
-        return _matrix_ratio(market.volume, previous_mean)
+        ratio = _matrix_ratio(market.volume, previous_mean)
+        time_factor = market.fields.get(_VOLUME_TIME_FACTOR) if name == "vol_ratio_5d" else None
+        return ratio if time_factor is None else ratio * time_factor
     if name in {"vol_ma5", "vol_ma10"}:
         window = 5 if name == "vol_ma5" else 10
         volume_valid = close_valid & np.isfinite(market.volume)
@@ -4266,9 +4302,9 @@ def _symbol_in_boards(symbol: str, boards: list[str]) -> bool:
             return True
         if board == "深主板" and symbol.startswith(("00", "001")):
             return True
-        if board == "创业板" and symbol.startswith(("300", "301")):
+        if board == "创业板" and symbol.startswith(("300", "301", "302")):
             return True
-        if board == "科创板" and symbol.startswith("688"):
+        if board == "科创板" and symbol.startswith(("688", "689")):
             return True
         if board == "北交所" and symbol.endswith(".BJ"):
             return True

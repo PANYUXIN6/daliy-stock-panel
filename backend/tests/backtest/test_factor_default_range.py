@@ -43,7 +43,7 @@ class _Req:
 
 
 @pytest.fixture
-def patched(monkeypatch):
+def patched(monkeypatch, private_owner):
     _CapturingService.captured = []
     monkeypatch.setattr(bt, "_get_engine", lambda request: object())
     # factor_run / factor_batch 内部 `from app.backtest.factor import FactorBacktestService`

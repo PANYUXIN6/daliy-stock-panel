@@ -291,6 +291,33 @@ def test_runner_exception_marks_failed_and_appends_error_event(make_manager) -> 
     }
 
 
+@pytest.mark.parametrize("run_id", [None, "weekly_claim_2026_33"])
+def test_rejected_admission_releases_claim_and_can_retry(make_manager, monkeypatch, run_id):
+    from app.services.task_scheduler import JobQueueFullError, TaskScheduler
+
+    scheduler = TaskScheduler(workers=1, capacity=1)
+    release = threading.Event()
+    occupied = scheduler.submit("owner", lambda: release.wait(5))
+    monkeypatch.setattr(mining_manager_module, "submit_research", lambda work: scheduler.submit("owner", work))
+    tasks = []
+    def runner(task, progress_cb, cancel_event):
+        tasks.append(task)
+        return {"status": "succeeded"}
+    manager = make_manager(runner)
+    try:
+        with pytest.raises(JobQueueFullError):
+            manager.start({"factor_names": ["size"]}, "data-v1", run_id=run_id)
+        assert manager.store.list_runs() == []
+        assert manager._futures == {} and manager._cancel_events == {}
+        assert tasks == []
+    finally:
+        release.set()
+        occupied.result(5)
+    created = manager.start({"factor_names": ["size"]}, "data-v1", run_id=run_id)
+    _wait_for_status(manager, created["run_id"], "succeeded")
+    assert len(tasks) == 1
+
+
 def test_non_dict_worker_result_is_rejected(make_manager) -> None:
     def runner(task, progress_cb, cancel_event):
         return ["full", "result"]

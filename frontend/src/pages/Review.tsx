@@ -29,6 +29,8 @@ import { usePreferences } from '@/lib/useSharedQueries'
 import { useReviewState } from '@/lib/useReviewStore'
 import { useAiFeature } from '@/lib/useAiCredits'
 import { AiCreditHint } from '@/components/AiCreditHint'
+import { useCurrentUser } from '@/lib/auth'
+import { ReviewPromptDialog } from '@/components/ReviewPromptDialog'
 import {
   startReviewGeneration, resetReview, isReviewGenerating, cancelReviewGeneration,
   type ReviewPhase,
@@ -68,6 +70,10 @@ function fmtArchivedAt(iso: string): string {
 // Phase 类型复用 store 的定义(单一来源)
 
 export function Review() {
+  const user = useCurrentUser()
+  const isAdmin = user?.role === 'admin'
+  const canEditPrompt = isAdmin || user?.role === 'pro'
+  const [showPrompt, setShowPrompt] = useState(false)
   const quota = useAiFeature('market_recap')
   const qc = useQueryClient()
   const [today, setToday] = useState(() => new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Shanghai' }).format(new Date()))
@@ -247,7 +253,11 @@ export function Review() {
         titleExtra={<Sparkles className="h-4 w-4 text-accent" />}
         subtitle={`${displayDate}${data?.emotion ? ` · 情绪 ${data.emotion.label}` : ''}`}
         right={
-          <div className="flex items-center gap-1">
+          <div className="flex flex-wrap items-center justify-end gap-1">
+            {canEditPrompt && <button
+              onClick={() => setShowPrompt(true)}
+              className="inline-flex items-center gap-1 rounded-btn border border-border bg-elevated px-2 py-1 text-[11px] text-secondary hover:text-foreground"
+            ><Wand2 className="h-3 w-3" />提示词</button>}
             <button
               onClick={() => { publication.refetch() }}
               disabled={publication.isFetching}
@@ -256,7 +266,7 @@ export function Review() {
             >
               <RefreshCw className={cn('h-3 w-3', publication.isFetching && 'animate-spin')} />刷新
             </button>
-            <button
+            {isAdmin && <button
               onClick={openSchedule}
               className={cn(
                 'inline-flex items-center gap-1 rounded-btn border px-2 py-1 text-[11px] transition-colors',
@@ -267,7 +277,7 @@ export function Review() {
               title={reviewSched.enabled ? `定时复盘已开启 · 每日 ${String(reviewSched.hour).padStart(2,'0')}:${String(reviewSched.minute).padStart(2,'0')}` : '定时复盘'}
             >
               <Clock className="h-3 w-3" />定时
-            </button>
+            </button>}
             <button
               onClick={generate}
               disabled={isGenerating || !quota.available}
@@ -351,7 +361,7 @@ export function Review() {
 
       {/* ===== 定时复盘设置弹窗 ===== */}
       <AnimatePresence>
-        {showSchedule && (
+        {isAdmin && showSchedule && (
           <motion.div
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
@@ -584,6 +594,10 @@ export function Review() {
           </motion.div>
         )}
       </AnimatePresence>
+
+      {canEditPrompt && showPrompt && user && (
+        <ReviewPromptDialog key={user.id} userId={user.id} onClose={() => setShowPrompt(false)} />
+      )}
 
       {/* 个股日 K 详情 (龙虎榜单点击打开) */}
       <StockPreviewDialog

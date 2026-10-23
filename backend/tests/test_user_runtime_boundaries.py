@@ -17,6 +17,32 @@ UID_A = 'a' * 32
 UID_B = 'b' * 32
 
 
+def test_background_users_skip_idle_engines_but_keep_offline_tasks(tmp_path, monkeypatch):
+    from unittest.mock import Mock
+
+    from app.services import auth, preferences
+    from app.services.user_runtime import UserRuntimeRegistry
+    from app.strategy import monitor_rules, paper
+
+    users = [{'id': UID_A, 'role': 'admin'}, {'id': UID_B, 'role': 'user'}]
+    monkeypatch.setattr(auth, 'get_store', lambda root: SimpleNamespace(list_active_users=lambda: users))
+    monkeypatch.setattr(monitor_rules, 'load_all', lambda root: [])
+    monkeypatch.setattr(preferences, 'get_strategy_monitor_enabled', lambda: False)
+    registry = UserRuntimeRegistry(SimpleNamespace(repo=SimpleNamespace(store=SimpleNamespace(data_dir=tmp_path))))
+    get = Mock(side_effect=lambda user: SimpleNamespace(user=user))
+    monkeypatch.setattr(registry, 'get', get)
+    assert registry.background_active() == []
+    get.assert_not_called()
+    # Persisted admin rules must continue to run without a browser session.
+    monkeypatch.setattr(monitor_rules, 'load_all', lambda root: [{'enabled': True}])
+    assert [r.user.id for r in registry.background_active()] == [UID_A]
+    with user_scope(UserContext(UID_B, 'user', tmp_path)):
+        path = paper.accounts_base(tmp_path) / 'paper-account' / 'account.json'
+        path.parent.mkdir(parents=True)
+        path.write_text('{}')
+    assert [r.user.id for r in registry.background_active()] == [UID_A, UID_B]
+
+
 def _runtime_strategy_code(strategy_id):
     return f'''import polars as pl
 META = {{"id": {strategy_id!r}, "name": "可信测试策略", "asset_types": ["stock"], "timeframes": ["1d"]}}
@@ -472,9 +498,9 @@ def test_monitor_round_restores_each_owner_and_never_uses_global_engine(tmp_path
     owners = [UserContext(UID_A, 'admin', tmp_path), UserContext(UID_B, 'guest', tmp_path)]
     runtimes = [SimpleNamespace(user=user, monitor_engine=object()) for user in owners]
     service = QuoteService()
-    service._app_state = SimpleNamespace(user_runtimes=SimpleNamespace(active=lambda: runtimes))
+    service._app_state = SimpleNamespace(user_runtimes=SimpleNamespace(background_active=lambda: runtimes))
     seen = []
-    service._evaluate_user_monitors = lambda daily, quotes, runtime: seen.append((current_user().id, runtime.monitor_engine))
+    service._evaluate_user_monitors = lambda daily, quotes, runtime, **kwargs: seen.append((current_user().id, runtime.monitor_engine))
     service._evaluate_monitors(pl.DataFrame(), None)
     assert seen == [(runtime.user.id, runtime.monitor_engine) for runtime in runtimes]
     assert current_user(required=False) is None

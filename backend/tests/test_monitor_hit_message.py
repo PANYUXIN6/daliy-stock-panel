@@ -2,8 +2,8 @@
 
 修复前: signal/price/market 类告警的 message 拼的是规则全量条件 (8 个 "或" 连接),
 看不出实际触发的是哪条; 自定义信号 (csg_/csgi_) 显示原始列名而非用户命名。
-修复后: 有命中信号时 message 以「命中 信号A、信号B」开头; 无 truth 命中
-(纯比较条件) 时回退原条件摘要; 自定义信号解析为用户命名。
+有命中信号时 message 以「命中 信号A、信号B」开头，并补充实际满足的数值条件；
+纯比较规则同样只展示命中子集；自定义信号解析为用户命名。
 """
 import json
 
@@ -92,16 +92,15 @@ def test_message_and_logic_includes_comparison_conditions():
     assert "现价 3000.0" in msg
 
 
-def test_message_or_logic_omits_comparison_conditions():
-    """OR 规则 truth+比较混合: 无法判定比较条件是否为真, 不补进 message。"""
+def test_message_or_logic_includes_satisfied_comparison_conditions():
+    """OR 规则 truth+比较同时满足：两种条件均准确归因。"""
     eng = MonitorRuleEngine()
     rule = _rule(logic="or", conditions=[
         {"field": "signal_macd_dead", "op": "truth"},
         {"field": "close", "op": ">=", "value": 2500},
     ])
     msg = _fire(eng, rule, _df(signal_macd_dead=[True]))
-    assert msg.startswith("命中 MACD死叉 · ")
-    assert "收盘价" not in msg
+    assert msg.startswith("命中 MACD死叉 且 收盘价>=2500")
 
 
 def test_message_custom_signal_fallback_without_data_dir():

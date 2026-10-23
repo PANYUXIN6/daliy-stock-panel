@@ -132,3 +132,58 @@ def test_manager_serializes_different_keys():
     _wait_done(h1, timeout=10)
     _wait_done(h2, timeout=10)
     assert overlap == []
+
+
+def test_sync_job_can_cold_load_repository_with_exclusive_reservation():
+    from app.services.heavy_job_limiter import shared_heavy_job_limiter
+
+    def cold_load():
+        with shared_heavy_job_limiter.slot('exclusive'):
+            return {'rows': [{'symbol': 'A'}]}
+    manager = q.StrategyRunManager()
+    assert manager.run_sync(('cold',), cold_load) == {'rows': [{'symbol': 'A'}]}
+    assert shared_heavy_job_limiter.in_use == 0
+
+
+def test_terminal_status_survives_new_run_and_is_owner_scoped(tmp_path):
+    from app.services.user_context import UserContext, user_scope
+
+    manager = q.StrategyRunManager()
+    first = manager.get_or_submit(('same',), ['bad'], lambda h: h.fail_one('bad', '财务数据获取失败'))
+    first.future.result(5)
+    second = manager.get_or_submit(('same',), ['bad'], lambda h: h.complete('bad', {'total': 0}))
+    second.future.result(5)
+    assert first.run_id != second.run_id
+    status = manager.status(first.run_id)
+    assert status['done'] and status['pending'] == []
+    assert status['errors'] == {'bad': '财务数据获取失败'}
+    status['errors'].clear()
+    assert manager.status(first.run_id)['errors']
+    for owner in (UserContext('b' * 32, 'admin', tmp_path), UserContext('a' * 32, 'admin', tmp_path / 'other')):
+        with user_scope(owner):
+            assert manager.status(first.run_id) is None
+
+
+def test_completed_statuses_are_bounded_and_expire(monkeypatch):
+    manager = q.StrategyRunManager()
+    monkeypatch.setattr(q, '_MAX_COMPLETED_STATUSES', 1)
+    first = manager.get_or_submit(('first',), ['a'], lambda h: h.complete('a', {'total': 0}))
+    first.future.result(5)
+    second = manager.get_or_submit(('second',), ['b'], lambda h: h.complete('b', {'total': 0}))
+    second.future.result(5)
+    assert manager.status(first.run_id) is None
+    assert manager.status(second.run_id)['done']
+    monkeypatch.setattr(q, '_STATUS_TTL', 0)
+    assert manager.status(second.run_id) is None
+
+
+@pytest.mark.parametrize('error_type', [ValueError, BaseException])
+def test_job_level_failure_preserves_error_and_clears_pending(error_type):
+    manager = q.StrategyRunManager()
+    def fail(handle):
+        raise error_type('准备历史行情失败')
+    handle = manager.get_or_submit(('error',), ['a'], fail)
+    with pytest.raises(error_type, match='历史行情'):
+        handle.future.result(5)
+    assert manager.status(handle.run_id)['error'] == '准备历史行情失败'
+    assert manager.status(handle.run_id)['pending'] == []

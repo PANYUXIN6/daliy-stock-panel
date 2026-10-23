@@ -14,7 +14,8 @@ from datetime import date, datetime, timedelta
 
 import polars as pl
 
-from app.indicators.pipeline import compute_enriched
+from app.enriched_generation import EnrichedPublication, enriched_publication_incomplete
+from app.indicators.pipeline import ENRICHED_STORAGE_COLS, compute_enriched
 from app.services import kline_sync, preferences
 from app.services.daily_coverage import DailyCoverage
 from app.tickflow.capabilities import Cap, CapabilitySet
@@ -402,6 +403,64 @@ def sync_etf_adj_factor(
     )
 
 
+def _recover_etf_enriched(
+    repo: KlineRepository,
+    on_chunk_done: Callable[[int, int], None] | None = None,
+) -> None:
+    """显式同步时按标的批次重建中断的 ETF 指标，全部成功才发布。"""
+    if not enriched_publication_incomplete(repo.store.data_dir, "etf"):
+        return
+    from app.parquet import scan_daily_parquet
+
+    daily = repo.store.data_dir / "kline_etf_daily"
+    base = repo.store.data_dir / "kline_etf_enriched"
+    publication = EnrichedPublication(repo.store.data_dir, "etf", recover=True, full_rebuild=True)
+    publication.begin()
+    try:
+        files = list(daily.glob("date=*/*.parquet"))
+        if not files:
+            raise RuntimeError("缺少本地 ETF 日K，无法恢复中断的指标发布")
+        scan = scan_daily_parquet(files)
+        symbols = sorted(scan.select("symbol").unique().collect()["symbol"].drop_nulls().to_list())
+        source_dates = {str(day) for day in scan.select("date").unique().collect()["date"].drop_nulls()}
+        existing_dates = {p.name.removeprefix("date=") for p in base.glob("date=*") if p.is_dir()}
+        daily_dates = {p.name.removeprefix("date=") for p in daily.glob("date=*") if p.is_dir()}
+        if not symbols or (existing_dates & daily_dates) - source_dates:
+            raise RuntimeError("本地 ETF 日K日期覆盖不完整，无法恢复中断的指标发布")
+        factors = _load_etf_factors(repo)
+        written_dates: set[str] = set()
+        batches = chunked(symbols, 100)
+        if on_chunk_done:
+            on_chunk_done(0, len(batches))
+        for index, batch in enumerate(batches):
+            raw = scan.filter(pl.col("symbol").is_in(batch)).collect()
+            batch_factors = factors.filter(pl.col("symbol").is_in(batch)) if not factors.is_empty() else factors
+            enriched = compute_enriched(raw, factors=batch_factors, instruments=None)
+            if enriched.is_empty():
+                raise RuntimeError("ETF 指标重建未生成数据，发布保持未完成")
+            enriched = enriched.select([c for c in ENRICHED_STORAGE_COLS if c in enriched.columns])
+            for frame in enriched.partition_by("date"):
+                day = str(frame["date"][0])
+                out = base / f"date={day}" / "part.parquet"
+                # 首批覆盖该日期，后续只合并本轮已写入批次；不混入旧版半批结果。
+                if day in written_dates:
+                    frame = pl.concat([pl.read_parquet(out), frame], how="diagonal_relaxed")
+                publication.write_parquet(frame.sort("symbol"), out)
+                written_dates.add(day)
+            del raw, enriched
+            if on_chunk_done:
+                on_chunk_done(index + 1, len(batches))
+        if source_dates - written_dates:
+            raise RuntimeError("ETF 指标重建缺少日K日期，发布保持未完成")
+        publication.commit()
+        # 本地恢复已独立发布；后续上游请求即使失败，也不能继续使用旧视图。
+        repo.refresh_index_views()
+        logger.info("已恢复 ETF 指标发布：%d 个标的、%d 个日期", len(symbols), len(written_dates))
+    finally:
+        publication.abandon()
+        repo.invalidate_etf_enriched_cache()
+
+
 def sync_and_persist_etf_daily(
     repo: KlineRepository,
     capset: CapabilitySet,
@@ -416,6 +475,8 @@ def sync_and_persist_etf_daily(
     """
     if not capset.has(Cap.KLINE_DAILY_BATCH):
         return 0
+
+    _recover_etf_enriched(repo, on_chunk_done=on_chunk_done)
 
     if symbols_override:
         symbols = sorted(set(s for s in symbols_override if s))

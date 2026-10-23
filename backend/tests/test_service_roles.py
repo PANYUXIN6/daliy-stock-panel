@@ -46,6 +46,7 @@ def test_proxy_routes_keep_batch_queries_local_and_forward_owner_state():
     assert collector_owns('POST', '/api/kline/minute/fetch')
     assert collector_owns('GET', '/api/kline/minute/fetch/job1')
     assert collector_owns('GET', '/api/pipeline/jobs/job1')
+    assert collector_owns('GET', '/api/screener/run-status/job1')
     assert not collector_owns('GET', '/api/financials/status')
     assert collector_owns('GET', '/api/financials/execution-status')
     assert collector_owns('POST', '/api/custom/assistant/chat')

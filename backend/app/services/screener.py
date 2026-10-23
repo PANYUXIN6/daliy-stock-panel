@@ -17,6 +17,7 @@ from pathlib import Path
 import polars as pl
 
 from app.parquet import scan_enriched_parquet
+from app.services.snapshot_cache import SnapshotCache
 from app.tickflow.repository import KlineRepository
 
 logger = logging.getLogger(__name__)
@@ -46,8 +47,8 @@ def enriched_history_days(data_dir, asset_type: str = "stock", as_of: date | Non
 
 
 # ── 进程级历史数据缓存 (避免 run_all 每次重新扫描 parquet + 计算指标) ──
-_history_cache: dict[tuple[str, date, int], tuple[float, pl.DataFrame]] = {}
-_HISTORY_CACHE_TTL = 120.0  # 秒
+
+_history_cache = SnapshotCache(ttl=120.0, maxsize=10)
 
 # load_prior_consecutive 最多回看多少个已存在的日分区 (缺列时继续往前找的上限)
 _PRIOR_PARTITION_SCAN = 10
@@ -77,11 +78,13 @@ class ScreenerService:
         """
         _history_cache.clear()
 
-    def _load_enriched_for_date(self, target_date: date) -> pl.DataFrame:
+    def _load_enriched_for_date(self, target_date: date, *, required_bars: int | None = None) -> pl.DataFrame:
         """从 enriched parquet 读取指定日期的基础数据并即时计算完整指标+信号。
 
         enriched parquet 仅存 14 列。读取后需要即时计算 ma/ema/macd/kdj/rsi/boll/momentum/signal 等列。
         对于最新日, 优先使用内存缓存 (已包含完整指标)。
+        required_bars 指定历史计算所需的逐股交易记录数（含目标日），避免长期停牌
+        跨越固定自然日暖机窗口；补读与缓存复用现有历史加载器。
         """
         # 优先使用 repo 最新日缓存
         cache, cache_date = self.repo.get_enriched_latest_asset(self.asset_type)
@@ -94,6 +97,12 @@ class ScreenerService:
                 if "name" not in df.columns:
                     df = df.join(df_i.select(inst_cols), on="symbol", how="left")
             return df
+
+        if required_bars is not None:
+            if required_bars < 1:
+                raise ValueError("required_bars 必须大于零")
+            history = self._load_enriched_history(target_date, required_bars - 1)
+            return history.filter(pl.col("date") == target_date) if not history.is_empty() else history
 
         # 尝试从 repo 级预计算历史缓存中提取目标日期 (仅 stock: 该缓存为股票专用)
         if self.asset_type == "stock":
@@ -284,17 +293,16 @@ class ScreenerService:
                                 target_date, lookback_days, elapsed, len(cached))
                     return cached
 
-        # 优先级 2: 进程级 history_cache (之前的 TTL 缓存)
-        cache_key = (self.asset_type, target_date, lookback_days)
-        now = time.monotonic()
-        ttl_cached = _history_cache.get(cache_key)
-        if ttl_cached is not None:
-            ts, cached_df = ttl_cached
-            if now - ts < _HISTORY_CACHE_TTL:
-                logger.debug("history TTL cache hit: %s lookback=%d", target_date, lookback_days)
-                return cached_df
-            del _history_cache[cache_key]
+        generation_fn = getattr(self.repo, "get_matrix_data_generation", None)
+        generation = generation_fn(self.asset_type) if callable(generation_fn) else None
+        cache_key = (str(self.repo.store.data_dir.resolve()), self.asset_type, target_date, lookback_days, generation)
+        return _history_cache.get_or_compute(
+            cache_key, lambda: self._compute_history(target_date, lookback_days, cached, short_symbols),
+            cache_if=lambda frame: not frame.is_empty() and frame is not cached,
+        )
 
+    def _compute_history(self, target_date, lookback_days, cached, short_symbols):
+        t0 = time.perf_counter()
         # 优先级 3: scan_parquet + compute_indicators (慢路径, ~5s)
         logger.warning("_load_enriched_history cache miss, computing indicators (%s, %d)...",
                        target_date, lookback_days)
@@ -390,17 +398,6 @@ class ScreenerService:
         logger.info("_load_enriched_history(%s, %d): computed in %.1fms, %d rows",
                     target_date, lookback_days, elapsed, len(df_full))
 
-        _history_cache[cache_key] = (now, df_full)
-        # TTL 先清一轮; 仍超上限时按最旧无条件淘汰 — 否则两分钟内出现 >10 个
-        # 不同 (asset_type, date, lookback) 键时全部新鲜、零逐出, 数 GB 宽帧驻留
-        if len(_history_cache) > 10:
-            expired = [k for k, (ts, _) in _history_cache.items() if now - ts > _HISTORY_CACHE_TTL]
-            for k in expired:
-                del _history_cache[k]
-            while len(_history_cache) > 10:
-                oldest = min(_history_cache, key=lambda k: _history_cache[k][0])
-                del _history_cache[oldest]
-
         return df_full
 
     def run(
@@ -490,14 +487,18 @@ class ScreenerService:
         if current is None:
             current = self._load_enriched_for_date(as_of)
         financial_names = set()
+        earnings_prices = None
         if prepare_financials and self.asset_type == "stock" and timeframe == "1d":
             from app.services.auth import require_current_session
+            from app.services.earnings_breakout import EarningsPriceSnapshot
             from app.services.financial_demand import prepare_strategies
+            earnings_prices = EarningsPriceSnapshot()
             inputs = current.filter(pl.col("symbol").is_in(pool)) if pool and not current.is_empty() else current
             financial_names = prepare_strategies(
                 self.repo, engine, strategy_ids, inputs, as_of, overrides_map=overrides_map,
                 params_map=params_map,
                 before_write=require_current_session,
+                price_snapshot=earnings_prices,
             )
         if timeframe == "1m":
             # 分钟策略数据源是本地当日分钟K分区 (单分区文件直读), 与日线
@@ -554,6 +555,7 @@ class ScreenerService:
             history=history,
             market=market,
             cache_key=cache_key,
+            earnings_prices=earnings_prices,
         )
 
     def _load_minute_history(self, as_of: date, current: pl.DataFrame | None) -> pl.DataFrame:

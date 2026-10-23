@@ -6,6 +6,7 @@
 - 昨收基准线：浅灰实线（从开到右），比虚线更明显
 - 分时均线：黄色细线（成交均价，这里用 close 的累计均值近似）
 - 价格线下方渐变填充: 顶部半透明实色 → 底部全透明(与个股对话框 EChartsIntraday 一致)
+有有效成交量时在底部显示独立量带；小图按宽度合并相邻分钟，保留成交量总和。
 空数据返回等尺寸占位 SVG，保证加载前后尺寸一致（同 MiniCandlestick 模式）。
 */
 import { useId } from 'react'
@@ -20,6 +21,8 @@ export function MiniIntraday({ rows, prevClose, changePct, width = 100, height =
   width?: number
   height?: number
 }) {
+  // 空态切换到有数据时也保持 Hook 顺序。
+  const gradId = useId().replace(/:/g, '')
   // 空数据：返回等尺寸占位
   if (!rows || rows.length < 2) {
     return <svg width={width} height={height} viewBox={`0 0 ${width} ${height}`} className="block" aria-label="暂无分时" />
@@ -74,8 +77,43 @@ export function MiniIntraday({ rows, prevClose, changePct, width = 100, height =
   lo = Math.min(lo, baseline)
   const range = hi - lo || 1
 
-  const yScale = (v: number) => padY + (1 - (v - lo) / range) * (H - padY * 2)
+  const hasVolume = H >= 30 && rows.some(row => Number.isFinite(row.volume) && row.volume > 0)
+  const priceBottom = hasVolume ? Math.round(H * 0.66) : H - padY
+  const volumeTop = priceBottom + 3
+  const volumeBottom = H - padY
+  const yScale = (v: number) => padY + (1 - (v - lo) / range) * (priceBottom - padY)
   const xScale = (i: number) => (i / (n - 1)) * W
+
+  // 窄图中一根柱合并若干相邻分钟，按同一横轴分桶；不把缺量、负量当成交。
+  const volumeBuckets = new Map<number, { volume: number; first: number; last: number }>()
+  const bucketCount = Math.min(n, Math.max(1, Math.floor(W / 2.5)))
+  const bucketWidth = W / bucketCount
+  if (hasVolume) {
+    rows.forEach((row, index) => {
+      if (!Number.isFinite(row.volume) || row.volume < 0) return
+      const bucket = Math.min(bucketCount - 1, Math.floor(xScale(index) / bucketWidth))
+      const existing = volumeBuckets.get(bucket)
+      if (existing) {
+        existing.volume += row.volume
+        existing.last = index
+      } else {
+        volumeBuckets.set(bucket, { volume: row.volume, first: index, last: index })
+      }
+    })
+  }
+  const maxVolume = Math.max(0, ...Array.from(volumeBuckets.values(), bucket => bucket.volume))
+  const volumeBars = Array.from(volumeBuckets, ([bucket, value]) => {
+    const ref = value.first > 0 ? rows[value.first - 1].close : rows[value.first].open
+    const close = rows[value.last].close
+    const fill = ref == null || close === ref ? LINE_PREV_CLOSE : close > ref ? BULL : BEAR
+    return {
+      bucket,
+      volume: value.volume,
+      x: (bucket + 0.15) * bucketWidth,
+      height: maxVolume > 0 ? value.volume / maxVolume * (volumeBottom - volumeTop) : 0,
+      fill,
+    }
+  }).filter(bar => bar.volume > 0)
 
   // 价格折线 points
   const pricePoints = rows.map((r, i) => `${xScale(i).toFixed(1)},${yScale(r.close).toFixed(1)}`).join(' ')
@@ -83,23 +121,30 @@ export function MiniIntraday({ rows, prevClose, changePct, width = 100, height =
   const avgPoints = avgLine.map((v, i) => `${xScale(i).toFixed(1)},${yScale(v).toFixed(1)}`).join(' ')
 
   // 渐变填充多边形 points: 价格折线 + 底部右下角 + 左下角, 闭合到画布底边
-  const bottomY = H - padY
+  const bottomY = priceBottom
   const areaPoints = `${pricePoints} ${xScale(n - 1).toFixed(1)},${bottomY.toFixed(1)} ${xScale(0).toFixed(1)},${bottomY.toFixed(1)}`
 
   // 昨收参考线 y 坐标
   const prevCloseY = yScale(baseline)
 
-  // 渐变 id 唯一化(自选列表同屏多张图, 避免互相覆盖)
-  const gradId = useId().replace(/:/g, '')
-
   return (
-    <svg width={W} height={H} viewBox={`0 0 ${W} ${H}`} className="block">
+    <svg width={W} height={H} viewBox={`0 0 ${W} ${H}`} className="block" aria-label={hasVolume ? '分时走势与成交量' : '分时走势'}>
       <defs>
         <linearGradient id={gradId} x1="0" y1="0" x2="0" y2="1">
           <stop offset="0" stopColor={color} stopOpacity={0.4} />
           <stop offset="1" stopColor={color} stopOpacity={0} />
         </linearGradient>
       </defs>
+      {hasVolume && (
+        <g aria-label="成交量">
+          <line x1={0} y1={volumeTop - 1.5} x2={W} y2={volumeTop - 1.5} stroke={LINE_PREV_CLOSE} strokeWidth={0.5} opacity={0.3} />
+          {volumeBars.map(bar => (
+            <rect key={bar.bucket} x={bar.x} y={volumeBottom - bar.height} width={bucketWidth * 0.7} height={bar.height} fill={bar.fill} opacity={0.65}>
+              <title>{`成交量 ${bar.volume.toLocaleString('zh-CN')}`}</title>
+            </rect>
+          ))}
+        </g>
+      )}
       {/* 昨收基准线 (深灰实线, 比虚线更明显) */}
       <line
         x1={0} y1={prevCloseY} x2={W} y2={prevCloseY}

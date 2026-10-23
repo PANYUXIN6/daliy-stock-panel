@@ -103,7 +103,7 @@ def test_custom_provider_monitor_indices_join_fetch(monkeypatch):
             "r3": {"enabled": True, "asset_type": "stock", "scope": "symbols", "symbols": ["600519.SH"]},
         }
 
-    service._app_state = SimpleNamespace(user_runtimes=SimpleNamespace(active=lambda: [SimpleNamespace(monitor_engine=_Engine())]))
+    service._app_state = SimpleNamespace(user_runtimes=SimpleNamespace(background_active=lambda: [SimpleNamespace(monitor_engine=_Engine())]))
     service._fetch_full_market_quotes()
 
     assert provider.index_calls == [sorted(set(CORE_INDEX_SYMBOLS) | BENCHMARK_INDEX_SYMBOLS | {"000300.SH"})]

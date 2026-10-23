@@ -77,3 +77,18 @@ it('changes the publication date at Beijing midnight and uses the selected histo
     expect(host.textContent).not.toContain('当日复盘尚未更新')
   } finally { await act(async () => root.unmount()); qc.clear() }
 })
+
+it.each(['guest', 'pro', 'admin'] as const)('shows prompt customization for %s according to role without granting scheduling', async role => {
+  Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true })
+  mocks.publication.mockResolvedValue({ as_of: '2026-10-22', published: false, overview: null })
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  const host = document.createElement('div'); const root = createRoot(host)
+  const user = { ...guestUser, id: `${role}-test`, role }
+  try {
+    await act(async () => root.render(<AuthContext.Provider value={user}><MemoryRouter><QueryClientProvider client={qc}><Review /></QueryClientProvider></MemoryRouter></AuthContext.Provider>))
+    await settle()
+    const buttons = [...host.querySelectorAll('button')].map(button => button.textContent)
+    expect(buttons.includes('提示词')).toBe(role === 'pro' || role === 'admin')
+    expect(buttons.includes('定时')).toBe(role === 'admin')
+  } finally { await act(async () => root.unmount()); qc.clear() }
+})

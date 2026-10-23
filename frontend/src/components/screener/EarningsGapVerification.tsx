@@ -80,15 +80,16 @@ function formatCheckedAt(value: string) {
   })
 }
 
-export function EarningsGapVerification({ verification, job, submitting, canVerify, historical = false, error }: {
+export function EarningsGapVerification({ verification, job, submitting, canVerify, historical = false, error, onVerify }: {
   verification?: EarningsGapVerificationSummary
   job: ReturnType<typeof useCollectorJob>
   submitting: boolean
   canVerify: boolean
   historical?: boolean
   error?: Error | null
+  onVerify: () => void
 }) {
-  const taskError = job.data?.status === 'failed' ? job.data.error ?? '核验失败，请重新点击策略卡片重试。' : null
+  const taskError = job.data?.status === 'failed' ? job.data.error ?? '核验失败，请点击重新核验重试。' : null
   const completed = job.data?.status === 'succeeded' || verification?.status === 'completed'
   const showCompleted = completed && !job.running && !submitting && !error && !taskError
   return (
@@ -97,17 +98,23 @@ export function EarningsGapVerification({ verification, job, submitting, canVeri
         <h2 className="font-medium text-foreground">业绩断层核验</h2>
         <span className="text-accent tabular-nums">已确认 {verification?.confirmed_count ?? 0}</span>
       </div>
+      {canVerify && (
+        <button type="button" onClick={onVerify} disabled={submitting || job.running}
+          className="inline-flex items-center rounded-btn border border-accent/40 bg-accent/10 px-3 py-1.5 text-xs font-medium text-accent hover:bg-accent/20 disabled:opacity-50 disabled:cursor-wait">
+          {submitting || job.running ? '核验中…' : verification || completed || taskError ? '重新核验' : '核验'}
+        </button>
+      )}
       <CollectorJobProgress job={{ ...job, message: job.data?.status === 'pending' ? '核验任务排队中…' : '正在核验利润表…' }} />
       {submitting && !job.running && <p role="status" className="text-xs text-accent">正在启动业绩断层核验…</p>}
       {error && <p role="alert" className="text-xs text-danger">{error.message}</p>}
       {taskError && <p role="alert" className="text-xs text-danger">{taskError}</p>}
       {showCompleted && <p role="status" className="text-[11px] text-secondary">核验完成，仅展示已确认的业绩断层跳空。</p>}
-      {verification?.status === 'failed' && !taskError && <p role="alert" className="text-xs text-danger">上次核验未完成，可重新点击策略卡片重试。</p>}
+      {verification?.status === 'failed' && !taskError && <p role="alert" className="text-xs text-danger">上次核验未完成，可点击重新核验重试。</p>}
       {showCompleted && verification?.checked_at && <p className="text-[11px] text-muted">完成时间（北京时间）：{formatCheckedAt(verification.checked_at)}</p>}
       {historical
         ? <p className="text-[11px] text-muted">历史结果按财报版本可用时间回放，无法证明当时可用的数据不会用于确认信号。</p>
         : !canVerify && <p className="text-[11px] text-muted">运行策略时按需准备财务数据，保存后共享复用。</p>}
-      {!verification && !submitting && !job.running && !historical && <p className="text-xs text-secondary">点击策略卡片，核验当日业绩断层跳空。</p>}
+      {!verification && !submitting && !job.running && !historical && canVerify && <p className="text-xs text-secondary">点击核验，更新候选股利润表并核验当日业绩断层跳空。</p>}
     </div>
   )
 }

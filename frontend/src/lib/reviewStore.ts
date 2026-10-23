@@ -10,7 +10,7 @@
  *  - AbortController 存模块级 ref,组件卸载不中断流
  *  - 订阅者列表(notify 机制),Review mount 时订阅、unmount 时退订
  */
-import { api, friendlyStreamError } from '@/lib/api'
+import { api, friendlyStreamError, type ReviewPromptSnapshot } from '@/lib/api'
 
 export type ReviewPhase = 'idle' | 'loading' | 'streaming' | 'done' | 'error'
 
@@ -19,6 +19,7 @@ export interface ReviewMeta {
   emotion_score?: number
   emotion_label?: string
   summary?: string
+  system_prompt?: ReviewPromptSnapshot | null
 }
 
 export interface ReviewState {
@@ -156,6 +157,7 @@ export function setViewingReport(report: {
   emotion_score?: number | null
   emotion_label?: string
   summary?: string
+  system_prompt?: ReviewPromptSnapshot | null
 }): void {
   abortCtrl?.abort()
   abortCtrl = null
@@ -169,6 +171,7 @@ export function setViewingReport(report: {
       emotion_score: report.emotion_score ?? undefined,
       emotion_label: report.emotion_label,
       summary: report.summary,
+      system_prompt: report.system_prompt,
     },
     focus: state.focus,
   }

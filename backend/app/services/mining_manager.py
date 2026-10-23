@@ -1,4 +1,4 @@
-"""Threaded orchestration for persistent mining jobs."""
+"""Bounded background orchestration for persistent mining jobs."""
 
 from __future__ import annotations
 
@@ -6,6 +6,8 @@ import logging
 import threading
 import time
 from collections.abc import Callable
+from concurrent.futures import CancelledError, Future, TimeoutError
+from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +24,7 @@ from app.services.mining_jobs import (
     MiningRunValidationError,
     compute_run_signature,
 )
+from app.services.task_scheduler import JobQueueFullError, submit_research
 from app.services.user_context import current_user, user_scope
 
 logger = logging.getLogger(__name__)
@@ -37,7 +40,7 @@ _SHUTDOWN_JOIN_SECONDS = 1.0
 
 
 class MiningJobManager:
-    """Coordinate mining persistence, capacity, cancellation, and worker threads."""
+    """Coordinate mining persistence, capacity, cancellation, and background futures."""
 
     def __init__(
         self,
@@ -51,7 +54,7 @@ class MiningJobManager:
         self._worker_runner = worker_runner
         self._task_factory = task_factory
         self._lock = threading.RLock()
-        self._threads: dict[str, threading.Thread] = {}
+        self._futures: dict[str, Future] = {}
         self._cancel_events: dict[str, threading.Event] = {}
         self._shutdown = False
 
@@ -104,7 +107,17 @@ class MiningJobManager:
                 "queued",
                 {"status": "queued", "source": source},
             )
-            self._start_thread_locked(run_id, source)
+            try:
+                self._submit_locked(run_id, source)
+            except JobQueueFullError:
+                # Admission failed before a worker existed. In particular, do not
+                # consume the fixed weekly claim for work that never entered the queue.
+                self._store.discard_unsubmitted(run_id)
+                raise
+            except Exception as exc:
+                self._store.transition_status(run_id, "failed")
+                self._store.append_event(run_id, "error", {"message": str(exc)})
+                raise
             return manifest
 
     def cancel(self, run_id: str) -> dict[str, Any]:
@@ -122,6 +135,12 @@ class MiningJobManager:
                 return cancelled
 
             cancel_event.set()
+            future = self._futures.get(run_id)
+            if future is not None and future.cancel():
+                self._finish_cancelled_locked(run_id)
+                self._futures.pop(run_id, None)
+                self._cancel_events.pop(run_id, None)
+                return self._store.get(run_id)
             if manifest["status"] != "cancelling":
                 manifest = self._store.transition_status(run_id, "cancelling")
                 self._store.append_event(run_id, "cancelling", {"status": "cancelling"})
@@ -130,38 +149,36 @@ class MiningJobManager:
     def shutdown(self) -> None:
         with self._lock:
             self._shutdown = True
-            run_ids = list(self._threads)
+            run_ids = list(self._futures)
         for run_id in run_ids:
             self.cancel(run_id)
 
         deadline = time.monotonic() + _SHUTDOWN_JOIN_SECONDS
-        current = threading.current_thread()
         for run_id in run_ids:
             with self._lock:
-                thread = self._threads.get(run_id)
-            if thread is None or thread is current:
+                future = self._futures.get(run_id)
+            if future is None:
                 continue
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 break
-            thread.join(timeout=remaining)
+            with suppress(TimeoutError, CancelledError):
+                future.result(timeout=remaining)
 
     def recover_interrupted(self) -> int:
         return self._store.recover_interrupted()
 
-    def _start_thread_locked(self, run_id: str, source: str) -> None:
-        if run_id in self._threads:
+    def _submit_locked(self, run_id: str, source: str) -> None:
+        if run_id in self._futures:
             return
         cancel_event = threading.Event()
-        thread = threading.Thread(
-            target=self._run_owned_job,
-            args=(current_user(), run_id, source, cancel_event),
-            name=f"mining-{run_id}",
-            daemon=True,
-        )
+        owner = current_user()
         self._cancel_events[run_id] = cancel_event
-        self._threads[run_id] = thread
-        thread.start()
+        try:
+            self._futures[run_id] = submit_research(lambda: self._run_owned_job(owner, run_id, source, cancel_event))
+        except Exception:
+            self._cancel_events.pop(run_id, None)
+            raise
 
     def _run_owned_job(self, owner, *args) -> None:
         # 每次启动捕获本次会话；运行实例可能在启动恢复时以无会话上下文建立。
@@ -206,7 +223,7 @@ class MiningJobManager:
                 self._finish_failed(run_id, exc)
         finally:
             with self._lock:
-                self._threads.pop(run_id, None)
+                self._futures.pop(run_id, None)
                 self._cancel_events.pop(run_id, None)
 
     def _mark_running(self, run_id: str, cancel_event: threading.Event) -> bool:

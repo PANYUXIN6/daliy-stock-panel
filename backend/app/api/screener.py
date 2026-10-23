@@ -19,6 +19,7 @@ from app.config import settings
 from app.db_safe import is_valid_ext_ident, quote_ident
 from app.services import strategy_cache, strategy_run_queue
 from app.services.screener import ScreenerService
+from app.services.screener_quotes import with_live_quotes
 from app.services.user_runtime import runtime_for
 from app.strategy import config as strategy_config
 
@@ -365,21 +366,12 @@ def _cache_payload_with_ext(cached: dict, ext_values: dict[str, dict[str, Any]])
 
 
 def _update_cache_strategy(data_dir, as_of: str, strategy_id: str, safe_data: dict) -> None:
-    """单跑后更新缓存中该策略的结果，保持缓存与最新计算一致。"""
+    """单跑只更新已有同日缓存；历史查询不得替换当前结果及曾命中记录。"""
     from app.services import strategy_cache
-    cached = strategy_cache.read_cache(data_dir)
-    if cached and cached.get("as_of") == as_of:
-        results = cached.get("results", {})
-        results[strategy_id] = {
-            "total": safe_data.get("total", 0),
-            "as_of": as_of,
-            "rows": safe_data.get("rows", []),
-        }
-        if safe_data.get("warnings"):
-            # 数据不足提示 (#303) 随缓存下发 (get_cached 原样读出),
-            # 单跑刷新不得冲掉 run_all 写入的提示
-            results[strategy_id]["warnings"] = safe_data["warnings"]
-        strategy_cache.write_cache(data_dir, as_of, results)
+    payload = {"total": safe_data.get("total", 0), "as_of": as_of, "rows": safe_data.get("rows", [])}
+    if safe_data.get("warnings"):
+        payload["warnings"] = safe_data["warnings"]
+    strategy_cache.write_cache(data_dir, as_of, {strategy_id: payload}, same_date_only=True)
 
 
 @router.get("/strategies")
@@ -420,20 +412,24 @@ def run_custom(req: CustomRequest, request: Request):
     if not as_of:
         raise HTTPException(status_code=400,
                             detail="无可用数据日期 — enriched 表为空,请先运行盘后管道")
-    result = svc.run(
-        as_of=as_of,
-        conditions=req.conditions,
-        order_by=req.order_by,
-        limit=req.limit,
-        pool=req.pool,
-    )
-    safe_data = _safe(asdict(result))
-    warnings = _coverage_warnings(svc, as_of)
-    if warnings:
-        safe_data["warnings"] = warnings
-    ext_values = _load_ext_value_maps(repo, req.ext_columns)
-    return _result_with_ext(safe_data, ext_values)
+    def execute():
+        result = svc.run(
+            as_of=as_of,
+            conditions=req.conditions,
+            order_by=req.order_by,
+            limit=req.limit,
+            pool=req.pool,
+        )
+        safe_data = _safe(asdict(result))
+        warnings = _coverage_warnings(svc, as_of)
+        if warnings:
+            safe_data["warnings"] = warnings
+        ext_values = _load_ext_value_maps(repo, req.ext_columns)
+        return _result_with_ext(safe_data, ext_values)
 
+    return strategy_run_queue.MANAGER.run_sync(
+        strategy_run_queue.command_key(repo, None, req.asset_type, "custom", req.model_dump(), as_of), execute,
+    )
 
 @router.post("/run_preset")
 def run_preset(req: PresetRequest, request: Request):
@@ -451,47 +447,53 @@ def run_preset(req: PresetRequest, request: Request):
     if not engine:
         raise HTTPException(status_code=404, detail=f"策略引擎未初始化或策略 {req.strategy_id} 不存在")
 
-    try:
-        if not engine.has(req.strategy_id):
-            raise ValueError(f"unknown strategy: {req.strategy_id}")
-        if engine.get(req.strategy_id).meta.get("research_only"):
-            raise ValueError(f"unknown strategy: {req.strategy_id}")
-        params = dict(overrides.get("params") or {})
-        context = svc.build_strategy_context(
-            engine,
-            as_of,
-            [req.strategy_id],
-            timeframe=req.timeframe,
-            params_map={req.strategy_id: params},
-            overrides_map={req.strategy_id: overrides or {}},
-            prepare_financials=True, pool=req.pool,
-        )
-        result = engine.run(
-            req.strategy_id,
-            context,
-            pool=req.pool,
-            params=params,
-            overrides=overrides or None,
-        )
-    except ValueError as e:
-        status_code = 404 if "unknown strategy" in str(e) else 400
-        raise HTTPException(status_code=status_code, detail=str(e)) from e
+    def execute():
+        try:
+            if not engine.has(req.strategy_id):
+                raise ValueError(f"unknown strategy: {req.strategy_id}")
+            if engine.get(req.strategy_id).meta.get("research_only"):
+                raise ValueError(f"unknown strategy: {req.strategy_id}")
+            params = dict(overrides.get("params") or {})
+            context = svc.build_strategy_context(
+                engine,
+                as_of,
+                [req.strategy_id],
+                timeframe=req.timeframe,
+                params_map={req.strategy_id: params},
+                overrides_map={req.strategy_id: overrides or {}},
+                prepare_financials=True, pool=req.pool,
+            )
+            result = engine.run(
+                req.strategy_id,
+                context,
+                pool=req.pool,
+                params=params,
+                overrides=overrides or None,
+            )
+        except ValueError as e:
+            status_code = 404 if "unknown strategy" in str(e) else 400
+            raise HTTPException(status_code=status_code, detail=str(e)) from e
 
-    safe_data = _safe(asdict(result))
-    if req.timeframe == "1d":
-        # 数据不足提示随结果返回并写入盘后缓存 (#303); 分钟周期结果不写入盘后缓存
-        # (strategy_cache 是日线语义, as_of/updated_at 混入分钟结果会污染页面秒加载路径),
-        # 分钟策略数据源也与日线 enriched 历史无关, 不提示。
-        warnings = _coverage_warnings(
-            svc, as_of, engine=engine, strategy_ids=[req.strategy_id],
-            params_map={req.strategy_id: params},
-            overrides_map={req.strategy_id: overrides or {}},
-        )
-        if warnings:
-            safe_data["warnings"] = warnings
-        _update_cache_strategy(data_dir, str(as_of), req.strategy_id, safe_data)
+        safe_data = _safe(asdict(result))
+        if req.timeframe == "1d":
+            # 数据不足提示随结果返回并写入盘后缓存 (#303); 分钟周期结果不写入盘后缓存
+            # (strategy_cache 是日线语义, as_of/updated_at 混入分钟结果会污染页面秒加载路径),
+            # 分钟策略数据源也与日线 enriched 历史无关, 不提示。
+            warnings = _coverage_warnings(
+                svc, as_of, engine=engine, strategy_ids=[req.strategy_id],
+                params_map={req.strategy_id: params},
+                overrides_map={req.strategy_id: overrides or {}},
+            )
+            if warnings:
+                safe_data["warnings"] = warnings
+            _update_cache_strategy(data_dir, str(as_of), req.strategy_id, safe_data)
 
-    return _result_with_ext(safe_data, ext_values)
+        return _result_with_ext(safe_data, ext_values)
+
+    return strategy_run_queue.MANAGER.run_sync(
+        strategy_run_queue.command_key(repo, engine, req.asset_type, "preset", req.model_dump(), as_of, overrides),
+        execute,
+    )
 
 
 def _cached_with_realtime(request: Request) -> dict:
@@ -527,9 +529,10 @@ def get_cached(
     - 盘后缓存 (strategy_cache.json): 非监控策略 / 页面秒加载用, run_all 写入。
     - 监控引擎内存结果 (latest_strategy_results): 实时行情每轮对「加入监控的策略」算出,
       不落盘 (避免与 read_cache 的 mtime 校验冲突), 在此直接叠加覆盖盘后结果。
-      被监控的策略拿到新鲜数据, 非监控策略仍用盘后缓存。
+      被监控的策略拿到新鲜信号, 非监控策略保留原信号。
+    - 同日行情只覆盖价格展示字段，不重算评分、不写回策略缓存。
     """
-    cached = _cached_with_realtime(request)
+    cached = with_live_quotes(_cached_with_realtime(request), request.app.state.repo)
 
     # 无任何数据 (盘后缓存空 + 无实时结果) → 返回空标记, 前端据此提示
     if not cached.get("results") and cached.get("as_of") is None:
@@ -542,41 +545,18 @@ def get_cached(
 @router.get("/cached-summary")
 def get_cached_summary(request: Request):
     """返回策略卡片所需的轻量摘要，不序列化股票明细。"""
-    cached = _cached_with_realtime(request)
-    results = cached.get("results") or {}
-    summary = {
-        sid: {
-            "total": int(result.get("total") or 0),
-            "as_of": result.get("as_of"),
-            # 渐进式 run_all 写入的计算时间戳; 监控实时叠加/旧缓存无此字段 → None,
-            # 前端视为新鲜 (有值即为最新一轮实时结果)
-            "computed_at": result.get("computed_at"),
-            **({"verification": {key: value for key, value in result["verification"].items()
-                                  if key != "candidates"}}
-               if isinstance(result.get("verification"), dict) else {}),
-        }
-        for sid, result in results.items()
-        if isinstance(result, dict)
-    }
+    monitor = getattr(runtime_for(request), "monitor_engine", None)
+    realtime = monitor.latest_strategy_results() if monitor is not None else None
+    return strategy_cache.read_summary(request.app.state.repo.store.data_dir, realtime)
 
-    cached_as_of = cached.get("as_of")
-    ever_rows = cached.get("today_ever_rows") or {}
-    ever_counts = {}
-    for sid, result in results.items():
-        if not isinstance(result, dict) or result.get("as_of") != cached_as_of:
-            continue
-        current_symbols = {
-            str(row["symbol"])
-            for row in result.get("rows") or []
-            if isinstance(row, dict) and row.get("symbol")
-        }
-        ever_counts[sid] = len(set((ever_rows.get(sid) or {}).keys()) | current_symbols)
-    return {
-        "as_of": cached_as_of,
-        "results": summary,
-        "today_ever_counts": ever_counts,
-        "updated_at": cached.get("updated_at"),
-    }
+
+@router.get("/run-status/{run_id}")
+def get_run_status(run_id: str):
+    """只读当前用户的执行状态，独立于成功结果缓存，保留迟发错误。"""
+    status = strategy_run_queue.MANAGER.status(run_id)
+    if status is None:
+        raise HTTPException(status_code=404, detail="策略任务不存在或状态已过期，请查看结果或重新运行")
+    return status
 
 
 @router.get("/cached-result/{strategy_id}")
@@ -586,7 +566,9 @@ def get_cached_result(
     ext_columns: str | None = Query(None, description="逗号分隔: config_id.field_name"),
 ):
     """按需返回单个策略的完整明细及其今日失效行。"""
-    cached = _cached_with_realtime(request)
+    cached = with_live_quotes(
+        _cached_with_realtime(request), request.app.state.repo, strategy_id=strategy_id,
+    )
     raw_result = (cached.get("results") or {}).get(strategy_id)
     if not isinstance(raw_result, dict):
         return {
@@ -694,7 +676,9 @@ def _run_all_progressive(
     搭车现有执行, 不同请求排队; HTTP 侧只轮询状态快照到首返时限。
     """
     data_dir = repo.store.data_dir
-    key = (asset_type, timeframe, str(as_of), tuple(sorted(all_ids)))
+    key = strategy_run_queue.command_key(
+        repo, engine, asset_type, "progressive", asset_type, timeframe, as_of, sorted(all_ids), params_map, overrides_map,
+    )
     ordered_ids = strategy_run_queue.order_strategy_ids(
         all_ids, strategy_run_queue.load_run_timings(data_dir)
     )
@@ -766,13 +750,15 @@ def _run_all_progressive(
                 )
                 if w:
                     payload["warnings"] = w
-            all_results[sid] = payload
             elapsed_map[sid] = (time.perf_counter() - t0) * 1000
             # 逐策略增量落盘 (write_cache 同日按 sid 合并), 前端轮询即可逐个看到
             try:
                 strategy_cache.write_cache(data_dir, str(as_of), {sid: payload})
             except Exception:  # noqa: BLE001 -- 单策略及缓存写入失败已记录warning并按既有任务契约反馈
                 logger.warning("run_all 渐进写入缓存失败: %s", sid, exc_info=True)
+                handle.fail_one(sid, "策略结果保存失败，请重试")
+                continue
+            all_results[sid] = payload
             handle.complete(sid, {k: v for k, v in payload.items() if k != "rows"})
         # 收尾: 与旧版口径一致的整体重写 + 耗时落盘供下次排序
         if all_results:
@@ -797,6 +783,7 @@ def _run_all_progressive(
         len(snap["pending"]),
     )
     return {
+        "run_id": handle.run_id,
         "as_of": str(as_of),
         "results": done_results,
         "pending": snap["pending"],
@@ -894,60 +881,73 @@ def run_all(request: Request, body: dict | None = None):
             t_total=t_total,
         )
 
-    try:
-        context = svc.build_strategy_context(
-            engine,
-            as_of,
-            all_ids,
-            timeframe=timeframe,
-            params_map=params_map,
-            overrides_map=overrides_map,
-            prepare_financials=True,
-        )
-        engine_results = engine.run_all(
-            context,
-            params_map=params_map,
-            overrides_map=overrides_map,
-            strategy_ids=all_ids,
-        )
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
-
-    results: dict[str, dict] = {}
-    for sid, result in engine_results.items():
-        safe_rows = _safe(asdict(result)).get("rows", [])
-        results[sid] = {
-            "total": result.total,
-            "as_of": str(as_of),
-            "rows": safe_rows,
-        }
-        if timeframe == "1d":
-            w = _coverage_warnings(
-                svc, as_of, engine=engine, strategy_ids=[sid],
-                params_map=params_map, overrides_map=overrides_map,
+    def execute():
+        try:
+            context = svc.build_strategy_context(
+                engine,
+                as_of,
+                all_ids,
+                timeframe=timeframe,
+                params_map=params_map,
+                overrides_map=overrides_map,
+                prepare_financials=True,
             )
-            if w:
-                results[sid]["warnings"] = w
+            engine_results = engine.run_all(
+                context,
+                params_map=params_map,
+                overrides_map=overrides_map,
+                strategy_ids=all_ids,
+            )
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
 
-    elapsed = (time.perf_counter() - t_total) * 1000
-    logger.info("run_all: total took %.1fms (%d strategies)", elapsed, len(all_ids))
+        results: dict[str, dict] = {}
+        for sid, result in engine_results.items():
+            safe_rows = _safe(asdict(result)).get("rows", [])
+            results[sid] = {
+                "total": result.total,
+                "as_of": str(as_of),
+                "rows": safe_rows,
+            }
+            if timeframe == "1d":
+                w = _coverage_warnings(
+                    svc, as_of, engine=engine, strategy_ids=[sid],
+                    params_map=params_map, overrides_map=overrides_map,
+                )
+                if w:
+                    results[sid]["warnings"] = w
 
-    # 写入策略缓存 (供页面秒加载); 分钟周期结果不落盘 (日线语义缓存)
-    if results and timeframe == "1d":
-        with suppress(Exception):
-            strategy_cache.write_cache(data_dir, str(as_of), results)
+        elapsed = (time.perf_counter() - t_total) * 1000
+        logger.info("run_all: total took %.1fms (%d strategies)", elapsed, len(all_ids))
 
-    if body.get("summary_only"):
-        return {
-            "as_of": str(as_of),
-            "results": {
-                sid: {"total": result["total"], "as_of": result["as_of"]}
-                for sid, result in results.items()
-            },
-        }
+        # 写入策略缓存 (供页面秒加载); 分钟周期结果不落盘 (日线语义缓存)
+        if results and timeframe == "1d":
+            with suppress(Exception):
+                strategy_cache.write_cache(data_dir, str(as_of), results)
 
-    ext_values = _load_ext_value_maps(repo, body.get("ext_columns"))
-    return {"as_of": str(as_of), "results": _results_with_ext(results, ext_values)}
+        if body.get("summary_only"):
+            return {
+                "as_of": str(as_of),
+                "results": {
+                    sid: {"total": result["total"], "as_of": result["as_of"]}
+                    for sid, result in results.items()
+                },
+            }
+
+        ext_values = _load_ext_value_maps(repo, body.get("ext_columns"))
+        return {"as_of": str(as_of), "results": _results_with_ext(results, ext_values)}
+
+    return strategy_run_queue.MANAGER.run_sync(
+        strategy_run_queue.command_key(repo, engine, asset_type, "batch", body, as_of, params_map, overrides_map),
+        execute,
+    )
+
+@router.get("/strength-ladder")
+def strength_ladder(request: Request, as_of: date | None = None):
+    """按20个交易日收益分档的A股趋势梯队，读取本地历史或当日指标快照。"""
+    from app.services.strength_ladder import get_strength_ladder
+
+    return get_strength_ladder(request.app.state.repo, as_of)
 
 
 @router.get("/limit-ladder")

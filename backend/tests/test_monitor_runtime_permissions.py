@@ -60,6 +60,8 @@ def filter(df, params):
     monkeypatch.setattr("app.services.quote_service.cn_today", lambda: DAY)
     monkeypatch.setattr("app.strategy.monitor.cn_today", lambda: DAY)
     now = datetime(2026, 10, 16, 10, tzinfo=ZoneInfo("Asia/Shanghai"))
+    # 告警保留期也使用同一测试时钟，避免固定交易日的记录随实际日期过期。
+    monkeypatch.setattr("time.time", lambda: now.timestamp())
     monkeypatch.setattr(paper, "cn_now", lambda: now)
     monkeypatch.setattr(paper_auto, "cn_now", lambda: now)
     yield SimpleNamespace(root=tmp_path, users=users, state=state, registry=registry, service=service,

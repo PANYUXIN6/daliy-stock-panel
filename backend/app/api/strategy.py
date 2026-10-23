@@ -354,6 +354,7 @@ def get_strategy(strategy_id: str, request: Request):
 
 @router.post("/run")
 def run_strategy(req: RunRequest, request: Request):
+    from app.services import strategy_run_queue
     engine = _get_engine(request)
     _get_public_strategy(engine, req.strategy_id)
     data_dir = _data_dir(request)
@@ -376,33 +377,39 @@ def run_strategy(req: RunRequest, request: Request):
     if not as_of:
         raise HTTPException(status_code=400, detail="无可用数据日期")
 
-    try:
-        from app.services.screener import ScreenerService
-        svc = ScreenerService(request.app.state.repo, asset_type=req.asset_type)
-        context = svc.build_strategy_context(
-            engine,
-            as_of,
-            [req.strategy_id],
-            timeframe=req.timeframe,
-            params_map={req.strategy_id: params},
-            overrides_map={req.strategy_id: overrides or {}},
-            prepare_financials=True, pool=req.pool,
-        )
-        result = engine.run(
-            req.strategy_id,
-            context,
-            pool=req.pool,
-            params=params,
-            overrides=overrides or None,
-        )
-    except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e)) from e
+    def execute():
+        try:
+            from app.services.screener import ScreenerService
+            svc = ScreenerService(request.app.state.repo, asset_type=req.asset_type)
+            context = svc.build_strategy_context(
+                engine,
+                as_of,
+                [req.strategy_id],
+                timeframe=req.timeframe,
+                params_map={req.strategy_id: params},
+                overrides_map={req.strategy_id: overrides or {}},
+                prepare_financials=True, pool=req.pool,
+            )
+            result = engine.run(
+                req.strategy_id,
+                context,
+                pool=req.pool,
+                params=params,
+                overrides=overrides or None,
+            )
+        except ValueError as e:
+            raise HTTPException(status_code=404, detail=str(e)) from e
 
-    return _safe(asdict(result))
+        return _safe(asdict(result))
 
+    return strategy_run_queue.MANAGER.run_sync(
+        strategy_run_queue.command_key(request.app.state.repo, engine, req.asset_type, "strategy", req.model_dump(), as_of, overrides),
+        execute,
+    )
 
 @router.post("/run-all")
 def run_all(req: RunAllRequest, request: Request):
+    from app.services import strategy_run_queue
     engine = _get_engine(request)
     data_dir = _data_dir(request)
 
@@ -428,26 +435,31 @@ def run_all(req: RunAllRequest, request: Request):
         sid: dict((all_overrides.get(sid) or {}).get("params") or {})
         for sid in strategy_ids
     }
-    context = svc.build_strategy_context(
-        engine,
-        as_of,
-        strategy_ids,
-        timeframe=req.timeframe,
-        params_map=params_map,
-        overrides_map={sid: all_overrides.get(sid, {}) for sid in strategy_ids},
-        prepare_financials=True,
+    def execute():
+        context = svc.build_strategy_context(
+            engine,
+            as_of,
+            strategy_ids,
+            timeframe=req.timeframe,
+            params_map=params_map,
+            overrides_map={sid: all_overrides.get(sid, {}) for sid in strategy_ids},
+            prepare_financials=True,
+        )
+        results: dict[str, dict] = {}
+        for sid, result in engine.run_all(
+            context,
+            params_map=params_map,
+            overrides_map={sid: all_overrides.get(sid, {}) for sid in strategy_ids},
+            strategy_ids=strategy_ids,
+        ).items():
+            results[sid] = {"total": result.total, "as_of": str(as_of)}
+
+        return {"as_of": str(as_of), "results": results}
+
+    return strategy_run_queue.MANAGER.run_sync(
+        strategy_run_queue.command_key(request.app.state.repo, engine, req.asset_type, "strategy-batch", req.model_dump(), as_of, all_overrides),
+        execute,
     )
-    results: dict[str, dict] = {}
-    for sid, result in engine.run_all(
-        context,
-        params_map=params_map,
-        overrides_map={sid: all_overrides.get(sid, {}) for sid in strategy_ids},
-        strategy_ids=strategy_ids,
-    ).items():
-        results[sid] = {"total": result.total, "as_of": str(as_of)}
-
-    return {"as_of": str(as_of), "results": results}
-
 
 # ── 配置持久化 ───────────────────────────────────────────────────────
 

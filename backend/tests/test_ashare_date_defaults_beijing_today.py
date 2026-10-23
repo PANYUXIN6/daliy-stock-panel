@@ -31,7 +31,7 @@ class _DummyResult:
     status: str = "ok"
 
 
-def test_backtest_run_defaults_to_beijing_today(monkeypatch) -> None:
+def test_backtest_run_defaults_to_beijing_today(monkeypatch, private_owner) -> None:
     captured_cfg = []
 
     class DummyService:
@@ -54,7 +54,7 @@ def test_backtest_run_defaults_to_beijing_today(monkeypatch) -> None:
     assert captured_cfg[0].start == BJ - timedelta(days=365 * 3)
 
 
-def test_backtest_factor_run_defaults_to_beijing_today(monkeypatch) -> None:
+def test_backtest_factor_run_defaults_to_beijing_today(monkeypatch, private_owner) -> None:
     captured_cfg = []
 
     class DummyFactorService:

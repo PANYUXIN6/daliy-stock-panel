@@ -542,7 +542,8 @@ def test_covering_matrix_cache_reuses_wider_dates_and_fields(tmp_path):
     assert narrow.cache_status == "covering"
     assert narrow.cache_path == broad.cache_path
     assert narrow.timestamp_labels == tuple(value.isoformat() for value in days[1:3])
-    assert set(narrow.fields) == {"raw_close"}
+    assert set(narrow.fields) == {"raw_close", "_volume_time_factor"}
+    np.testing.assert_array_equal(narrow.fields["_volume_time_factor"], np.ones(narrow.shape))
     assert isinstance(narrow.close, np.memmap)
     assert not narrow.close.flags.writeable
     assert len(list(cache_root.glob("v*-*"))) == 1
@@ -727,7 +728,7 @@ def test_matrix_cache_prunes_by_bytes_and_leaves_no_staging_directory(tmp_path):
     del first
     gc.collect()
     assert second.close[0, 0] == pytest.approx(11.0)
-    assert len(list(cache_root.glob("v4-*"))) == 1
+    assert len(list(cache_root.glob("v*-*"))) == 1
     assert list(cache_root.glob(".*.tmp")) == []
     assert len(list(cache_root.glob(".axes-v1-*.json"))) == 1
 
@@ -780,7 +781,7 @@ def test_managed_source_generation_skips_file_walk_and_invalidates_explicitly(tm
     assert changed.cache_path != first.cache_path
     del first, repeated
     gc.collect()
-    assert len(list(cache_root.glob("v4-*"))) == 1
+    assert len(list(cache_root.glob("v*-*"))) == 1
 
 
 def test_registered_builtin_matrix_strategies_share_one_cache_profile():

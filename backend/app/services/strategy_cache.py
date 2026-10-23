@@ -13,15 +13,18 @@
 """
 from __future__ import annotations
 
+import copy
 import json
 import logging
 import os
 import threading
 import time
+from collections import OrderedDict
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
+from app.services.path_locks import path_lock
 from app.services.private_storage import private_path
 
 
@@ -38,10 +41,15 @@ logger = logging.getLogger(__name__)
 
 _CACHE_FILENAME = "strategy_cache.json"
 
-# 读写同一 JSON 文件的进程内锁: write_cache 的 read-modify-write 与并发 read_cache
-# 无锁会丢更新/读到半写文件。read_cache 与 write_cache 共用此锁; write 内部复用
-# _read_cache_unlocked 避免自死锁。写入用临时文件 + os.replace 做到原子替换。
-_file_lock = threading.Lock()
+# File ownership stays isolated; only the bounded memo index has a short global lock.
+_memo_lock = threading.Lock()
+_memo: OrderedDict = OrderedDict()
+_MEMO_MAX_BYTES = 32 * 1024 * 1024
+
+
+def _signature(path):
+    stat = path.stat()
+    return stat.st_ino, stat.st_mtime_ns, stat.st_size
 
 
 def _cache_path(data_dir: Path) -> Path:
@@ -71,7 +79,7 @@ def read_cache(data_dir: Path) -> dict | None:
     保护价值有限。故移除: 盘后缓存总能读出, 实时新鲜度由 /api/screener/cached
     端点叠加监控引擎的内存实时结果 (latest_strategy_results) 来保证。
     """
-    with _file_lock:
+    with path_lock(_cache_path(data_dir)):
         return _read_cache_unlocked(data_dir)
 
 
@@ -103,7 +111,7 @@ def clear_cache(data_dir: Path, strategy_id: str | None = None) -> None:
     )
     logger.warning("策略缓存被清除, 调用链: %s", chain)
     path = _cache_path(data_dir)
-    with _file_lock:
+    with path_lock(path):
         if strategy_id is None:
             path.unlink(missing_ok=True)
             path.with_name(path.name + ".tmp").unlink(missing_ok=True)
@@ -119,21 +127,72 @@ def clear_cache(data_dir: Path, strategy_id: str | None = None) -> None:
             os.replace(temporary, path)
 
 
-def _read_cache_unlocked(data_dir: Path) -> dict | None:
-    """实际读取逻辑 (不持锁)。供 read_cache 与 write_cache 复用, 避免重入死锁。"""
-    path = _cache_path(data_dir)
-    if not path.exists():
-        return None
-    try:
-        text = path.read_text(encoding="utf-8")
-        if not text.strip():
-            return None
-        cached = json.loads(text)
-    except Exception as e:  # noqa: BLE001
-        logger.warning("读取策略缓存失败: %s", e)
-        return None
+def summarize(cached: dict, results: dict | None = None) -> dict:
+    if results is None:
+        results = cached.get("results") or {}
+    summary, counts = {}, {}
+    for sid, result in results.items():
+        if not isinstance(result, dict):
+            continue
+        summary[sid] = {
+            "total": int(result.get("total") or 0), "as_of": result.get("as_of"),
+            "computed_at": result.get("computed_at"),
+        }
+        if isinstance(result.get("verification"), dict):
+            summary[sid]["verification"] = {k: v for k, v in result["verification"].items() if k != "candidates"}
+        if result.get("as_of") == cached.get("as_of"):
+            current = {str(row["symbol"]) for row in result.get("rows") or []
+                       if isinstance(row, dict) and row.get("symbol")}
+            counts[sid] = len(set((cached.get("today_ever_rows") or {}).get(sid) or {}) | current)
+    return {"as_of": cached.get("as_of"), "results": summary, "today_ever_counts": counts,
+            "updated_at": cached.get("updated_at")}
 
-    return cached
+
+def _snapshot_unlocked(data_dir):
+    path = _cache_path(data_dir)
+    try:
+        sig = _signature(path)
+        with _memo_lock:
+            memo = _memo.get(path)
+            if memo is not None and memo[0] == sig:
+                _memo.move_to_end(path)
+                return memo[1], memo[2]
+        cached = json.loads(path.read_text(encoding="utf-8"))
+        summary = summarize(cached)
+        if _signature(path) == sig:
+            with _memo_lock:
+                _memo[path] = (sig, cached, summary)
+                _memo.move_to_end(path)
+                while len(_memo) > 32 or sum(item[0][2] for item in _memo.values()) > _MEMO_MAX_BYTES:
+                    _memo.popitem(last=False)
+        return cached, summary
+    except FileNotFoundError:
+        with _memo_lock:
+            _memo.pop(path, None)
+        return None, None
+    except (OSError, ValueError, TypeError, AttributeError) as exc:
+        logger.warning("读取策略缓存失败: %s", exc)
+        return None, None
+
+
+def _read_cache_unlocked(data_dir: Path) -> dict | None:
+    # No caller can mutate a shared cached snapshot.
+    return copy.deepcopy(_snapshot_unlocked(data_dir)[0])
+
+
+def read_summary(data_dir: Path, realtime: dict | None = None) -> dict:
+    with path_lock(_cache_path(data_dir)):
+        cached, summary = _snapshot_unlocked(data_dir)
+        cached = cached or {"as_of": None, "results": {}, "updated_at": None}
+        result = copy.deepcopy(summary or summarize(cached))
+        if realtime:
+            overlay = summarize(cached, realtime)
+            result["results"].update(overlay["results"])
+            for sid in realtime:
+                result["today_ever_counts"].pop(sid, None)
+            result["today_ever_counts"].update(overlay["today_ever_counts"])
+            result["updated_at"] = int(time.time() * 1000)
+        return result
 
 
 def _rows_to_symbol_map(rows: list[dict]) -> dict[str, dict]:
@@ -150,18 +209,21 @@ def write_cache(
     data_dir: Path,
     as_of: str,
     results: dict[str, Any],
+    *,
+    same_date_only: bool = False,
 ) -> None:
     """将策略结果写入缓存文件，同时更新今日曾命中集合。
 
     - 日期变更时重置 today_ever_matched 和 today_ever_rows
     - 同一天内合并 (并集) 之前曾命中的 symbol，并用最新行数据更新
+    - 单策略刷新传 same_date_only，仅在锁内确认已有缓存同日时更新
     """
     path = _cache_path(data_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
 
     # 整个 read-modify-write 持锁: 避免并发 write 丢更新, 也避免与 read_cache 撕裂
-    with _file_lock:
-        _write_cache_locked(path, data_dir, as_of, results)
+    with path_lock(path):
+        _write_cache_locked(path, data_dir, as_of, results, same_date_only=same_date_only)
 
 
 def _write_cache_locked(
@@ -169,11 +231,15 @@ def _write_cache_locked(
     data_dir: Path,
     as_of: str,
     results: dict[str, Any],
+    *,
+    same_date_only: bool = False,
 ) -> None:
-    """持 _file_lock 后的实际写入逻辑 (read-merge-write + 原子替换)。"""
+    """持用户文件锁后的实际写入逻辑 (read-merge-write + 原子替换)。"""
     # 读取旧缓存 (已持锁, 走不重入的 _read_cache_unlocked)
     old = _read_cache_unlocked(data_dir)
     old_as_of = old.get("as_of") if old else None
+    if same_date_only and old_as_of != as_of:
+        return
     old_ever_rows: dict[str, dict[str, dict]] = old.get("today_ever_rows", {}) if old else {}
 
     merged_results = {**(old.get("results") or {}), **results} if old_as_of == as_of else results

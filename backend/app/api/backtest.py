@@ -7,7 +7,6 @@ import json
 import logging
 import threading
 import time
-from contextvars import copy_context
 from dataclasses import asdict
 from datetime import date, timedelta
 from typing import Literal
@@ -97,6 +96,16 @@ class BacktestRequest(BaseModel):
     asset_type: str = "stock"
 
 
+def _run_bounded_research(work, *, kind="exclusive"):
+    from app.services.heavy_job_limiter import shared_heavy_job_limiter
+    from app.services.task_scheduler import submit_research
+
+    def execute():
+        with shared_heavy_job_limiter.slot(kind):
+            return work()
+    return submit_research(execute).result()
+
+
 @router.post("/run")
 def run(req: BacktestRequest, request: Request):
     """信号回测 — 现有接口，向后兼容。"""
@@ -119,7 +128,7 @@ def run(req: BacktestRequest, request: Request):
         asset_type=req.asset_type,
     )
     try:
-        result = svc.run(cfg)
+        result = _run_bounded_research(lambda: svc.run(cfg), kind="exclusive")
     except VectorbtUnavailable as e:
         raise HTTPException(status_code=503, detail=str(e)) from e
     return asdict(result)
@@ -187,7 +196,7 @@ def factor_run(req: FactorBacktestRequest, request: Request):
         slippage_bps=req.slippage_bps,
         asset_type=req.asset_type,
     )
-    result = svc.run(cfg)
+    result = _run_bounded_research(lambda: svc.run(cfg))
     return asdict(result)
 
 
@@ -230,7 +239,7 @@ def factor_batch(req: FactorBatchRequest, request: Request):
         )
 
     svc = FactorBacktestService(_get_engine(request))
-    result = svc.run_batch(FactorBatchConfig(
+    cfg = FactorBatchConfig(
         factor_names=factor_names,
         symbols=symbols,
         start=start,
@@ -241,7 +250,8 @@ def factor_batch(req: FactorBatchRequest, request: Request):
         fees_pct=req.fees_pct,
         slippage_bps=req.slippage_bps,
         asset_type=req.asset_type,
-    ))
+    )
+    result = _run_bounded_research(lambda: svc.run_batch(cfg))
     return asdict(result)
 
 
@@ -418,16 +428,18 @@ def strategy_run(req: StrategyBacktestRequest, request: Request):
     )
     task = make_worker_task("backtest", settings.data_dir, cfg)
     from app.services.heavy_job_limiter import shared_heavy_job_limiter
-
-    with shared_heavy_job_limiter.slot("normal"):
-        return run_worker_task(task)
+    from app.services.task_scheduler import submit_research
+    def execute():
+        with shared_heavy_job_limiter.slot("normal"):
+            return run_worker_task(task)
+    return submit_research(execute).result()
 
 
 # ── SSE 流式回测 (实时进度 + 可取消 + 支持重连) ───────────────────
 
 class _BacktestJob:
     """单个回测任务的状态, 存模块级供重连使用。"""
-    __slots__ = ("cancel_event", "done", "error", "finish_ts", "key", "owner_id", "progress", "result")
+    __slots__ = ("cancel_event", "done", "error", "finish_ts", "future", "key", "owner_id", "progress", "result")
 
     def __init__(self, key: str):
         self.owner_id = current_user().id
@@ -438,11 +450,12 @@ class _BacktestJob:
         self.error: str | None = None
         self.done = False
         self.finish_ts: float = 0.0
+        self.future = None
 
 
 # 模块级任务表: key -> _BacktestJob
 _running_jobs: dict[str, _BacktestJob] = {}
-_jobs_lock = threading.Lock()
+_jobs_lock = threading.RLock()
 _JOB_TTL = 300  # 完成后保留 5 分钟
 
 
@@ -455,14 +468,20 @@ def _cleanup_stale_jobs():
             _running_jobs.pop(k, None)
 
 
-def _finish_job(job: _BacktestJob, *, result=None, error: str | None = None) -> None:
-    """Publish the terminal state and proactively drop the reconnect entry after TTL."""
+def _finish_job(job: _BacktestJob, *, result=None, error: str | None = None, retain: bool = True) -> None:
+    """Publish terminal state; temporary admission failures skip reconnect retention."""
     finished_at = time.time()
     with _jobs_lock:
         job.result = result
         job.error = error
         job.done = True
         job.finish_ts = finished_at
+        if not retain:
+            # Existing subscribers still hold this terminal job. New requests
+            # must retry admission instead of replaying temporary queue pressure.
+            if _running_jobs.get(job.key) is job:
+                _running_jobs.pop(job.key)
+            return
 
     def _expire() -> None:
         with _jobs_lock:
@@ -473,6 +492,20 @@ def _finish_job(job: _BacktestJob, *, result=None, error: str | None = None) -> 
     timer = threading.Timer(_JOB_TTL, _expire)
     timer.daemon = True
     timer.start()
+
+
+def _submit_research_job(job, work):
+    from app.services.task_scheduler import JobQueueFullError, submit_research
+    job.progress.append({"day": 0, "total": 1, "date": "任务排队中…"})
+    try:
+        job.future = submit_research(work)
+    except JobQueueFullError as exc:
+        _finish_job(job, error=str(exc), retain=False)
+        return
+    def finished(future):
+        if future.cancelled():
+            _finish_job(job, error="任务已取消")
+    job.future.add_done_callback(finished)
 
 
 def _make_job_key(
@@ -642,7 +675,7 @@ async def strategy_stream(
                     _finish_job(job, error=str(e))
 
             # 启动后台线程 (不阻塞事件循环)
-            threading.Thread(target=copy_context().run, args=(_run_backtest,), daemon=True).start()
+            _submit_research_job(job, _run_backtest)
 
         # 订阅进度: 用读指针读 job.progress 列表 (多连接互不干扰)
         cursor = 0
@@ -731,6 +764,8 @@ async def strategy_cancel(request: Request):
         job = _running_jobs.get(job_key)
     if job and job.owner_id == current_user().id and not job.done:
         job.cancel_event.set()
+        if job.future is not None:
+            job.future.cancel()
         return {"ok": True}
     return {"ok": False, "message": "任务不存在或已完成"}
 
@@ -952,7 +987,7 @@ async def optimize_stream(
                         logger.exception("backtest worker failed")
                         _finish_job(job, error=str(e))
 
-                threading.Thread(target=copy_context().run, args=(_run_opt,), daemon=True).start()
+                _submit_research_job(job, _run_opt)
 
         cursor = 0
         tick = 0
@@ -998,6 +1033,8 @@ async def optimize_cancel(request: Request):
     job = _running_jobs.get(job_key)
     if job and job.owner_id == current_user().id and not job.done:
         job.cancel_event.set()
+        if job.future is not None:
+            job.future.cancel()
         return {"ok": True}
     return {"ok": False, "message": "任务不存在或已完成"}
 
@@ -1185,7 +1222,7 @@ async def walkforward_stream(
                         logger.exception("backtest worker failed")
                         _finish_job(job, error=str(e))
 
-                threading.Thread(target=copy_context().run, args=(_run_wf,), daemon=True).start()
+                _submit_research_job(job, _run_wf)
 
         cursor = 0
         tick = 0
@@ -1225,5 +1262,7 @@ async def walkforward_cancel(request: Request):
     job = _running_jobs.get(job_key)
     if job and job.owner_id == current_user().id and not job.done:
         job.cancel_event.set()
+        if job.future is not None:
+            job.future.cancel()
         return {"ok": True}
     return {"ok": False, "message": "任务不存在或已完成"}

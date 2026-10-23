@@ -18,7 +18,13 @@ from datetime import date as date_cls
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel
 
-from app.services import auction_benchmark, dragon_tiger, market_recap_reports, preferences
+from app.services import (
+    auction_benchmark,
+    dragon_tiger,
+    market_recap_reports,
+    preferences,
+    recap_prompt,
+)
 from app.services.market_recap import recap_market_stream
 
 logger = logging.getLogger(__name__)
@@ -30,6 +36,26 @@ class AnalyzeRequest(BaseModel):
     """AI 大盘复盘请求。"""
     as_of: str | None = None  # 可选:复盘日期(YYYY-MM-DD),缺省取最新有数据日
     focus: str = ""           # 可选:用户追加的复盘关注点
+
+
+class RecapPromptRequest(BaseModel):
+    prompt: str
+
+
+@router.get("/prompt")
+def get_recap_prompt():
+    recap_prompt.require_access()
+    return recap_prompt.configuration()
+
+
+@router.put("/prompt")
+def update_recap_prompt(req: RecapPromptRequest):
+    recap_prompt.require_access()
+    try:
+        recap_prompt.save(req.prompt)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return recap_prompt.configuration()
 
 
 @router.get("/publication")

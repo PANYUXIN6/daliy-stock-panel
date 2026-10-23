@@ -26,6 +26,7 @@ from app.enriched_generation import (
     EnrichedPublication,
     enriched_publication_incomplete,
 )
+from app.indicators.volume_ratio import volume_time_factor
 from app.market_time import cn_today
 from app.parquet import scan_daily_parquet, scan_enriched_parquet, scan_parquet_compat
 from app.price_limits import (
@@ -462,9 +463,9 @@ def compute_indicators(
         )
     if "vol_ratio_5d" in want:
         # 标准量比(同花顺/东财): 今日成交量 / 前5日均量(不含当天)
-        # 盘后全量路径: 当日 volume 是完整全天量, 无需时间折算
+        # 正式日线按全天量；盘中快照按其 quote_ts 折算，与实时递推一致。
         df = df.with_columns(
-            (pl.col("volume") / pl.col("_vol_ma5_prev")).alias("vol_ratio_5d"),
+            (pl.col("volume") * volume_time_factor(df) / pl.col("_vol_ma5_prev")).alias("vol_ratio_5d"),
         )
     _p4mom: list[pl.Expr] = []
     if "momentum_5d" in want:
@@ -1520,6 +1521,23 @@ def run_pipeline(data_dir: Path | None = None,
                  symbols: list[str] | None = None,
                  new_dates_only: bool = False,
                  on_batch_done: Callable[[int, int], None] | None = None) -> int:
+    """End publication ownership on failure while keeping partial writes unreadable."""
+    publication = EnrichedPublication(
+        Path(data_dir or settings.data_dir), "stock", recover=True, full_rebuild=True,
+    )
+    try:
+        return _run_pipeline_impl(
+            data_dir, symbols, new_dates_only, on_batch_done, publication=publication,
+        )
+    finally:
+        publication.abandon()
+
+
+def _run_pipeline_impl(data_dir: Path | None = None,
+                       symbols: list[str] | None = None,
+                       new_dates_only: bool = False,
+                       on_batch_done: Callable[[int, int], None] | None = None,
+                       *, publication: EnrichedPublication) -> int:
     """运行盘后管道:读 kline_daily + adj_factor → 前复权 + 计算存储列 → 写 enriched。
 
     enriched 表仅存储 14 列基础行情窄表 (OHLCV + raw_close/high/low + turnover_rate + 连板数)。
@@ -1546,7 +1564,6 @@ def run_pipeline(data_dir: Path | None = None,
         logger.warning("检测到未完成的 enriched 发布,改为全量重建")
         symbols = None
         new_dates_only = False
-    publication = EnrichedPublication(d, "stock", recover=True)
     daily_dir = d / "kline_daily"
     enriched_base = d / "kline_daily_enriched"
     factor_path = d / "adj_factor" / "all.parquet"
@@ -1555,6 +1572,10 @@ def run_pipeline(data_dir: Path | None = None,
     if not daily_dir.exists() or not any(daily_dir.rglob("*.parquet")):
         logger.info("无日K数据, 跳过管道")
         return 0
+
+    # 恢复权限与实际范围一致；准备期间也持有发布租约，防止其他写者插入。
+    publication.full_rebuild = not symbols and not new_dates_only
+    publication.begin()
 
     daily_glob = (daily_dir / "**" / "*.parquet").as_posix()
     _cast = pl.ScanCastOptions(integer_cast="allow-float")
@@ -1636,6 +1657,7 @@ def run_pipeline(data_dir: Path | None = None,
                     out = enriched_base / f"date={ds}" / "part.parquet"
                     out.parent.mkdir(parents=True, exist_ok=True)
                     date_df = _select_storage_cols(date_df).sort(["symbol"])
+                    publication.mark_changed()
                     publication.write_parquet(date_df, out)
                     written += date_df.height
                 t_write_new = _t.perf_counter()
@@ -1669,6 +1691,7 @@ def run_pipeline(data_dir: Path | None = None,
                         existing = existing.filter(~pl.col("symbol").is_in(list(sym_set)))
                         date_df_storage = pl.concat([existing, date_df_storage], how="diagonal_relaxed")
                     date_df_storage = date_df_storage.sort(["symbol"])
+                    publication.mark_changed()
                     publication.write_parquet(date_df_storage, out)
                     written += date_df.height
                 logger.info("除权重算: %d 只, 共写入 %d 行", len(sym_set), written)
@@ -1783,6 +1806,7 @@ def run_pipeline(data_dir: Path | None = None,
                             existing = existing.filter(~pl.col("symbol").is_in(batch_syms))
                             date_df_storage = pl.concat([existing, date_df_storage], how="diagonal_relaxed")
                         date_df_storage = date_df_storage.sort(["symbol"])
+                        publication.mark_changed()
                         publication.write_parquet(date_df_storage, out)
                         written += date_df_storage.height
                 else:
@@ -1807,6 +1831,10 @@ def run_pipeline(data_dir: Path | None = None,
 
         # 全量模式: 日期覆盖校验 → 按日期分块流式合并 → 逐分区原子替换
         if not symbols and staging_files:
+            daily_dates = {
+                p.name.removeprefix("date=")
+                for p in daily_dir.glob("date=*") if p.is_dir()
+            }
             existing_dates = {
                 p.name.removeprefix("date=")
                 for p in base.glob("date=*")
@@ -1820,7 +1848,13 @@ def run_pipeline(data_dir: Path | None = None,
                 ds.isoformat() if hasattr(ds, "isoformat") else str(ds)
                 for ds in unique_dates
             }
-            missing_dates = existing_dates - rebuilt_dates
+            orphan_dates = existing_dates - daily_dates
+            if orphan_dates:
+                logger.warning(
+                    "enriched 存在 %d 个日K已不存在的历史分区(保留不动): %s",
+                    len(orphan_dates), ", ".join(sorted(orphan_dates)[:5]),
+                )
+            missing_dates = (existing_dates & daily_dates) - rebuilt_dates
             if missing_dates:
                 sample = ", ".join(sorted(missing_dates)[:5])
                 raise RuntimeError(f"全量重建结果缺少已有日期分区,拒绝覆盖: {sample}")
@@ -1842,6 +1876,7 @@ def run_pipeline(data_dir: Path | None = None,
                     ds_str = ds.isoformat() if hasattr(ds, "isoformat") else str(ds)
                     out = base / f"date={ds_str}" / "part.parquet"
                     out.parent.mkdir(parents=True, exist_ok=True)
+                    publication.mark_changed()
                     publication.write_parquet(date_df.sort(["symbol"]), out)
             gc.collect()
             logger.info("全量暂存合并完成: %d 个日期分区", len(unique_dates))
@@ -1936,8 +1971,8 @@ def compute_enriched_today(
         prev_enriched:  repo.get_enriched_latest() — 昨天的完整 enriched (用于信号交叉判断)
         today_ohlcv:    今天的 OHLCV (symbol, date, open, high, low, close, volume, amount)
         instruments:    维表 (涨跌停/换手率需要)
-        elapsed_minutes: 当日已交易分钟数(用于标准量比的时间折算)。
-            None 或 0 表示不折算(盘后或时间不可用, 此时 volume 已是全天量)。
+        elapsed_minutes: quote_ts 缺失时的已交易分钟数；优先按各行行情时刻折算。
+            无有效时间依据时不折算。
 
     返回:
         今天的 enriched DataFrame (~5500 行, 64 列)
@@ -2093,7 +2128,7 @@ def compute_enriched_today(
     # 盘中 volume 是部分量, 按 elapsed_minutes 折算到全天量级
     vol_ma5_prev = pl.col("_vol_ma5_prev_sum") / 5  # 前5日均量(不含当天)
     # 盘中把部分量折算到全天量级; 盘后/无效时间不折算。
-    time_factor = 240.0 / elapsed_minutes if elapsed_minutes and elapsed_minutes > 0 else 1.0
+    time_factor = volume_time_factor(df, elapsed_minutes=elapsed_minutes)
     df = df.with_columns([
         vol_ma5.alias("vol_ma5"),
         vol_ma10.alias("vol_ma10"),

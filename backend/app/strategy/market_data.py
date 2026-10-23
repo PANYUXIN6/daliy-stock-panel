@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import logging
 import threading
+from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import date
 from typing import Any
 
@@ -27,6 +29,17 @@ _FULL_START = date(1990, 1, 1)
 # ── repo 懒加载(线程安全) ─────────────────────────────
 _repo = None
 _lock = threading.Lock()
+_earnings_prices: ContextVar = ContextVar("earnings_prices", default=None)
+
+
+@contextmanager
+def earnings_prices_scope(snapshot):
+    """Bind prepared inputs only while this strategy invocation is executing."""
+    token = _earnings_prices.set(snapshot)
+    try:
+        yield
+    finally:
+        _earnings_prices.reset(token)
 
 
 def _get_repo():
@@ -142,11 +155,11 @@ def get_earnings_breakout_signals(frame: pl.DataFrame) -> pl.DataFrame:
     """
     from app.services.earnings_breakout import filter_pullback_signals
 
-    return filter_pullback_signals(_get_repo(), frame)
+    return filter_pullback_signals(_get_repo(), frame, price_snapshot=_earnings_prices.get())
 
 
 def get_earnings_gap_signals(frame: pl.DataFrame) -> pl.DataFrame:
     """只读本地财报版本与日K，返回输入日期内首次形成业绩断层的行。"""
     from app.services.earnings_breakout import filter_gap_signals
 
-    return filter_gap_signals(_get_repo(), frame)
+    return filter_gap_signals(_get_repo(), frame, price_snapshot=_earnings_prices.get())

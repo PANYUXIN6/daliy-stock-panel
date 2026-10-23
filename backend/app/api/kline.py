@@ -646,9 +646,10 @@ class DailyBatchRequest:
 
 @router.post("/daily-batch")
 def get_daily_batch(request: Request, body: dict):
-    """批量获取多只股票最近 N 天日K (OHLCV)。
+    """批量获取多只股票最近 N 根本地日K (OHLCV)。
 
     用于自选列表迷你蜡烛图等场景，只返回基础列，不返回全部 enriched 指标。
+    停牌或断档造成根数不足时有限回看更早日期，不触发网络补采。
     """
     symbols = body.get("symbols", [])
     days = body.get("days", 12)
@@ -669,44 +670,40 @@ def get_daily_batch(request: Request, body: dict):
 
     cols = ["symbol", "date", "open", "high", "low", "close", "volume"]
 
-    # 按资产类型分组: stock 走批量缓存; etf/index 逐只查独立存储 (数量少, 成本可忽略)
-    stock_symbols: list[str] = []
-    etf_symbols: list[str] = []
-    index_symbols: list[str] = []
-    for s in symbols:
-        t = repo.resolve_asset_type(s)
-        if t == "etf":
-            etf_symbols.append(s)
-        elif t == "index":
-            index_symbols.append(s)
-        else:
-            stock_symbols.append(s)
+    # 解析一次并按原顺序去重; 回补仍沿股票批量、ETF/指数独立存储的读取路径。
+    asset_types = {symbol: repo.resolve_asset_type(symbol) for symbol in symbols}
 
-    frames: list[pl.DataFrame] = []
-    if stock_symbols:
-        df_stock = repo.get_daily_batch(stock_symbols, start, end, columns=cols)
-        if not df_stock.is_empty():
-            frames.append(df_stock)
-    for sym in etf_symbols:
-        sub = repo.get_etf_daily(sym, start, end, columns=cols)
-        if not sub.is_empty():
-            frames.append(sub)
-    for sym in index_symbols:
-        sub = repo.get_index_daily(sym, start, end, columns=cols)
-        if not sub.is_empty():
-            frames.append(sub)
+    def read_range(members: list[str], range_start: date) -> pl.DataFrame:
+        frames: list[pl.DataFrame] = []
+        stocks = [symbol for symbol in members if asset_types[symbol] not in ("etf", "index")]
+        if stocks:
+            frame = repo.get_daily_batch(stocks, range_start, end, columns=cols)
+            if not frame.is_empty():
+                frames.append(frame)
+        for symbol in members:
+            asset = asset_types[symbol]
+            if asset not in ("etf", "index"):
+                continue
+            read = repo.get_etf_daily if asset == "etf" else repo.get_index_daily
+            frame = read(symbol, range_start, end, columns=cols)
+            if not frame.is_empty():
+                frames.append(frame)
+        return pl.concat(frames, how="diagonal_relaxed") if frames else pl.DataFrame()
 
-    if not frames:
-        return {"data": {}}
-    df = pl.concat(frames, how="diagonal_relaxed")
-
-    # 按 symbol 分组, 每只取最近 N 条。
-    # partition_by 一次切分, 避免 N 只自选时对同一批数据做 N 次全帧过滤。
     result: dict[str, list[dict]] = {}
-    for part in df.partition_by("symbol", maintain_order=True):
-        sub = part.sort("date").tail(days)
-        if not sub.is_empty():
-            result[sub["symbol"][0]] = sub.to_dicts()
+    remaining = list(asset_types)
+    # 常规窗口通常足够。只为不足根数/整窗无数据的标的扩大窗口，最多追加两轮。
+    # +120 天优先利用近期缓存，+480 天覆盖更长停牌；范围外历史保持缺失。
+    for extra_days in (0, 120, 480):
+        if not remaining:
+            break
+        frame = read_range(remaining, start - timedelta(days=extra_days))
+        if not frame.is_empty():
+            # 一次切分避免每只股票重复过滤全帧。
+            for part in frame.partition_by("symbol", maintain_order=True):
+                sub = part.sort("date").tail(days)
+                result[sub["symbol"][0]] = sub.to_dicts()
+        remaining = [symbol for symbol in remaining if len(result.get(symbol, [])) < days]
 
     # 日K批量同为大响应端点 (千只自选 MB 级), 与分时各自独立压缩开关
     return _gzip_payload(request, {"data": result}, pref_key="daily_batch_compress")

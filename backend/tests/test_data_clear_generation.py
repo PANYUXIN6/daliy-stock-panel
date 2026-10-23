@@ -90,14 +90,14 @@ def test_clear_data_bumps_enriched_generations_and_invalidates_panel_cache(
     assert repo.calls == ["clear_cache", "refresh_cache", "rebuild_views"]
 
 
-def test_clear_data_restores_ready_generation_when_first_delete_fails(
+def test_clear_data_keeps_generation_closed_when_first_delete_fails(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     repo = _RepoStub(tmp_path)
     target = tmp_path / "kline_daily_enriched" / "date=2026-08-14" / "part.parquet"
     _write_parquet_placeholder(target)
-    generation_before = get_enriched_generation(tmp_path, "stock")
+    get_enriched_generation(tmp_path, "stock")
     original_unlink = Path.unlink
 
     def fail_target(path: Path, *args, **kwargs) -> None:
@@ -111,11 +111,13 @@ def test_clear_data_restores_ready_generation_when_first_delete_fails(
         data_api.clear_data(_request(repo))
 
     assert target.is_file()
-    assert get_enriched_generation(tmp_path, "stock") == generation_before
+    # 删除前必须先持久化 dirty；异常后保守关闭，由完整清理/重建恢复。
+    with pytest.raises(EnrichedGenerationUnavailableError):
+        get_enriched_generation(tmp_path, "stock")
     marker = json.loads(
         (tmp_path / ".matrix_generation_stock.json").read_text(encoding="utf-8")
     )
-    assert marker["state"] == "ready"
+    assert marker["state"] == "publishing"
 
 
 def test_clear_data_keeps_generation_publishing_after_partial_delete(

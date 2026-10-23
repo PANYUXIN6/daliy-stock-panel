@@ -295,12 +295,16 @@ def _is_signal_field(field: str) -> bool:
     return any(field.startswith(p) for p in _SIGNAL_PREFIXES)
 
 
+_COND_FLAG_PREFIX = "__cond_hit_"
+# 逐条件归因改编自 hzy1522/tickflow-stock-panel@1f62a19，MIT，版权见根目录 LICENSE。
+
+
 def _build_condition_mask(df: pl.DataFrame, conditions: list[dict], logic: str) -> pl.DataFrame:
     """根据 conditions + logic 构建过滤后的命中 DataFrame。
 
     conditions: [{"field","op","value"?}] — op=truth 为布尔信号, 否则阈值比较
     logic: "and" | "or"
-    返回命中行 (含 symbol/name/close/change_pct + 各信号列)
+    返回命中行，并保留逐条件命中标记，供 OR 规则精确归因。
     """
     cols = set(df.columns)
     parts: list[pl.Expr] = []
@@ -318,7 +322,8 @@ def _build_condition_mask(df: pl.DataFrame, conditions: list[dict], logic: str) 
     if not parts:
         return df.head(0)
     mask = pl.any_horizontal(parts) if logic == "or" else pl.all_horizontal(parts)
-    return df.filter(mask)
+    flags = [part.fill_null(False).alias(f"{_COND_FLAG_PREFIX}{i}") for i, part in enumerate(parts)]
+    return df.with_columns(flags).filter(mask)
 
 
 class MonitorRuleEngine:
@@ -1106,13 +1111,13 @@ class MonitorRuleEngine:
             return []
 
         # 2. 根据 type 构建命中集
-        #    元组格式: (event_type, symbol, name, price, pct, signals)
-        hit_rows: list[tuple[str, str, Any, Any, Any, list[str]]] = []
+        #    元组格式: (event_type, symbol, name, price, pct, signals, matched_conditions)
+        hit_rows: list[tuple[str, str, Any, Any, Any, list[str], list[dict]]] = []
 
         rtype = rule.get("type", "signal")
         if rtype == "strategy":
             # 策略类型: 跑策略选股, 同时产出所选的信号和结果池变更事件
-            hit_rows = self._match_strategy(scoped, rule)
+            hit_rows = [(*row, []) for row in self._match_strategy(scoped, rule)]
         elif rtype == "ladder":
             # 连板梯队封单监控: 独立处理 (需带预警封单值, 走专属 message)
             return self._evaluate_ladder(scoped, rule, now)
@@ -1121,8 +1126,8 @@ class MonitorRuleEngine:
             return self._evaluate_volume_delta(scoped, rule, now)
         else:
             # signal / price / market: 通用条件匹配
-            for sym, name, price, pct, hit_sigs in self._match_conditions(scoped, rule):
-                hit_rows.append((rtype, sym, name, price, pct, hit_sigs))
+            for sym, name, price, pct, hit_sigs, matched in self._match_conditions(scoped, rule):
+                hit_rows.append((rtype, sym, name, price, pct, hit_sigs, matched))
 
         if not hit_rows:
             return []
@@ -1133,7 +1138,7 @@ class MonitorRuleEngine:
         source = rtype
 
         events: list[dict] = []
-        for ev_type, sym, name, price, pct, hit_sigs in hit_rows:
+        for ev_type, sym, name, price, pct, hit_sigs, matched in hit_rows:
             # cooldown 键包含事件类型, 同股不同策略事件互不压制。
             is_batch = sym == "_batch"
             key_symbol = f"_{ev_type}_batch" if is_batch else sym
@@ -1152,7 +1157,7 @@ class MonitorRuleEngine:
                 message = rule.get("message", "") or self._default_message(
                     rule, ev_type=ev_type, sym=sym, name=resolved_name,
                     pct=pct, price=price,
-                    conditions=list(rule.get("conditions", [])) if rule.get("type") != "strategy" else None,
+                    conditions=matched if rtype != "strategy" else None,
                     signals=hit_sigs,
                 )
 
@@ -1173,6 +1178,7 @@ class MonitorRuleEngine:
                 # 触发条件快照 (signal/price/market 类型): 用于触发记录展示
                 # 「命中了什么条件」。strategy 类型靠策略选股池 diff, 不写条件。
                 "conditions": list(rule.get("conditions", [])) if rtype != "strategy" else [],
+                "matched_conditions": matched if rtype != "strategy" else [],
                 "logic": rule.get("logic", "and") if rtype != "strategy" else "and",
             }
             events.append(ev)
@@ -1481,8 +1487,8 @@ class MonitorRuleEngine:
     @staticmethod
     def _match_conditions(
         df: pl.DataFrame, rule: dict,
-    ) -> list[tuple[str, Any, Any, Any, list[str]]]:
-        """按 conditions + logic 匹配,返回命中行 [(symbol,name,price,pct,signals)]。"""
+    ) -> list[tuple[str, Any, Any, Any, list[str], list[dict]]]:
+        """返回命中行及其实际满足的布尔、数值比较条件。"""
         conditions = rule.get("conditions", [])
         logic = rule.get("logic", "and")
         if not conditions:
@@ -1494,12 +1500,9 @@ class MonitorRuleEngine:
             name = row.get("name")
             price = row.get("close")
             pct = row.get("change_pct")
-            # 收集命中的信号列名 (仅 op=truth 且为真的)
-            hit_sigs = [
-                c["field"] for c in conditions
-                if c.get("op") == "truth" and row.get(c["field"])
-            ]
-            results.append((sym, name, price, pct, hit_sigs))
+            matched = [c for i, c in enumerate(conditions) if row.get(f"{_COND_FLAG_PREFIX}{i}") is True]
+            hit_sigs = [c["field"] for c in matched if c.get("op") == "truth"]
+            results.append((sym, name, price, pct, hit_sigs, matched))
         return results
 
     @staticmethod
@@ -1755,26 +1758,23 @@ class MonitorRuleEngine:
                 return f"策略「{sname}」{action} {name}{pct_text}"
             return f"策略「{sname}」事件"
 
-        # signal / price / market: 命中信号 + 现价 + 涨跌幅
-        # 有实际命中信号 (op=truth 且为真的子集) 时以命中信号开头 — 全量规则
-        # 条件仍保留在 event.conditions 供前端展示, message 不再复读 (OR 规则
-        # 条件多时全文复读会淹没真正触发的条件)。
+        # conditions 显式传入时是本次命中子集，其中各条同时成立；
+        # 完整规则仍保存在 event.conditions，供前端回溯。
         tail = format_alert_quote(price, pct)
+        message_rule = {**rule, "logic": "and"} if conditions is not None else rule
         if signals:
             hit_text = "命中 " + "、".join(self._signal_label(s) for s in signals)
-            # AND 规则: 比较条件同样全部满足, 补进 message 保持信息完整。
-            # OR 规则无法判定哪些比较条件为真 (hit_sigs 只收集 truth 信号), 不补。
-            if rule.get("logic", "and") == "and":
+            if conditions is not None or rule.get("logic", "and") == "and":
                 comp = [c for c in (conditions if conditions is not None else rule.get("conditions", []))
                         if c.get("op") != "truth"]
                 if comp:
-                    comp_text = self._format_conditions_text(rule, comp, resolver=self._signal_label)
+                    comp_text = self._format_conditions_text(message_rule, comp, resolver=self._signal_label)
                     if comp_text:
                         hit_text = f"{hit_text} 且 {comp_text}"
             return f"{hit_text} · {tail}" if tail else hit_text
         # 无 truth 命中 (纯比较条件规则): 回退条件摘要
         # 条件摘要: 把 conditions (truth/比较) 拼成可读串, 如 "MA20金叉 且 量比>2"
-        cond_text = self._format_conditions_text(rule, conditions, resolver=self._signal_label)
+        cond_text = self._format_conditions_text(message_rule, conditions, resolver=self._signal_label)
         if cond_text and tail:
             return f"{cond_text} · {tail}"
         return cond_text or tail or "监控触发"

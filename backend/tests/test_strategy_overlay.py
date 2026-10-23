@@ -4,6 +4,7 @@ import numpy as np
 import polars as pl
 import pytest
 
+from app.services.snapshot_cache import SnapshotCache
 from app.strategy import overlay
 from app.strategy.engine import StrategyDataContext, StrategyDef, StrategyEngine
 
@@ -239,7 +240,7 @@ def test_long_overlay_factor_history_is_not_capped_at_180_calendar_days(tmp_path
 
     from app.services.screener import ScreenerService
 
-    monkeypatch.setattr('app.services.screener._history_cache', {})
+    monkeypatch.setattr('app.services.screener._history_cache', SnapshotCache(120, 10))
     days = [date(2025, 1, 1) + timedelta(days=i) for i in range(500)]
     days = [day for day in days if day.weekday() < 5]
     frame = pl.DataFrame({'symbol': ['A'] * len(days), 'date': days,

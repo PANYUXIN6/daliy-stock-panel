@@ -22,6 +22,7 @@ PERSONAL_KEYS = frozenset({
     "screener_result_columns", "dashboard_layout", "sse_refresh_pages",
     "strategy_monitor_enabled", "strategy_monitor_ids", "screener_auto_run",
     "webhook_enabled_default", "webhook_default_channels", "monitor_ext_fields",
+    "market_recap_system_prompt",
 })
 _cache: dict[str, tuple[tuple[int, int], dict]] = {}
 _SAVE_LOCK = threading.RLock()

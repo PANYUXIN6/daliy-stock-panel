@@ -27,11 +27,16 @@ def _pullback_common() -> pl.Expr:
             & (pl.col("close") > pl.col("open")))
 
 
-def pullback_price_candidates(bars: pl.DataFrame, targets: pl.DataFrame) -> pl.DataFrame:
+def pullback_price_candidates(
+    bars: pl.DataFrame, targets: pl.DataFrame, *, prepared: dict[str, pl.DataFrame] | None = None,
+) -> pl.DataFrame:
     """仅依据回踩共同价格条件筛候选；不需要财报，不修改最终信号口径。"""
     frames = []
     for group in filter_halt_days(bars).partition_by("symbol", maintain_order=True):
-        eligible = _pullback_prices(group).filter(_pullback_common()).select("symbol", "date")
+        prices = _pullback_prices(group)
+        if prepared is not None:
+            prepared[str(group["symbol"][0])] = prices
+        eligible = prices.filter(_pullback_common()).select("symbol", "date")
         frames.append(eligible.join(targets.select("symbol", "date").unique(), on=["symbol", "date"], how="semi"))
     return pl.concat(frames) if frames else targets.select("symbol", "date").head(0)
 
@@ -41,7 +46,11 @@ def compute_earnings_breakout(bars: pl.DataFrame, event_dates: set[date]) -> pl.
     bars = filter_halt_days(bars)
     if bars.is_empty():
         return bars
-    df = _pullback_prices(bars)
+    return compute_prepared_earnings_breakout(_pullback_prices(bars), event_dates)
+
+
+def compute_prepared_earnings_breakout(df: pl.DataFrame, event_dates: set[date]) -> pl.DataFrame:
+    """Consume one stock's prepared PSY/EMA/MA frame without recalculating it."""
     df = df.with_row_index("_eg_i").with_columns(
         (pl.col("date").is_in(sorted(event_dates)) & upward_gap_expr()).alias("earnings_gap"),
     )

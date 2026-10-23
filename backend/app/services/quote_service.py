@@ -207,6 +207,28 @@ def _monitor_name_map(repo) -> dict[str, str]:
     return {s: n for s, n in repo.get_name_map().items() if n}
 
 
+def rule_event_to_alert(ev: dict) -> dict:
+    """规则事件到 SSE 的显式字段契约，保留实际命中条件及各类告警上下文。"""
+    alert = {
+        "source": ev["source"], "type": ev["type"], "rule_id": ev.get("rule_id"),
+        "strategy_id": ev.get("strategy_id") if ev["source"] == "strategy" else None,
+        "symbol": ev["symbol"], "name": ev["name"], "message": ev["message"],
+        "price": ev["price"], "change_pct": ev["change_pct"], "signals": ev["signals"],
+        "severity": ev.get("severity", "info"), "conditions": ev.get("conditions") or [],
+        "matched_conditions": ev.get("matched_conditions") or [],
+        "logic": ev.get("logic") or "and",
+    }
+    for key in (
+        "sector_kind", "sector_key", "sector_name", "sector_source_field", "sector_value", "sector_level",
+        "window_change_pct", "coverage_ratio", "valid_count", "total_count", "up_count", "down_count", "leader",
+        "abnormal_window", "abnormal_value", "abnormal_threshold", "abnormal_closeness",
+        "volume_delta", "volume_delta_span", "volume_delta_amount",
+    ):
+        if key in ev:
+            alert[key] = ev[key]
+    return alert
+
+
 class QuoteService:
     """全局实时行情服务 — 单例。"""
 
@@ -1030,7 +1052,7 @@ class QuoteService:
         if registry is None:
             return set()
         out: set[str] = set()
-        rules = [r for runtime in registry.active() for r in runtime.monitor_engine.rules.values()]
+        rules = [r for runtime in registry.background_active() for r in runtime.monitor_engine.rules.values()]
         for _r in rules:
             if _r.get("enabled", True) and _r.get("asset_type") == "index" and _r.get("scope") == "symbols":
                 out.update(s for s in _r.get("symbols", []) if s)
@@ -1254,11 +1276,12 @@ class QuoteService:
         registry = getattr(self._app_state, "user_runtimes", None)
         if registry is None:
             return
-        for runtime in registry.active():
+        round_data = {}
+        for runtime in registry.background_active():
             with user_scope(runtime.user):
-                self._evaluate_user_monitors(daily_df, quote_extra, runtime)
+                self._evaluate_user_monitors(daily_df, quote_extra, runtime, round_data=round_data)
 
-    def _evaluate_user_monitors(self, daily_df: pl.DataFrame, quote_extra: pl.DataFrame | None, runtime) -> None:
+    def _evaluate_user_monitors(self, daily_df: pl.DataFrame, quote_extra: pl.DataFrame | None, runtime, *, round_data=None) -> None:
         """行情更新后评估统一监控规则引擎,并刷新策略结果缓存。"""
         try:
             # 仅在「交易日 + 连续竞价时段」评估监控 —— 避开集合竞价指示价、盘前/收盘后
@@ -1267,7 +1290,11 @@ class QuoteService:
             if not self._is_continuous_trading():
                 return
             # 获取 enriched 数据 (刚算好的)
-            enriched_today, enriched_date = self.get_enriched_today()
+            if round_data is None:
+                round_data = {}
+            if 'enriched' not in round_data:
+                round_data['enriched'] = self.get_enriched_today()
+            enriched_today, enriched_date = round_data['enriched']
             # 股票快照就绪 = 非空 + 日期为当日。未就绪时仅跳过股票轮,
             # ETF/指数轮有各自的空表+日期守卫, 不受影响 (纯指数行情/自选场景可独立评估)。
             stock_ready = (not enriched_today.is_empty()) and (enriched_date == cn_today())
@@ -1372,33 +1399,7 @@ class QuoteService:
                             logger.warning("告警落盘失败: %s", e)
                         # 转为 SSE 推送格式 (兼容旧 alert schema)
                         for ev in rule_events:
-                            alert = {
-                                "source": ev["source"],
-                                "type": ev["type"],
-                                "rule_id": ev.get("rule_id"),
-                                "strategy_id": ev.get("strategy_id") if ev["source"] == "strategy" else None,
-                                "symbol": ev["symbol"],
-                                "name": ev["name"],
-                                "message": ev["message"],
-                                "price": ev["price"],
-                                "change_pct": ev["change_pct"],
-                                "signals": ev["signals"],
-                                "severity": ev.get("severity", "info"),
-                                "conditions": ev.get("conditions") or [],
-                                "logic": ev.get("logic") or "and",
-                            }
-                            for key in (
-                                "sector_kind", "sector_key", "sector_name",
-                                "sector_source_field", "sector_value", "sector_level",
-                                "window_change_pct", "coverage_ratio", "valid_count",
-                                "total_count", "up_count", "down_count", "leader",
-                                "abnormal_window", "abnormal_value", "abnormal_threshold",
-                                "abnormal_closeness", "volume_delta", "volume_delta_span",
-                                "volume_delta_amount",
-                            ):
-                                if key in ev:
-                                    alert[key] = ev[key]
-                            all_alerts.append(alert)
+                            all_alerts.append(rule_event_to_alert(ev))
 
             # 策略页实时回显: 不写文件 (实时行情每轮更新 enriched, 写文件会被 read_cache
             # 的 mtime 校验判过期, 反复读不到)。监控引擎本轮已算出的结果存在内存
@@ -1425,11 +1426,15 @@ class QuoteService:
                     from app.strategy import paper as paper_trading
                     from app.strategy import paper_auto
                     data_dir = self._app_state.repo.store.data_dir
-                    snapshot = dict(zip(
-                        enriched_today["symbol"].to_list(),
-                        enriched_today["raw_close"].to_list(),
-                        strict=False,
-                    ))
+                    account_ids = paper_trading.list_account_ids(data_dir)
+                    if not account_ids:
+                        return
+                    if 'prices' not in round_data:
+                        round_data['prices'] = dict(zip(
+                            enriched_today["symbol"].to_list(),
+                            enriched_today["raw_close"].to_list(), strict=False,
+                        ))
+                    snapshot = round_data['prices']
                     strategy_events = None
                     paper_engine = getattr(runtime, "paper_monitor_engine", None)
                     if paper_engine is not None:
@@ -1443,7 +1448,7 @@ class QuoteService:
                             for event in strategy_events
                         ]
                     paper_events: list[dict] = []
-                    for acc_id in paper_trading.list_account_ids(data_dir):
+                    for acc_id in account_ids:
                         paper_events.extend(
                             paper_trading.evaluate_intraday(data_dir, snapshot, account_id=acc_id))
                         if rule_events or strategy_events:

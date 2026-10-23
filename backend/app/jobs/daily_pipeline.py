@@ -1318,6 +1318,7 @@ async def _run_scheduled_review_for_owner(repo) -> None:
             "summary": meta.get("summary", ""),
             "emotion_score": meta.get("emotion_score"),
             "emotion_label": meta.get("emotion_label", ""),
+            "system_prompt": meta.get("system_prompt"),
         })
         from app.services.shared_runtime import publish_data_update
         publish_data_update(repo.store.data_dir, ["review"], private=True)

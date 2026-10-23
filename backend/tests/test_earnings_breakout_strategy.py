@@ -266,3 +266,106 @@ def test_monitor_never_loads_or_executes_full_history_strategy(setup_repo, priva
     assert engine.evaluate(repo.prices.tail(1)) == []
     assert calls == []
     assert STRATEGY_ID not in engine.latest_strategy_results()
+
+
+@pytest.mark.parametrize("kind,index", [("9", 42), ("42", 45)])
+def test_prepared_command_reads_history_and_computes_prices_once(setup_repo, monkeypatch, kind, index):
+    from unittest.mock import Mock
+
+    from app.indicators import earnings_breakout as indicators
+    from app.services import financial_demand
+    from app.tickflow.capabilities import CapabilitySet
+
+    repo = setup_repo(kind)
+    history = repo.prices.slice(index - 1, 2)
+    day = history["date"][-1]
+    expected = service.filter_pullback_signals(repo, history)
+    repo.price_reads.clear()
+    repo.version_reads.clear()
+    prepared = False
+    original_versions = repo.get_financial_versions
+    def versions(*args, **kwargs):
+        assert prepared, "Final events must use versions available after financial preparation"
+        return original_versions(*args, **kwargs)
+    def prepare_tables(*args, **kwargs):
+        nonlocal prepared
+        prepared = True
+    monkeypatch.setattr(repo, 'get_financial_versions', versions)
+    monkeypatch.setattr(financial_demand, 'prepare_tables', prepare_tables)
+    compute = Mock(wraps=indicators._pullback_prices)
+    monkeypatch.setattr(indicators, '_pullback_prices', compute)
+    svc = ScreenerService(repo)
+    monkeypatch.setattr(svc, '_load_enriched_history', lambda *args: history)
+    financial_demand.register(repo, CapabilitySet())
+    try:
+        engine = strategy_engine()
+        context = svc.build_strategy_context(engine, day, [STRATEGY_ID],
+                                             current=history.tail(1), prepare_financials=True)
+        result = engine.run(STRATEGY_ID, context)
+        assert len(repo.price_reads) == 1
+        assert compute.call_count == 1
+        assert repo.version_reads == [("income", None)]
+        assert result.total == 1
+        assert result.rows[0]['earnings_pullback'] == expected.tail(1)['earnings_pullback'][0]
+        assert result.rows[0]['earnings_9_event_date'] == expected.tail(1)['earnings_9_event_date'][0]
+        # A standalone chart/strategy read must not retain the previous command's scope.
+        market_data.get_earnings_breakout_signals(history)
+        assert len(repo.price_reads) == 2
+        assert compute.call_count == 2
+    finally:
+        financial_demand.unregister(repo.store.data_dir)
+
+
+@pytest.mark.parametrize("changed_index,expected_rows", [(0, 0), (1, 1)])
+def test_prepared_prices_recompute_when_history_override_changes(setup_repo, changed_index, expected_rows):
+    repo = setup_repo()
+    history = repo.prices.slice(42, 2)
+    snapshot = service.EarningsPriceSnapshot()
+    snapshot.capture(repo, history.tail(1), history['date'][-1])
+    snapshot.prepare_pullback_candidates(history.tail(1))
+    # Final history may change either the previous candle or preparation's current candle.
+    changed = history.with_columns(pl.when(pl.col('date') == history['date'][changed_index])
+                                   .then(10.2).otherwise(pl.col('low')).alias('low'))
+    reads = len(repo.price_reads)
+    result = service.filter_pullback_signals(repo, changed, price_snapshot=snapshot)
+    assert len(repo.price_reads) == reads
+    assert result.height == expected_rows
+    assert result.equals(service.filter_pullback_signals(repo, changed))
+    # Reuse must not mutate the snapshot or poison another invocation.
+    original = service.filter_pullback_signals(repo, history, price_snapshot=snapshot)
+    assert original.height == 2
+
+
+def test_prepared_prices_do_not_cross_dates_or_stock_pools(setup_repo):
+    repo = setup_repo()
+    frame = repo.prices.slice(42, 1)
+    snapshot = service.EarningsPriceSnapshot()
+    snapshot.capture(repo, frame, frame['date'][0])
+    snapshot.prepare_pullback_candidates(frame)
+    # Different date must read the new cutoff; no reuse of an incomplete old prefix.
+    assert service.filter_pullback_signals(repo, repo.prices.slice(43, 1), price_snapshot=snapshot).height == 1
+    assert len(repo.price_reads) == 2
+    second = '000001.SZ'
+    record_versions(repo.store.data_dir, 'income', pl.DataFrame([
+        {**financial_row('2024-12-31', '2025-03-01', 50.), 'symbol': second},
+        {**financial_row('2025-12-31', '2026-02-09', 100.), 'symbol': second},
+    ]), 'fuyao', datetime.fromisoformat('2026-02-09T20:00:00+08:00'))
+    other = repo.prices.with_columns(pl.lit(second).alias('symbol'))
+    repo.prices = pl.concat([repo.prices, other])
+    result = service.filter_pullback_signals(repo, other.slice(42, 1), price_snapshot=snapshot)
+    assert result['symbol'].to_list() == [second]
+    assert repo.price_reads[-1][0] == [second]
+
+
+def test_earnings_price_scope_is_nested_and_thread_local():
+    from concurrent.futures import ThreadPoolExecutor
+    first, second = object(), object()
+    with market_data.earnings_prices_scope(first):
+        assert market_data._earnings_prices.get() is first
+        with pytest.raises(ValueError), market_data.earnings_prices_scope(second):
+            assert market_data._earnings_prices.get() is second
+            raise ValueError('failed invocation')
+        assert market_data._earnings_prices.get() is first
+        with ThreadPoolExecutor(1) as executor:
+            assert executor.submit(market_data._earnings_prices.get).result() is None
+    assert market_data._earnings_prices.get() is None

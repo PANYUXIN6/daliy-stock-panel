@@ -40,7 +40,7 @@ def test_screener_backfills_suspended_symbol_and_bounds_each_window(tmp_path, mo
             .with_columns(pl.when((pl.col("symbol") == "A") & (pl.col("date") == target))
                           .then(14.).otherwise(pl.col("close")).alias("close"))
         )
-    monkeypatch.setattr("app.services.screener._history_cache", {})
+    monkeypatch.setattr("app.services.screener._history_cache", __import__("app.services.snapshot_cache", fromlist=["SnapshotCache"]).SnapshotCache(120, 10))
     service = ScreenerService(repo)
 
     history = service._load_enriched_history(target, 2)

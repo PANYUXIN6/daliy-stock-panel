@@ -1,6 +1,7 @@
 """run_all 渐进式返回的端点行为 — 快策略先返回、慢策略后台落缓存、搭车与旧路径兼容。"""
 from __future__ import annotations
 
+import threading
 import time
 from dataclasses import dataclass, field
 from datetime import date
@@ -76,6 +77,8 @@ def _wait_cache_results(tmp_path, want_ids, timeout=8.0) -> dict:
 
 @pytest.fixture()
 def fast_first_return(monkeypatch):
+    # The deadline measures execution, not first-import initialization of dependencies.
+    from app.services import financial_demand  # noqa: F401
     monkeypatch.setattr(settings, "strategy_run_all_first_return_s", 0.4)
 
 
@@ -176,9 +179,69 @@ def test_run_all_same_key_piggybacks_running_execution(
     resp2 = screener_api.run_all(_request(tmp_path, engine), body)
     assert resp2["started_at"] == resp1["started_at"]
     assert engine.executed.count("fast_a") == 1
+
     _wait_cache_results(tmp_path, ["fast_a", "slow_c"])
     assert engine.executed.count("slow_c") == 1
     assert engine.executed.count("fast_a") == 1
+
+
+def test_late_strategy_failure_is_available_via_status_without_success_cache(monkeypatch, tmp_path, fast_first_return):
+    release = threading.Event()
+    manager = strategy_run_queue.StrategyRunManager()
+    monkeypatch.setattr(strategy_run_queue, 'MANAGER', manager)
+    monkeypatch.setattr(screener_api, 'ScreenerService', _FakeService)
+    class Engine(_FakeEngine):
+        def run_all(self, context, params_map=None, overrides_map=None, *, strategy_ids=None, parallel=True):
+            if strategy_ids == ['bad']:
+                assert release.wait(5)
+                raise ValueError('利润表获取失败')
+            return super().run_all(context, params_map, overrides_map, strategy_ids=strategy_ids, parallel=parallel)
+    engine = Engine({'good': .01, 'bad': .01})
+    try:
+        response = screener_api.run_all(_request(tmp_path, engine), {
+            'as_of': AS_OF, 'strategy_ids': ['good', 'bad'], 'summary_only': True,
+        })
+        assert response['pending'] == ['bad']
+        assert response['errors'] == {}
+        assert screener_api.get_run_status(response['run_id'])['pending'] == ['bad']
+    finally:
+        release.set()
+    deadline = time.monotonic() + 5
+    while not screener_api.get_run_status(response['run_id'])['done'] and time.monotonic() < deadline:
+        time.sleep(.01)
+    status = screener_api.get_run_status(response['run_id'])
+    assert status['done'] and status['pending'] == []
+    assert status['errors'] == {'bad': '利润表获取失败'}
+    assert set(status['results']) == {'good'}
+    assert set(strategy_cache.read_summary(tmp_path)['results']) == {'good'}
+
+
+def test_result_persistence_failure_is_not_reported_as_success(monkeypatch, tmp_path, fast_first_return):
+    manager = strategy_run_queue.StrategyRunManager()
+    monkeypatch.setattr(strategy_run_queue, 'MANAGER', manager)
+    monkeypatch.setattr(screener_api, 'ScreenerService', _FakeService)
+    def failed_write(*args):
+        raise OSError('fixture disk full')
+    monkeypatch.setattr(strategy_cache, 'write_cache', failed_write)
+    response = screener_api.run_all(_request(tmp_path, _FakeEngine({'a': .01})), {
+        'as_of': AS_OF, 'strategy_ids': ['a'], 'summary_only': True,
+    })
+    status = screener_api.get_run_status(response['run_id'])
+    assert status['done'] and status['results'] == {}
+    assert status['errors'] == {'a': '策略结果保存失败，请重试'}
+
+
+def test_status_route_hides_other_users_and_missing_tasks(monkeypatch, tmp_path):
+    from app.services.user_context import UserContext, user_scope
+    manager = strategy_run_queue.StrategyRunManager()
+    monkeypatch.setattr(strategy_run_queue, 'MANAGER', manager)
+    handle = manager.get_or_submit(('private',), ['a'], lambda h: h.complete('a', {'total': 1}))
+    handle.future.result(5)
+    with user_scope(UserContext('b' * 32, 'admin', tmp_path)):
+        for run_id in (handle.run_id, 'missing'):
+            with pytest.raises(HTTPException) as error:
+                screener_api.get_run_status(run_id)
+            assert error.value.status_code == 404
 
 
 def test_run_all_job_level_error_without_results_is_500(

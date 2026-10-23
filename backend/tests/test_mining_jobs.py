@@ -142,6 +142,29 @@ def test_status_transitions_summary_and_artifact_registration(tmp_path: Path) ->
         store.register_artifact("artifacts", "folds", "../other/folds.parquet")
 
 
+@pytest.mark.parametrize("existing_data", ["running", "summary", "artifact", "unexpected", "symlink"])
+def test_discard_unsubmitted_refuses_execution_data(tmp_path, existing_data):
+    store = _store(tmp_path)
+    store.create({}, "v1", run_id="keep")
+    run_dir = store.runs_root / "keep"
+    if existing_data == "running":
+        store.transition_status("keep", "running")
+    elif existing_data == "summary":
+        store.write_summary("keep", {"candidate_count": 1})
+    elif existing_data == "artifact":
+        store.register_artifact("keep", "factors")
+    elif existing_data == "unexpected":
+        (run_dir / "notes.txt").write_text("keep")
+    else:
+        summary = run_dir / "summary.json"
+        summary.rename(tmp_path / "summary.json")
+        summary.symlink_to(tmp_path / "summary.json")
+    before = {path.name: path.read_bytes() for path in run_dir.iterdir()}
+    with pytest.raises(MiningRunValidationError, match="execution data"):
+        store.discard_unsubmitted("keep")
+    assert {path.name: path.read_bytes() for path in run_dir.iterdir()} == before
+
+
 def test_historical_manifest_defaults_and_startup_recovery(tmp_path: Path) -> None:
     store = _store(tmp_path)
     runs_root = store.runs_root

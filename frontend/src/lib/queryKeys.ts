@@ -48,11 +48,14 @@ export const QK = {
   screener:             ['screener'] as const,
   screenerStrategies:   (assetType: string = 'stock', timeframe: '1d' | '1m' | 'all' = '1d') => ['screener-strategies', assetType, timeframe] as const,
   screenerCachedSummary: ['screener-cached', 'summary'] as const,
+  screenerCachedRoot:    ['screener-cached'] as const,
+  screenerRunStatus:     (runId: string) => ['screener-run-status', runId] as const,
   screenerCachedResult: (strategyId: string, asOf?: string, ext?: string) => ['screener-cached', 'strategy', strategyId, asOf ?? '', ext ?? ''] as const,
   screenerCached:       (asOf?: string, ext?: string) => ['screener-cached', 'all', asOf ?? '', ext ?? ''] as const,
   screenerKlineBatch:   (symbols: string) => ['screener-kline-batch', symbols] as const,
   marketSnapshot:       ['market-snapshot'] as const,
   limitLadder:          (asOf?: string) => ['limit-ladder', asOf] as const,
+  strengthLadder:       (asOf?: string) => ['limit-ladder', 'strength', asOf ?? 'latest'] as const,
 
   // Backtest
   backtestStatus:       ['backtest-status'] as const,
@@ -126,6 +129,7 @@ export const QK = {
   alerts:               (source?: string) => ['alerts', source ?? ''] as const,
 
   // AI 大盘复盘
+  reviewPrompt:         (userId: string) => ['review-prompt', userId] as const,
   reviewPublication:    (date?: string) => ['review-publication', date ?? 'today'] as const,
   dragonTiger:          (date?: string) => ['dragon-tiger', date ?? 'latest'] as const,
   reviewReports:        ['review-reports'] as const,
@@ -167,10 +171,8 @@ export function minuteCollectionAffectsQuery(key: readonly unknown[], symbol: st
 // ===== SSE 应该 invalidate 的 key 前缀列表 =====
 // 新增需要 SSE 推送的查询，只需在此加一行
 //
-// 注意: 策略页 (screener-cached) 不在此列表 —— 行情刷新时策略结果不变
-// (非监控策略读盘后静态缓存, 监控策略由独立的 strategy_results_updated 事件在
-// 重算完成后刷新)。若加入 'screener', 会导致每个行情 tick 双重刷新策略页,
-// 且在 monitor "重算" 窗口内读到空结果, 造成策略列表闪烁 (变 0 → 空失效 → 又出现)。
+// 策略页不使用宽泛前缀: useQuoteStream 只对今日明细合并刷新价格展示，
+// 摘要和历史不随行情 tick 刷新；监控重算仍由 strategy_results_updated 通知。
 
 export const SSE_INVALIDATE_PREFIXES = [
   // 精确前缀: 只命中自选页的实时数据 (quotes/enriched)。不能用宽泛的 'watchlist' ——

@@ -101,6 +101,12 @@ async def _application_lifespan(app: FastAPI):
 
     # 数据层
     store = DataStore()
+    # Only collector starts this lifespan. A partially written generation remains
+    # unavailable until the existing sync pipeline rebuilds it successfully.
+    from app.enriched_generation import recover_stale_publications
+    recovered = recover_stale_publications(store.data_dir)
+    if recovered:
+        logger.warning("已释放上次中断且未写入数据的指标发布: %s", ", ".join(recovered))
     repo = KlineRepository(store)
     app.state.datastore = store
     app.state.repo = repo
@@ -441,6 +447,14 @@ def create_app(role: str | None = None) -> FastAPI:
         lifespan=lifespan,
     )
 
+    from fastapi.responses import JSONResponse
+
+    from app.services.task_scheduler import JobQueueFullError
+
+    @app.exception_handler(JobQueueFullError)
+    async def queue_full(_request, exc):
+        return JSONResponse(status_code=429, content={"detail": str(exc)}, headers={"Retry-After": "3"})
+
     app.state.service_role = role
     if role == 'collector':
         from app.services.shared_runtime import router as runtime_router
@@ -509,7 +523,6 @@ def create_app(role: str | None = None) -> FastAPI:
     # 能力门控异常 → 403(而非默认 500)
     # 业务代码用 capset.require(Cap.X) 断言能力,缺失时抛 CapabilityDenied;
     # 若不注册 handler 会冒泡成 500 Internal Server Error,对前端不友好且语义错误。
-    from fastapi.responses import JSONResponse
 
     from app.services.ai_credits import CreditError
 

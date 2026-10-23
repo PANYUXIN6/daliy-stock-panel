@@ -13,6 +13,17 @@ def repo(tmp_path):
     return KlineRepository(DataStore(tmp_path))
 
 
+def test_stock_display_snapshot_does_not_warm_cold_repository(repo, monkeypatch):
+    def unexpected_refresh():
+        pytest.fail("display-only snapshot must not load history")
+
+    monkeypatch.setattr(repo, "_refresh_enriched", unexpected_refresh)
+    frame, day = repo.get_enriched_latest(refresh=False)
+    assert frame.is_empty() and day is None
+    frame, day = repo.get_enriched_latest_asset("stock", refresh=False)
+    assert frame.is_empty() and day is None
+
+
 def _write_index_instruments(repo, rows):
     pl.DataFrame(rows).write_parquet(
         repo.store.data_dir / "instruments_index" / "part.parquet"

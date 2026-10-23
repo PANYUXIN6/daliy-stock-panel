@@ -10,6 +10,8 @@ from app.api import kline
 from app.backtest.matrix import load_market_data_matrix_from_parquet
 from app.indicators import pipeline
 from app.price_limits import (
+    is_no_limit_day,
+    no_limit_window_days,
     numpy_limit_price,
     numpy_price_limit_matrix,
     polars_is_risk_warning_name,
@@ -26,6 +28,7 @@ from app.price_limits import (
         ("600001.SH", date(2026, 7, 6), True, 0.10),
         ("000001.SZ", date(2026, 7, 3), False, 0.10),
         ("300001.SZ", date(2026, 7, 3), True, 0.20),
+        ("302132.SZ", date(2026, 7, 3), True, 0.20),
         ("688001.SH", date(2026, 7, 3), True, 0.20),
         ("689001.SH", date(2026, 7, 3), True, 0.20),
         ("830001.BJ", date(2026, 7, 3), True, 0.30),
@@ -41,8 +44,8 @@ def test_scalar_price_limit_rules(symbol, trade_date, is_st, expected):
 
 def test_polars_and_numpy_price_limit_rules_match():
     dates = [date(2026, 7, 3), date(2026, 7, 6)]
-    symbols = ["600001.SH", "300001.SZ", "689001.SH", "830001.BJ"]
-    names = ["*st主板", "*ST创业", "科创ST", "北交ST"]
+    symbols = ["600001.SH", "300001.SZ", "302132.SZ", "689001.SH", "830001.BJ"]
+    names = ["*st主板", "*ST创业", "创业新号段", "科创ST", "北交ST"]
     panel = pl.DataFrame({
         "date": [value for value in dates for _ in symbols],
         "symbol": symbols * len(dates),
@@ -57,6 +60,36 @@ def test_polars_and_numpy_price_limit_rules_match():
     polars_values = panel["limit_pct"].to_numpy().reshape(len(dates), len(symbols))
     numpy_values = numpy_price_limit_matrix(dates, symbols, names)
     np.testing.assert_allclose(polars_values, numpy_values)
+
+
+def test_chinext_302_registration_window_uses_growth_board_date():
+    listing = date(2021, 6, 1)
+    assert no_limit_window_days("302001.SZ", listing) == 5
+    assert no_limit_window_days("302001.SZ", date(2020, 8, 23)) == 0
+    assert is_no_limit_day("302001.SZ", listing, date(2021, 6, 7), day_rank=5)
+    assert not is_no_limit_day("302001.SZ", listing, date(2021, 6, 8), day_rank=6)
+
+
+@pytest.mark.parametrize("symbol", ["302132.SZ", "689009.SH"])
+def test_matrix_growth_board_locks_at_twenty_percent(tmp_path, symbol):
+    root = tmp_path / "market"
+    days = [date(2026, 10, 19), date(2026, 10, 20), date(2026, 10, 21)]
+    for day, price in zip(days, [10.0, 11.0, 13.2], strict=True):
+        partition = root / f"date={day.isoformat()}"
+        partition.mkdir(parents=True)
+        pl.DataFrame({
+            "symbol": [symbol], "date": [day],
+            "open": [price], "high": [price], "low": [price], "close": [price],
+            "raw_close": [price], "volume": [1000.0],
+        }).write_parquet(partition / "part.parquet")
+
+    market = load_market_data_matrix_from_parquet(
+        root, days[0], days[-1],
+        field_columns={"raw_close", "price_limit_pct"},
+        cache_root=tmp_path / "cache",
+    )
+    np.testing.assert_allclose(market.field("price_limit_pct")[:, 0], [0.2, 0.2, 0.2])
+    assert market.limit_up_locked[:, 0].tolist() == [0, 0, 1]
 
 
 def test_polars_and_numpy_limit_prices_use_identical_half_up_rounding():

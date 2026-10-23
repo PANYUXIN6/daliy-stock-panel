@@ -168,6 +168,8 @@ class StrategyDataContext:
     daily_history: pl.DataFrame | None = None
     market: Any | None = None
     cache_key: str | None = None
+    # Command-local complete earnings prices and precomputed pullback indicators.
+    earnings_prices: Any | None = None
 
 
 @dataclass(frozen=True)
@@ -1098,7 +1100,9 @@ class StrategyEngine:
                     "盘中信号仅可用于分钟策略(timeframes=['1m']), 日线策略不支持: "
                     + ", ".join(sorted(missing_csgi))
                 )
-            df = s.filter_history_fn(df, params)
+            from app.strategy.market_data import earnings_prices_scope
+            with earnings_prices_scope(context.earnings_prices):
+                df = s.filter_history_fn(df, params)
             if "date" in df.columns:
                 df = df.filter(pl.col("date") == as_of)
         else:
@@ -1716,9 +1720,13 @@ class StrategyEngine:
                     board_exprs.append(
                         pl.col("symbol").str.starts_with("300")
                         | pl.col("symbol").str.starts_with("301")
+                        | pl.col("symbol").str.starts_with("302")
                     )
                 elif b == "科创板":
-                    board_exprs.append(pl.col("symbol").str.starts_with("688"))
+                    board_exprs.append(
+                        pl.col("symbol").str.starts_with("688")
+                        | pl.col("symbol").str.starts_with("689")
+                    )
                 elif b == "北交所":
                     board_exprs.append(pl.col("symbol").str.contains(r"\.BJ$"))
             if board_exprs:

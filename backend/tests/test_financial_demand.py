@@ -184,6 +184,22 @@ def test_factor_preparation_only_fetches_required_table_and_pool_then_reuses(env
     assert env.fetch.call_count == 1
 
 
+def test_warm_pool_reads_each_table_once_instead_of_per_symbol(env, monkeypatch):
+    from app.services import financial_snapshot
+
+    symbols = ['600000.SH', '000001.SZ', '000002.SZ']
+    for symbol in symbols:
+        fetch(env, symbol)
+    financial_snapshot._cache.clear()
+    read = Mock(wraps=pl.read_parquet)
+    monkeypatch.setattr(pl, 'read_parquet', read)
+    frame = pl.DataFrame({'symbol': symbols, 'date': [date(2026, 9, 1)] * 3})
+    demand.prepare_tables(env.root, frame, ['income'])
+    demand.prepare_tables(env.root, frame, ['income'])
+    assert read.call_count == 2  # one current table and one versions table
+    assert env.fetch.call_count == 3
+
+
 def test_factor_preparation_fails_with_unavailable_symbols_instead_of_silent_ranking(env):
     env.fetch.side_effect = lambda *args, **kwargs: pl.DataFrame()
     frame = pl.DataFrame({"symbol": ["600000.SH"], "date": [date(2026, 9, 1)]})

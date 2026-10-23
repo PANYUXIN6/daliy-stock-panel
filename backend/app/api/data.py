@@ -646,8 +646,8 @@ def clear_data(request: Request):
     # 残留的 publishing 标记(owner pid 已死)不应永久阻塞清空; 活进程的发布
     # 仍会被拦(another publication is active), 写盘竞态保护不受影响。
     publications = {
-        "kline_daily_enriched": EnrichedPublication(data_dir, "stock", recover=True),
-        "kline_etf_enriched": EnrichedPublication(data_dir, "etf", recover=True),
+        "kline_daily_enriched": EnrichedPublication(data_dir, "stock", recover=True, full_rebuild=True),
+        "kline_etf_enriched": EnrichedPublication(data_dir, "etf", recover=True, full_rebuild=True),
     }
 
     for sub in (
@@ -657,19 +657,20 @@ def clear_data(request: Request):
         "backtest_results", "screener_results", "ai_cache",
     ):
         d = data_dir / sub
-        if not d.exists():
-            continue
         publication = publications.get(sub)
+        if not d.exists() and publication is None:
+            continue
         parquet_files = list(d.rglob("*.parquet"))
-        if publication is not None and parquet_files:
+        if publication is not None:
             publication.begin()
         try:
+            if publication is not None:
+                # 即使上次恰在删完最后一个文件后中断，本次完整清空也可发布空数据集。
+                publication.mark_changed()
             for f in parquet_files:
                 f.unlink()
                 deleted += 1
-                if publication is not None:
-                    publication.mark_changed()
-            for child in list(d.iterdir()):
+            for child in list(d.iterdir()) if d.exists() else []:
                 if child.is_dir():
                     shutil.rmtree(child, ignore_errors=True)
             if publication is not None:

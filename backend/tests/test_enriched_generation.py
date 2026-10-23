@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
+import sys
 import threading
 from datetime import date
 from types import SimpleNamespace
@@ -14,6 +16,7 @@ from app.enriched_generation import (
     EnrichedGenerationUnavailableError,
     EnrichedPublication,
     get_enriched_generation,
+    recover_stale_publications,
 )
 from app.tickflow.repository import DataStore, KlineRepository
 
@@ -147,7 +150,7 @@ def test_recovery_takes_over_when_owner_pid_is_dead_on_windows(tmp_path, monkeyp
     monkeypatch.setattr("app.enriched_generation.os.kill", probe)
 
     out = tmp_path / "kline_daily_enriched" / "date=2026-08-14" / "part.parquet"
-    recovered = EnrichedPublication(tmp_path, recover=True)
+    recovered = EnrichedPublication(tmp_path, recover=True, full_rebuild=True)
     recovered.write_parquet(_frame(10.0), out)
     recovered.commit()
 
@@ -238,11 +241,10 @@ def test_matrix_reader_retries_when_generation_changes_during_build(
     assert calls == ["generation-a", "generation-b"]
 
 
-def test_live_flush_write_recovers_stale_marker_from_dead_process(
+def test_live_flush_cannot_publish_unknown_legacy_state(
     tmp_path, monkeypatch
 ) -> None:
-    """实时 enriched 落盘(repository 路径)遇到僵死 publishing 标记应接管自愈,
-    而非持续抛错直到下一次盘后管道。"""
+    """旧标记未记录写入进度，今日单分区写入不能掩盖历史的半批更新。"""
     from app.tickflow.repository import DataStore, KlineRepository
 
     (tmp_path / ".matrix_generation_stock.json").write_text(
@@ -257,12 +259,14 @@ def test_live_flush_write_recovers_stale_marker_from_dead_process(
     )
 
     repo = KlineRepository(DataStore(tmp_path))
-    repo.append_enriched(_frame(10.0))
+    with pytest.raises(EnrichedGenerationUnavailableError, match="full rebuild"):
+        repo.append_enriched(_frame(10.0))
 
     marker = json.loads(
         (tmp_path / ".matrix_generation_stock.json").read_text(encoding="utf-8")
     )
-    assert marker["state"] == "ready"
+    assert marker["state"] == "publishing"
+    assert not list((tmp_path / "kline_daily_enriched").rglob("*.parquet"))
 
 
 def _stale_publishing_marker(tmp_path, owner_pid: int = 999999999) -> None:
@@ -278,21 +282,19 @@ def _stale_publishing_marker(tmp_path, owner_pid: int = 999999999) -> None:
     )
 
 
-def test_reader_self_heals_stale_publishing_marker_from_dead_owner(tmp_path) -> None:
-    """读取方遇到属主已死的 publishing 标记应就地恢复 ready, 而非持续失败
-    直到某个写入方碰巧接管 (dev 热重载杀掉发布进程即产生这种孤儿)。"""
+def test_reader_keeps_legacy_dead_owner_marker_closed(tmp_path) -> None:
+    """进程已死不能证明旧版多分区写入完成。"""
     _stale_publishing_marker(tmp_path)
 
-    generation = get_enriched_generation(tmp_path, "stock")
+    with pytest.raises(EnrichedGenerationUnavailableError, match="being published"):
+        get_enriched_generation(tmp_path, "stock")
+    assert recover_stale_publications(tmp_path) == []
 
     marker = json.loads(
         (tmp_path / ".matrix_generation_stock.json").read_text(encoding="utf-8")
     )
-    assert marker["state"] == "ready"
-    # 恢复时换新 generation: 磁盘可能残留部分替换的文件, 按代缓存需要失效。
-    assert generation not in ("", "stale-generation")
-    assert generation == marker["generation"]
-    assert get_enriched_generation(tmp_path, "stock") == generation
+    assert marker["state"] == "publishing"
+    assert marker["generation"] == "stale-generation"
 
 
 def test_reader_still_fails_closed_while_owner_is_alive(
@@ -380,3 +382,93 @@ def test_worker_error_message_translates_publishing_error() -> None:
     )
     assert translated == "指标数据正在发布更新，请稍后重试"
     assert _error_message(ValueError("boom")) == "boom"
+
+
+def test_abandon_partial_full_rebuild_cannot_be_published_by_live_flush(tmp_path):
+    publication = EnrichedPublication(tmp_path, recover=True, full_rebuild=True)
+    out = tmp_path / "kline_daily_enriched" / "date=2026-08-14" / "part.parquet"
+    publication.write_parquet(_frame(), out)
+    publication.abandon()
+    assert not publication._publishing
+    assert recover_stale_publications(tmp_path) == []
+    with pytest.raises(EnrichedGenerationUnavailableError):
+        get_enriched_generation(tmp_path)
+    with pytest.raises(EnrichedGenerationUnavailableError, match="full rebuild"):
+        KlineRepository(DataStore(tmp_path)).append_enriched(_frame(12.0))
+    recovered = EnrichedPublication(tmp_path, recover=True, full_rebuild=True)
+    recovered.write_parquet(_frame(13.0), out)
+    recovered.commit()
+    assert get_enriched_generation(tmp_path)
+
+
+def test_failed_recovery_without_writes_preserves_previous_partial_state(tmp_path):
+    publication = EnrichedPublication(tmp_path, full_rebuild=True)
+    publication.write_parquet(_frame(), tmp_path / "part.parquet")
+    publication.abandon()
+    recovery = EnrichedPublication(tmp_path, recover=True, full_rebuild=True)
+    recovery.begin()
+    recovery.abandon()
+    with pytest.raises(EnrichedGenerationUnavailableError):
+        get_enriched_generation(tmp_path)
+
+
+def test_empty_commit_releases_claim(tmp_path):
+    publication = EnrichedPublication(tmp_path)
+    publication.begin()
+    assert publication.commit() is None
+    assert get_enriched_generation(tmp_path)
+    assert not publication._publishing
+
+
+def test_cross_process_lease_prevents_reader_and_writer_takeover(tmp_path, monkeypatch):
+    """A shared filesystem lock protects long computations even across PID namespaces."""
+    code = """
+import sys
+from pathlib import Path
+from app.enriched_generation import EnrichedPublication
+p = EnrichedPublication(Path(sys.argv[1]))
+p.begin()
+print('ready', flush=True)
+sys.stdin.readline()
+p.abandon()
+"""
+    child = subprocess.Popen(
+        [sys.executable, "-c", code, str(tmp_path)],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True,
+    )
+    try:
+        assert child.stdout.readline().strip() == "ready"
+        path = tmp_path / ".matrix_generation_stock.json"
+        marker = json.loads(path.read_text())
+        # PID probes and heartbeat age must not defeat the live lease.
+        marker.update(owner_pid=os.getpid(), updated_at_ns=0)
+        path.write_text(json.dumps(marker))
+        monkeypatch.setattr("app.enriched_generation._process_is_alive", lambda _pid: False)
+        assert recover_stale_publications(tmp_path) == []
+        with pytest.raises(EnrichedGenerationUnavailableError):
+            get_enriched_generation(tmp_path)
+        with pytest.raises(EnrichedGenerationUnavailableError, match="active"):
+            EnrichedPublication(tmp_path, recover=True).begin()
+        child.kill()
+        child.wait(timeout=5)
+        assert recover_stale_publications(tmp_path) == ["stock"]
+        assert get_enriched_generation(tmp_path)
+    finally:
+        if child.poll() is None:
+            child.kill()
+        child.wait(timeout=5)
+        child.stdin.close()
+        child.stdout.close()
+
+
+def test_abandon_releases_lease_even_when_marker_write_fails(tmp_path, monkeypatch):
+    import app.enriched_generation as generation
+
+    publication = EnrichedPublication(tmp_path)
+    publication.begin()
+    original = generation._write_marker
+    monkeypatch.setattr(generation, "_write_marker", lambda *_: (_ for _ in ()).throw(OSError("disk")))
+    publication.abandon()
+    assert not publication._publishing
+    monkeypatch.setattr(generation, "_write_marker", original)
+    assert recover_stale_publications(tmp_path) == ["stock"]

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -291,6 +292,43 @@ def test_same_week_and_fingerprint_enqueue_once(scheduled_state):
     assert call["request"]["require_regime"] is True
     assert call["request"]["end"] == "2026-08-14"
     assert len(call["request"]["factor_names"]) <= 48
+
+
+def test_queue_rejection_does_not_consume_weekly_claim(scheduled_state, monkeypatch):
+    from app.services import mining_manager
+    from app.services.task_scheduler import JobQueueFullError, TaskScheduler
+
+    scheduler = TaskScheduler(workers=1, capacity=1)
+    release = threading.Event()
+    occupied = scheduler.submit("owner", lambda: release.wait(5))
+    monkeypatch.setattr(mining_manager, "submit_research", lambda work: scheduler.submit("owner", work))
+    tasks = []
+    def runner(task, progress_cb, cancel_event):
+        tasks.append(task)
+        return {"status": "succeeded"}
+    manager = mining_manager.MiningJobManager(scheduled_state.repo.store.data_dir, worker_runner=runner)
+    scheduled_state.mining_manager = manager
+    claim = mining_schedule.schedule_claim(_friday().date())
+    try:
+        with pytest.raises(JobQueueFullError):
+            mining_schedule.run_weekly_mining(scheduled_state, now=_friday())
+        assert manager.store.get(claim) is None
+        assert tasks == []
+        release.set()
+        occupied.result(5)
+        result = mining_schedule.run_weekly_mining(scheduled_state, now=_friday())
+        assert result == {"status": "enqueued", "run_id": claim}
+        for future in list(manager._futures.values()):
+            future.result(5)
+        assert manager.store.get(claim)["status"] == "succeeded"
+        assert mining_schedule.run_weekly_mining(scheduled_state, now=_friday()) == {
+            "status": "already_claimed", "run_id": claim,
+        }
+        assert len(tasks) == 1
+    finally:
+        release.set()
+        occupied.result(5)
+        manager.shutdown()
 
 
 def test_profile_change_cannot_bypass_same_week_claim(scheduled_state, monkeypatch):

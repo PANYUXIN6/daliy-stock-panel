@@ -305,12 +305,15 @@ async def recap_market_stream(
     emo = overview.get("emotion") or {}
 
     # 2. meta 事件(前端据此先渲染信号灯/看板)
+    from app.services.recap_prompt import snapshot
+    system_prompt = snapshot()
     yield json.dumps({
         "type": "meta",
         "as_of": as_of_str,
         "emotion_score": emo.get("score", 50),
         "emotion_label": emo.get("label", "—"),
         "summary": _recap_summary(overview),
+        "system_prompt": system_prompt,
     }, ensure_ascii=False)
 
     # 3+4. 构建 prompt + 流式调用 LLM(整体 try-except,任何异常 yield error,避免前端卡死)
@@ -329,7 +332,7 @@ async def recap_market_stream(
         got_content = False
         async for delta in stream_ai_text(
             [
-                {"role": "system", "content": _SYSTEM_PROMPT},
+                {"role": "system", "content": system_prompt["text"]},
                 {"role": "user", "content": user_prompt},
             ],
             temperature=0.5,

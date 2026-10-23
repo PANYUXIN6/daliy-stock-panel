@@ -5,8 +5,8 @@ export type BoardType = (typeof BOARDS)[number]
 
 /** 根据股票代码判断板块 */
 export function getBoardType(symbol: string): BoardType | null {
-  if (/^(300|301)/.test(symbol)) return '创业板'
-  if (/^688/.test(symbol)) return '科创板'
+  if (/^(300|301|302)/.test(symbol)) return '创业板'
+  if (/^(688|689)/.test(symbol)) return '科创板'
   if (/\.BJ$/.test(symbol)) return '北交所'
   if (/^60[0135]/.test(symbol)) return '沪主板'
   if (/^00[012]/.test(symbol)) return '深主板'

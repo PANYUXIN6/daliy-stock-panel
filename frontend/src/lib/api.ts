@@ -501,6 +501,7 @@ export interface ScreenerCachedSummary {
 
 /** run_all 渐进式返回: 快策略已算完, 慢策略后台继续算 */
 export interface ScreenerRunAllSummary {
+  run_id?: string
   as_of: string | null
   results: Record<string, ScreenerResultSummary>
   /** 尚未算完的策略 (后台继续, 逐个写入缓存) */
@@ -509,8 +510,19 @@ export interface ScreenerRunAllSummary {
   complete?: boolean
   /** 后台执行出错时的错误信息 (部分结果仍会返回) */
   error?: string | null
+  errors?: Record<string, string>
   /** 本次执行起点 (Unix ms, 后端时钟), 用于判断缓存结果是否属于本轮 */
   started_at?: number | null
+}
+
+export interface ScreenerRunStatus {
+  run_id: string
+  results: Record<string, ScreenerResultSummary>
+  pending: string[]
+  errors: Record<string, string>
+  error: string | null
+  done: boolean
+  started_at_ms: number
 }
 
 export interface ScreenerCachedResult {
@@ -770,6 +782,12 @@ export interface ReviewPublication {
   overview: OverviewMarket | null
 }
 
+export interface ReviewPromptSnapshot {
+  source: 'custom' | 'default'
+  text: string
+  sha256: string
+}
+
 export interface AiReviewReport {
   id: string
   as_of: string
@@ -778,7 +796,15 @@ export interface AiReviewReport {
   summary?: string
   emotion_score?: number | null
   emotion_label?: string
+  system_prompt?: ReviewPromptSnapshot | null
   created_at: string
+}
+
+export interface ReviewPromptConfig {
+  custom: string
+  default: string
+  customized: boolean
+  max_chars: number
 }
 
 // ===== 龙虎榜 (fuyao 专有, 复盘页) =====
@@ -1348,6 +1374,8 @@ export interface AlertEvent {
   severity?: string
   strategy_id?: string
   conditions?: MonitorCondition[]
+  /** 本次实际满足的条件；旧触发记录可能缺失。 */
+  matched_conditions?: MonitorCondition[]
   logic?: 'and' | 'or'
   sector_kind?: SectorKind
   sector_key?: string
@@ -1376,6 +1404,27 @@ export function genRuleId(): string {
   const ts = Date.now().toString(36)
   const rand = Math.random().toString(36).slice(2, 6)
   return `mr_${ts}_${rand}`
+}
+
+// ===== 趋势强度梯队 =====
+export interface StrengthLadderStock {
+  symbol: string
+  name: string | null
+  close: number
+  change_pct: number | null
+  momentum_20d: number
+  vol_ratio_5d: number | null
+  status: 'high' | 'volume' | 'momentum'
+}
+
+export interface StrengthLadderResult {
+  as_of: string | null
+  tiers: { level: number; minimum: number; maximum: number | null; count: number; stocks: StrengthLadderStock[] }[]
+  total: number
+  eligible: number
+  /** 全市场有效价格中距离60日极值不超过0.5%的数量。 */
+  counts: { near_high: number; near_low: number }
+  warnings: string[]
 }
 
 // ===== Limit Ladder =====
@@ -3003,6 +3052,8 @@ export const api = {
     ),
   screenerCachedSummary: () =>
     request<ScreenerCachedSummary>('/api/screener/cached-summary'),
+  screenerRunStatus: (runId: string) =>
+    request<ScreenerRunStatus>(`/api/screener/run-status/${encodeURIComponent(runId)}`, { quiet: true }),
   screenerCachedResult: (strategyId: string, extColumns?: string) =>
     request<ScreenerCachedResult>(
       extColumns
@@ -3063,6 +3114,10 @@ export const api = {
       method: 'PUT',
       body: JSON.stringify(payload),
     }),
+
+  strengthLadder: (asOf?: string) => request<StrengthLadderResult>(
+    `/api/screener/strength-ladder${asOf ? `?as_of=${encodeURIComponent(asOf)}` : ''}`,
+  ),
 
   limitLadder: (asOf?: string, extColumns?: string, direction?: 'up' | 'down') => {
     const params = new URLSearchParams()
@@ -3763,6 +3818,10 @@ export const api = {
   },
 
   // ===== 大盘复盘 =====
+  reviewPrompt: () => request<ReviewPromptConfig>('/api/market-recap/prompt'),
+  updateReviewPrompt: (prompt: string) => request<ReviewPromptConfig>('/api/market-recap/prompt', {
+    method: 'PUT', body: JSON.stringify({ prompt }),
+  }),
   reviewPublication: (date?: string) =>
     request<ReviewPublication>(`/api/market-recap/publication${date ? `?date=${encodeURIComponent(date)}` : ''}`),
 
@@ -3805,6 +3864,7 @@ export const api = {
     emotion_score?: number
     emotion_label?: string
     summary?: string
+    system_prompt?: ReviewPromptSnapshot
     content?: string
     message?: string
   }> {

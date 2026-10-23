@@ -19,6 +19,7 @@ import polars as pl
 from app.data_providers.base import ProviderFinancialDataUnavailableError
 from app.market_time import cn_today
 from app.services import financial_sync, preferences
+from app.services.financial_snapshot import read_table
 from app.services.fs_utils import atomic_write_text
 from app.tickflow.capabilities import Cap, CapabilitySet
 
@@ -111,7 +112,7 @@ def history_start(data_dir: Path, table: str, symbol: str, frame: pl.DataFrame |
         saved = _receipt(data_dir, table, symbol, source)
         if frame is None:
             path = data_dir / "financials" / table / "part.parquet"
-            frame = pl.read_parquet(path) if path.exists() else pl.DataFrame()
+            frame = read_table(path)
         rows = _source_rows(frame, source, symbol)
         starts = [saved["history_start"]] if saved.get("history_start") else []
         if not rows.is_empty() and "period_end" in rows.columns:
@@ -162,7 +163,7 @@ def _fetch_and_merge(data_dir, capset, source, symbol, table, before_write, canc
     window = ({"start_date": start_date.isoformat(), "end_date": end_date.isoformat()}
               if start_date is not None and end_date is not None else {})
     with financial_sync.financial_write_lock:
-        existing = pl.read_parquet(path) if path.exists() else pl.DataFrame()
+        existing = read_table(path)
         financial_sync.read_versions(data_dir, table)
         rows = _source_rows(existing, source, symbol)
         saved = _receipt(data_dir, table, symbol, source)
@@ -218,7 +219,7 @@ def _fetch_and_merge(data_dir, capset, source, symbol, table, before_write, canc
             raise ValueError("数据源未返回该范围的可用财务数据")
     # 网络请求不占写锁；提交时重新读取，防不同股票同时获取丢失彼此的数据。
     with financial_sync.financial_write_lock:
-        existing = pl.read_parquet(path) if path.exists() else pl.DataFrame()
+        existing = read_table(path)
         if preferences.get_financial_provider() != source:
             raise ValueError("财务数据源已改变，请重新获取")
         if before_write:
@@ -325,9 +326,27 @@ def prepare_tables(data_dir: Path, frame: pl.DataFrame, tables: Iterable[str], *
             before_write = require_current_session
     supported = supported_tables(capset)
     failures = []
+    symbols = sorted(frame["symbol"].unique().to_list())
     for table in tables:
-        for symbol in sorted(frame["symbol"].unique().to_list()):
+        # Whole-table readiness is evaluated once per batch, not once per stock.
+        # Network misses still go through the shared flights and re-merge under the write lock.
+        ready = set()
+        if table in supported:
+            source = preferences.get_financial_provider()
+            with financial_sync.financial_write_lock:
+                existing = read_table(data_dir / "financials" / table / "part.parquet")
+                financial_sync.read_versions(data_dir, table)
+            present = set(existing.filter(pl.col("source") == source)["symbol"].unique().to_list()) \
+                if {"symbol", "source"} <= set(existing.columns) else set()
+            today = cn_today().isoformat()
+            for symbol in present.intersection(symbols):
+                saved = _receipt(data_dir, table, symbol, source)
+                if saved.get("checked_on") == today and not saved.get("pending_periods"):
+                    ready.add(symbol)
+        for symbol in symbols:
             _check_cancel(cancel_event)
+            if symbol in ready:
+                continue
             try:
                 if table not in supported:
                     saved = financial_sync.read_versions(data_dir, table, symbol=symbol)
@@ -381,7 +400,8 @@ def strategy_requirements(engine, strategy_ids, overrides_map=None, params_map=N
 
 
 def prepare_strategies(repo, engine, strategy_ids, frame, as_of: date, *,
-                       overrides_map=None, params_map=None, cancel_event=None, before_write=None) -> set[str]:
+                       overrides_map=None, params_map=None, cancel_event=None, before_write=None,
+                       price_snapshot=None) -> set[str]:
     if repo.store.data_dir.resolve() not in _runtimes:
         return set()
     names, events = strategy_requirements(engine, strategy_ids, overrides_map, params_map)
@@ -389,26 +409,19 @@ def prepare_strategies(repo, engine, strategy_ids, frame, as_of: date, *,
     if events and not frame.is_empty():
         # 两种断层策略均要求历史价格出现缺口；先做独立于财务的必要条件筛选。
         from app.indicators.earnings_breakout import pullback_price_candidates, upward_gap_expr
-        from app.indicators.pipeline import filter_halt_days
-        from app.services.earnings_breakout import PRICE_COLUMNS
-        prices = repo.get_daily_batch(frame["symbol"].unique().to_list(), date(1990, 1, 1),
-                                      as_of, columns=PRICE_COLUMNS)
-        live_columns = set(PRICE_COLUMNS) <= set(frame.columns)
-        if live_columns:
-            live = frame.select(PRICE_COLUMNS)
-            if not prices.is_empty():
-                prices = prices.join(live.select("symbol", "date"), on=["symbol", "date"], how="anti")
-            prices = pl.concat([prices, live], how="diagonal_relaxed")
+        from app.services.earnings_breakout import EarningsPriceSnapshot
+        snapshot = price_snapshot if price_snapshot is not None else EarningsPriceSnapshot()
+        prices = snapshot.capture(repo, frame, as_of)
         if not prices.is_empty():
-            prices = filter_halt_days(prices).sort(["symbol", "date"])
             gaps = prices.with_columns(upward_gap_expr().alias("_gap")).filter(pl.col("_gap"))
             candidates = []
             if "earnings_breakout_gap" in events:
                 candidates.append(gaps.join(frame.select("symbol", "date").unique(),
                                              on=["symbol", "date"], how="semi"))
             if "earnings_breakout_pullback" in events:
-                eligible = pullback_price_candidates(prices, frame)
-                candidates.append(gaps.filter(pl.col("symbol").is_in(eligible["symbol"].unique())))
+                eligible = (snapshot.prepare_pullback_candidates(frame) if price_snapshot is not None
+                            else pullback_price_candidates(prices, frame))
+                candidates.append(gaps.filter(pl.col("symbol").is_in(eligible["symbol"].unique().implode())))
             prepare_tables(repo.store.data_dir, pl.concat(candidates, how="diagonal_relaxed"), ["income"],
                            cancel_event=cancel_event, before_write=before_write)
     return names

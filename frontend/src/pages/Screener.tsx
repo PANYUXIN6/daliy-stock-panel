@@ -10,6 +10,7 @@ import { toast } from '@/components/Toast'
 import { useDataStatus, usePreferences, useCapabilities, useQuoteStatus } from '@/lib/useSharedQueries'
 import { useWatchlistBatchAdd } from '@/lib/useSharedMutations'
 import { QK } from '@/lib/queryKeys'
+import { useScreenerRunStatus } from '@/lib/useScreenerRunStatus'
 import { storage } from '@/lib/storage'
 import { PageHeader } from '@/components/PageHeader'
 import { EmptyState } from '@/components/EmptyState'
@@ -131,9 +132,9 @@ export function Screener() {
   const [expiredCounts, setExpiredCounts] = useState<Record<string, number>>({})
   // 各策略显示上限 (null = 全部)
   const [strategyLimits, setStrategyLimits] = useState<Record<string, number | null>>({})
-  // run_all 渐进式返回后仍在后台计算的策略 (startedAt 为后端时钟, 用于判断缓存新旧)
-  const [pendingRun, setPendingRun] = useState<{ ids: string[]; startedAt: number } | null>(null)
-  const pendingRunIds = useMemo(() => new Set(pendingRun?.ids ?? []), [pendingRun])
+  const runStatus = useScreenerRunStatus(`${assetType}|${asOf}`, asOf)
+  const { reconcileSummary } = runStatus
+  const pendingRunIds = useMemo(() => new Set(runStatus.pendingIds), [runStatus.pendingIds])
 
   // 筛选条件变化时同步到 map（供切换策略时读取最新值）
   useEffect(() => {
@@ -177,7 +178,7 @@ export function Screener() {
     queryKey: QK.screenerCachedSummary,
     queryFn: api.screenerCachedSummary,
     enabled: assetType === 'stock',
-    refetchInterval: pendingRun ? 2000 : false,
+    refetchInterval: runStatus.running ? 2000 : false,
   })
 
   const fullCachedQuery = useQuery({
@@ -291,28 +292,40 @@ export function Screener() {
   // 进入页面自动跑策略池中的策略，获取命中数 (日线走盘后缓存/渐进式 runAll;
   // 分钟策略结果不落缓存, 由 runAllMinute 异步批量计算后合入 hitCounts)
   const runAll = useMutation({
-    mutationFn: ({ date, strategyIds }: { date?: string; strategyIds?: string[] } = {}) =>
+    mutationFn: ({ date, strategyIds, assetType: requestedAssetType }: {
+      date?: string; strategyIds: string[]; assetType: 'stock' | 'etf'; ticket: ReturnType<typeof runStatus.begin>
+    }) =>
       api.screenerRunAll(
         date,
         strategyIds ?? dailyPoolIds,
-        assetType,
+        requestedAssetType,
       ),
-    onSuccess: (data) => {
+    onSuccess: (data, variables) => {
+      const confirmedScope = data.as_of ? `${variables.assetType}|${data.as_of}` : variables.ticket.scope
+      const accepted = runStatus.accept(variables.ticket, data, confirmedScope)
+      if (!accepted) return
+      if (data.as_of) {
+        if (activeBatchRef.current?.scope === variables.ticket.scope) activeBatchRef.current.scope = confirmedScope
+        // Date confirmation also applies to requests queued while this asset was hidden.
+        const queued = queuedRuns.current.get(variables.ticket.scope)
+        if (queued && confirmedScope !== variables.ticket.scope) {
+          queuedRuns.current.delete(variables.ticket.scope)
+          const destination = queuedRuns.current.get(confirmedScope)
+          queuedRuns.current.set(confirmedScope, {
+            date: data.as_of,
+            strategyIds: [...new Set([...(destination?.strategyIds ?? []), ...queued.strategyIds])],
+          })
+        }
+      }
+      if (!accepted.visible) return
       if (data.as_of) setAsOf(data.as_of)
       const counts: Record<string, number> = {}
       for (const [id, item] of Object.entries(data.results)) {
         counts[id] = item.total
       }
       setHitCounts(prev => ({ ...prev, ...counts }))
-      // 渐进式返回: 慢策略后台继续算, 开启摘要轮询逐个点亮
-      setPendingRun(
-        data.pending?.length
-          ? { ids: [...data.pending], startedAt: data.started_at ?? 0 }
-          : null,
-      )
-      if (data.error) toast(`策略计算失败：${data.error}`, 'error')
-      qc.invalidateQueries({ queryKey: ['screener-cached'] })
     },
+    onError: (error, variables) => runStatus.reject(variables.ticket, error),
   })
 
   // 分钟策略批量计算: 结果不落盘后缓存 (strategy_cache 为日线语义), 只取 total
@@ -340,20 +353,40 @@ export function Screener() {
   // 防止 reload / auto-run / StrictMode 叠出并发 run_all（后端 Numba 会崩溃）
   // 用 ref 同步门闩，避免同一渲染周期内 isPending 尚未更新导致重复触发
   const runAllPendingRef = useRef(false)
+  const activeBatchRef = useRef<{ scope: string; strategyIds: string[] } | null>(null)
+  const queuedRuns = useRef(new Map<string, { date?: string; strategyIds: string[] }>())
+  const runScope = `${assetType}|${asOf}`
   const requestRunAll = useCallback((
-    vars: { date?: string; strategyIds?: string[] } = {},
-    options?: Parameters<typeof runAll.mutate>[1],
+    vars: { date?: string; strategyIds?: string[]; force?: boolean } = {},
   ) => {
-    if (runAllPendingRef.current || runAll.isPending) return
+    const strategyIds = vars.strategyIds ?? dailyPoolIds
+    if (runAllPendingRef.current || runAll.isPending || runStatus.running) {
+      const alreadyRequested = new Set(runStatus.running ? runStatus.requestedIds
+        : activeBatchRef.current?.scope === runScope ? activeBatchRef.current.strategyIds : [])
+      const added = vars.force ? strategyIds : strategyIds.filter(id => !alreadyRequested.has(id))
+      if (added.length === 0) return
+      const queued = queuedRuns.current.get(runScope)
+      queuedRuns.current.set(runScope, {
+        date: vars.date ?? queued?.date ?? (asOf || undefined),
+        strategyIds: [...new Set([...(queued?.strategyIds ?? []), ...added])],
+      })
+      return
+    }
     runAllPendingRef.current = true
-    runAll.mutate(vars, {
-      ...options,
-      onSettled: (...args) => {
-        runAllPendingRef.current = false
-        options?.onSettled?.(...args)
-      },
+    activeBatchRef.current = { scope: runScope, strategyIds }
+    const ticket = runStatus.begin(strategyIds)
+    runAll.mutate({ ...vars, strategyIds, ticket, assetType }, {
+      onSettled: () => { runAllPendingRef.current = false },
     })
-  }, [runAll])
+  }, [runAll, runStatus.begin, runStatus.running, runStatus.requestedIds, dailyPoolIds, runScope, assetType, asOf])
+
+  useEffect(() => {
+    if (runAll.isPending || runAllPendingRef.current || runStatus.running) return
+    const queued = queuedRuns.current.get(runScope)
+    if (!queued) return
+    queuedRuns.current.delete(runScope)
+    requestRunAll(queued)
+  }, [runAll.isPending, runStatus.running, runScope, requestRunAll])
 
   // 摘要只同步当前日期的卡片数量，避免旧日期缓存短暂显示成当前结果。
   useEffect(() => {
@@ -380,27 +413,8 @@ export function Screener() {
       return next
     })
     setExpiredCounts(expired)
-    // 渐进式: computed_at 晚于本轮起点的策略已算完, 从 pending 中移除;
-    // 无 computed_at (监控实时叠加/旧缓存) 视为新鲜。容差吸收前后端时钟差。
-    if (pendingRun) {
-      const arrived = (id: string) => {
-        const r = summaryQuery.data!.results[id]
-        if (!r || r.as_of !== asOf) return false
-        return r.computed_at == null || r.computed_at >= pendingRun.startedAt - 2000
-      }
-      const rest = pendingRun.ids.filter(id => !arrived(id))
-      if (rest.length !== pendingRun.ids.length) {
-        setPendingRun(rest.length ? { ...pendingRun, ids: rest } : null)
-      }
-    }
-  }, [summaryQuery.data, asOf, pendingRun, strategyMap])
-
-  // 渐进式兜底: 后台计算最长等 8 分钟, 防止异常时无限轮询
-  useEffect(() => {
-    if (!pendingRun) return
-    const t = setTimeout(() => setPendingRun(null), 8 * 60 * 1000)
-    return () => clearTimeout(t)
-  }, [pendingRun])
+    reconcileSummary(summaryQuery.data)
+  }, [summaryQuery.data, asOf, reconcileSummary, strategyMap])
 
   // 当前单策略缓存更新后同步明细；参数保存的强制重算结果仍由 run 直接覆盖。
   useEffect(() => {
@@ -635,12 +649,6 @@ export function Screener() {
     setShowAll(false)
     if (result?.strategy !== s.id || result.as_of !== asOf) setResult(null)
     const tf = s.timeframes?.includes('1m') ? '1m' as const : '1d' as const
-    // 只有管理员显式点击此卡片才核验候选；自动批量计算和缓存读取仍只用本地数据。
-    if (s.id === EARNINGS_GAP_STRATEGY_ID && gapControl.canVerify) {
-      run.reset()
-      gapControl.start()
-      return
-    }
     // ETF 模式无股票盘后缓存、分钟策略走本地分钟分区 → 始终实时单跑。
     // 传空日期让后端用自身的最新交易日 (ETF 与分钟分区跟股票 enriched 可能不同日)。
     if (assetType !== 'stock' || tf === '1m') {
@@ -648,7 +656,7 @@ export function Screener() {
       return
     }
     // 摘要命中时由 singleCachedQuery 按需加载明细；缺失时才单独计算。
-    if (summaryQuery.data?.results[s.id]?.as_of === asOf || runAll.isPending) return
+    if (summaryQuery.data?.results[s.id]?.as_of === asOf || runAll.isPending || pendingRunIds.has(s.id)) return
     run.mutate({ id: s.id, date: asOf, timeframe: tf })
   }
 
@@ -699,7 +707,7 @@ export function Screener() {
     mutationFn: api.strategyReload,
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['screener-strategies'] })
-      if (asOf) requestRunAll({ date: asOf })
+      if (asOf) requestRunAll({ date: asOf, force: true })
       // 分钟策略: 重置去重 key, 策略列表失效重取后 effect 重新触发批量计算
       minuteRunDateRef.current = null
     },
@@ -916,6 +924,26 @@ export function Screener() {
       />
 
       <div className="px-8 py-4 space-y-3">
+        {(runStatus.error || Object.keys(runStatus.errors).length > 0 || runStatus.notice) && (
+          <div className="rounded-btn border border-warning/40 bg-surface p-3 text-sm space-y-2">
+            {(runStatus.error || Object.keys(runStatus.errors).length > 0) && (
+              <div role="alert" className="text-danger space-y-1">
+                {runStatus.error && <p>策略计算失败：{runStatus.error}</p>}
+                {Object.entries(runStatus.errors).map(([id, message]) => (
+                  <p key={id}>{strategyMap.get(id)?.name ?? id}：{message}</p>
+                ))}
+              </div>
+            )}
+            {runStatus.notice && <p role="status" className="text-secondary">{runStatus.notice}</p>}
+            {runStatus.retryIds.length > 0 && (
+              <button type="button" disabled={runAll.isPending || runStatus.running}
+                className="text-accent disabled:opacity-50"
+                onClick={() => requestRunAll({ date: asOf, strategyIds: runStatus.retryIds })}>
+                重试未完成策略
+              </button>
+            )}
+          </div>
+        )}
         {/* 策略卡片 */}
         {cardSize !== 'hidden' && (
         <section>
@@ -962,7 +990,7 @@ export function Screener() {
                   awaitRun={hitCounts[id] == null && isMinute && !selfRunning && !minuteRunning}
                   cardSize={cardSize}
                   onRun={() => handleRun(s)}
-                  disabled={(run.isPending && activeStrategy === s.id) || (s.id === EARNINGS_GAP_STRATEGY_ID && gapControl.busy)}
+                  disabled={run.isPending && activeStrategy === s.id}
                   onSettings={() => setSettingsStrategyId(s.id)}
                   monitored={strategyMonitorMap.has(`${assetType}:${s.id}`)}
                   onToggleMonitor={isAdmin && s.realtime_supported !== false ? () => toggleStrategyMonitor(s.id, s.name) : undefined}
@@ -979,7 +1007,8 @@ export function Screener() {
           {!showAll && assetType === 'stock' && activeStrategy === EARNINGS_GAP_STRATEGY_ID && (
             <div className="mb-4">
               <EarningsGapVerification verification={gapVerification} job={gapControl.job}
-                submitting={gapControl.busy} canVerify={gapControl.canVerify} historical={gapControl.historical} error={gapControl.error} />
+                submitting={gapControl.busy} canVerify={gapControl.canVerify} historical={gapControl.historical} error={gapControl.error}
+                onVerify={gapControl.start} />
             </div>
           )}
           {run.isError && (

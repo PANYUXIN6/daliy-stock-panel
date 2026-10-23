@@ -37,8 +37,9 @@ def test_daily_batch_groups_index_symbols(repo, monkeypatch):
     req = type("R", (), {"app": type("A", (), {"state": state})()})()
 
     out = kline_api.get_daily_batch(req, {"symbols": ["600000.SH", "000001.SH"], "days": 12})
-    assert calls["stock_batch"] == [["600000.SH"]]
-    assert calls["index"] == ["000001.SH"]
+    # 仅有一根的 fixture 会进入两轮回补，每轮仍保持资产隔离。
+    assert calls["stock_batch"] == [["600000.SH"]] * 3
+    assert calls["index"] == ["000001.SH"] * 3
     assert "000001.SH" in out["data"]
 
 

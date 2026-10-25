@@ -40,6 +40,15 @@ def test_persisted_calendar_shared_and_bounded(calendar, monkeypatch):
     assert provider.trading_days.call_count == 1
 
 
+def test_calendar_publication_invalidates_shared_review(calendar):
+    import json
+
+    root, _ = calendar
+    assert trading_day.sync_calendar(root)["updated"] is True
+    update = json.loads((root / "runtime" / "data_update.json").read_text())
+    assert update["datasets"] == ["calendar"]
+
+
 @pytest.mark.parametrize("verdict", [False, None])
 def test_quote_stops_on_holiday_or_unknown_calendar(monkeypatch, verdict):
     monkeypatch.setattr(trading_day, "is_trading_day", lambda *args, **kwargs: verdict)

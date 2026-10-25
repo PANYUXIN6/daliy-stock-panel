@@ -113,5 +113,6 @@ git status --short
 | 数据源接入 | [custom-data-source.md](custom-data-source.md)、[plugin-development.md](plugin-development.md) |
 | 策略与信号 | [strategy.md](strategy.md)、[策略开发规范](../backend/app/strategy/prompts/strategy-guide.md)、[strategy-iteration.md](strategy-iteration.md) |
 | 因子与研究 | [factor-system-design.md](factor-system-design.md)、[factor-platform-plan.md](factor-platform-plan.md)、[mining.md](mining.md) |
+| 板块复盘 | [事件共振与调整逆势设计](sector-review-design.md)：页面、规则、数据边界与验收清单；[首版实现与验证](sector-review-implementation.md) |
 | 市场环境与模拟盘 | [market-phase.md](market-phase.md)、[paper-trading-plan.md](paper-trading-plan.md) |
 | 源码定制 | [secondary-development.md](secondary-development.md) |

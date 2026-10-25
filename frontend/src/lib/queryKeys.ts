@@ -8,6 +8,9 @@
 // ===== Query Key 工厂 =====
 
 export const QK = {
+  sectorReviewAvailability: ['sector-review', 'availability'] as const,
+  sectorReview: (mode: string, params: object) => ['sector-review', mode, params] as const,
+  sectorReviewMembers: (mode: string, params: object, sector: string, snapshot: string, page: number) => ['sector-review', 'members', mode, params, sector, snapshot, page] as const,
   aiCredits: (userId: string) => ['ai-credits', userId] as const,
   users: (search = '', offset = 0) => ['users', search, offset] as const,
   loginEvents: (userId = '', offset = 0) => ['login-events', userId, offset] as const,
@@ -191,16 +194,19 @@ export const SSE_INVALIDATE_PREFIXES = [
 
 // 后台落盘事件不受实时行情显示开关影响；仅失效受影响的数据集。
 export const DATASET_QUERY_PREFIXES: Record<string, readonly string[]> = {
-  daily: ['kline-gaps', 'earnings-breakout', 'kline', 'kline-latest', 'kline-batch', 'index-daily', 'index-quotes', 'screener-kline-batch', 'watchlist-enriched', 'overview-market', 'limit-ladder', 'market-snapshot', 'stock-levels', 'lots-kline', 'sector-rotation-index-daily', 'screener-cached', 'regime-history', 'regime-latest', 'regime-states', 'regime-coverage', 'regime-phases', 'regime-mainline', 'rps-rotation'],
+  daily: ['sector-review', 'kline-gaps', 'earnings-breakout', 'kline', 'kline-latest', 'kline-batch', 'index-daily', 'index-quotes', 'screener-kline-batch', 'watchlist-enriched', 'overview-market', 'limit-ladder', 'market-snapshot', 'stock-levels', 'lots-kline', 'sector-rotation-index-daily', 'screener-cached', 'regime-history', 'regime-latest', 'regime-states', 'regime-coverage', 'regime-phases', 'regime-mainline', 'rps-rotation'],
   minute: ['kline-minute', 'kline-minute-range', 'index-minute', 'minute-batch', 'sector-rotation', 'sector-rotation-index-minute', 'dimension-intraday'],
   financials: ['financials', 'earnings-breakout'],
   regime: ['regime-history', 'regime-latest', 'regime-states', 'regime-coverage', 'regime-phases', 'regime-mainline'],
   mainline: ['regime-mainline', 'regime-phases'],
-  ext_data: ['ext-data', 'ext-data-rows', 'ext-data-schema-all', 'ext-schema-all', 'dimension-members', 'dimension-intraday', 'market-snapshot', 'watchlist-enriched', 'kline', 'kline-latest', 'kline-batch', 'screener-kline-batch', 'screener-cached', 'rps-rotation', 'sector-rotation'],
+  ext_data: ['sector-review', 'ext-data', 'ext-data-rows', 'ext-data-schema-all', 'ext-schema-all', 'dimension-members', 'dimension-intraday', 'market-snapshot', 'watchlist-enriched', 'kline', 'kline-latest', 'kline-batch', 'screener-kline-batch', 'screener-cached', 'rps-rotation', 'sector-rotation'],
   review: ['review-publication', 'review-reports'],
   dragon_tiger: ['dragon-tiger'],
   auction_benchmark: ['auction-benchmark', 'abnormal-overview'],
-  config: ['preferences', 'settings', 'capabilities', 'capability-matrix', 'data-sources', 'quote-status', 'quote-interval', 'monitor-rules', 'monitor-rule-options', 'screener-strategies', 'screener-cached', 'strategy-detail', 'watchlist', 'watchlist-groups', 'watchlist-enriched', 'watchlist-quotes', 'factors-library', 'backtest-factor-columns'],
+  calendar: ['sector-review'],
+  index: ['sector-review'],
+  etf: ['sector-review'],
+  config: ['sector-review', 'preferences', 'settings', 'capabilities', 'capability-matrix', 'data-sources', 'quote-status', 'quote-interval', 'monitor-rules', 'monitor-rule-options', 'screener-strategies', 'screener-cached', 'strategy-detail', 'watchlist', 'watchlist-groups', 'watchlist-enriched', 'watchlist-quotes', 'factors-library', 'backtest-factor-columns'],
 }
 
 export function dataUpdateQueryPrefixes(datasets: readonly string[]): Set<string> {

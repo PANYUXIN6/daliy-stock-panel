@@ -156,3 +156,33 @@ it('叠加多空线后关键价位和通道高亮仍对应原来的线，关闭�
   expect(lastOption().series[3].zlevel).toBe(10)
   expect(lastOption().series[4].zlevel).toBe(10)
 })
+
+it('后端仍返回 ATR 时只展示 Keltner 通道，开关同步控制曲线与价位统计', async () => {
+  const levels: Record<LevelType, PriceLevel[]> = {
+    sr: [], pivot: [], extreme: [], boll: [],
+    keltner_s: [{ value: 24, label: 'Keltner短上', type: 'keltner_s', side: 'resistance' }],
+    keltner_m: [], keltner_l: [],
+    atr_stop: [{ value: 23, label: 'ATR上轨', type: 'atr_stop', side: 'resistance' }],
+    gap: [], fib: [], round: [],
+  }
+  await render([10, 12], {
+    levels, seriesDates: ['2026-10-01', '2026-10-02'],
+    defaultLevelTypes: ['keltner_s', 'atr_stop'],
+    series: {
+      keltner_s: { upper: [23, 24], lower: [17, 18] },
+      atr: { stop_loss: [18, 19], take_profit: [22, 23] },
+    },
+  })
+  expect(lastOption().series.map(series => series.name)).toEqual(['K', '成交量', 'Keltner短上', 'Keltner短下', '多空线'])
+  expect(lastOption().series.find(series => series.name === 'Keltner短上')?.data).toEqual([23, 24])
+  expect(host.textContent).toContain('Keltner短上')
+  expect(host.textContent).not.toContain('ATR')
+  const toggle = [...host.querySelectorAll('button')].find(button => button.textContent?.startsWith('Keltner短期'))!
+  await act(async () => toggle.click())
+  expect(lastOption().series.map(series => series.name)).toEqual(['K', '成交量', '多空线'])
+  expect(host.textContent).not.toContain('Keltner短上')
+  expect(host.textContent).not.toContain('ATR')
+  await act(async () => toggle.click())
+  expect(lastOption().series.find(series => series.name === 'Keltner短下')?.data).toEqual([17, 18])
+  expect(host.textContent).toContain('Keltner短上')
+})

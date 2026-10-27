@@ -900,10 +900,14 @@ def update_ordinary_minute(req: OrdinaryMinutePrefs) -> dict:
 
 @router.get("/minute-refresh/status")
 def minute_refresh_status(request: Request) -> dict:
-    """盘中分钟增量刷新服务状态 (开关/能力门控/最近一轮/下一轮)。"""
+    """列表页可读取分钟 freshness；详细采集诊断仅向管理员返回。"""
+    from app.services.user_context import current_user
+
     svc = getattr(request.app.state, "minute_refresh", None)
     if svc is None:
         return {"available": False}
+    if current_user().role != "admin":
+        return {"available": True, "healthy": svc.is_healthy()}
     return {"available": True, **svc.status()}
 
 

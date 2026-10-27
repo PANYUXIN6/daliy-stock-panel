@@ -58,6 +58,7 @@ def admin_required(path: str, method: str) -> bool:
                 "/api/settings",
                 "/api/settings/preferences",
                 "/api/settings/capability-matrix",
+                "/api/settings/minute-refresh/status",
                 "/api/settings/preferences/watchlist-columns",
                 "/api/settings/preferences/screener-result-columns",
                 "/api/settings/preferences/quote-interval",

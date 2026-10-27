@@ -171,6 +171,8 @@ web 与 collector 均通过 `auth_access.py` 验证 SQLite 会话，建立不可
 
 选股叠加条件继续通过 `GET /api/custom-signals/options` 读取共享字段元数据，此例外不开放个人信号定义或写入。因子检验保留筛选、分析与候选操作，仅管理员可从检验结果创建信号。
 
+策略页读取 `GET /api/settings/minute-refresh/status` 判断分钟数据 freshness，所有已登录用户均可查询。Guest／Pro 只获得 `available`、`healthy`，服务未初始化时返回 `available=false`；采集源、运行参数、轮次和错误详情仅向管理员返回，采集配置写入仍限管理员。
+
 概念／行业轮动的 AI 分析通过 `POST /api/rps/rotation-analyze` 向所有已登录用户开放，包括 guest 和 pro；前端共用 `RpsRotationDialog`，web 与 collector 使用相同权限规则。该例外不放宽其他 RPS 写入或管理员操作。
 
 AI 点数和模型用量通过独立事务账本 `auth/ai_credits.sqlite3` 管理：`ai_credit_policy.py` 定义可调整规则，`ai_credits.py` 持久化月度任务、价格快照、模型 usage 和终态；`ai_credit_stream.py` 在 collector 的实际执行边界预留及结算点数，`ai_metering.py` 逐次记录调用用量并按已配置报价估算金额。当前默认只按点数限制使用，费用不拦截、不收紧生成参数；缺失 usage 或报价明确标记，不把预留当实际消耗。web 只转发，额度查询同样由 collector 回答；前端读取服务端入口价格与可用状态，不自行扣点。游客/Pro 按北京时间自然月分别 60/4,000 点，助手 3 点、报告 5 点，管理员零点任务可统计手动生成的用量，原功能权限保留。管理员用户列表按当前页账号批量汇总月度点数、tokens 和金额估算。失败退点但保留已上报模型用量；collector 启动恢复中断任务，web 不恢复。规则更新带版本比较，已有任务继续使用启动快照。详见 [AI 点数与用量统计](ai-credits.md)。

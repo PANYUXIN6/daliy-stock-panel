@@ -34,6 +34,7 @@ from app.api import (
     regime,
     rps,
     screener,
+    sector_review,
     sector_rotation,
     signals,
     stock_analysis,
@@ -513,6 +514,7 @@ def create_app(role: str | None = None) -> FastAPI:
     app.include_router(events.router)
     app.include_router(rps.router)
     app.include_router(sector_rotation.router)
+    app.include_router(sector_review.router)
 
     # 二次开发路由与小粒度策略在所有核心路由后注册, 禁止覆盖核心路径。
     extension_registry, extension_load_errors = configure_backend_extensions(app)

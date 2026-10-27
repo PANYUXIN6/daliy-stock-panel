@@ -1352,6 +1352,11 @@ class KlineRepository:
             return pl.DataFrame()
         return self._instruments_cache
 
+    def sector_review_reader(self):
+        """Strict historical reads, isolated from indicator warmup and live snapshots."""
+        from app.tickflow.sector_review_reader import SectorReviewReader
+        return SectorReviewReader(self.store.data_dir)
+
     def get_historical_shares(self) -> pl.DataFrame:
         """读取财务股本历史，并在文件更新后自动刷新缓存。"""
         path = self.store.data_dir / "financials" / "shares" / "part.parquet"

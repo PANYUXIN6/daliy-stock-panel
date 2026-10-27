@@ -321,6 +321,21 @@ class ExtConfigStore:
             raise ValueError(f"非法 config_id: {config_id!r}")
         return self._base / config_id / "config.json"
 
+    def load_all_readonly(self) -> list[ExtConfig]:
+        """历史只读查询使用；不运行旧配置迁移，也不复用可能跨版本的缓存。"""
+        paths = sorted(self._base.glob("*/config.json"))
+        configs = []
+        for path in paths:
+            if not self._VALID_ID.fullmatch(path.parent.name):
+                continue
+            try:
+                config = ExtConfig.from_dict(json.loads(path.read_text(encoding="utf-8")))
+                if config.id == path.parent.name:
+                    configs.append(config)
+            except (OSError, UnicodeError, ValueError, TypeError, KeyError, AttributeError):
+                logger.warning("只读扩展配置不可用: %s", path.parent.name)
+        return configs
+
     def load_all(self) -> list[ExtConfig]:
         # 兼容旧版: 如果目录为空且旧配置文件存在则迁移
         sig = _ext_config_dir_signature(self._base)

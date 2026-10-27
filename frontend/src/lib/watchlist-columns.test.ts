@@ -1,7 +1,24 @@
 // @vitest-environment node
 import { describe, expect, it } from 'vitest'
-import { mergeColumns } from './list-columns'
+import { mergeColumns, type ColumnConfig } from './list-columns'
 import { BUILTIN_COLUMNS, COLUMN_GROUPS } from './watchlist-columns'
+import { SCREENER_BUILTIN_COLUMNS } from './screener-columns'
+
+it.each([
+  ['自选', BUILTIN_COLUMNS],
+  ['选股', SCREENER_BUILTIN_COLUMNS],
+] as const)('%s 合并旧配置时忽略已移除的 ATR 列，保留其他列的顺序与显隐', (_label, defaults) => {
+  const saved: ColumnConfig[] = [
+    { id: 'builtin:pct', source: { type: 'builtin', key: 'pct' }, label: '涨跌幅', visible: true },
+    { id: 'builtin:atr14', source: { type: 'builtin', key: 'atr14' }, label: 'ATR14', visible: true },
+    { id: 'builtin:price', source: { type: 'builtin', key: 'price' }, label: '现价', visible: false },
+  ]
+  const merged = mergeColumns(saved, defaults)
+  expect(merged.some(column => column.id === 'builtin:atr14')).toBe(false)
+  expect(merged.slice(0, 3).map(column => column.id)).toEqual(['builtin:symbol', 'builtin:pct', 'builtin:price'])
+  expect(merged.find(column => column.id === 'builtin:price')?.visible).toBe(false)
+  expect(merged.find(column => column.id === 'builtin:pct')?.visible).toBe(true)
+})
 
 // #328: 自选页新增 今开/最高/最低/昨收/成交量/涨停价/跌停价 七列。
 // 关键兼容契约: 老用户的持久化配置不含这些列 id, mergeColumns 必须把它们

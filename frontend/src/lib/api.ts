@@ -2388,7 +2388,92 @@ export interface AuthStatus { configured: boolean; authenticated: boolean; user:
 export interface LoginEvent { id: number; user_id: string | null; username: string; occurred_at: string; ip: string; user_agent: string; success: boolean; reason: string }
 
 // ===== API surface =====
+export type SectorReviewMode = 'event' | 'countertrend'
+export interface SectorReviewParams {
+  kind: 'industry' | 'concept'
+  dimension_id: string
+  level: number
+  benchmark: string
+  as_of?: string
+  window?: number
+  event_date?: string
+  view_as_of?: string
+}
+export interface SectorReviewDimension {
+  dimension_id: string; config_id: string; field: string; label: string
+  kind: 'industry' | 'concept'; levels: number[]; mode: string
+}
+export interface SectorReviewAvailability {
+  status: 'ready' | 'partial' | 'unavailable'
+  default_date: string | null; latest_local_date: string | null
+  calendar: { start: string; end: string; days: string[] } | null
+  dimensions: SectorReviewDimension[]
+  benchmarks: { symbol: string; name: string }[]
+  etf: { status: string; reason: string }; warnings: string[]
+}
+export interface SectorReviewDownDays {
+  wins: number; comparable_days: number; benchmark_down_days: number | null
+  known_down_days: number; ratio: number | null; mean_excess: number | null
+  complete: boolean; small_sample: boolean
+}
+export interface SectorReviewPeriod {
+  sector_return: number | null; benchmark_return: number | null; relative_return: number | null
+  classification: string; down_days: SectorReviewDownDays; return_days: number; required_days: number
+}
+export interface SectorReviewObservation {
+  date: string | null; status: string; offset?: number
+  day_return?: number | null; benchmark_return?: number | null; relative_return?: number | null
+  median_return?: number | null; breadth_up?: number | null; breadth_diff?: number | null
+  breadth_expanding?: number | null; amount?: number | null; amount_ratio?: number | null
+  amount_share?: number | null; share_delta?: number | null
+  members?: number; return_count?: number; amount_count?: number
+  daily_classification?: string; strength?: boolean | null; same_day_up?: boolean | null
+  amount_expansion?: boolean | null; majority_up?: boolean | null; daily_resonance_candidate?: boolean | null
+  relative_lead?: boolean | null
+  relative_return_delta?: number | null; breadth_up_delta?: number | null; amount_ratio_delta?: number | null
+  core_up_count?: number | null; core_count?: number; core_amount_share?: number | null
+}
+export interface SectorReviewMemberObservation {
+  date: string; price: number | null; day_return: number | null
+  amount: number | null; amount_ratio: number | null; reason: string | null
+}
+export interface SectorReviewCore {
+  symbol: string; name: string | null; formation_mean_amount: number
+  observations: SectorReviewMemberObservation[]
+}
+export interface SectorReviewRow extends SectorReviewPeriod {
+  sector_id: string; name: string; path: string
+  original_members: number; formed_members: number; exclusions: Record<string, number>
+  eligible_for_comparison: boolean; data_complete: boolean; missing_reasons: Record<string, number>
+  member_up_ratio: number | null; member_median_return: number | null; member_return_count: number
+  latest: SectorReviewObservation; observations: SectorReviewObservation[]; core_members: SectorReviewCore[]
+  candidate?: boolean | null; earliest_observed_strength_date?: string | null; confirmed_first_strength_date?: string | null
+  first_strength_offset?: number | null; strength_streak?: number | null; streak_complete?: boolean
+  background?: Record<string, SectorReviewPeriod>; background_label?: string | null
+}
+export interface SectorReviewResult {
+  status: 'ready' | 'partial' | 'unavailable'
+  context: { mode: SectorReviewMode; kind: string; dimension_id: string | null; dimension_label?: string; level: number | null; benchmark: string; benchmark_name?: string; as_of: string | null; event_date: string | null; view_as_of: string | null; window: number | null; formation_date?: string; window_start?: string }
+  rules_version: string; snapshot_id: string | null; membership_basis: string; calculation_basis: string
+  membership_observed_at?: string; membership_fingerprint?: string; input_versions?: Record<string, string>; computed_at?: string
+  rows: SectorReviewRow[]; warnings: string[]
+  coverage: { total_sectors: number; evaluated_sectors: number; complete_sectors: number; original_market_members?: number; formed_market_members?: number; exchanges?: string[]; market_exclusions?: Record<string, number>; excluded_by_policy?: number }
+  benchmark_evidence?: { date: string; day_return: number | null; amount: number | null; amount_ratio: number | null; pre_returns: Record<string, number | null>; low_vs_prev_close: number | null; close_position: number | null; prior20_close_high: number | null; labels: Record<string, boolean | null> }
+  response_overview?: { same_day_candidates: number; first_strength_counts: Record<string, number>; window_finished: boolean; overlap_note: string }
+  etf?: { status: string; reason: string }
+}
+export interface SectorReviewMembers {
+  snapshot_id: string; sector_id: string; page: number; page_size: number; total: number
+  rows: { symbol: string; name: string | null; formation_eligible: boolean; exclusion_reason: string | null; is_core: boolean; window_return: number | null; observations: SectorReviewMemberObservation[] }[]
+}
+function sectorReviewQuery(params: object): string {
+  return new URLSearchParams(Object.entries(params).filter(([, v]) => v != null).map(([k, v]) => [k, String(v)])).toString()
+}
+
 export const api = {
+  sectorReviewAvailability: (signal?: AbortSignal) => request<SectorReviewAvailability>('/api/sector-review/availability', { signal, quiet: true }),
+  sectorReview: (mode: SectorReviewMode, params: SectorReviewParams, signal?: AbortSignal) => request<SectorReviewResult>(`/api/sector-review/${mode}?${sectorReviewQuery(params)}`, { signal, quiet: true }),
+  sectorReviewMembers: (mode: SectorReviewMode, params: SectorReviewParams, sectorId: string, snapshotId: string, page: number, signal?: AbortSignal) => request<SectorReviewMembers>(`/api/sector-review/members?${sectorReviewQuery({ ...params, mode, sector_id: sectorId, snapshot_id: snapshotId, page, page_size: 30 })}`, { signal, quiet: true }),
   aiCredits: fetchAiCredits,
   health: () => request<{ status: string; version: string; mode: string }>('/health'),
 

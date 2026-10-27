@@ -96,7 +96,6 @@ export function getSortValue(r: any, col: ColumnConfig): any {
     case 'kdj_j':         return r.kdj_j
     case 'boll_upper':    return r.boll_upper
     case 'boll_lower':    return r.boll_lower
-    case 'atr14':         return r.atr_14
     case 'vol_ma5':       return r.vol_ma5
     case 'vol_ma10':      return r.vol_ma10
     case 'momentum_5d':   return r.momentum_5d

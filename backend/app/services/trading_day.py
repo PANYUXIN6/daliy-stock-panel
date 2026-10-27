@@ -48,6 +48,8 @@ def sync_calendar(data_dir: Path | None = None) -> dict:
     tmp = path.with_suffix(".tmp")
     tmp.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
     tmp.replace(path)
+    from app.services.shared_runtime import publish_data_update
+    publish_data_update(path.parent.parent, ["calendar"])
     return {"updated": True, "start": payload["start"], "end": payload["end"]}
 
 

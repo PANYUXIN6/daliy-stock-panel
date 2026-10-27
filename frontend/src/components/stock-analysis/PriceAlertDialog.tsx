@@ -75,8 +75,7 @@ export function PriceAlertDialog({
   const recommended = useMemo(() => {
     if (currentPrice == null) return { above: [] as PriceLevel[], below: [] as PriceLevel[] }
     const seen = new Set<string>()
-    const all = Object.values(levelsQuery.data?.levels ?? {})
-      .flat()
+    const all = LEVEL_GROUPS.flatMap(group => levelsQuery.data?.levels[group.key] ?? [])
       .filter(level => Number.isFinite(level.value) && level.value > 0)
       .sort((a, b) => Math.abs(a.value - currentPrice) - Math.abs(b.value - currentPrice))
       .filter(level => {

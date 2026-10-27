@@ -10,6 +10,68 @@ from app.services.auth import AuthStore
 
 @pytest.mark.parametrize('service_role', ['web', 'collector'])
 @pytest.mark.parametrize('role', [None, 'guest', 'pro', 'admin'])
+@pytest.mark.parametrize('healthy', [True, False, None])
+def test_minute_refresh_read_status_respects_roles(tmp_path, monkeypatch, service_role, role, healthy):
+    from app.config import settings
+    from app.main import create_app
+    from app.services import collector_proxy
+
+    monkeypatch.setattr(settings, 'data_dir', tmp_path)
+
+    async def no_proxy(request, call_next):
+        return await call_next(request)
+
+    monkeypatch.setattr(collector_proxy, 'proxy_middleware', no_proxy)
+    store = AuthStore(tmp_path)
+    store.bootstrap('admin', 'initial-secret')
+    token = None
+    if role:
+        if role != 'admin':
+            store.create_user(role, 'initial-secret', role,
+                              '2099-12-31' if role == 'pro' else None)
+        token, _ = store.login(role, 'initial-secret', 'test', '')
+        if role != 'admin':
+            token, _ = store.change_password(token, 'initial-secret', 'changed-secret')
+
+    # 普通策略页只需要 freshness；供应商及错误详情仍属于管理员诊断。
+    detail = {'healthy': healthy, 'provider': 'private-source', 'last_error': 'private diagnostics'}
+
+    def admin_status():
+        assert role == 'admin'
+        return detail
+
+    @asynccontextmanager
+    async def lifespan(app):
+        app.state.auth_store = store
+        app.state.minute_refresh = None if healthy is None else SimpleNamespace(
+            is_healthy=lambda: healthy, status=admin_status,
+        )
+        yield
+
+    app = create_app(service_role)
+    app.router.lifespan_context = lifespan
+    with TestClient(app) as client:
+        if token:
+            client.cookies.set('tf_session', token)
+        response = client.get('/api/settings/minute-refresh/status')
+        if role is None:
+            assert response.status_code == 401
+        else:
+            assert response.status_code == 200, response.text
+            expected = {'available': False} if healthy is None else {
+                'available': True, **(detail if role == 'admin' else {'healthy': healthy}),
+            }
+            assert response.json() == expected
+        if role in {'guest', 'pro'}:
+            for path in ('/api/settings/minute-refresh/status/private', '/api/settings/data-sources'):
+                assert client.get(path).status_code == 403
+            assert client.put('/api/settings/preferences/realtime-monitor', json={
+                'minute_refresh_enabled': True,
+            }).status_code == 403
+
+
+@pytest.mark.parametrize('service_role', ['web', 'collector'])
+@pytest.mark.parametrize('role', [None, 'guest', 'pro', 'admin'])
 def test_feature_routes_require_admin(tmp_path, monkeypatch, service_role, role):
     from app.config import settings
     from app.main import create_app

@@ -43,14 +43,13 @@ export const LEVEL_GROUPS: { key: LevelType; label: string; color: string }[] = 
   { key: 'keltner_s',label: 'Keltner短期',  color: '#06B6D4' },   // 青(MA20±2ATR 曲线)
   { key: 'keltner_m',label: 'Keltner中期',  color: '#22D3EE' },   // 浅青(MA60±2.5ATR 曲线)
   { key: 'keltner_l',label: 'Keltner长期',  color: '#67E8F9' },   // 更浅青(MA120±3ATR 曲线)
-  { key: 'atr_stop', label: 'ATR波动通道',  color: '#EF4444' },   // 红(警示)
   { key: 'gap',      label: '缺口位',    color: '#EC4899' },   // 粉
   { key: 'fib',      label: '斐波那契',  color: '#F59E0B' },   // 金
   { key: 'round',    label: '整数关口',  color: '#71717A' },   // 灰(心理位,弱视觉)
 ]
 
 // 通道曲线元数据(单一数据源):供 buildOption 画线 + 右侧面板取最新值共用。
-//   alignedKey: alignedSeries 中的 key(由 series.boll/keltner/atr 对齐而来)
+//   alignedKey: alignedSeries 中的 key(由 series.boll/keltner 对齐而来)
 //   group:      属于哪个价位开关组(开关该组即开关这条曲线)
 //   endLabel:   右侧端点标签(显示最新值的文字)
 const CURVE_DEFS: { alignedKey: string; group: LevelType; endLabel: string; color: string; dashed?: boolean }[] = [
@@ -63,8 +62,6 @@ const CURVE_DEFS: { alignedKey: string; group: LevelType; endLabel: string; colo
   { alignedKey: 'keltner_m_lower',group: 'keltner_m', endLabel: 'Keltner中下', color: '#22D3EE', dashed: true },
   { alignedKey: 'keltner_l_upper',group: 'keltner_l', endLabel: 'Keltner长上', color: '#67E8F9', dashed: true },
   { alignedKey: 'keltner_l_lower',group: 'keltner_l', endLabel: 'Keltner长下', color: '#67E8F9', dashed: true },
-  { alignedKey: 'atr_stop',       group: 'atr_stop',  endLabel: 'ATR下轨', color: '#EF4444', dashed: true },
-  { alignedKey: 'atr_tp',         group: 'atr_stop',  endLabel: 'ATR上轨', color: '#F87171', dashed: true },
 ]
 
 // ===== 日期标记与区间 =====
@@ -84,7 +81,7 @@ export interface ChartRange {
 interface Props {
   rows: KlineRow[]
   levels?: Record<LevelType, PriceLevel[]>
-  /** 带状曲线指标(布林带/Keltner/ATR)的每日序列 —— 画成跟随时间漂移的曲线 */
+  /** 带状曲线指标(布林带/Keltner)的每日序列 —— 画成跟随时间漂移的曲线 */
   series?: LevelSeries
   /** series 数据对应的日期数组(与 series 各数组对齐) */
   seriesDates?: string[]
@@ -169,10 +166,6 @@ export function AnalysisKChart({
       if (series.keltner_l) {
         alignedSeries['keltner_l_upper'] = align(series.keltner_l.upper)
         alignedSeries['keltner_l_lower'] = align(series.keltner_l.lower)
-      }
-      if (series.atr) {
-        alignedSeries['atr_stop'] = align(series.atr.stop_loss)
-        alignedSeries['atr_tp'] = align(series.atr.take_profit)
       }
     }
 
@@ -264,7 +257,7 @@ export function AnalysisKChart({
       })
     }
 
-    // 带状曲线指标(布林带 / Keltner通道 / ATR波动通道) —— 跟随行情漂移的曲线
+    // 带状曲线指标(布林带 / Keltner通道) —— 跟随行情漂移的曲线
     // 单一数据源 CURVE_DEFS 驱动:每条曲线带 endLabel(右侧端点标签),显示最新数值
     for (const def of CURVE_DEFS) {
       if (!activeTypes.has(def.group)) continue
@@ -600,7 +593,7 @@ function LevelOverview({
 }
 
 // ===== 工具:收集要画的水平价位线(按开启的组 + 档位 + 强度配色) =====
-// 注意:带状指标(布林带/Keltner/ATR)改用曲线渲染,不在此画水平线,避免重复。
+// 注意:带状指标(布林带/Keltner)改用曲线渲染,不在此画水平线,避免重复。
 function collectPriceLines(
   levels: Record<LevelType, PriceLevel[]> | undefined,
   active: Set<LevelType>,
@@ -613,10 +606,10 @@ function collectPriceLines(
     for (const p of levels[g.key] ?? []) {
       // 枢轴点:按档位过滤(rank>P 的,只显示到选定的档位)
       if (p.type === 'pivot' && p.rank !== undefined && p.rank > pivotRank) continue
-      // 波动通道类(boll / keltner三档 / atr_stop)整组走曲线渲染,不画水平线;
+      // 波动通道类(boll / keltner三档)整组走曲线渲染,不画水平线;
       // sr 组现为成交密集区水平点,直接画线即可,无需特判。
       if (p.type === 'boll' || p.type === 'keltner_s' || p.type === 'keltner_m'
-          || p.type === 'keltner_l' || p.type === 'atr_stop') continue
+          || p.type === 'keltner_l') continue
       out.push({ value: p.value, label: p.label, color: strengthColor(p.strength, g.color), type: p.type })
     }
   }

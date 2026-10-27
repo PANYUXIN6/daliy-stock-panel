@@ -66,6 +66,12 @@ ETF 显式同步遇到未完成发布时，先使用本地 ETF 日线与因子�
 
 量比的全量重算与实时递推共用 [volume_ratio.py](../backend/app/indicators/volume_ratio.py)，使用各行同日北京时间 `quote_ts` 折算累计成交量，午休不累加交易分钟。正式日线无快照时间时按全天成交量计算；实时调用缺少时间时才使用显式传入的已交易分钟数。历史快照重算不依赖执行时钟。日线策略矩阵在内存、Parquet 直读、磁盘缓存和实时更新中保留独立时间因子，使 `vol_ratio_5d` 过滤不依赖是否开启该字段评分；原始成交量及其他研究因子定义保持不变。302 与 300／301 使用相同创业板分类和限价规则，689 纳入科创板；回测矩阵版本失效后重新构建相应限价与锁板标记。
 
+## 板块复盘
+
+独立「板块复盘」页 `/sector-review` 经 `api/sector_review.py` 访问 web 本机的 `services/sector_review.py`，事件共振与调整逆势共享 `sector_review_rules.py`。`KlineRepository.sector_review_reader()` 提供窄列读取边界：正式原始日线校验 OHLC、成交字段和 `quote_ts`，股票收益使用与原始收盘一致的 enriched 前复权 close；不访问实时缓存、不预热指标、不迁移配置、不采集和归档。
+
+成员按事前21个连续交易日收盘及20日成交额形成，之后固定；缺失不补零、不删成员重新归一。当前分类回看历史的限制常显，ETF 未配置单独降级。版本键包含目录、日期／窗口、分类、日历、股票／指数／ETF文件签名、已有发布标记和规则；同键单飞、有界缓存，读取中版本变化丢弃并重试。重叠概念的临时聚合按10个日期分批以限制内存，股票历史仍一次批量读取。成员分页携带摘要版本，修订后返回409。前端随日线、分类、日历及配置发布失效，不随实时报价高频重算；collector日历成功持久化后发布独立 `calendar` 数据更新通知。设计与验证边界见 [设计基线](sector-review-design.md) 和 [实现记录](sector-review-implementation.md)。
+
 ## 实时行情与事件流
 
 collector 的 [QuoteService](../backend/app/services/quote_service.py) 默认每 30 秒按路由与交易时段拉取标准行情，在允许写入的阶段更新当日日线和 enriched；`compute_enriched_today` 优先使用历史聚合状态递推。完成缓存更新后，服务评估统一监控规则、更新策略实时结果并驱动模拟盘撮合。取数锁和监控评估锁分开管理。
@@ -164,6 +170,8 @@ web 与 collector 均通过 `auth_access.py` 验证 SQLite 会话，建立不可
 回测、监控中心、信号库和持仓提醒仅对 admin 开放：前端隐藏菜单及关联入口，直接 URL 由 `AdminOnly` 拦截；后端统一限制回测、监控规则、自定义信号、告警记录和持仓提醒接口，AI 助手的回测、信号及持仓提醒查询也遵守相同角色约束。因子检验、挖掘与候选管理虽共用 `/api/backtest` 前缀，仍保留各自权限，不随回测页一起关闭；模拟盘的独立接口不变。
 
 选股叠加条件继续通过 `GET /api/custom-signals/options` 读取共享字段元数据，此例外不开放个人信号定义或写入。因子检验保留筛选、分析与候选操作，仅管理员可从检验结果创建信号。
+
+策略页读取 `GET /api/settings/minute-refresh/status` 判断分钟数据 freshness，所有已登录用户均可查询。Guest／Pro 只获得 `available`、`healthy`，服务未初始化时返回 `available=false`；采集源、运行参数、轮次和错误详情仅向管理员返回，采集配置写入仍限管理员。
 
 概念／行业轮动的 AI 分析通过 `POST /api/rps/rotation-analyze` 向所有已登录用户开放，包括 guest 和 pro；前端共用 `RpsRotationDialog`，web 与 collector 使用相同权限规则。该例外不放宽其他 RPS 写入或管理员操作。
 

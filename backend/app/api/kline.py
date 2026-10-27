@@ -11,7 +11,7 @@ import re
 from contextlib import suppress
 from datetime import date, timedelta
 from functools import lru_cache
-from typing import Annotated
+from typing import Annotated, Literal
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, HTTPException, Query, Request, Response
@@ -575,6 +575,28 @@ def _maybe_inject_live_candle(
         rows.append(live_row)
 
     return rows
+
+
+@router.get("/boxes")
+def get_boxes(
+    request: Request,
+    symbol: Annotated[str, Query(pattern=r"^\d{6}\.(SH|SZ|BJ)$")],
+    start_date: date,
+    end_date: date,
+    period: Literal["daily", "weekly", "monthly"] = "daily",
+):
+    """读取日／周／月 K 及独立箱体结构，所有资产共用本地前复权数据。"""
+    import polars as pl
+
+    from app.services.box_oscillation import get_box_oscillation
+
+    if start_date > end_date:
+        raise HTTPException(400, "起始日期不能晚于截止日期")
+    try:
+        return get_box_oscillation(request.app.state.repo, symbol, start_date, end_date, period)
+    except (OSError, pl.exceptions.PolarsError, ValueError) as exc:
+        logger.warning("箱体结构本地数据读取失败: %s", symbol, exc_info=True)
+        raise HTTPException(503, "箱体结构读取失败，请检查本地日线及交易日历") from exc
 
 
 @router.get("/gaps")

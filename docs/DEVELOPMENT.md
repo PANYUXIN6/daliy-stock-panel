@@ -63,6 +63,8 @@ collector 启动会创建或使用数据目录、恢复任务并启动调度、�
 
 ## 验证入口
 
+- 箱体结构：既有 `test_box_oscillation.py`、`test_box_oscillation_service.py`；离线评估增加 `test_box_evaluation.py`、`test_box_evaluation_service.py`、`test_box_oscillation_baseline.py`。在 `backend/` 使用 `uv run python scripts/evaluate_box_oscillation.py baseline --output /tmp/box-baseline.json` 复核合成完整输出；标注格式、时间隔离和真实质量待校准状态见[箱体评估规范](box-oscillation-evaluation.md)。输出路径必须尚不存在。
+
 只改文档时核对链接、源码位置和最终差异。代码修改按 [维护约定](../CONTRIBUTING.md#9-验证矩阵) 选择受影响模块；类型检查和构建不能代替业务行为验证。
 
 ```bash

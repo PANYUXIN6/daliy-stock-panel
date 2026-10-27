@@ -23,11 +23,13 @@ const fixtures = vi.hoisted(() => ({
   minuteCap: true,
   dailyCap: true,
   sync: vi.fn(),
+  boxes: vi.fn(),
 }))
 
 vi.mock('@/lib/api', () => ({
   api: {
     syncIndexDaily: fixtures.sync,
+    klineBoxes: fixtures.boxes,
     indexQuotes: async () => ({ rows: [] }),
     indexDaily: (symbol: string) => fixtures.deferDaily
       ? new Promise<DailyResponse>(resolve => fixtures.pendingDaily.push({ symbol, resolve }))
@@ -73,6 +75,7 @@ beforeEach(() => {
   fixtures.minuteCap = true
   fixtures.dailyCap = true
   fixtures.sync.mockReset().mockResolvedValue({ job_id: 'index-job', reused: false })
+  fixtures.boxes.mockReset().mockImplementation(async (symbol: string, period: string) => ({ symbol, period, status: 'ready', rows: [], boxes: [], diagnostics: [] }))
   host = document.createElement('div')
   document.body.append(host)
   root = createRoot(host)
@@ -116,6 +119,8 @@ it('keeps selected dates isolated across delayed, out-of-order and cached respon
     <MemoryRouter><QueryClientProvider client={client}><Indices /></QueryClientProvider></MemoryRouter>,
   ))
   await settle()
+  expect(fixtures.boxes).not.toHaveBeenCalled()
+  expect([...host.querySelectorAll('button')].find(button => button.textContent === '箱体')?.getAttribute('aria-pressed')).toBe('false')
   const chart = () => host.querySelector<HTMLElement>('[data-chart]')
   await resolveDay('2026-09-11', 11)
   expect(chart()?.textContent).toBe('2026-09-11|2026-09-11T09:35:00|11')
@@ -200,4 +205,69 @@ it('isolates daily prices during index changes and keeps the current index durin
   expect(chart()?.dataset.close).toBe('3010')
   await resolveDaily('000001.SH', 3011)
   expect(chart()?.dataset.close).toBe('3011')
+})
+
+it('周月线使用所选指数的聚合K线，点击最后交易日打开分时，切换指数不透传旧数据', async () => {
+  fixtures.boxes.mockImplementation(async (symbol: string, period: string) => ({ symbol, period, status: 'ready', boxes: [], diagnostics: ['未完成周期仅供展示'],
+    rows: [{ date: period === 'weekly' ? '2026-09-11' : '2026-09-30', open: 3000, high: 3100, low: 2900, close: 3050, volume: 12 }] }))
+  await act(async () => root.render(<MemoryRouter><QueryClientProvider client={client}><Indices /></QueryClientProvider></MemoryRouter>))
+  await settle()
+  const click = async (label: string) => {
+    const button = [...host.querySelectorAll<HTMLButtonElement>('button')].find(item => item.textContent === label)!
+    await act(async () => button.click()); await settle()
+  }
+  await click('周K')
+  expect(fixtures.boxes).toHaveBeenCalledWith('000001.SH', 'weekly', expect.objectContaining({ start: expect.stringMatching(/^2021-/) }))
+  expect(host.querySelector<HTMLElement>('[data-daily-chart]')?.dataset.close).toBe('3050')
+  expect(host.textContent).toContain('未完成周期仅供展示')
+  const start = host.querySelector<HTMLInputElement>('[aria-label="K线起始日期"]')!
+  await act(async () => {
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(start, '2024-01-01')
+    start.dispatchEvent(new Event('change', { bubbles: true }))
+  })
+  await settle()
+  expect(start.value).toBe('2024-01-01')
+  expect(fixtures.boxes).toHaveBeenCalledWith('000001.SH', 'weekly', expect.objectContaining({ start: '2024-01-01' }))
+  await clickDay('2026-09-11')
+  await resolveDay('2026-09-11', 11)
+  expect(host.querySelector('[data-chart]')?.textContent).toContain('2026-09-11|')
+  await click('月K')
+  expect(fixtures.boxes).toHaveBeenCalledWith('000001.SH', 'monthly', expect.objectContaining({ start: expect.stringMatching(/^2011-/) }))
+  await clickDay('2026-09-30')
+  await resolveDay('2026-09-30', 30)
+  expect(host.querySelector('[data-chart]')?.textContent).toContain('2026-09-30|')
+  fixtures.boxes.mockReturnValue(new Promise(() => {}))
+  const next = [...host.querySelectorAll<HTMLButtonElement>('aside button')].find(item => item.textContent?.includes('深证成指'))!
+  await act(async () => next.click()); await settle()
+  expect(host.querySelector('[data-daily-chart]')).toBeNull()
+  expect(host.querySelector('[data-chart]')).toBeNull()
+})
+
+it('清空日期保留最后有效范围，起点晚于截止时提示并停止查询', async () => {
+  await act(async () => root.render(<MemoryRouter><QueryClientProvider client={client}><Indices /></QueryClientProvider></MemoryRouter>))
+  await settle()
+  const end = host.querySelector<HTMLInputElement>('[aria-label="K线截止日期"]')!
+  const originalEnd = end.value
+  const change = async (input: HTMLInputElement, value: string) => {
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(input, value)
+      input.dispatchEvent(new Event('change', { bubbles: true }))
+    })
+    await settle()
+  }
+  const switchPeriod = async (label: string) => {
+    await act(async () => [...host.querySelectorAll<HTMLButtonElement>('button')].find(button => button.textContent === label)!.click())
+    await settle()
+  }
+  await change(end, '')
+  expect(end.value).toBe(originalEnd)
+  await switchPeriod('周K')
+  await change(end, '')
+  expect(end.value).toBe(originalEnd)
+  await switchPeriod('月K')
+  expect(fixtures.boxes).toHaveBeenLastCalledWith('000001.SH', 'monthly', expect.objectContaining({ end: originalEnd }))
+  const count = fixtures.boxes.mock.calls.length
+  await change(host.querySelector<HTMLInputElement>('[aria-label="K线起始日期"]')!, '2099-01-01')
+  expect(host.querySelector('[role="alert"]')?.textContent).toBe('起始日期不能晚于截止日期')
+  expect(fixtures.boxes).toHaveBeenCalledTimes(count)
 })

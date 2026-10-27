@@ -175,11 +175,28 @@ export function StockPanel({
   }, [showIntraday, selectedDate, rows])
 
   const selectedIdx = selectedDate ? rows.findIndex(r => r.date === selectedDate) : -1
-  const selectedRow = selectedIdx >= 0 ? rows[selectedIdx] : undefined
+  const selectedHistoryRange = useMemo(() => {
+    if (!selectedDate) return dateRange
+    const start = new Date(`${selectedDate}T12:00:00Z`)
+    start.setUTCFullYear(start.getUTCFullYear() - 1)
+    return { start: start.toISOString().slice(0, 10), end: selectedDate }
+  }, [selectedDate, dateRange])
+  // 周月K可以选中原日K窗口以外的日期；按需补该日真实日K与前收，不能回退到当前日期的前收。
+  const selectedHistory = useQuery({
+    ...klineDailyQueryOptions(symbol, selectedHistoryRange),
+    enabled: !!symbol && showIntraday && !intradayDismissed && !!selectedDate && selectedIdx <= 0
+      && prevSymbol.current === symbol,
+    staleTime: 30_000,
+  })
+  const historicalRows = useMemo(() => !selectedHistory.isError && selectedHistory.data?.symbol === symbol
+    ? toOHLC(selectedHistory.data.rows).filter(row => row.date <= (selectedDate ?? '')) : [],
+  [selectedHistory.isError, selectedHistory.data, symbol, selectedDate])
+  const historicalIdx = selectedDate ? historicalRows.findIndex(row => row.date === selectedDate) : -1
+  const selectedRow = selectedIdx >= 0 ? rows[selectedIdx] : historicalIdx >= 0 ? historicalRows[historicalIdx] : undefined
   const prevClose = selectedIdx > 0
     ? rows[selectedIdx - 1].close
-    : rows.length >= 2
-      ? rows[rows.length - 2].close
+    : historicalIdx > 0
+      ? historicalRows[historicalIdx - 1].close
       : undefined
   if (!symbol) return null
 

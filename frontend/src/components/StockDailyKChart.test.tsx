@@ -6,14 +6,15 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { QK } from '@/lib/queryKeys'
 import { StockDailyKChart } from './StockDailyKChart'
 
-const mocks = vi.hoisted(() => ({ daily: vi.fn(), earnings: vi.fn(), gaps: vi.fn() }))
-vi.mock('@/lib/api', () => ({ api: { klineDaily: mocks.daily, klineEarningsBreakout: mocks.earnings, klineGaps: mocks.gaps } }))
+const mocks = vi.hoisted(() => ({ daily: vi.fn(), earnings: vi.fn(), gaps: vi.fn(), boxes: vi.fn() }))
+vi.mock('@/lib/api', () => ({ api: { klineDaily: mocks.daily, klineEarningsBreakout: mocks.earnings, klineGaps: mocks.gaps, klineBoxes: mocks.boxes } }))
 vi.mock('@/components/EChartsCandlestick', async importOriginal => ({
   ...await importOriginal<typeof import('./EChartsCandlestick')>(),
-  EChartsCandlestick: ({ data, activeIndicators, markers, showMarkers, priceGaps }: any) => <div data-chart>
+  EChartsCandlestick: ({ data, activeIndicators, markers, showMarkers, priceGaps, boxes, ranges, priceLines }: any) => <div data-chart data-rows={JSON.stringify(data)} data-ranges={ranges?.length ?? 0} data-lines={priceLines?.length ?? 0}>
     {activeIndicators.includes('bull_bear_line') ? `多空线:${data.at(-1)?.bull_bear_line ?? '—'}` : '指标关闭'}
     <span data-markers>{showMarkers ? markers.map((m: any) => `${m.date}:${m.label}`).join(',') : ''}</span>
     <span data-gaps>{priceGaps?.length ? JSON.stringify(priceGaps) : ''}</span>
+    <span data-boxes>{boxes?.map((box: any) => box.id).join(',')}</span>
   </div>,
 }))
 
@@ -30,6 +31,9 @@ beforeEach(() => {
   mocks.daily.mockReset()
   mocks.earnings.mockReset()
   mocks.gaps.mockReset()
+  mocks.boxes.mockReset().mockImplementation(async (symbol: string, period: string) => ({
+    symbol, period, status: 'ready', history_start: range.start, as_of: range.end, rows: [], boxes: [], diagnostics: [],
+  }))
   mocks.gaps.mockImplementation(async (symbol: string) => ({
     symbol, status: 'ready', history_start: range.start, as_of: range.end, gaps: [],
   }))
@@ -168,4 +172,75 @@ it('缺口区域默认显示且无开关，回补、切股和出错时清除旧�
   await render('000001.SZ')
   expect(host.querySelector('[data-gaps]')?.textContent).toBe('')
   expect(host.textContent).toContain('缺口区域读取失败')
+})
+
+it('日周月独立读取，保留历史截止且不把日线标记、缺口和线段带入周月', async () => {
+  mocks.daily.mockResolvedValue({ ...response('600000.SH', 10.25), rows: [{ ...response('600000.SH', 10.25).rows[0], signal_limit_up: true }] })
+  mocks.gaps.mockResolvedValue({ symbol: '600000.SH', status: 'ready', gaps: [{ date: '2026-01-05', lower: 10, upper: 11 }] })
+  let resolveWeekly: (value: unknown) => void = () => {}
+  mocks.boxes.mockImplementation((symbol: string, period: string) => period === 'weekly'
+    ? new Promise(resolve => { resolveWeekly = resolve })
+    : Promise.resolve({ symbol, period, status: 'insufficient_data', rows: [], boxes: [], diagnostics: [] }))
+  await act(async () => root.render(<QueryClientProvider client={client}><StockDailyKChart symbol="600000.SH" dateRange={range}
+    markers={[{ date: '2026-01-05', kind: 'buy', label: '买' }]} ranges={[{ start: '2026-01-05', end: '2026-01-06', color: '#123' }]}
+    priceLines={[{ value: 10, label: '日线支撑' }]} /></QueryClientProvider>))
+  await settle()
+  expect(host.querySelector('[data-markers]')?.textContent).toContain('板')
+  expect(host.querySelector('[data-chart]')?.getAttribute('data-ranges')).toBe('1')
+  await clickPill('周K')
+  expect(host.querySelector('[data-chart]')).toBeNull()
+  expect(mocks.boxes).toHaveBeenCalledWith('600000.SH', 'weekly', { start: '2021-01-31', end: range.end })
+  await act(async () => resolveWeekly({ symbol: '600000.SH', period: 'weekly', status: 'ready', boxes: [], diagnostics: ['当前周K尚未完成'],
+    rows: [{ date: '2026-01-30', open: 10, high: 15, low: 8, close: 14, bull_bear_line: 12, is_complete: false }] }))
+  await settle()
+  expect(host.querySelector('[data-chart]')?.getAttribute('data-rows')).toContain('2026-01-30')
+  expect(host.querySelector('[data-markers]')?.textContent).toBe('')
+  expect(host.querySelector('[data-gaps]')?.textContent).toBe('')
+  expect(host.querySelector('[data-chart]')?.getAttribute('data-ranges')).toBe('0')
+  expect(host.querySelector('[data-chart]')?.getAttribute('data-lines')).toBe('0')
+  expect(host.textContent).toContain('当前周K尚未完成')
+  await clickPill('月K')
+  expect(mocks.boxes).toHaveBeenCalledWith('600000.SH', 'monthly', { start: '2011-01-31', end: range.end })
+  expect(host.textContent).toContain('暂无本地月K数据')
+  await clickPill('日K')
+  expect(host.querySelector('[data-markers]')?.textContent).toContain('买')
+  expect(host.querySelector('[data-chart]')?.getAttribute('data-ranges')).toBe('1')
+})
+
+it('箱体默认关闭且不请求，手动开启后筛选所选结构并展示详情，关闭后隐藏', async () => {
+  mocks.daily.mockResolvedValue(response('600000.SH', 10.25))
+  const base = { period: 'daily', lower: 10, upper: 12, width: 2, width_pct: 20, start_date: '2026-01-01', end_date: '2026-01-31',
+    observed_until: '2026-01-31', confirmed_date: '2026-01-22', duration_bars: 22, status: 'confirmed',
+    upper_touches: [{ date: '2026-01-05', price: 12, confirmed_date: '2026-01-07' }],
+    lower_touches: [{ date: '2026-01-09', price: 10, confirmed_date: null }], missing_conditions: [], parent_id: null,
+    breakout: { status: 'returned', direction: 'up', first_date: '2026-01-28', confirmed_date: null },
+    events: [{ type: 'returned', date: '2026-01-29', direction: 'up' }] }
+  mocks.boxes.mockResolvedValue({ symbol: '600000.SH', period: 'daily', status: 'ready', history_start: '2020-01-01', as_of: range.end, diagnostics: [], rows: [],
+    boxes: [{ ...base, id: 'small', level: 'short', parent_id: 'large' }, { ...base, id: 'large', level: 'long', lower: 8, upper: 15, duration_bars: 70 }] })
+  await render()
+  expect(mocks.boxes).not.toHaveBeenCalled()
+  expect([...host.querySelectorAll('button')].find(button => button.textContent === '箱体')?.getAttribute('aria-pressed')).toBe('false')
+  expect(host.querySelector('[data-boxes]')?.textContent).toBe('')
+  expect(host.querySelector('[aria-label="箱体大小"]')).toBeNull()
+  await clickPill('箱体')
+  expect(mocks.boxes).toHaveBeenCalledWith('600000.SH', 'daily', range)
+  expect(host.querySelector('[data-boxes]')?.textContent).toBe('small')
+  await clickPill('箱体详情（2）')
+  expect(host.textContent).toContain('宽度 20.00%')
+  expect(host.textContent).toContain('首次确认 2026-01-22')
+  expect(host.textContent).toContain('2026-01-07 确认')
+  expect(host.textContent).toContain('嵌套父箱：大箱体 8.00–15.00')
+  expect(host.textContent).toContain('2026-01-29 向上回到箱内')
+  const size = host.querySelector<HTMLSelectElement>('[aria-label="箱体大小"]')!
+  await act(async () => { size.value = 'long'; size.dispatchEvent(new Event('change', { bubbles: true })) })
+  expect(host.querySelector('[data-boxes]')?.textContent).toBe('large')
+  const status = host.querySelector<HTMLSelectElement>('[aria-label="箱体状态"]')!
+  await act(async () => { status.value = 'candidate'; status.dispatchEvent(new Event('change', { bubbles: true })) })
+  expect(host.querySelector('[data-boxes]')?.textContent).toBe('')
+  expect(host.textContent).toContain('当前范围与筛选条件下没有箱体')
+  await act(async () => { status.value = 'all'; status.dispatchEvent(new Event('change', { bubbles: true })) })
+  expect(host.querySelector('[data-boxes]')?.textContent).toBe('large')
+  await clickPill('箱体')
+  expect(host.querySelector('[data-boxes]')?.textContent).toBe('')
+  expect(host.querySelector('[aria-label="箱体大小"]')).toBeNull()
 })

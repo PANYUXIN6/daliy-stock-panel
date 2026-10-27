@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "dataset_id": "replace-with-reviewed-dataset-id",
+  "description": "待人工核对；日期是格式示例，请替换为实际校准和验证范围。cases 为空时不产生质量指标。",
+  "split_plan": {
+    "gap_bars": 5,
+    "splits": [
+      {"name": "calibration", "start_date": "2019-01-01", "end_date": "2022-12-31"},
+      {"name": "validation", "start_date": "2023-01-01", "end_date": "2025-12-31"}
+    ]
+  },
+  "match_config": {
+    "min_time_iou": 0.5,
+    "max_boundary_error": 0.2,
+    "max_start_error_bars": 5,
+    "max_end_error_bars": 5
+  },
+  "cases": []
+}

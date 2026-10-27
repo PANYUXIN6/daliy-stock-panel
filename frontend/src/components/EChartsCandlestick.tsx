@@ -3,7 +3,7 @@ import { chartTheme, getTheme, useTheme } from '@/lib/theme'
 import { fmtPct } from '@/lib/format'
 import * as echarts from 'echarts'
 import type { ECharts, EChartsOption } from 'echarts'
-import type { PriceGap } from '@/lib/api'
+import type { BoxOscillation, PriceGap } from '@/lib/api'
 import { buildBullBearLineSeries, BULL_BEAR_UP, BULL_BEAR_DOWN } from '@/lib/bullBearLine'
 
 export interface OHLC {
@@ -330,6 +330,7 @@ interface Props {
   ranges?: ChartRange[]
   priceLines?: ChartPriceLine[]
   priceGaps?: PriceGap[]
+  boxes?: BoxOscillation[]
   height?: number
   showMA?: boolean
   showInfoBar?: boolean
@@ -492,6 +493,122 @@ function markerTooltip(description?: string) {
   }
 }
 
+function buildBoxOscillationSeries(boxes: BoxOscillation[] | undefined, dates: string[], dateIndexMap: Map<string, number>) {
+  if (!boxes?.length || !dates.length) return undefined
+  const areas: any[] = []
+  const lines: any[] = []
+  const points: any[] = []
+  const periodLabels = { daily: '日 K', weekly: '周 K', monthly: '月 K' }
+  const levelLabels = { short: '小箱体', medium: '中箱体', long: '大箱体' }
+  const statusLabels = { candidate: '形成中', confirmed: '已形成', broken: '已突破', invalidated: '已失效' }
+  const breakoutLabels = { none: '尚未越界', pending: '突破待确认', confirmed: '突破已确认', returned: '已回箱' }
+  const colors = getTheme() === 'dark'
+    ? { short: '#38BDF8', medium: '#2DD4BF', long: '#A78BFA' }
+    : { short: '#0284C7', medium: '#0D9488', long: '#7C3AED' }
+  const fills = { short: 'rgba(56,189,248,0.07)', medium: 'rgba(45,212,191,0.07)', long: 'rgba(167,139,250,0.07)' }
+
+  for (const box of boxes) {
+    if (box.upper <= box.lower || box.end_date < dates[0] || box.start_date > dates[dates.length - 1]) continue
+    const startIndex = dates.findIndex(date => date >= box.start_date)
+    let endIndex = dates.length - 1
+    while (endIndex >= 0 && dates[endIndex] > box.end_date) endIndex -= 1
+    if (startIndex < 0 || endIndex < startIndex) continue
+
+    const color = box.status === 'invalidated' ? CT().text : colors[box.level]
+    const precision = box.lower.toFixed(2) === box.upper.toFixed(2) ? 4 : 2
+    const title = `${periodLabels[box.period]} · ${levelLabels[box.level]}`
+    const description = [
+      title,
+      `状态：${statusLabels[box.status]}`,
+      `上下沿：${box.lower.toFixed(precision)}–${box.upper.toFixed(precision)}`,
+      `宽度：${box.width.toFixed(precision)}（${box.width_pct.toFixed(2)}%）`,
+      `持续：${box.duration_bars} 根${periodLabels[box.period]}`,
+      `独立试探：上沿 ${box.upper_touches.length} 次 / 下沿 ${box.lower_touches.length} 次`,
+      `结构起点：${box.start_date}`,
+      `首次确认：${box.confirmed_date ?? '尚未确认'}`,
+      `观察截止：${box.observed_until}`,
+      `箱体终点：${box.end_date}`,
+      `突破状态：${breakoutLabels[box.breakout.status]}${box.breakout.direction ? `（${box.breakout.direction === 'up' ? '向上' : '向下'}）` : ''}`,
+      ...(box.breakout.first_date ? [`本轮越界：${box.breakout.first_date}`] : []),
+      ...(box.breakout.confirmed_date ? [`突破确认：${box.breakout.confirmed_date}`] : []),
+      ...(box.missing_conditions.length ? [`尚缺条件：${box.missing_conditions.join('、')}`] : []),
+      ...(box.parent_id ? ['嵌套：此箱体位于另一箱体内部，突破状态单独判断。'] : []),
+    ].join('\n')
+
+    const addSegment = (start: string, end: string, forming: boolean) => {
+      const lineStyle = { color, type: forming ? 'dashed' : 'solid', width: forming ? 1 : 1.5, opacity: 0.9 }
+      const tooltip = markerTooltip(`${description}\n${forming ? '该区间为形成过程，当时尚未确认。' : '该区间已确认形成箱体。'}`)
+      areas.push([
+        {
+          name: title, xAxis: start, yAxis: box.lower,
+          itemStyle: { color: fills[box.level], borderColor: color, borderWidth: 1, borderType: lineStyle.type },
+          label: { show: false }, tooltip,
+        },
+        { xAxis: end, yAxis: box.upper },
+      ])
+      for (const value of [box.lower, box.upper]) {
+        lines.push([
+          { xAxis: start, yAxis: value },
+          { xAxis: end, yAxis: value, lineStyle, label: { show: false }, tooltip },
+        ])
+      }
+    }
+
+    // 历史形成过程保留虚线；首次确认日才开始画实线，不能把已形成状态回填到起点。
+    const confirmedIndex = box.status !== 'candidate' && box.confirmed_date
+      ? dates.findIndex(date => date >= box.confirmed_date!)
+      : -1
+    if (confirmedIndex < 0 || confirmedIndex > endIndex) {
+      addSegment(dates[startIndex], dates[endIndex], true)
+    } else {
+      if (confirmedIndex > startIndex) addSegment(dates[startIndex], dates[confirmedIndex], true)
+      addSegment(dates[Math.max(startIndex, confirmedIndex)], dates[endIndex], false)
+    }
+
+    for (const [side, touches] of [['上沿', box.upper_touches], ['下沿', box.lower_touches]] as const) {
+      for (const touch of touches) {
+        if (!dateIndexMap.has(touch.date)) continue
+        points.push({
+          name: touch.date, coord: [touch.date, touch.price],
+          symbol: touch.confirmed_date ? 'circle' : 'emptyCircle', symbolSize: 6,
+          itemStyle: { color }, label: { show: false },
+          tooltip: markerTooltip(`${title} · ${side}独立试探\n发生日期：${touch.date}\n触点价格：${touch.price.toFixed(precision)}\n触点确认：${touch.confirmed_date ?? '等待后续 K 线确认'}`),
+        })
+      }
+    }
+    if (box.confirmed_date && dateIndexMap.has(box.confirmed_date)) {
+      points.push({
+        name: box.confirmed_date, coord: [box.confirmed_date, box.upper], symbol: 'diamond', symbolSize: 9,
+        symbolOffset: [0, -8], itemStyle: { color },
+        label: { show: true, formatter: '形成', position: 'top', color, fontSize: 10 },
+        tooltip: markerTooltip(`${title} · 首次确认\n${description}\n形成事件只从此日可用。`),
+      })
+    }
+    for (const event of box.events) {
+      if (!dateIndexMap.has(event.date)) continue
+      const up = event.direction === 'up'
+      const eventLabel = event.type === 'returned' ? '回箱' : event.type === 'breakout_confirmed' ? '突破确认' : '突破待确认'
+      const eventColor = event.type === 'returned' ? color : up ? THEME.bull : THEME.bear
+      points.push({
+        name: event.date, coord: [event.date, up ? box.upper : box.lower],
+        symbol: event.type === 'returned' ? 'diamond' : 'triangle', symbolSize: 9,
+        symbolRotate: up ? 0 : 180, symbolOffset: [0, up ? -10 : 10], itemStyle: { color: eventColor },
+        label: { show: true, formatter: eventLabel, position: up ? 'top' : 'bottom', color: eventColor, fontSize: 10 },
+        tooltip: markerTooltip(`${title} · ${eventLabel}\n事件日期：${event.date}\n方向：${up ? '向上' : '向下'}\n${description}`),
+      })
+    }
+  }
+
+  if (!areas.length) return undefined
+  return {
+    id: 'box-oscillation-overlay', name: '箱体区域', type: 'line', data: [], symbol: 'none', animation: false,
+    xAxisIndex: 0, yAxisIndex: 0,
+    markArea: { silent: false, data: areas, animation: false },
+    markLine: { silent: false, symbol: 'none', data: lines, animation: false },
+    markPoint: { data: points, animation: false, labelLayout: { hideOverlap: true } },
+  }
+}
+
 function buildOption(
   data: OHLC[],
   dates: string[],
@@ -508,6 +625,7 @@ function buildOption(
   volumeCompare: VolumeCompareConfig,
   addedDate: string | null | undefined,
   priceGaps: PriceGap[] | undefined,
+  boxes: BoxOscillation[] | undefined,
 ): EChartsOption {
   const candleData = data.map(d => [d.open, d.close, d.low, d.high])
 
@@ -737,6 +855,9 @@ function buildOption(
     markArea: { silent: false, data: gapAreas, animation: false },
   })
 
+  const boxSeries = buildBoxOscillationSeries(boxes, dates, dateIndexMap)
+  if (boxSeries) series.push(boxSeries)
+
   if (hasMA) {
     const maLine = (key: keyof OHLC, color: string, name: string) => ({
       name, type: 'line',
@@ -929,6 +1050,7 @@ export function EChartsCandlestick({
   ranges,
   priceLines,
   priceGaps,
+  boxes,
   height = 480,
   showMA = true,
   showInfoBar = true,
@@ -1316,6 +1438,7 @@ export function EChartsCandlestick({
       volumeCompare,
       addedDate,
       priceGaps,
+      boxes,
     )
 
     chart.setOption(option, true)
@@ -1333,7 +1456,7 @@ export function EChartsCandlestick({
     if (infoEl) {
       infoEl.innerHTML = getInfoBarHTML()
     }
-  }, [data, markers, ranges, priceLines, priceGaps, linkedPrice, showMA, showMarkersProp, activeIndicators, volumeCompare, addedDate, chartHeight, dates, dateIndexMap, initialZoom, getInfoBarHTML, theme])
+  }, [data, markers, ranges, priceLines, priceGaps, boxes, linkedPrice, showMA, showMarkersProp, activeIndicators, volumeCompare, addedDate, chartHeight, dates, dateIndexMap, initialZoom, getInfoBarHTML, theme])
 
   // 渲染信息栏容器 (内容由 JS 直接写入)
   const initialHTML = useMemo(() => {

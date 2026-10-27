@@ -2,6 +2,7 @@
 import { act } from 'react'
 import { createRoot } from 'react-dom/client'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
+import type { BoxOscillation } from '@/lib/api'
 import { EChartsCandlestick, OVERLAY_INDICATORS, type OHLC } from './EChartsCandlestick'
 
 const chart = vi.hoisted(() => ({
@@ -208,4 +209,72 @@ it('价格带使用剩余上下沿，旧缺口从窗口左侧延伸，回补后�
   expect(option.series.find((s: any) => s.name === 'K').markArea.data[0][0].name).toBe('原有区间')
   await render([])
   expect((chart.setOption.mock.calls.at(-1)?.[0] as any).series.some((s: any) => s.name === '缺口区域')).toBe(false)
+})
+
+const boxFixture = (overrides: Partial<BoxOscillation> = {}): BoxOscillation => ({
+  id: 'box-1', period: 'daily', level: 'medium', lower: 8, upper: 12, width: 4, width_pct: 50,
+  start_date: '2023-12-01', end_date: DAYS[40], observed_until: DAYS[61], confirmed_date: DAYS[20],
+  duration_bars: 45, status: 'confirmed', parent_id: null, missing_conditions: [],
+  upper_touches: [{ date: '2023-12-01', price: 12, confirmed_date: '2023-12-03' }, { date: DAYS[12], price: 11.9, confirmed_date: DAYS[14] }],
+  lower_touches: [{ date: DAYS[5], price: 8.1, confirmed_date: DAYS[7] }, { date: DAYS[18], price: 8, confirmed_date: DAYS[20] }],
+  breakout: { status: 'returned', direction: 'up', first_date: DAYS[30], confirmed_date: null },
+  events: [{ type: 'breakout_pending', date: DAYS[30], direction: 'up' }, { type: 'returned', date: DAYS[31], direction: 'up' }],
+  ...overrides,
+})
+
+it('箱体保持原始边界，裁剪时间范围并区分形成过程、首次确认与突破事件', async () => {
+  await act(async () => root.render(<EChartsCandlestick data={rows(10)} boxes={[boxFixture()]}
+    ranges={[{ start: DAYS[2], end: DAYS[4], label: '原有区间' }]}
+    markers={[{ date: DAYS[10], kind: 'buy', label: '买点' }]}
+    priceGaps={[{ date: DAYS[8], direction: 'up', lower: 8.5, upper: 9, original_lower: 8.5, original_upper: 9 }]}
+  />))
+  const option = chart.setOption.mock.calls.at(-1)?.[0] as any
+  const overlay = option.series.find((series: any) => series.name === '箱体区域')
+  const areas = overlay.markArea.data
+  expect(areas.map((area: any) => [area[0].xAxis, area[0].yAxis, area[1].xAxis, area[1].yAxis, area[0].itemStyle.borderType])).toEqual([
+    [DAYS[0], 8, DAYS[20], 12, 'dashed'],
+    [DAYS[20], 8, DAYS[40], 12, 'solid'],
+  ])
+  expect(areas[0][0].tooltip.formatter()).toContain('当时尚未确认')
+  expect(areas[1][0].tooltip.formatter()).toContain('宽度：4.00（50.00%）')
+  expect(areas[1][0].tooltip.formatter()).toContain('持续：45 根日 K')
+  expect(overlay.markLine.data.every((line: any) => [8, 12].includes(line[0].yAxis) && line[0].yAxis === line[1].yAxis)).toBe(true)
+  const points = overlay.markPoint.data
+  expect(points.map((point: any) => point.name)).not.toContain('2023-12-01')
+  expect(points.find((point: any) => point.label.formatter === '形成').name).toBe(DAYS[20])
+  expect(points.filter((point: any) => point.label.formatter?.startsWith('突破')).map((point: any) => point.label.formatter)).toEqual(['突破待确认'])
+  expect(points.find((point: any) => point.name === DAYS[31]).tooltip.formatter()).toContain('回箱')
+  expect(points.find((point: any) => point.name === DAYS[12]).tooltip.formatter()).toContain(`触点确认：${DAYS[14]}`)
+  expect(option.series.find((series: any) => series.name === 'K').markArea.data[0][0].name).toBe('原有区间')
+  expect(option.series.find((series: any) => series.name === 'K').markPoint.data[0].label.formatter).toBe('买点')
+  expect(option.series.some((series: any) => series.name === '缺口区域')).toBe(true)
+})
+
+it('周月 K 候选保持虚线和未确认触点，切换或关闭箱体会移除旧叠加', async () => {
+  const render = async (boxes: BoxOscillation[]) => {
+    await act(async () => root.render(<EChartsCandlestick data={rows(10)} boxes={boxes} />))
+  }
+  await render([boxFixture({
+    period: 'weekly', status: 'candidate', confirmed_date: null, level: 'short', end_date: '2027-01-01',
+    missing_conditions: ['下沿独立试探不足'], upper_touches: [{ date: DAYS[30], price: 12, confirmed_date: null }],
+    breakout: { status: 'none', direction: null, first_date: null, confirmed_date: null }, events: [],
+  })])
+  const candidate = (chart.setOption.mock.calls.at(-1)?.[0] as any).series.find((series: any) => series.name === '箱体区域')
+  expect(candidate.markArea.data).toHaveLength(1)
+  expect(candidate.markArea.data[0][0].itemStyle.borderType).toBe('dashed')
+  expect(candidate.markArea.data[0][1].xAxis).toBe(DAYS[61])
+  expect(candidate.markArea.data[0][0].tooltip.formatter()).toContain('周 K · 小箱体')
+  expect(candidate.markArea.data[0][0].tooltip.formatter()).toContain('尚缺条件：下沿独立试探不足')
+  expect(candidate.markPoint.data.find((point: any) => point.name === DAYS[30]).symbol).toBe('emptyCircle')
+
+  await render([boxFixture({ period: 'monthly', level: 'long', status: 'broken', breakout: {
+    status: 'confirmed', direction: 'down', first_date: DAYS[39], confirmed_date: DAYS[41],
+  }, events: [{ type: 'breakout_confirmed', date: DAYS[41], direction: 'down' }] })])
+  const monthly = (chart.setOption.mock.calls.at(-1)?.[0] as any).series.find((series: any) => series.name === '箱体区域')
+  const event = monthly.markPoint.data.find((point: any) => point.name === DAYS[41])
+  expect(event.tooltip.formatter()).toContain('月 K · 大箱体')
+  expect(event.tooltip.formatter()).toContain('方向：向下')
+  expect(event.coord).toEqual([DAYS[41], 8])
+  await render([])
+  expect((chart.setOption.mock.calls.at(-1)?.[0] as any).series.some((series: any) => series.name === '箱体区域')).toBe(false)
 })

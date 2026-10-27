@@ -312,6 +312,8 @@ export interface KlineRow {
   macd_hist?: number | null
   rsi_14?: number | null
   vol_ratio_5d?: number | null
+  /** 周期是否已经收盘；未完成K线仅展示，不参与箱体确认。 */
+  is_complete?: boolean
   [key: string]: any
 }
 
@@ -330,6 +332,57 @@ export interface PriceGapsResponse {
   history_start: string | null
   as_of: string | null
   gaps: PriceGap[]
+}
+
+export type KlinePeriod = 'daily' | 'weekly' | 'monthly'
+
+export interface BoxOscillation {
+  id: string
+  period: KlinePeriod
+  level: 'short' | 'medium' | 'long'
+  lower: number
+  upper: number
+  width: number
+  /** 百分数值，例如 5 表示 5%。 */
+  width_pct: number
+  start_date: string
+  end_date: string
+  observed_until: string
+  confirmed_date: string | null
+  duration_bars: number
+  status: 'candidate' | 'confirmed' | 'broken' | 'invalidated'
+  upper_touches: { date: string; price: number; confirmed_date: string | null }[]
+  lower_touches: { date: string; price: number; confirmed_date: string | null }[]
+  missing_conditions: string[]
+  parent_id: string | null
+  breakout: {
+    status: 'none' | 'pending' | 'confirmed' | 'returned'
+    direction: 'up' | 'down' | null
+    first_date: string | null
+    confirmed_date: string | null
+  }
+  events: { type: 'breakout_pending' | 'breakout_confirmed' | 'returned'; date: string; direction: 'up' | 'down' }[]
+}
+
+export interface BoxOscillationResponse {
+  symbol: string
+  asset_type: 'stock' | 'etf' | 'index'
+  period: KlinePeriod
+  status: 'ready' | 'no_prices' | 'insufficient_data'
+  history_start: string | null
+  as_of: string | null
+  rows: KlineRow[]
+  boxes: BoxOscillation[]
+  diagnostics: string[]
+  config: {
+    pivot_window: number
+    min_bars: number
+    medium_bars: number
+    long_bars: number
+    touch_tolerance_ratio: number
+    breakout_margin_ratio: number
+    breakout_closes: number
+  }
 }
 
 export interface EarningsBreakoutResponse {
@@ -2872,6 +2925,8 @@ export const api = {
     request<EarningsBreakoutResponse>(`/api/kline/earnings-breakout?symbol=${encodeURIComponent(symbol)}&start_date=${range.start}&end_date=${range.end}`),
   klineGaps: (symbol: string, end: string) =>
     request<PriceGapsResponse>(`/api/kline/gaps?symbol=${encodeURIComponent(symbol)}&end_date=${end}`),
+  klineBoxes: (symbol: string, period: KlinePeriod, range: { start: string; end: string }) =>
+    request<BoxOscillationResponse>(`/api/kline/boxes?symbol=${encodeURIComponent(symbol)}&period=${period}&start_date=${range.start}&end_date=${range.end}`),
   klineDailyLatest: (symbol: string) =>
     request<KlineDailyLatestResponse>(
       `/api/kline/daily/latest?symbol=${encodeURIComponent(symbol)}`,

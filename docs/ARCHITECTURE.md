@@ -163,6 +163,10 @@ collector 的 [QuoteService](../backend/app/services/quote_service.py) 默认每
 
 未回补价格缺口为日 K 图默认展示的独立图层，无开关。`GET /api/kline/gaps` 经 `services/price_gaps.py` 只读截止日前的全部已存日线（股票、ETF、指数按仓库资产路由）并合并同日实时尾部；`indicators/price_gaps.py` 按相邻交易 K 线的最高／最低价确定向上和向下缺口，利用截止日内后续价格极值收窄剩余区间，触及远端边界后移除。此结果是截止日的展示状态，不是逐日策略信号。前端随日 K 图读取，当前日每 30 秒刷新，日线落盘使 `kline-gaps` 查询失效；历史截止日之后的数据不参与回补判断。价格带从形成日或窗口左侧延伸到右侧，完全回补不删除既有业绩断层／回踩历史标记。显示覆盖范围由接口的 `history_start` 与 `as_of` 明示，不虚构未保存的旧缺口。
 
+日／周／月箱体展示由个股共享 K 线和指数页通过 `useBoxOscillation`、`BoxOscillationControls` 复用 `GET /api/kline/boxes`。`services/box_oscillation.py` 按资产路由只读全部已存前复权 OHLCV，利用交易日内 `quote_ts` 与北京时间定版窗口检查完成状态；周／月聚合后重算均线等图表指标，只把已完成周期交给 `indicators/box_oscillation.py`。纯算法按右侧窗口确认拐点、独立访问及交替往返成立，固定边界后分别推进各箱体的突破／回箱事件，保持嵌套结构独立。显示区间裁剪不改变历史确认日；异常价格与未完成历史快照隔断识别，停牌不补点。`EChartsCandlestick` 在独立图层区分形成过程和确认后区间，日线专属标记在周／月关闭；选中聚合 K 线时按其最后有效交易日读取分时和实际日线前收。第一版不另存识别结果或后端缓存；前端键包含标的、周期和起止日，日线、日历更新失效，参数与限制见 [箱体震荡设计](box-oscillation-design.md)。
+
+箱体结构评估工具独立于在线链路：`scripts/evaluate_box_oscillation.py` 只读显式本地 JSON；`services/box_evaluation.py` 校验完整复核区间，处理校准／验证两段切分、小隔离带与实际跨界结构剔除，每个集合按当时截止前缀调用原识别算法；`indicators/box_evaluation.py` 负责一对一结构匹配、边界误差、时间重叠及误／漏识别。人工与合成结果分组输出，工具不读取仓库缓存、不启动采集、不改识别状态；识别和展示不产生仓位建议。完整输出回归快照仅含合成数据，真实质量仍待人工检查，见[评估说明](box-oscillation-evaluation.md)。
+
 ## 账号与个人数据边界
 
 web 与 collector 均通过 `auth_access.py` 验证 SQLite 会话，建立不可变 `UserContext`；账号库保存用户、会话及登录事件。单账号只允许一个 7 天会话，停用及密码变更撤销会话；角色调整在后续请求中读取最新权限。pro 到期按北京时间日期判断。

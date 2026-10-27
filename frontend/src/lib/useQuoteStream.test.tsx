@@ -23,6 +23,22 @@ function LiveProbe({ enabled = true, pages }: { enabled?: boolean; pages?: Recor
   useQuoteStream(enabled, pages)
   return null
 }
+it('日线、日历与指数数据更新会失效各周期箱体，分钟更新保持箱体缓存', async () => {
+  Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true })
+  vi.stubGlobal('EventSource', Stream)
+  const qc = new QueryClient()
+  const keys = [QK.klineBoxes('600000.SH', 'daily', '2026-01-01', '2026-10-26'),
+    QK.klineBoxes('000001.SH', 'weekly', '2021-01-01', '2026-10-26')]
+  const root = createRoot(document.createElement('div'))
+  try {
+    await act(async () => root.render(<QueryClientProvider client={qc}><Probe /></QueryClientProvider>))
+    for (const dataset of ['daily', 'calendar', 'index', 'etf', 'minute']) {
+      keys.forEach(key => qc.setQueryData(key, { value: 1 }))
+      await act(async () => Stream.current.dispatchEvent(new MessageEvent('data_updated', { data: JSON.stringify({ datasets: [dataset] }) })))
+      keys.forEach(key => expect(qc.getQueryState(key)?.isInvalidated).toBe(dataset !== 'minute'))
+    }
+  } finally { await act(async () => root.unmount()); qc.clear(); vi.unstubAllGlobals() }
+})
 it('refreshes collected extension and environment results across pages without invalidating unrelated data', async () => {
   Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true })
   vi.stubGlobal('EventSource', Stream)

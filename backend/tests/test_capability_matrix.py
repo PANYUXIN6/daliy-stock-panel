@@ -14,6 +14,7 @@ from app.data_providers import custom as custom_sources
 from app.data_providers.capabilities import CAPABILITY_REGISTRY, build_capability_matrix
 
 DEFAULT_CURRENT = {
+    "fund_nav_provider": "fuyao",
     "daily_data_provider": "tickflow",
     "adj_factor_provider": "tickflow",
     "minute_data_provider": "tickflow",
@@ -40,14 +41,18 @@ def test_registry_covers_all_routing_fields():
     assert sorted(routable) == sorted(DEFAULT_CURRENT)
     assert len(set(routable)) == len(routable)
     assert {c["id"] for c in CAPABILITY_REGISTRY} == {
-        "realtime", "daily", "minute", "full_minute", "depth5", "adj_factor", "financial",
+        "realtime", "daily", "minute", "full_minute", "depth5", "adj_factor", "financial", "fund_nav",
     }
     full_minute = next(c for c in CAPABILITY_REGISTRY if c["id"] == "full_minute")
     assert full_minute["field"] == "full_minute_data_provider"
     assert full_minute["tf_tier"] == "expert"
     for cap in CAPABILITY_REGISTRY:
-        assert cap["default"] == "tickflow"
-        assert cap["tf_tier"] in ("none", "starter", "pro", "expert")
+        if cap["id"] == "fund_nav":
+            assert cap["default"] == "fuyao"
+            assert cap["tf_tier"] is None
+        else:
+            assert cap["default"] == "tickflow"
+            assert cap["tf_tier"] in ("none", "starter", "pro", "expert")
         assert "follow" not in cap
 
 
@@ -56,8 +61,14 @@ def test_matrix_without_third_party_sources(monkeypatch):
     _fake_sources(monkeypatch, [])
     matrix = build_capability_matrix(dict(DEFAULT_CURRENT), tickflow_tier="expert")
     assert matrix["tickflow_tier"] == "expert"
-    assert len(matrix["capabilities"]) == 7
+    assert len(matrix["capabilities"]) == 8
     for cap in matrix["capabilities"]:
+        if cap["id"] == "fund_nav":
+            assert cap["candidates"] == []
+            assert cap["tf_available"] is False
+            assert cap["usable"] is False
+            assert cap["current"] == "fuyao"
+            continue
         names = [c["name"] for c in cap["candidates"]]
         assert names == ["tickflow"]
         assert cap["candidates"][0]["kind"] == "builtin"
@@ -282,6 +293,7 @@ def test_api_endpoint_injects_all_routing_preferences(monkeypatch):
     from app.tickflow import policy
 
     getter_values = {
+        "fund_nav_provider": "nav-src",
         "realtime_data_provider": "rt-src",
         "daily_data_provider": "daily-src",
         "minute_data_provider": "min-src",
@@ -291,6 +303,7 @@ def test_api_endpoint_injects_all_routing_preferences(monkeypatch):
         "financial_data_provider": "fin-src",
     }
     getter_names = {
+        "fund_nav_provider": "get_fund_nav_provider",
         "realtime_data_provider": "get_realtime_data_provider",
         "daily_data_provider": "get_daily_data_provider",
         "minute_data_provider": "get_minute_data_provider",
@@ -345,3 +358,23 @@ def test_api_endpoint_full_minute_usable_follows_preference(monkeypatch):
     assert fm["effective"] == "eltdx"
     assert fm["usable"] is True
     assert fm["tf_available"] is False
+
+
+def test_fund_nav_routes_to_declared_source_without_tickflow_fallback(monkeypatch):
+    _fake_sources(monkeypatch, [
+        {"name": "fuyao", "display_name": "fuyao", "datasets": ["fund_nav"],
+         "available": True, "status": "ok"},
+    ])
+    cap = _by_id(build_capability_matrix(dict(DEFAULT_CURRENT), tickflow_tier="expert"))["fund_nav"]
+    assert cap["usable"] is True
+    assert [source["name"] for source in cap["candidates"]] == ["fuyao"]
+    assert cap["tf_available"] is False
+    _fake_sources(monkeypatch, [
+        {"name": "fuyao", "display_name": "fuyao", "datasets": ["fund_nav"],
+         "available": False, "status": "Key未配置"},
+    ])
+    cap = _by_id(build_capability_matrix(dict(DEFAULT_CURRENT), tickflow_tier="expert"))["fund_nav"]
+    assert cap["usable"] is False
+    assert cap["effective"] == "fuyao"
+    assert cap["candidates"] == []
+    assert [source["name"] for source in cap["pending"]] == ["fuyao"]

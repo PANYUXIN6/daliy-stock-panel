@@ -58,7 +58,7 @@ from app.plugins.fuyao.client import (
 logger = logging.getLogger(__name__)
 
 # 只声明真实提供的数据集; 其余数据集 provider_has_dataset 返回 False → 回退 tickflow
-_DATASETS = ("realtime", "daily", "adj_factor", "financial")
+_DATASETS = ("realtime", "daily", "adj_factor", "financial", "fund_nav")
 
 API_KEY_ENV = "FUYAO_API_KEY"
 SECRETS_FIELD = "fuyao_api_key"  # UI 配置的 Key 存 secrets.json, 优先级高于 .env
@@ -361,6 +361,20 @@ class FuyaoProvider:
         self._dump_memo.clear()
         self._dump_path_memo.clear()
         self._dump_checked_at.clear()
+
+    def get_fund_nav(self, symbols: list[str], start: date, end: date) -> pl.DataFrame:
+        from app.data_providers.fund_nav import normalize_fund_nav
+
+        rows = []
+        for symbol in symbols:
+            data = self._get_client().fund_nav(symbol)
+            for item in data.get("item") or []:
+                day = _date_of_ms(item.get("nav_date"))
+                if day is None:
+                    raise ValueError("基金净值缺少有效日期")
+                rows.append({"symbol": symbol, "date": day.isoformat(),
+                             "unit_nav": item.get("unit_nav")})
+        return normalize_fund_nav(rows, start, end)
 
     def _get_client(self) -> FuyaoClient:
         if self._client is None:
@@ -1411,11 +1425,13 @@ class FuyaoProvider:
 
     # ---- 测试(设置页试拉) ----
     def test_dataset(self, dataset: str, symbols: list[str] | None = None) -> dict:
-        if dataset in ("daily", "adj_factor"):
-            syms = [s for s in (symbols or [])][:3] or ["000001.SZ"]
+        if dataset in ("daily", "adj_factor", "fund_nav"):
+            syms = [s for s in (symbols or [])][:3] or (["510300.SH"] if dataset == "fund_nav" else ["000001.SZ"])
             try:
                 if dataset == "daily":
                     df = self.get_daily(syms, datetime.now() - timedelta(days=30), datetime.now())
+                elif dataset == "fund_nav":
+                    df = self.get_fund_nav(syms, date.today() - timedelta(days=30), date.today())
                 else:
                     df = self.get_adj_factors(
                         syms, datetime.now() - timedelta(days=365), datetime.now()

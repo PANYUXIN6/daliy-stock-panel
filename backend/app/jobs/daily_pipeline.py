@@ -1551,6 +1551,14 @@ def start_scheduler(repo: KlineRepository) -> AsyncIOScheduler:
     inst_sched = preferences.get_instruments_schedule()
 
     scheduler = AsyncIOScheduler(timezone="Asia/Shanghai")
+    from app.services import etf_reference
+
+    scheduler.add_job(
+        etf_reference.run_scheduled, args=[repo],
+        trigger=CronTrigger(hour=f"{etf_reference.CHECK_HOUR}-23", minute=0, timezone="Asia/Shanghai"),
+        id=etf_reference.JOB_ID, replace_existing=True, coalesce=True, max_instances=1,
+        misfire_grace_time=6 * 3600, next_run_time=cn_now(),
+    )
     from app.services import trading_day
     scheduler.add_job(
         trading_day.sync_calendar, args=[repo.store.data_dir],

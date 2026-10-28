@@ -12,7 +12,7 @@ display_name: 我的数据源
 runtime: none
 entry: app.plugins.my_source.provider:MyProvider
 check: app.plugins.my_source.provider:availability
-datasets: [daily, adj_factor, minute, full_minute, realtime, depth5, financial]
+datasets: [daily, adj_factor, minute, full_minute, realtime, depth5, financial, fund_nav]
 api_key_env: MY_SOURCE_API_KEY
 hidden: false
 description: 数据覆盖范围
@@ -52,6 +52,7 @@ provider 无需继承基类，需有 `name`、`config.datasets` 和 `close()`；
 | 数据集／方法 | 返回与要求 |
 | --- | --- |
 | `get_daily(symbols, start_time, end_time, asset_type="stock", on_chunk_done=None)` | Polars DataFrame：`symbol, date, open, high, low, close, volume, amount` |
+| `get_fund_nav(symbols, start: date, end: date)` | 声明 `fund_nav` 时实现。Polars DataFrame：`symbol: String, date: Date, unit_nav: Float64`，日期为北京时间交易日，单位元/份，必须是当日单位净值；不能以累计、复权净值或收盘价替代。区间含首尾，合法无数据返回同 schema 空表，失败抛异常，禁止重复日期、非正值与非有限值。默认路由 Fuyao，TickFlow 不提供此能力 |
 | 可选 `iter_daily(...)` | 与 `get_daily` 同形的有界分批迭代器，日线同步优先消费；流正常结束后才提交 staging，异常丢弃 staging |
 | `get_adj_factors(symbols, start_time, end_time, asset_type="stock", on_chunk_done=None)` | DataFrame：`symbol, trade_date, ex_factor`；可选 `dividend, bonus, allot, allot_price, prev_close`，用于等差投影与全精度因子链重建 |
 | `get_minute(symbols, start_time, end_time, asset_type="stock", on_chunk_done=None, freq="1m")` | DataFrame：`symbol, datetime, open, high, low, close, volume, amount`，成交额可空 |

@@ -52,6 +52,7 @@ const DATASET_LABEL: Record<string, string> = {
   adj_factor: '除权',
   depth5: '五档',
   financial: '财务',
+  fund_nav: '基金净值',
   full_minute: '全量分钟',
 }
 
@@ -66,7 +67,8 @@ const CAP_ICON: Record<string, React.ComponentType<{ className?: string }>> = {
 }
 
 /** TickFlow 档位要求文本: none → 全档位, 其余 → starter+ 形式 */
-function tierReqText(tier: string): string {
+function tierReqText(tier: string | null): string {
+  if (tier === null) return '不提供'
   return tier === 'none' ? '全档位' : `${tier}+`
 }
 
@@ -154,6 +156,7 @@ const DEFAULT_ROUTING: Record<ProviderField, string> = {
   depth5_data_provider: 'tickflow',
   realtime_data_provider: 'tickflow',
   financial_data_provider: 'tickflow',
+  fund_nav_provider: 'fuyao',
 }
 
 /** 单个能力卡: 当前生效提供方 + 候选切换标签。
@@ -549,7 +552,7 @@ function CapabilityChips({ caps, servingSet, isTickFlow }: {
   if (caps.length === 0) return <span className="text-[10px] text-muted/40">未声明能力</span>
   return (
     <div className="flex flex-wrap gap-1">
-      {caps.map(cap => {
+      {caps.filter(cap => !isTickFlow || cap.tf_tier !== null).map(cap => {
         const servingNow = servingSet.has(cap.id)
         const locked = isTickFlow && !cap.tf_available
         const cls = servingNow
@@ -617,6 +620,7 @@ export function SettingsDataSourcesPanel({ highlight }: { highlight?: string } =
     realtime: prefs.data?.realtime_data_provider || 'tickflow',
     depth5: prefs.data?.depth5_data_provider || 'tickflow',
     financial: prefs.data?.financial_data_provider || 'tickflow',
+    fund_nav: prefs.data?.fund_nav_provider || 'fuyao',
   }
   const servingDatasets = (name: string) =>
     Object.entries(effProvider).filter(([, v]) => v === name).map(([k]) => k)
@@ -668,6 +672,7 @@ export function SettingsDataSourcesPanel({ highlight }: { highlight?: string } =
         realtime_data_provider: pick('realtime'),
         minute_data_provider: pick('minute'),
         financial_data_provider: pick('financial'),
+        fund_nav_provider: supported.has('fund_nav') ? name : DEFAULT_ROUTING.fund_nav_provider,
       })
     },
     onSuccess: (_d, name) => {
@@ -1189,7 +1194,7 @@ function TickFlowDetail({ active, matrix }: { active: boolean; matrix?: Capabili
           {/* 能力档位表: 各能力所需档位 + 当前档位可用性 */}
           {caps.length > 0 && (
             <div className="rounded-lg border border-border/60 bg-elevated/20 divide-y divide-border/50">
-              {caps.map(cap => {
+              {caps.filter(cap => cap.tf_tier !== null).map(cap => {
                 const Icon = CAP_ICON[cap.id] ?? Database
                 return (
                   <div key={cap.id} className="flex items-center gap-2.5 px-3 py-1.5">
@@ -1198,7 +1203,7 @@ function TickFlowDetail({ active, matrix }: { active: boolean; matrix?: Capabili
                       <span className="text-xs text-foreground">{cap.label}</span>
                       <span className="ml-1.5 text-[10px] text-muted/60">{cap.desc}</span>
                     </div>
-                    <TierReqChip tier={cap.tf_tier} currentLabel={tier} />
+                    <TierReqChip tier={cap.tf_tier!} currentLabel={tier} />
                     {cap.tf_available ? (
                       <span className="w-[52px] text-right text-[10px] text-bear inline-flex items-center justify-end gap-0.5 shrink-0">
                         <Check className="h-2.5 w-2.5" />可用

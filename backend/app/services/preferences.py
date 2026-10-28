@@ -326,6 +326,11 @@ def get_financial_provider() -> str:
     return provider if provider in _allowed_data_providers() else "tickflow"
 
 
+def get_fund_nav_provider() -> str:
+    provider = str(load().get("fund_nav_provider", "fuyao") or "fuyao").lower()
+    return provider if provider in _allowed_data_providers() else "fuyao"
+
+
 # ===== 盘后管道拉取内容开关 (A股 / ETF / 指数 独立控制) =====
 
 def get_pipeline_pull_a_share() -> bool:

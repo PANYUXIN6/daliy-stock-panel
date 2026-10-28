@@ -8,12 +8,13 @@ import type { User } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { Dashboard } from './Dashboard'
 
-const mocks = vi.hoisted(() => ({ overview: vi.fn(), refreshCache: vi.fn() }))
-vi.mock('@/lib/api', () => ({ api: { overviewMarket: mocks.overview, refreshCache: mocks.refreshCache } }))
+const mocks = vi.hoisted(() => ({ overview: vi.fn(), refreshCache: vi.fn(), etfReference: vi.fn(async () => ({ state: "no_data", rows: [], as_of: null, checked_at: null, update_failed: false })) }))
+vi.mock('@/lib/api', () => ({ api: { overviewMarket: mocks.overview, refreshCache: mocks.refreshCache, etfReference: mocks.etfReference } }))
 vi.mock('@/lib/useSharedQueries', () => ({ useDataStatus: () => ({ data: {} }), useCapabilities: () => ({ data: {} }) }))
 vi.mock('@/components/dashboard/useDashboardLayout', () => ({ useDashboardLayout: () => ({ items: [{ i: 'monitor', t: 'monitor' }, { i: 'trend', t: 'trend' }], setItems: vi.fn() }) }))
 vi.mock('@/components/dashboard/registry', () => ({ DEFAULT_LAYOUT: [], widgetDef: vi.fn() }))
 vi.mock('@/components/dashboard/DashboardGrid', () => ({ DashboardGrid: ({ ctx, items }: { ctx: { score: number }; items: { i: string; t: string }[] }) => <div>市场分数 {ctx.score}{items.map(item => <span key={item.i} data-widget={item.t} />)}</div> }))
+vi.mock('@/components/dashboard/EtfReferenceChart', () => ({ default: () => <div>国家队持仓占比参考</div> }))
 vi.mock('@/components/dashboard/AddWidgetPanel', () => ({ AddWidgetPanel: () => null }))
 vi.mock('@/components/StockPreviewDialog', () => ({ StockPreviewDialog: () => null }))
 vi.mock('@/components/DimensionMembersDialog', () => ({ DimensionMembersDialog: () => null }))
@@ -31,10 +32,13 @@ it('reloads the saved overview without rebuilding shared backend data', async ()
     await act(async () => root.render(<QueryClientProvider client={qc}><Dashboard /></QueryClientProvider>)); await settle()
     expect(host.textContent).toContain('市场分数 40')
     mocks.overview.mockResolvedValue({ emotion: { score: 60, label: '偏强' }, limit: {}, quote_status: {} })
+    expect(host.textContent).toContain("国家队持仓占比参考")
+    const checks = mocks.etfReference.mock.calls.length
     const reload = [...host.querySelectorAll('button')].find(button => button.textContent === '重载')!
     await act(async () => reload.click()); await settle()
     expect(host.textContent).toContain('市场分数 60')
     expect(mocks.refreshCache).not.toHaveBeenCalled()
+    expect(mocks.etfReference.mock.calls.length).toBe(checks + 1)
   } finally { await act(async () => root.unmount()); qc.clear() }
 })
 

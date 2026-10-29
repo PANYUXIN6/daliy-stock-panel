@@ -4,26 +4,17 @@
  * 包含：
  * - AnalysisConfigDialog: 字段配置弹窗
  * - DimensionHeatmap: 维度热力图块
- * - OverviewStatCards: 总览统计卡片
- * - DimensionGroupSidebar: 维度分组侧边栏
  */
 
 import { useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { motion } from 'framer-motion'
 import {
-  BarChart3,
   ChevronDown,
-  Database,
-  Search,
-  Settings2,
-  Tags,
-  TrendingUp,
   X,
 } from 'lucide-react'
 import { api, type ExtDataField } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
-import { cn } from '@/lib/cn'
 import type { DimensionGroup, QuoteMap } from '@/lib/analysis-adapter'
 import { computeQuoteMetrics } from '@/lib/analysis-adapter'
 import { fmtPct, priceColorClass } from '@/lib/format'
@@ -166,51 +157,6 @@ export function AnalysisConfigDialog({
   )
 }
 
-// ===== 总览统计卡片 =====
-
-export function OverviewStatCards({
-  groups,
-  totalStocks,
-  configLabel,
-  dateStr,
-  accentColor,
-}: {
-  groups: DimensionGroup[]
-  totalStocks: number
-  configLabel: string
-  dateStr?: string | null
-  accentColor: string
-}) {
-  const cards = [
-    { label: '数据源', value: configLabel, hint: dateStr ?? '快照', icon: Database },
-    { label: '维度数量', value: groups.length, hint: '按维度聚合分组', icon: Tags },
-    { label: '覆盖标的', value: totalStocks, hint: '去重股票数', icon: BarChart3 },
-    {
-      label: '最大分组',
-      value: groups[0]?.key ?? '—',
-      hint: groups[0] ? `${groups[0].count} 只` : '',
-      icon: TrendingUp,
-    },
-  ]
-
-  return (
-    <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-      {cards.map(card => (
-        <div key={card.label} className="rounded-card border border-border bg-surface p-4">
-          <div className="flex items-center justify-between">
-            <span className="text-xs text-muted">{card.label}</span>
-            <card.icon className="h-4 w-4" style={{ color: accentColor }} />
-          </div>
-          <div className="mt-2 text-xl font-semibold tracking-tight text-foreground truncate">
-            {card.value}
-          </div>
-          <div className="mt-1 text-[11px] text-muted truncate">{card.hint}</div>
-        </div>
-      ))}
-    </div>
-  )
-}
-
 // ===== 维度热力图 =====
 
 export function DimensionHeatmap({
@@ -294,160 +240,5 @@ export function DimensionHeatmap({
         })}
       </div>
     </div>
-  )
-}
-
-// ===== 维度分组侧边栏 =====
-
-export function DimensionGroupSidebar({
-  groups,
-  quoteMap,
-  selectedKey,
-  onSelect,
-  searchValue,
-  onSearchChange,
-  kindLabel,
-  colorScheme,
-}: {
-  groups: DimensionGroup[]
-  quoteMap: Map<string, QuoteMap>
-  selectedKey: string | null
-  onSelect: (key: string) => void
-  searchValue: string
-  onSearchChange: (v: string) => void
-  kindLabel: string
-  colorScheme: 'blue' | 'amber'
-}) {
-  const q = searchValue.trim().toLowerCase()
-  const filtered = q
-    ? groups.filter(g => g.key.toLowerCase().includes(q))
-    : groups
-
-  const accentColor = colorScheme === 'blue' ? 'rgba(59,130,246,0.7)' : 'rgba(245,158,11,0.7)'
-  const accentBg = colorScheme === 'blue' ? 'rgba(59,130,246,0.1)' : 'rgba(245,158,11,0.1)'
-  const accentBorder = colorScheme === 'blue' ? 'rgba(59,130,246,0.25)' : 'rgba(245,158,11,0.25)'
-
-  return (
-    <section className="rounded-card border border-border bg-surface overflow-hidden">
-      <div className="px-4 py-3 border-b border-border">
-        <h3 className="text-sm font-medium text-foreground">{kindLabel}榜单</h3>
-        <p className="mt-0.5 text-[11px] text-muted">按覆盖标的数量排序</p>
-      </div>
-      <div className="p-3 border-b border-border/60">
-        <div className="relative">
-          <Search className="absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted" />
-          <input
-            value={searchValue}
-            onChange={e => onSearchChange(e.target.value)}
-            placeholder={`搜索${kindLabel}`}
-            className="h-8 w-full rounded-btn border border-border bg-base pl-8 pr-3 text-xs text-foreground placeholder:text-muted/50 focus:outline-none focus:border-accent/50"
-          />
-        </div>
-      </div>
-      <div className="max-h-[560px] overflow-auto p-2 space-y-1">
-        {filtered.length === 0 ? (
-          <div className="px-3 py-8 text-center text-xs text-muted">没有可展示的分组</div>
-        ) : filtered.slice(0, 200).map((group, i) => {
-          const active = selectedKey === group.key
-          const qm = computeQuoteMetrics(group.stocks, quoteMap)
-          return (
-            <button
-              key={group.key}
-              onClick={() => onSelect(group.key)}
-              className={cn(
-                'w-full rounded-lg px-3 py-2 text-left transition-colors',
-                active ? 'border' : 'border border-transparent hover:bg-elevated/60',
-              )}
-              style={active ? { backgroundColor: accentBg, borderColor: accentBorder } : undefined}
-            >
-              <div className="flex items-center gap-2">
-                <span className="w-5 text-[10px] font-mono text-muted">#{i + 1}</span>
-                <span className="flex-1 truncate text-xs font-medium text-foreground">{group.key}</span>
-                <span className="font-mono text-xs text-secondary">{group.count}</span>
-              </div>
-              {/* 覆盖量进度条 */}
-              <div className="mt-1 h-1.5 overflow-hidden rounded-full bg-elevated">
-                <div
-                  className="h-full rounded-full transition-all"
-                  style={{
-                    width: `${Math.max(6, (group.count / (filtered[0]?.count || 1)) * 100)}%`,
-                    backgroundColor: accentColor,
-                  }}
-                />
-              </div>
-              {/* 行情摘要 */}
-              <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-[10px] text-muted">
-                {qm.avgPct != null && (
-                  <span className={priceColorClass(qm.avgPct)}>
-                    均幅 {fmtPct(qm.avgPct)}
-                  </span>
-                )}
-                {qm.upCount + qm.downCount > 0 && (
-                  <span>
-                    <span className="text-bull">{qm.upCount}涨</span>
-                    <span className="mx-0.5 text-muted/40">/</span>
-                    <span className="text-bear">{qm.downCount}跌</span>
-                  </span>
-                )}
-              </div>
-            </button>
-          )
-        })}
-      </div>
-    </section>
-  )
-}
-
-// ===== 行情摘要条 =====
-
-export function QuoteSummaryBar({
-  groups,
-  quoteMap,
-}: {
-  groups: DimensionGroup[]
-  quoteMap: Map<string, QuoteMap>
-}) {
-  const stats = useMemo(() => {
-    let upTotal = 0, downTotal = 0, flatTotal = 0
-    for (const g of groups) {
-      const qm = computeQuoteMetrics(g.stocks, quoteMap)
-      upTotal += qm.upCount
-      downTotal += qm.downCount
-      flatTotal += qm.flatCount
-    }
-    return { upTotal, downTotal, flatTotal }
-  }, [groups, quoteMap])
-
-  const total = stats.upTotal + stats.downTotal + stats.flatTotal
-  if (total === 0) return null
-
-  const upPct = (stats.upTotal / total) * 100
-  const downPct = (stats.downTotal / total) * 100
-
-  return (
-    <div className="flex items-center gap-3 text-[11px]">
-      <div className="flex-1 h-2 rounded-full overflow-hidden bg-elevated flex">
-        <div className="h-full bg-bull/70 rounded-l-full" style={{ width: `${upPct}%` }} />
-        <div className="flex-1" />
-        <div className="h-full bg-bear/70 rounded-r-full" style={{ width: `${downPct}%` }} />
-      </div>
-      <span className="text-bull font-mono">{stats.upTotal}涨</span>
-      <span className="text-muted">/</span>
-      <span className="text-bear font-mono">{stats.downTotal}跌</span>
-    </div>
-  )
-}
-
-// ===== 配置按钮 =====
-
-export function ConfigButton({ onClick }: { onClick: () => void }) {
-  return (
-    <button
-      onClick={onClick}
-      className="p-1.5 hover:bg-surface text-muted hover:text-accent transition-colors"
-      title="配置数据源"
-    >
-      <Settings2 className="h-3.5 w-3.5" />
-    </button>
   )
 }

@@ -96,10 +96,6 @@ export function tierRank(label: string): number {
   return TIER_RANK[base] ?? -1
 }
 
-export function isExpertOrAbove(label: string): boolean {
-  return tierRank(label) >= EXPERT_RANK
-}
-
 /** 档位完整样式(tag 背景 + 圆点 + 文字渐变), 与左侧菜单 TierBadge 一致 */
 export interface TierStyle {
   tagBg: { background: string }
@@ -153,11 +149,6 @@ export function tierStyle(label: string): TierStyle {
 
 /** 所有档位(有序, 供档位列表渲染) */
 export const ALL_TIERS = ['none', 'free', 'starter', 'pro', 'expert'] as const
-
-/** 返回档位标签的渐变文字样式(用于大字显示, 如 Keys 页档位) */
-export function tierTextStyle(label: string): { color?: string; background?: string; WebkitBackgroundClip?: string; backgroundClip?: string } {
-  return tierStyle(label).labelTextStyle
-}
 
 /** 渲染档位 tag(与左侧菜单一致的胶囊样式) */
 export function TierTag({ label, className = '' }: { label: string; className?: string }) {

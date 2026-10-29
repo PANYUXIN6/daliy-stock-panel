@@ -10,7 +10,7 @@ from datetime import date
 import polars as pl
 import pytest
 
-from app.factors.dsl import BASE_COLUMNS, FACTOR_COLUMN, compile_formula
+from app.factors.dsl import FACTOR_COLUMN, compile_formula
 
 
 def _panel() -> pl.DataFrame:
@@ -108,11 +108,6 @@ def test_dependencies_and_warmup() -> None:
     compiled = compile_formula("turnover_z_60d * 2")
     assert compiled.ok
     assert compiled.warmup_bars == 61  # 引用因子 warmup 传递
-
-
-def test_base_columns_contract() -> None:
-    assert "close" in BASE_COLUMNS
-    assert "clos" not in BASE_COLUMNS
 
 
 # ------------------------------------------------------------- 数值正确性

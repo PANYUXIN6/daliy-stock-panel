@@ -483,7 +483,7 @@ def _run_now(
 
     # 完整性修复时删除股票 enriched 的坏分区: 增量重算只算 enriched 里不存在
     # 的日期, 盘中快照日分区已存在(虽是错的), 不删永远不会被重算。删除后
-    # Step 2 把这些日期当"新日期"重算 (剩余分区最近 60 天做历史前缀, 窗口 ≤5 天回看充足)。
+    # Step 2 把这些日期当"新日期"重算，使用剩余分区最近 60 天做历史前缀。
     repair_start = override_start_date if override_start_date is not None else stale_day
     if postmarket:
         # 正式日线可能只修订成交量额，既有收盘价比较无法发现；当日必须重新加工。

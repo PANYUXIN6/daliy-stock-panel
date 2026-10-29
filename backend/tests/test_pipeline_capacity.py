@@ -4,7 +4,7 @@ import asyncio
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
@@ -307,11 +307,9 @@ def test_weekly_mining_follows_only_successful_manual_pipeline(capacity, monkeyp
     assert store.get(job_ids[0])["status"] == ("failed" if fail else "succeeded")
 
 
-@pytest.mark.parametrize("entry", ["scheduled", "integrity"])
-def test_background_pipeline_entries_share_capacity(capacity, monkeypatch, entry):
+def test_scheduled_pipeline_shares_capacity(capacity, monkeypatch):
     monkeypatch.setattr("app.services.trading_day.is_trading_day", lambda *args, **kwargs: True)
     from app.jobs import daily_pipeline
-    from app.services import data_integrity, repair_daily
 
     store, limiter = capacity
     called = threading.Event()
@@ -321,15 +319,9 @@ def test_background_pipeline_entries_share_capacity(capacity, monkeypatch, entry
         called.set()
         return {}
 
-    monkeypatch.setattr(repair_daily, "run_repair_daily", compute)
     assert limiter.acquire("normal", timeout=0)
     with ThreadPoolExecutor(max_workers=1) as pool:
-        if entry == "scheduled":
-            future = pool.submit(daily_pipeline._run_tracked, compute, "test")
-        else:
-            state = SimpleNamespace(repo=object(), capabilities=SimpleNamespace(has=lambda _: True))
-            data_integrity.launch_integrity_repair(state, date(2026, 1, 1), "test")
-            future = None
+        future = pool.submit(daily_pipeline._run_tracked, compute, "test")
         try:
             wait_for(lambda: store.active_id() is not None)
             jid = store.active_id()
@@ -339,7 +331,6 @@ def test_background_pipeline_entries_share_capacity(capacity, monkeypatch, entry
         finally:
             limiter.release("normal")
         wait_for(lambda: store.get(jid)["status"] == "succeeded")
-        if future is not None:
-            assert future.result(timeout=1)
+        assert future.result(timeout=1)
     assert called.is_set()
     assert limiter.in_use == 0

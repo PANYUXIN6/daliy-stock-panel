@@ -199,16 +199,6 @@ export function speakAlerts(alerts: AlertEvent[]) {
   }
 }
 
-/** 停止当前播报 (关闭开关/试听前调用) */
-export function stopVoice() {
-  try {
-    if (isVoiceSupported()) {
-      window.speechSynthesis.cancel()
-      _speaking = false
-    }
-  } catch { /* ignore */ }
-}
-
 /** 试听 (设置页点"试听"用) */
 export function previewVoice(text = '语音播报已开启, 这是试听效果') {
   try {

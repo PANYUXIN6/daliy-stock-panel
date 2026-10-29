@@ -139,14 +139,13 @@ def test_calc_stats_empty_trades_safe():
 
 def test_portfolio_stats_emits_robustness_fields():
     """portfolio 分支同样输出 sortino / mc / per-trade 字段。"""
-    equity_curve = [
-        {"date": "2024-01-01", "value": 100_000.0, "exposure": 0.0},
-        {"date": "2024-01-02", "value": 103_000.0, "exposure": 0.5},
-        {"date": "2024-01-03", "value": 101_000.0, "exposure": 0.5},
-        {"date": "2024-01-04", "value": 105_000.0, "exposure": 0.5},
-    ]
     trades = _trades([0.06, -0.02, 0.04], [2, 1, 3])
-    stats = BacktestEngine._calc_portfolio_stats(equity_curve, trades, 100_000)
+    stats = BacktestEngine._calc_portfolio_stats_from_values(
+        [100_000.0, 103_000.0, 101_000.0, 105_000.0],
+        [0.0, 0.5, 0.5, 0.5],
+        trades,
+        100_000,
+    )
     for k in ("sortino", "mc_maxdd_p50", "mc_maxdd_p95", "median_pnl", "best", "worst", "avg_holding_days"):
         assert k in stats, f"缺字段 {k}"
 

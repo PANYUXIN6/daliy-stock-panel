@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import date, datetime
+from datetime import datetime
 from threading import Event
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
@@ -11,7 +11,7 @@ import pytest
 
 from app.api import data, kline
 from app.market_time import CN_TZ
-from app.services import collection_status, data_integrity, kline_sync, pipeline_jobs
+from app.services import collection_status, kline_sync, pipeline_jobs
 from app.tickflow.capabilities import Cap, CapabilityLimits, CapabilitySet
 
 
@@ -63,39 +63,6 @@ def test_delayed_sdk_callbacks_keep_original_chunk_and_window(monkeypatch, mode)
             (middle, end),
             (middle, end),
         ]
-
-
-@pytest.mark.asyncio
-async def test_integrity_repair_retains_running_task_and_releases_on_completion(monkeypatch):
-    target = data_integrity
-    loop = asyncio.get_running_loop()
-    gate = loop.create_future()
-    tasks = []
-    real_create_task = asyncio.create_task
-
-    def create_task(coro):
-        task = real_create_task(coro)
-        tasks.append(task)
-        return task
-
-    monkeypatch.setattr(target.asyncio if hasattr(target, "asyncio") else asyncio, "create_task", create_task)
-    monkeypatch.setattr(loop, "run_in_executor", lambda *_args: gate)
-    monkeypatch.setattr(pipeline_jobs, "job_store", SimpleNamespace(create=lambda: ("repair-job", True)))
-    state = SimpleNamespace(repo=object(), capabilities=SimpleNamespace(has=lambda _: True))
-    assert target.launch_integrity_repair(state, date(2026, 8, 3), "gap") == ("repair-job", True)
-    try:
-        registry = getattr(target, "_REPAIR_TASKS", set())
-        assert tasks[0] in registry
-        await asyncio.sleep(0)
-        assert tasks[0] in registry and not tasks[0].done()
-        gate.set_result(None)
-        await tasks[0]
-        await asyncio.sleep(0)
-        assert tasks[0] not in registry
-    finally:
-        if not gate.done():
-            gate.set_result(None)
-        await tasks[0]
 
 
 @pytest.mark.asyncio

@@ -275,12 +275,6 @@ export async function stopBacktest(): Promise<void> {
   accountStorage.removeItem(RECONNECT_KEY)
 }
 
-/** 清除任务状态 (隐藏提示) */
-export function clearBacktest(): void {
-  current = null
-  emit()
-}
-
 /** 恢复: 从 localStorage 读取 reconnect 信息, 重新连接 (刷新后调用) */
 export function tryReconnect(): boolean {
   const qs = accountStorage.getItem(RECONNECT_KEY)

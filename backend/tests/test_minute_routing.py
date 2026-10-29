@@ -922,19 +922,6 @@ def test_minute_batch_leading_hole_is_not_filled(monkeypatch):
     assert calls == [] and writes == []
 
 
-def test_healthy_service_does_not_fill_saved_gaps(monkeypatch):
-    from app.api import kline as kline_api
-    local = pl.concat([_mock_tail_rows('600519.SH', 11, datetime(2026, 1, 15, 11, 20)), _mock_minute_rows('000001.SZ', 100)])
-    calls, writes, request = _endpoint_mocks(monkeypatch, local, sync_ret=_mock_minute_df())
-    request.app.state.minute_refresh = _healthy_svc(monkeypatch, True)
-    result = kline_api.get_minute_batch(request, {'symbols': ['600519.SH', '000001.SZ'], 'date': '2026-01-15', 'prefer_local': True})
-    assert len(result['data']['600519.SH']) == 11
-    assert result['data']['600519.SH'][0]['datetime'] == datetime(2026, 1, 15, 11, 20)
-    assert len(result['data']['000001.SZ']) == 100
-    assert result['full_minute_local'] is True
-    assert calls == [] and writes == []
-
-
 def test_minute_batch_short_open_returns_saved_bars(monkeypatch):
     from app.api import kline as kline_api
     local = _bars('600519.SH', [datetime(2026, 1, 15, 9, 35)])

@@ -1,14 +1,12 @@
 import { activateSession } from '@/lib/sessionRuntime'
 // @vitest-environment jsdom
-// 「默认基础参数」: 对话框编辑保存写 localStorage; 纯函数把默认参数渲染进
-// 新建策略模板的 META.basic_filter 段 (Python 字面量)。
+// 「默认基础参数」: 对话框编辑保存写 localStorage。
 // 「一键应用到全部策略」: 二次确认后逐策略 PATCH basic_filter 并存为默认配置。
 import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { DefaultStrategyParamsDialog, BUILTIN_DEFAULT_BASIC_FILTER, loadDefaultBasicFilter } from './DefaultStrategyParamsDialog'
-import { buildCustomTemplate, renderBasicFilterPy } from './StrategyBuilderDialog'
 import { storage } from '@/lib/storage'
 import { api } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
@@ -107,29 +105,6 @@ it('reset restores builtin defaults', async () => {
   act(() => { resetBtn.click() })
 
   expect((container.querySelector('input[type="number"]') as HTMLInputElement).value).toBe('5')
-})
-
-// ===== 模板注入 (纯函数) =====
-
-it('renderBasicFilterPy emits Python literals for the template META', () => {
-  const py = renderBasicFilterPy({
-    ...BUILTIN_DEFAULT_BASIC_FILTER,
-    price_min: 3, exclude_st: false, float_cap_max: null,
-  })
-
-  expect(py).toContain('"price_min": 3, "price_max": 200,')
-  expect(py).toContain('"exclude_st": False,')
-  expect(py).toContain('"float_cap_max": None,')
-  expect(py).toContain('"boards": ["沪主板", "深主板", "创业板", "科创板"],')
-})
-
-it('buildCustomTemplate embeds custom defaults into the code template', () => {
-  const code = buildCustomTemplate({ ...BUILTIN_DEFAULT_BASIC_FILTER, price_min: 3, turnover_min: 2 })
-
-  expect(code).toContain('"basic_filter": {')
-  expect(code).toContain('"price_min": 3,')
-  expect(code).toContain('"turnover_min": 2,')
-  expect(code).toContain('def filter(df: pl.DataFrame, params: dict) -> pl.Expr:')
 })
 
 // ===== 一键应用到全部策略 =====

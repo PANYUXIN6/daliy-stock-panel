@@ -65,8 +65,9 @@ export default function EtfReferenceChart({ data, loading, error, onRetry }: {
           {data?.as_of && <span className="text-[10px] text-muted">截至 {data.as_of}</span>}
         </div>
       </div>
-      {hasRows ? <div ref={container} className="h-[210px] w-full sm:h-[240px]" role="img" aria-label={`国家队持仓占比参考，最新${(latest!.ratio * 100).toFixed(3)}%，截至${data?.as_of}`} /> : (
-        <div className="flex h-[210px] items-center justify-center gap-2 text-xs text-muted sm:h-[240px]" role="status">
+      {/* 图表销毁会清空容器；不同 key 避免 React 将其复用为加载/空态节点。 */}
+      {hasRows ? <div key="chart" ref={container} className="h-[210px] w-full sm:h-[240px]" role="img" aria-label={`国家队持仓占比参考，最新${(latest!.ratio * 100).toFixed(3)}%，截至${data?.as_of}`} /> : (
+        <div key="status" className="flex h-[210px] items-center justify-center gap-2 text-xs text-muted sm:h-[240px]" role="status">
           {loading ? <><Loader2 className="h-3.5 w-3.5 animate-spin" />加载中…</> : error ? <>
             加载失败<button className="text-accent hover:underline" onClick={onRetry}>重试</button>
           </> : '暂无已对齐的数据'}

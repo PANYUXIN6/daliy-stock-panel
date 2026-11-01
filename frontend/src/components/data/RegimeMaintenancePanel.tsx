@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Loader2, X } from 'lucide-react'
 import { api } from '@/lib/api'
-import { QK } from '@/lib/queryKeys'
+import { DATASET_QUERY_PREFIXES, QK } from '@/lib/queryKeys'
 import { toast } from '@/components/Toast'
 import { cn } from '@/lib/cn'
 
@@ -16,14 +16,9 @@ export function RegimeMaintenancePanel() {
     queryFn: () => api.regimeMainline(),
   })
   const invalidate = async () => {
-    await Promise.all([
-      qc.invalidateQueries({ queryKey: ['regime-history'] }),
-      qc.invalidateQueries({ queryKey: ['regime-states'] }),
-      qc.invalidateQueries({ queryKey: QK.regimeLatest }),
-      qc.invalidateQueries({ queryKey: ['regime-phases'] }),
-      qc.invalidateQueries({ queryKey: ['regime-mainline'] }),
-      qc.invalidateQueries({ queryKey: QK.regimeCoverage }),
-    ])
+    await Promise.all(DATASET_QUERY_PREFIXES.regime.map(prefix =>
+      qc.invalidateQueries({ queryKey: [prefix] }),
+    ))
   }
   const recompute = useMutation({
     mutationFn: (range: { start?: string; end?: string }) => api.regimeRecompute(range.start, range.end),
@@ -118,6 +113,7 @@ function MainlineFilterPanel({ filter, onDone, disabled, onSavingChange }: {
   }
 
   const save = async () => {
+    let filterSaved = false
     setSaving(true)
     onSavingChange(true)
     try {
@@ -127,8 +123,11 @@ function MainlineFilterPanel({ filter, onDone, disabled, onSavingChange }: {
         blacklist,
         exclude_st: excludeSt,
       })
+      filterSaved = true
       const stChanged = excludeSt !== (filter?.exclude_st ?? true)
       if (stChanged) {
+        // 配置已保存，立即撤销旧口径缓存；重算失败也不能保留旧观察值。
+        await onDone()
         // 口径切换影响情绪周期驱动指标, 需全量重算 regime+主线(较重, 需等待)
         await api.regimeRecompute()
         toast('过滤已保存, 主线与情绪周期已全量重算', 'success')
@@ -138,7 +137,7 @@ function MainlineFilterPanel({ filter, onDone, disabled, onSavingChange }: {
       }
       await onDone()
     } catch (e) {
-      toast(`保存失败 · ${String((e as Error)?.message || e)}`, 'error')
+      toast(`${filterSaved ? '过滤已保存，但重算失败' : '保存失败'} · ${String((e as Error)?.message || e)}`, 'error')
     } finally {
       setSaving(false)
       onSavingChange(false)

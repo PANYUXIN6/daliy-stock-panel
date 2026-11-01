@@ -144,3 +144,24 @@ it('respects screener refresh opt-out and cancels delayed invalidation when disa
     qc.clear(); vi.unstubAllGlobals(); vi.useRealTimers()
   }
 })
+
+
+it.each(['regime', 'config'])('%s 外部更新在关闭实时刷新时也撤销看板和环境口径缓存', async dataset => {
+  Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true })
+  vi.stubGlobal('EventSource', Stream)
+  const qc = new QueryClient()
+  const keys = [
+    QK.overviewMarket(), QK.overviewMarket('2026-10-16'),
+    QK.regimeObservations('2026-10-16'), QK.regimeHistory(250),
+    QK.regimeLatest, QK.regimeStates(250), QK.regimePhases(),
+    QK.regimeCoverage, QK.regimeMainline('concept'),
+  ]
+  for (const key of [...keys, QK.etfReference()]) qc.setQueryData(key, { value: 1 })
+  const root = createRoot(document.createElement('div'))
+  try {
+    await act(async () => root.render(<QueryClientProvider client={qc}><Probe /></QueryClientProvider>))
+    await act(async () => Stream.current.dispatchEvent(new MessageEvent('data_updated', { data: JSON.stringify({ datasets: [dataset] }) })))
+    for (const key of keys) expect(qc.getQueryState(key)?.isInvalidated).toBe(true)
+    expect(qc.getQueryState(QK.etfReference())?.isInvalidated).toBe(false)
+  } finally { await act(async () => root.unmount()); qc.clear(); vi.unstubAllGlobals() }
+})

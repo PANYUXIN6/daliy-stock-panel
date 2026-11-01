@@ -366,7 +366,11 @@ def test_real_indicator_storage_and_environment_builder_complete_together(closin
         assert result["regime_days"] > 0
         assert frame.height == 1
         assert frame["phase"][0] is not None
-        assert frame["score"][0] is not None
+        assert frame["score"][0] is None
+        assert frame["seal_rate"][0] is None
+        assert frame["touched_limit"][0] == 0
+        assert frame["state"][0] == "unavailable"
+        assert frame["method_version"][0] == regime_builder.VERSION
         assert repo.get_enriched_latest()[1] == DAY
     finally:
         repo.db.close()
@@ -489,3 +493,19 @@ def test_explicit_halted_rows_are_allowed_but_unknown_missing_symbols_are_not():
     assert coverage.active == {SYMBOLS[0]}
     with pytest.raises(DailyCoverageError):
         coverage.require([*SYMBOLS, "600001.SH"])
+
+
+@pytest.mark.parametrize("state,version", [("range", regime_builder.VERSION), ("unavailable", "old"), ("unavailable", None)])
+def test_incomplete_score_requires_current_explicit_unavailable(closing, monkeypatch, state, version):
+    repo, caps, steps, _ = closing
+
+    def compute(*args, **kwargs):
+        rows = pl.DataFrame({"date": [DAY], "state": [state], "score": [None],
+                             "phase": ["unknown"], "method_version": [version]})
+        regime_builder.upsert_regime_history(repo.store.data_dir, rows)
+        return rows
+
+    monkeypatch.setattr(regime_builder, "compute_regime_incremental", compute)
+    with pytest.raises(DailyCoverageError, match="缺少有效计算状态"):
+        daily_pipeline.run_now(repo, caps, postmarket=True)
+    assert "publication" not in steps

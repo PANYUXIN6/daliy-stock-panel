@@ -9,6 +9,7 @@ import { QK } from '@/lib/queryKeys'
 import { Dashboard } from './Dashboard'
 
 const mocks = vi.hoisted(() => ({ overview: vi.fn(), refreshCache: vi.fn(), etfReference: vi.fn(async () => ({ state: "no_data", rows: [], as_of: null, checked_at: null, update_failed: false })) }))
+vi.mock('@/components/DatePicker', () => ({ DatePicker: ({ value, onChange }: { value: string; onChange: (date: string) => void }) => <button onClick={() => onChange('2026-10-18')}>日期 {value}</button> }))
 vi.mock('@/lib/api', () => ({ api: { overviewMarket: mocks.overview, refreshCache: mocks.refreshCache, etfReference: mocks.etfReference } }))
 vi.mock('@/lib/useSharedQueries', () => ({ useDataStatus: () => ({ data: {} }), useCapabilities: () => ({ data: {} }) }))
 vi.mock('@/components/dashboard/useDashboardLayout', () => ({ useDashboardLayout: () => ({ items: [{ i: 'monitor', t: 'monitor' }, { i: 'trend', t: 'trend' }], setItems: vi.fn() }) }))
@@ -60,4 +61,30 @@ it.each(['guest', 'pro', 'admin'] as const)('saved dashboard widgets respect %s 
     await act(async () => root.unmount())
     qc.clear()
   }
+})
+
+it('切换日期等待期间不展示上日数据，同日期刷新保留有效结果', async () => {
+  Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true })
+  const initial = { as_of: '2026-10-19', emotion: { score: 40 }, limit: {}, quote_status: {} }
+  let resolveNext!: (value: unknown) => void
+  mocks.overview.mockReset().mockImplementation(() => new Promise(resolve => { resolveNext = resolve }))
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity } } })
+  qc.setQueryData(QK.overviewMarket(), initial)
+  const host = document.createElement('div'); const root = createRoot(host)
+  async function settle() {
+    for (let i = 0; i < 5; i++) await act(async () => { await new Promise(r => setTimeout(r, 0)) })
+  }
+  try {
+    await act(async () => root.render(<QueryClientProvider client={qc}><Dashboard /></QueryClientProvider>)); await settle()
+    await act(async () => [...host.querySelectorAll('button')].find(b => b.textContent === '重载')!.click())
+    expect(host.textContent).toContain('市场分数 40')
+    await act(async () => resolveNext(initial)); await settle()
+    await act(async () => [...host.querySelectorAll('button')].find(b => b.textContent === '日期 2026-10-19')!.click()); await settle()
+    expect(mocks.overview).toHaveBeenLastCalledWith('2026-10-18')
+    expect(host.textContent).not.toContain('市场分数 40')
+    expect(host.textContent).toContain('加载市场看板')
+    await act(async () => resolveNext({ ...initial, as_of: '2026-10-18', emotion: { score: null } })); await settle()
+    expect(host.textContent).toContain('日期 2026-10-18')
+    expect(host.textContent).not.toContain('市场分数 40')
+  } finally { await act(async () => root.unmount()); qc.clear() }
 })

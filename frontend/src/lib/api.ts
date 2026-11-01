@@ -565,7 +565,36 @@ export interface OverviewDimensionRankItem {
   } | null
 }
 
+export interface SentimentObservation {
+  key: string
+  label: string
+  group: 'breadth' | 'activity' | 'price' | 'speculation' | 'external'
+  unit: string
+  value: number | null
+  denominator: number | null
+  status: 'available' | 'unavailable'
+  percentile_reason?: string | null
+  missing_reason?: string | null
+  percentile: number | null
+  history_sample_count: number
+  history_coverage: number
+  change_5d: number | null
+  extreme_streak: number
+  extreme_side: 'low' | 'high' | null
+}
+
+export interface SentimentObservations {
+  version: string
+  as_of: string
+  universe: { exclude_st: boolean | null; suspension_rule: string }
+  coverage: { sample_count: number | null; valid_change_count?: number | null; method_current: boolean; is_complete_day?: boolean; is_closed_day?: boolean; market_coverage_verified?: boolean; completeness_note?: string }
+  observations: SentimentObservation[]
+  context: string[]
+  limitations: string[]
+}
+
 export interface OverviewMarket {
+  sentiment?: SentimentObservations | null
   as_of: string | null
   quote_status: {
     enabled?: boolean
@@ -580,21 +609,21 @@ export interface OverviewMarket {
     up: number
     down: number
     flat: number
-    up_pct: number
-    down_pct: number
+    up_pct: number | null
+    down_pct: number | null
     avg_pct?: number | null
     median_pct?: number | null
     strong_up?: number
     strong_down?: number
   }
-  amount: { total: number; avg: number }
+  amount: { total: number | null; avg: number | null }
   boards: { board: string; count: number; up: number; down: number; up_pct: number; amount: number }[]
-  limit: { limit_up: number; broken: number; failed: number; limit_down: number; max_boards: number; seal_rate?: number; tiers: { boards: number; count: number; stocks?: { symbol: string; name?: string; amount?: number }[] }[]; sealed_ready?: boolean; fake_up?: number; fake_down?: number }
+  limit: { limit_up: number; broken: number; failed: number; limit_down: number; max_boards: number; seal_rate?: number | null; tiers: { boards: number; count: number; stocks?: { symbol: string; name?: string; amount?: number }[] }[]; sealed_ready?: boolean; fake_up?: number; fake_down?: number }
   distribution: { label: string; count: number; pct: number }[]
-  trend: { above_ma5: number; above_ma20: number; above_ma60: number; above_ma5_pct: number; above_ma20_pct: number; above_ma60_pct: number; new_high: number; new_low: number }
+  trend: { above_ma5: number; above_ma20: number; above_ma60: number; above_ma5_pct: number | null; above_ma20_pct: number | null; above_ma60_pct: number | null; new_high: number; new_low: number }
   activity: { avg_turnover: number; high_turnover: number; high_vol_ratio: number; vol_ratio: number }
-  radar: { key: string; label: string; value: number }[]
-  emotion: { score: number; label: string }
+  radar: { key: string; label: string; value: number | null }[]
+  emotion: { score: number | null; label: string }
   top_gainers: MarketSnapshotRow[]
   top_losers: MarketSnapshotRow[]
   turnover_leaders: MarketSnapshotRow[]
@@ -612,9 +641,10 @@ export interface RpsRotationData {
 }
 
 // ===== 市场环境(Regime) =====
-export type RegimeState = 'strong' | 'lean_strong' | 'range' | 'lean_weak' | 'weak'
+export type RegimeState = 'unavailable' | 'strong' | 'lean_strong' | 'range' | 'lean_weak' | 'weak'
 
 export const REGIME_STATE_LABELS: Record<RegimeState, string> = {
+  unavailable: '不可计算',
   strong: '强势',
   lean_strong: '偏强',
   range: '震荡',
@@ -623,6 +653,7 @@ export const REGIME_STATE_LABELS: Record<RegimeState, string> = {
 }
 
 export const REGIME_STATE_COLORS: Record<RegimeState, string> = {
+  unavailable: '#64748b',
   strong: '#ef4444',      // 红(强)
   lean_strong: '#f97316', // 橙
   range: '#6b7280',       // 灰
@@ -631,30 +662,34 @@ export const REGIME_STATE_COLORS: Record<RegimeState, string> = {
 }
 
 export interface RegimeRow {
+  method_version?: string | null
+  method_current?: boolean
+  is_complete_day?: boolean | null
+  sentiment?: SentimentObservations | null
   date: string
   state: RegimeState
-  score: number
+  score: number | null
   limit_up: number
   limit_down: number
   broken_limit: number
   max_consecutive: number
-  seal_rate: number
+  seal_rate: number | null
   up_count: number
   down_count: number
-  up_ratio: number
+  up_ratio: number | null
   index_pct: number
-  above_ma20_pct: number
-  total_amount: number
-  avg_turnover: number
+  above_ma20_pct: number | null
+  total_amount: number | null
+  avg_turnover: number | null
   // 4 个子维度分(0-100, 重算后才有; 旧数据可能缺) — 综合分的加权来源
   avg_pct?: number
   median_pct?: number
   strong_up_pct?: number
   strong_down_pct?: number
-  profit_score?: number
-  speculation_score?: number
-  resilience_score?: number
-  trend_score?: number
+  profit_score?: number | null
+  speculation_score?: number | null
+  resilience_score?: number | null
+  trend_score?: number | null
   // 情绪周期阶段与梯队指标(重算后才有; 旧数据可能缺)
   phase?: MarketPhase | null
   first_board?: number | null
@@ -690,18 +725,22 @@ export interface RegimeCoverage {
 }
 
 // ── 市场阶段(情绪周期) 与 主线 ──
-export type MarketPhase = 'ice' | 'ignite' | 'rally' | 'climax' | 'ebb' | 'repair'
+export type MarketPhase = 'ice' | 'ignite' | 'rally' | 'climax' | 'ebb' | 'repair' | 'unclassified' | 'unknown'
 
 export const MARKET_PHASE_LABELS: Record<MarketPhase, string> = {
-  ice: '冰点',
-  ignite: '启动',
-  rally: '主升',
-  climax: '高潮',
-  ebb: '退潮',
-  repair: '修复',
+  ice: '短线低迷',
+  ignite: '短线启动',
+  rally: '短线活跃',
+  climax: '短线高热',
+  ebb: '短线退潮',
+  repair: '短线修复',
+  unclassified: '未归类',
+  unknown: '数据不足',
 }
 
 export const MARKET_PHASE_COLORS: Record<MarketPhase, string> = {
+  unclassified: '#64748b',
+  unknown: '#475569',
   ice: '#38bdf8',     // 天蓝(冻结)
   ignite: '#f59e0b',  // 琥珀(升温)
   rally: '#ef4444',   // 红(主升)
@@ -710,7 +749,7 @@ export const MARKET_PHASE_COLORS: Record<MarketPhase, string> = {
   repair: '#94a3b8',  // 灰(修复)
 }
 
-export const MARKET_PHASE_ORDER: MarketPhase[] = ['ice', 'ignite', 'rally', 'climax', 'ebb', 'repair']
+export const MARKET_PHASE_ORDER: MarketPhase[] = ['ice', 'ignite', 'rally', 'climax', 'ebb', 'repair', 'unclassified', 'unknown']
 
 export interface MainlineMemberStat {
   member: string
@@ -726,11 +765,11 @@ export interface PhaseSegment {
   start: string
   end: string
   days: number
-  avg_height: number
-  avg_first_board: number
-  avg_ge2: number
+  avg_height: number | null
+  avg_first_board: number | null
+  avg_ge2: number | null
   avg_promo: number | null
-  avg_seal_rate: number
+  avg_seal_rate: number | null
   top_mainlines: MainlineMemberStat[]
 }
 
@@ -3179,6 +3218,7 @@ export const api = {
     const qs = params.toString()
     return request<RegimeHistory>(`/api/regime/history${qs ? `?${qs}` : ''}`)
   },
+  regimeObservations: (date: string) => request<{ sentiment: SentimentObservations | null }>(`/api/regime/observations?date=${encodeURIComponent(date)}`),
   regimeLatest: () => request<{ row: RegimeRow | null }>('/api/regime/latest'),
   regimeStates: (days = 60) => request<RegimeStates>(`/api/regime/states?days=${days}`),
   regimeCoverage: () => request<RegimeCoverage>('/api/regime/coverage'),

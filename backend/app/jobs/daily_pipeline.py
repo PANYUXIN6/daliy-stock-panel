@@ -862,9 +862,20 @@ def _run_now(
             raise DailyCoverageError("当日市场环境计算未完成")
         current = environment.filter(pl.col("date") == today)
         if current.is_empty() or current.select(pl.any_horizontal(
-            pl.col(column).is_null() for column in ("state", "score", "phase")
+            pl.col(column).is_null() for column in ("state", "phase")
         ).any()).item():
             raise DailyCoverageError("当日市场环境或情绪周期未生成")
+        # 已完成计算但合法缺少分母（如当日零触板）可返回 unavailable/null。
+        # 这不替代上游股票、指数、因子和 enriched 的完整性验收。
+        invalid_score = current.filter(pl.col("score").is_null())
+        if not invalid_score.is_empty() and (
+            "method_version" not in invalid_score.columns
+            or invalid_score.filter(
+                (pl.col("state") != "unavailable")
+                | (pl.col("method_version") != regime_builder.VERSION).fill_null(True)
+            ).height
+        ):
+            raise DailyCoverageError("当日环境缺少有效计算状态")
 
     # Step 2.7: 市场主线(概念/行业涨停梯队聚合) 增量计算 — regime 同开关。
     # 只窄扫连板 >=1 的行, 增量通常 1 天, 开销可忽略。软失败: 不阻断主管道。

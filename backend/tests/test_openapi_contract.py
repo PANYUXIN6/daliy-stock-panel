@@ -70,6 +70,7 @@ EXPECTED_OPEN_ENDPOINTS: set[str] = {
     "GET /api/regime/history",
     "GET /api/regime/latest",
     "GET /api/regime/mainline",
+    "GET /api/regime/observations",
     "GET /api/regime/phases",
     "GET /api/regime/states",
     "GET /api/screener/cached",
@@ -112,3 +113,8 @@ def test_open_contract_snapshot():
             f"  移除: {sorted(removed) or '无'}\n"
             "确认无误后, 同步更新本文件的 EXPECTED_OPEN_ENDPOINTS 并在 commit 中说明。",
         )
+
+
+def test_observations_inherits_analysis_read_scope():
+    assert api_gateway.required_scope("GET", "/api/regime/observations") == "read:analysis"
+    assert api_gateway.required_scope("POST", "/api/regime/observations") is None

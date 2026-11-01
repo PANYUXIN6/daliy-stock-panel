@@ -6,7 +6,7 @@ import type { EtfReference } from '@/lib/api'
 import EtfReferenceChart from './EtfReferenceChart'
 
 const mocks = vi.hoisted(() => ({ setOption: vi.fn(), dispose: vi.fn() }))
-vi.mock('echarts', () => ({ init: () => ({ setOption: mocks.setOption, dispose: mocks.dispose, resize: vi.fn() }) }))
+vi.mock('echarts', () => ({ init: (container: HTMLElement) => ({ setOption: mocks.setOption, dispose: () => { mocks.dispose(); container.innerHTML = '' }, resize: vi.fn() }) }))
 vi.mock('@/lib/theme', () => ({ useChartTheme: () => ({}) }))
 let host: HTMLDivElement
 let root: Root
@@ -54,4 +54,16 @@ it('更新失败仍展示已保存曲线', async () => {
   await act(async () => root.render(<EtfReferenceChart data={{ ...data, update_failed: true }} loading={false} error={false} onRetry={() => {}} />))
   expect(host.querySelector('[role="img"]')).not.toBeNull()
   expect(host.textContent).toContain('更新失败，显示已保存数据')
+})
+
+it('切日期时图表销毁不移除加载状态，加载完成和空数据均可继续切换', async () => {
+  const render = async (next: EtfReference | undefined, loading = false) => act(async () => root.render(
+    <EtfReferenceChart data={next} loading={loading} error={false} onRetry={() => {}} />))
+  await render(data)
+  await render(undefined, true)
+  expect(host.querySelector('[role="status"]')?.textContent).toContain('加载中')
+  await render({ ...data, rows: [], as_of: null })
+  expect(host.textContent).toContain('暂无已对齐的数据')
+  await render(data)
+  expect(host.querySelector('[role="img"]')).not.toBeNull()
 })

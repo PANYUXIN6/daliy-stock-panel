@@ -312,6 +312,8 @@ export interface KlineRow {
   macd_hist?: number | null
   rsi_14?: number | null
   vol_ratio_5d?: number | null
+  /** 周期是否已经收盘；未完成K线仅展示，不参与箱体确认。 */
+  is_complete?: boolean
   [key: string]: any
 }
 
@@ -330,6 +332,69 @@ export interface PriceGapsResponse {
   history_start: string | null
   as_of: string | null
   gaps: PriceGap[]
+}
+
+export type KlinePeriod = 'daily' | 'weekly' | 'monthly'
+
+export interface BoxOscillation {
+  id: string
+  period: KlinePeriod
+  level: 'short' | 'medium' | 'long'
+  lower: number
+  upper: number
+  /** 支撑、压力的允许触碰区域；旧响应可能未提供。 */
+  lower_zone?: [number, number]
+  upper_zone?: [number, number]
+  width: number
+  /** 百分数值，例如 5 表示 5%。 */
+  width_pct: number
+  start_date: string
+  end_date: string
+  observed_until: string
+  confirmed_date: string | null
+  duration_bars: number
+  status: 'candidate' | 'confirmed' | 'broken' | 'invalidated'
+  upper_touches: { date: string; price: number; confirmed_date: string | null }[]
+  lower_touches: { date: string; price: number; confirmed_date: string | null }[]
+  missing_conditions: string[]
+  parent_id: string | null
+  /** 同范围的新震荡关联此前已结束的箱体；不会复用其触点。 */
+  previous_box_id?: string | null
+  breakout: {
+    status: 'none' | 'pending' | 'confirmed' | 'returned'
+    direction: 'up' | 'down' | null
+    first_date: string | null
+    confirmed_date: string | null
+  }
+  events: { type: 'breakout_pending' | 'breakout_confirmed' | 'returned'; date: string; direction: 'up' | 'down' }[]
+  /** 突破后的区域回访，与原箱体的形成触点和回箱事件分开记录。 */
+  revisits?: { kind: 'touch' | 'entered'; date: string; boundary: 'upper' | 'lower' }[]
+}
+
+export interface BoxOscillationResponse {
+  symbol: string
+  asset_type: 'stock' | 'etf' | 'index'
+  period: KlinePeriod
+  status: 'ready' | 'no_prices' | 'insufficient_data'
+  history_start: string | null
+  as_of: string | null
+  as_of_close?: number | null
+  rows: KlineRow[]
+  boxes: BoxOscillation[]
+  diagnostics: string[]
+  config: {
+    pivot_window: number
+    min_bars: number
+    medium_bars: number
+    long_bars: number
+    touch_tolerance_ratio: number
+    release_distance_ratio?: number
+    dedup_tolerance_ratio?: number
+    fine_pivot_window?: number | null
+    min_width_retention_ratio?: number
+    breakout_margin_ratio: number
+    breakout_closes: number
+  }
 }
 
 export interface EarningsBreakoutResponse {
@@ -3025,6 +3090,8 @@ export const api = {
     request<EarningsBreakoutResponse>(`/api/kline/earnings-breakout?symbol=${encodeURIComponent(symbol)}&start_date=${range.start}&end_date=${range.end}`),
   klineGaps: (symbol: string, end: string) =>
     request<PriceGapsResponse>(`/api/kline/gaps?symbol=${encodeURIComponent(symbol)}&end_date=${end}`),
+  klineBoxes: (symbol: string, period: KlinePeriod, range: { start: string; end: string }) =>
+    request<BoxOscillationResponse>(`/api/kline/boxes?symbol=${encodeURIComponent(symbol)}&period=${period}&start_date=${range.start}&end_date=${range.end}`),
   klineDailyLatest: (symbol: string) =>
     request<KlineDailyLatestResponse>(
       `/api/kline/daily/latest?symbol=${encodeURIComponent(symbol)}`,

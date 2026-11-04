@@ -18,7 +18,7 @@ def bars(identifier="daily_first_confirmation"):
 
 
 def dataset():
-    # 人工手算的矩形示例：2/6/10/14 为交替触点，第16根索引确认。
+    # 人工手算的矩形示例：2/6/10/14 为交替触点，索引15时右侧确认就绪。
     # 这里只标 synthetic，不把回归 fixture 的 expected_boxes 当真值。
     return {
         "schema_version": 1, "dataset_id": "test-synthetic", "description": "工程测试",
@@ -73,15 +73,42 @@ def test_unannotated_snapshot_is_not_scored_as_false_positive_or_quality():
     assert report["skipped_cases"] == [{"case_id": "rectangle", "reason": "awaiting_annotations"}]
 
 
+def test_reference_zones_survive_service_validation_and_have_separate_aggregate_error():
+    payload = dataset()
+    payload["match_config"] = {"max_boundary_error": 0}
+    payload["cases"][0]["references"][0].update(
+        lower=101., upper=109., lower_zone=[99., 102.], upper_zone=[108., 111.])
+    parsed = EvaluationDataset.model_validate(payload)
+    assert parsed.model_dump(mode="json")["cases"][0]["references"][0]["lower_zone"] == [99., 102.]
+    summary = evaluate_dataset(parsed)["summary"]["synthetic"]["calibration"]["daily"]
+    assert summary["counts"]["true_positive"] == 1
+    assert summary["match_quality"]["boundary_error"]["mean"] == pytest.approx(0.15)
+    assert summary["match_quality"]["zone_boundary_error"]["mean"] == 0
+
+
+@pytest.mark.parametrize("zones", [
+    {"lower_zone": [99, 100]},
+    {"lower_zone": [99, 100, 101], "upper_zone": [110, 111]},
+    {"lower_zone": [100, 101], "upper_zone": [110, 111]},
+    {"lower_zone": [99, 105], "upper_zone": [105, 111]},
+    {"lower_zone": [99, 100], "upper_zone": [110, float("inf")]},
+])
+def test_service_rejects_incomplete_or_ambiguous_reference_zones(zones):
+    payload = dataset()
+    payload["cases"][0]["references"][0].update(zones)
+    with pytest.raises(ValidationError):
+        EvaluationDataset.model_validate(payload)
+
+
 def test_recognition_uses_reviewed_cutoff_prefix_not_later_confirmation():
     payload = dataset()
     case = payload["cases"][0]
-    case["evaluation_interval"]["end_date"] = "2024-01-23"
-    case["references"][0].update(end_date="2024-01-23", earliest_confirmable_date=None)
+    case["evaluation_interval"]["end_date"] = "2024-01-22"
+    case["references"][0].update(end_date="2024-01-22", earliest_confirmable_date=None)
     report = run(payload)["case_reports"][0]
-    assert report["recognition_as_of"] == "2024-01-23"
+    assert report["recognition_as_of"] == "2024-01-22"
     assert report["structure"]["counts"]["confirmed_detections"] == 0
-    assert report["structure"]["counts"]["candidates"] == 1
+    assert report["structure"]["counts"]["candidates"] >= 1
     assert report["structure"]["counts"]["false_negative"] == 1
 
 

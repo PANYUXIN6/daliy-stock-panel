@@ -45,10 +45,52 @@ def test_bar_distances_iou_and_historical_broken_confirmation_are_explicit():
     result = evaluate([detection], [reference])
     match = result["matches"][0]
     assert match["boundary_error"] == 0.2
+    assert match["zone_boundary_error"] == match["boundary_error"]
     assert match["time_iou"] == pytest.approx(9 / 11)
     assert (match["start_error_bars"], match["end_error_bars"]) == (1, 1)
     assert evaluate([detection], [reference], config={"max_boundary_error": 0.19})["counts"]["true_positive"] == 0
     assert evaluate([detection], [reference], config={"max_start_error_bars": 0})["counts"]["true_positive"] == 0
+
+
+def test_reference_zones_accept_expected_price_variation_without_hiding_representative_error():
+    reference = {**structure("ref"), "lower_zone": [97, 101], "upper_zone": [109, 113]}
+    result = evaluate([structure("det", lower=97, upper=113)], [reference],
+                      config={"max_boundary_error": 0})
+    match = result["matches"][0]
+    assert match["boundary_error"] == 0.3
+    assert match["zone_boundary_error"] == 0
+    assert match["cost"] == 0
+    # 区域只能解决价格分歧，不能豁免时间范围条件。
+    shifted = structure("shifted", start=6, end=15, lower=97, upper=113, confirmed=8)
+    assert not evaluate([shifted], [reference])["matches"]
+
+
+def test_zone_excess_error_and_assignment_use_distance_to_band_not_representative_line():
+    reference = {**structure("ref"), "lower_zone": [97, 101], "upper_zone": [109, 113]}
+    detection = structure("outside", lower=95, upper=115)
+    assert evaluate([detection], [reference])["matches"][0]["zone_boundary_error"] == 0.2
+    assert not evaluate([detection], [reference], config={"max_boundary_error": 0.19})["matches"]
+    result = evaluate([structure("inside", lower=97), structure("closer_line", lower=101.1)],
+                      [reference])
+    assert result["matches"][0]["detection_id"] == "inside"
+
+
+def test_detection_zones_do_not_relax_reference_without_zones():
+    detection = {**structure("det", lower=97, upper=113),
+                 "lower_zone": [0, 101], "upper_zone": [109, 114]}
+    assert not evaluate([detection], [structure("ref")])["matches"]
+
+
+@pytest.mark.parametrize("zones", [
+    {"lower_zone": [99, 101]},
+    {"lower_zone": [99, 101, 102], "upper_zone": [109, 111]},
+    {"lower_zone": [101, 102], "upper_zone": [109, 111]},
+    {"lower_zone": [99, 105], "upper_zone": [105, 111]},
+    {"lower_zone": [float("nan"), 101], "upper_zone": [109, 111]},
+])
+def test_invalid_reference_zones_are_rejected_by_pure_evaluator(zones):
+    with pytest.raises(ValueError):
+        evaluate([], [{**structure("ref"), **zones}])
 
 
 def test_optional_earliest_confirmation_metadata_does_not_affect_boundary_assessment():

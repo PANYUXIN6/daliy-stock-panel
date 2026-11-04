@@ -222,6 +222,25 @@ const boxFixture = (overrides: Partial<BoxOscillation> = {}): BoxOscillation => 
   ...overrides,
 })
 
+it('可见范围之前结束的箱体只延伸历史参考线，回访不恢复矩形区域', async () => {
+  const historical = boxFixture({
+    start_date: '2023-10-01', end_date: '2023-11-29', confirmed_date: '2023-10-20', status: 'broken',
+    upper_touches: [], lower_touches: [], events: [],
+    breakout: { status: 'confirmed', direction: 'up', first_date: '2023-11-29', confirmed_date: '2023-11-30' },
+    revisits: [{ kind: 'touch', date: DAYS[30], boundary: 'upper' }, { kind: 'entered', date: DAYS[31], boundary: 'upper' }],
+  })
+  await act(async () => root.render(<EChartsCandlestick data={rows(10)} boxes={[historical]} />))
+  const overlay = (chart.setOption.mock.calls.at(-1)?.[0] as any).series.find((series: any) => series.name === '箱体区域')
+  expect(overlay.markArea.data).toEqual([])
+  expect(overlay.markLine.data.map((line: any) => [line[0].xAxis, line[1].xAxis, line[1].lineStyle.type])).toEqual([
+    [DAYS[0], DAYS[61], 'dotted'], [DAYS[0], DAYS[61], 'dotted'],
+  ])
+  expect(overlay.markLine.data[0][1].tooltip.formatter()).toContain('虚线不表示箱体仍在延续')
+  expect(overlay.markPoint.data.map((point: any) => point.label.formatter)).toEqual(['回访上沿', '再入原区间'])
+  expect(overlay.markPoint.data.every((point: any) => !point.label.show && point.emphasis.label.show)).toBe(true)
+  expect(overlay.markPoint.data[1].tooltip.formatter()).toContain('不会恢复其震荡状态')
+})
+
 it('箱体保持原始边界，裁剪时间范围并区分形成过程、首次确认与突破事件', async () => {
   await act(async () => root.render(<EChartsCandlestick data={rows(10)} boxes={[boxFixture()]}
     ranges={[{ start: DAYS[2], end: DAYS[4], label: '原有区间' }]}
@@ -243,6 +262,7 @@ it('箱体保持原始边界，裁剪时间范围并区分形成过程、首次�
   expect(points.map((point: any) => point.name)).not.toContain('2023-12-01')
   expect(points.find((point: any) => point.label.formatter === '形成').name).toBe(DAYS[20])
   expect(points.filter((point: any) => point.label.formatter?.startsWith('突破')).map((point: any) => point.label.formatter)).toEqual(['突破待确认'])
+  expect(points.find((point: any) => point.name === DAYS[30]).label.show).toBe(false)
   expect(points.find((point: any) => point.name === DAYS[31]).tooltip.formatter()).toContain('回箱')
   expect(points.find((point: any) => point.name === DAYS[12]).tooltip.formatter()).toContain(`触点确认：${DAYS[14]}`)
   expect(option.series.find((series: any) => series.name === 'K').markArea.data[0][0].name).toBe('原有区间')

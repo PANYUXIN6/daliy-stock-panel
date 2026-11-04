@@ -12,7 +12,7 @@ from typing import Literal, Self
 import polars as pl
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from app.indicators.box_evaluation import evaluate_structures
+from app.indicators.box_evaluation import evaluate_structures, validate_boundary_zones
 from app.indicators.box_oscillation import PERIOD_CONFIG, compute_box_oscillation
 
 
@@ -35,6 +35,8 @@ class Reference(Interval):
     id: str = Field(min_length=1)
     lower: float = Field(gt=0)
     upper: float = Field(gt=0)
+    lower_zone: tuple[float, float] | None = None
+    upper_zone: tuple[float, float] | None = None
     earliest_confirmable_date: date | None = None
     note: str = ""
 
@@ -42,6 +44,7 @@ class Reference(Interval):
     def valid_reference(self) -> Self:
         if self.upper <= self.lower:
             raise ValueError("参考结构必须 lower < upper")
+        validate_boundary_zones(self.lower, self.upper, self.lower_zone, self.upper_zone)
         return self
 
 
@@ -237,7 +240,7 @@ def _aggregate(reports: list[dict]) -> dict:
                   "negative_segment_false_positive_rate": ratio(
                       totals.get("negative_segments_with_detection", 0), totals.get("negative_segments", 0))},
         "match_quality": {key: distribution([item[key] for item in matches])
-                          for key in ("time_iou", "boundary_error")},
+                          for key in ("time_iou", "boundary_error", "zone_boundary_error")},
     }
 
 

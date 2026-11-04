@@ -42,13 +42,20 @@ export function boxStatusLabel(box: BoxOscillation): string {
   return '已形成'
 }
 
+/** 显隐只反映与当前已完成收盘的接近程度，不参与识别或有效性判断。 */
+function isNearbyBox(box: BoxOscillation, close: number | null | undefined): boolean {
+  if (close == null) return false
+  return close >= (box.lower_zone?.[0] ?? box.lower) && close <= (box.upper_zone?.[1] ?? box.upper)
+}
+
 export function useBoxOscillation(symbol: string, range: KlineDateRange, startOverrides?: Partial<Record<KlinePeriod, string>>) {
   const [period, setPeriod] = useState<KlinePeriod>('daily')
-  const [enabled, setEnabled] = useState(false)
+  const [enabled, setEnabled] = useState(true)
   const [level, setLevel] = useState<BoxLevelFilter>('all')
   const [status, setStatus] = useState<BoxStatusFilter>('all')
   const [selectedId, setSelectedId] = useState<string | null>(null)
-  const [showAll, setShowAll] = useState(false)
+  const [showAll, setShowAll] = useState(true)
+  const [showDistant, setShowDistant] = useState(false)
   const expandedRange = klineRangeForPeriod(range, period)
   const requestRange = { ...expandedRange, start: startOverrides?.[period] ?? expandedRange.start }
   const rangeError = !requestRange.start || !requestRange.end ? '请选择完整的起止日期'
@@ -61,16 +68,23 @@ export function useBoxOscillation(symbol: string, range: KlineDateRange, startOv
     refetchInterval: requestRange.end >= getKlineDefaultRange().end ? 30_000 : false,
   })
   const report = !rangeError && !query.isError && query.data?.symbol === symbol && query.data.period === period ? query.data : undefined
+  const asOfClose = report?.as_of_close ?? report?.rows.find(row => row.date === report.as_of)?.close
   const filteredBoxes = useMemo(() => (report?.boxes ?? [])
-    .filter(box => box.end_date >= requestRange.start && box.start_date <= requestRange.end
+    .filter(box => box.start_date <= requestRange.end
+      && (box.status === 'broken' || box.status === 'invalidated'
+        ? showDistant || box.status === 'broken'
+        : box.end_date >= requestRange.start)
+      && (showDistant || isNearbyBox(box, asOfClose))
       && (level === 'all' || box.level === level) && (status === 'all' || box.status === status))
     .sort((a, b) => Number(b.status === 'confirmed') - Number(a.status === 'confirmed')
+      || Number(b.status === 'candidate') - Number(a.status === 'candidate')
       || b.observed_until.localeCompare(a.observed_until) || b.start_date.localeCompare(a.start_date)),
-  [report, level, status, requestRange.start, requestRange.end])
+  [report, level, status, showDistant, asOfClose, requestRange.start, requestRange.end])
   const selectedBox = filteredBoxes.find(box => box.id === selectedId) ?? filteredBoxes[0]
   const boxes = useMemo(() => enabled ? (showAll ? filteredBoxes : selectedBox ? [selectedBox] : []) : [],
     [enabled, showAll, filteredBoxes, selectedBox])
   return { period, setPeriod, enabled, setEnabled, level, setLevel, status, setStatus, showAll, setShowAll,
+    showDistant, setShowDistant,
     selectedBox, setSelectedId, boxes, filteredBoxes, report, query, requestRange, rangeError }
 }
 

@@ -119,8 +119,8 @@ it('keeps selected dates isolated across delayed, out-of-order and cached respon
     <MemoryRouter><QueryClientProvider client={client}><Indices /></QueryClientProvider></MemoryRouter>,
   ))
   await settle()
-  expect(fixtures.boxes).not.toHaveBeenCalled()
-  expect([...host.querySelectorAll('button')].find(button => button.textContent === '箱体')?.getAttribute('aria-pressed')).toBe('false')
+  expect(fixtures.boxes).toHaveBeenCalledWith('000001.SH', 'daily', expect.objectContaining({ start: expect.any(String), end: expect.any(String) }))
+  expect([...host.querySelectorAll('button')].find(button => button.textContent === '箱体')?.getAttribute('aria-pressed')).toBe('true')
   const chart = () => host.querySelector<HTMLElement>('[data-chart]')
   await resolveDay('2026-09-11', 11)
   expect(chart()?.textContent).toBe('2026-09-11|2026-09-11T09:35:00|11')

@@ -162,7 +162,11 @@ def test_null_price_cannot_bridge_confirmed_box_and_unknown_volume_is_not_halt(t
     complete = service.get_box_oscillation(repo, "600000.SH", days[0], days[-1],
                                            now=datetime(2026, 2, 1, tzinfo=CN_TZ))
     assert len(complete["rows"]) == len(closes)
-    assert any(box["status"] == "confirmed" for box in complete["boxes"])
+    confirmed = next(box for box in complete["boxes"] if box["status"] == "confirmed")
+    assert confirmed["lower_zone"][0] < confirmed["lower"] < confirmed["lower_zone"][1]
+    assert confirmed["upper_zone"][0] < confirmed["upper"] < confirmed["upper_zone"][1]
+    assert complete["config"]["fine_pivot_window"] == 1
+    assert complete["config"]["release_distance_ratio"] != complete["config"]["touch_tolerance_ratio"]
     broken = frame.with_columns(
         pl.when(pl.col("date") == days[9]).then(None).otherwise(pl.col(column)).alias(column)
         for column in ("open", "high", "low", "close")
@@ -213,3 +217,24 @@ def test_api_asset_routing_no_data_validation_and_read_failure(tmp_path, monkeyp
     failure = client.get("/api/kline/boxes", params=params)
     assert failure.status_code == 503
     assert "private local path" not in failure.text
+
+
+def test_old_ended_boxes_and_later_revisits_survive_display_crop(tmp_path):
+    closes = [105., 110., 100., 110., 100., 105., 105., 105., 105., 114., 115.]
+    closes += [120.] * 30 + [111., 105.]
+    days = [date(2026, 1, 1) + timedelta(days=index) for index in range(len(closes))]
+    repo, _ = repository(prices(days, closes=closes), tmp_path)
+    now = datetime(2026, 3, 1, tzinfo=CN_TZ)
+    full = service.get_box_oscillation(repo, '600000.SH', days[0], days[-1], now=now)
+    cropped = service.get_box_oscillation(repo, '600000.SH', days[38], days[-1], now=now)
+    old = next(box for box in full['boxes'] if box['status'] == 'broken'
+               and box['start_date'] == days[1].isoformat())
+    assert old['end_date'] < days[38].isoformat()
+    assert old['revisits'][-1]['kind'] == 'entered'
+    assert old in cropped['boxes']
+    assert len(cropped['rows']) == 5
+    assert cropped['as_of_close'] == 105.
+    before = service.get_box_oscillation(repo, '600000.SH', days[0], days[10], now=now)
+    earlier = next(box for box in before['boxes'] if box['id'] == old['id'])
+    assert earlier['end_date'] == old['end_date']
+    assert earlier['revisits'] == []

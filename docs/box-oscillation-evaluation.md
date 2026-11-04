@@ -2,7 +2,7 @@
 
 目标是让用户看清箱体上下沿和当前价格所处位置，自行判断仓位。工具只核对边界是否合理、是否有明显误识别或漏识别，不提供仓位建议，也不评价交易收益。
 
-当前已有离线核对工具和[合成回归基准](box-oscillation-baseline-report.md)，尚无独立人工标注，因此真实识别质量仍待人工核对。人工集不作为开发诊断字段的前置门槛；合成测试通过也不能说明真实行情识别可靠。在线识别算法、默认参数和图表默认关闭行为沿用[第一版](box-oscillation-design.md)。
+当前已有离线核对工具和[合成回归基准](box-oscillation-baseline-report.md)，真实识别质量仍需独立人工核对。人工集不作为开发诊断字段的前置门槛；合成测试通过也不能说明真实行情识别可靠。在线识别算法与默认参数见[算法设计](box-oscillation-design.md)，图表默认关闭。
 
 ## 保留的工具
 
@@ -32,6 +32,8 @@
 | `review_candidate` | 引擎检测或多周期一致性产生的待复核线索，不进入质量统计 |
 
 `annotation_status=complete` 需指定 `evaluation_interval`，表示这个区间已完整看过，正样清单完整。仅标出几个箱体、尚未检查其余行情时应保持 pending，或把复核区间缩小到已看过的连续范围。否则未匹配的检测框可能只是尚未标注，不能计作误识别。
+
+AI 独立目视选例仍不是人工真值或穷尽标注。此类样本可单独复用配对指标，报告所选参考的对应比例和未对应原因，但不得改写为 `human/complete` 后计算总体精确率或召回率。原本只否定整段同尺度箱体的趋势对照，也不能作为“任何局部箱体都不应出现”的纯负样。
 
 ## 输入格式
 
@@ -67,22 +69,26 @@
 
 正样字段示例为 `{"id":"ref-1","start_date":"…","end_date":"…","lower":10,"upper":12,"earliest_confirmable_date":null,"note":"…"}`；负样为 `{"id":"neg-1","start_date":"…","end_date":"…","reason":"人工核对为单边通道"}`。替换为实际有效日期。完整机器格式通过 `schema` 命令导出，校验实现见 [box_evaluation.py](../backend/app/services/box_evaluation.py)。
 
+正样可额外提供 `"lower_zone":[9.8,10.2],"upper_zone":[11.8,12.2]` 表示独立标注时接受的支撑／压力区域。两个字段必须同时提供或同时省略；每个区域恰含两个有限正数，按低到高排列并包含对应代表线，且下沿区域上界须小于上沿区域下界。区域不能在看到算法输出后再扩张。省略时保留原来的代表线评价行为，检测结果自身携带的边界带不用于放宽参考要求。
+
 ## 匹配和评价口径
 
 同一 case、同一时间集合内，检测与参考满足以下四个条件才配对：
 
 1. 有效 K 日期集合的交并比 `time_iou >= min_time_iou`，含首尾。
-2. `max(|Ldet−Lref|, |Udet−Uref|) / (Uref−Lref) <= max_boundary_error`。
+2. `zone_boundary_error <= max_boundary_error`。有参考边界带时，分别计算检测上下沿到对应区域的距离（在带内为 0），取两侧最大距离除以参考核心箱高 `Uref−Lref`；无参考带时等于原代表线误差 `max(|Ldet−Lref|, |Udet−Uref|) / (Uref−Lref)`。
 3. 起点相差有效 K 根数不超过 `max_start_error_bars`。
 4. 终点相差有效 K 根数不超过 `max_end_error_bars`。
 
-默认值依次为 0.5、0.2、5、5，是待核对的初始匹配口径，不是已经证明可靠的识别参数。配对先最大化匹配数，再最小化 `1−IoU + boundary_error + (start_error+end_error)/reference_bars`；每个检测和参考最多配对一次。
+默认值依次为 0.5、0.2、5、5，是待核对的初始匹配口径，不是已经证明可靠的识别参数。配对先最大化匹配数，再最小化 `1−IoU + zone_boundary_error + (start_error+end_error)/reference_bars`；每个检测和参考最多配对一次。增加边界带不会放宽时间重叠或起止偏差条件。若需要解释“价格接近但时间不同”，应另列明确注明配置的诊断结果，不能覆盖严格对应结果。
 
 首次确认日非空的检测纳入评价，包括历史已突破箱体；候选单列。配对为 TP，未匹配检测为 FP，未匹配参考为 FN。一个大参考被识别成相邻小框时，简单匹配仍可能产生 FP／FN；应回看具体图形，不把这些数字直接等同于看图功能是否可用，也不另建碎片错误分类。
 
 | 输出 | 含义 |
 | --- | --- |
-| 边界误差、时间 IoU | 匹配框的边界偏差与覆盖程度，给出明细及汇总 |
+| `boundary_error` | 保留相对代表线的最大偏差／参考核心箱高，展示实际画线差异，不因增加边界带而归零 |
+| `zone_boundary_error` | 超出独立参考边界带的最大距离／参考核心箱高；无带时等于 `boundary_error`，用于配对阈值与费用 |
+| 时间 IoU、起止根数偏差 | 时间覆盖和端点差异独立保留；边界误差与 IoU 给出分组汇总 |
 | `negative_segment_false_positive_rate` | 被已确认检测覆盖的负样段数／负样段数；有至少一根有效 K 重叠即命中，一段多框只算一次 |
 | `precision` / `false_discovery_rate` | TP／(TP+FP) 与 FP／(TP+FP) |
 | `recall` / `false_negative_rate` | TP／(TP+FN) 与 FN／(TP+FN) |

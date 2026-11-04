@@ -126,7 +126,7 @@ def _aggregate(bars: pl.DataFrame, period: BoxPeriod, end: date, now: datetime, 
 
 
 def get_box_oscillation(repo, symbol: str, start: date, end: date, period: BoxPeriod = "daily", *, now: datetime | None = None) -> dict:
-    """全量已存历史确定结构，显示范围只裁剪结果，避免改变起点及首次确认日。"""
+    """全量已存历史确定结构；图表裁剪不丢弃历史箱体及其后续回访。"""
     now = now or cn_now()
     now = now.astimezone(CN_TZ) if now.tzinfo else now.replace(tzinfo=CN_TZ)
     end = min(end, now.date())
@@ -134,10 +134,15 @@ def get_box_oscillation(repo, symbol: str, start: date, end: date, period: BoxPe
     config = PERIOD_CONFIG[period]
     report = {
         "symbol": symbol, "asset_type": asset, "period": period, "status": "no_prices",
-        "history_start": None, "as_of": None, "rows": [], "boxes": [], "diagnostics": [],
+        "history_start": None, "as_of": None, "as_of_close": None,
+        "rows": [], "boxes": [], "diagnostics": [],
         "config": {"pivot_window": config.pivot_left, "min_bars": config.min_bars,
                    "medium_bars": config.medium_bars, "long_bars": config.long_bars,
                    "touch_tolerance_ratio": config.touch_tolerance_ratio,
+                   "release_distance_ratio": config.release_distance_ratio,
+                   "dedup_tolerance_ratio": config.dedup_tolerance_ratio,
+                   "fine_pivot_window": config.fine_pivot_window,
+                   "min_width_retention_ratio": config.min_width_retention_ratio,
                    "breakout_margin_ratio": config.breakout_margin_ratio,
                    "breakout_closes": config.breakout_closes},
     }
@@ -161,6 +166,7 @@ def get_box_oscillation(repo, symbol: str, start: date, end: date, period: BoxPe
     complete = periods.filter(pl.col("is_complete"))
     if not complete.is_empty():
         report["as_of"] = complete["date"][-1].isoformat()
+        report["as_of_close"] = complete["close"][-1]
     report["status"] = "ready" if complete.height >= config.min_bars else "insufficient_data"
     boxes: list[dict] = []
     # 缺失/未完成的历史快照隔断判断，不能把缺口两边拼成新的往返。
@@ -172,7 +178,9 @@ def get_box_oscillation(repo, symbol: str, start: date, end: date, period: BoxPe
                     box["status"] = "invalidated"
                     box["missing_conditions"].append("后续记录不完整，结构已停止延续")
         boxes.extend(box for box in found if box["status"] != "invalidated" or box["confirmed_date"])
-    report["boxes"] = [box for box in boxes if box["end_date"] >= start.isoformat()]
+    # 已结束结构仍可能在远期再次被触及；保留记录，由显示层决定显隐。
+    report["boxes"] = [box for box in boxes if box["confirmed_date"] is not None
+                       or box["end_date"] >= start.isoformat()]
     chart = compute_indicators(periods.with_columns(pl.col("volume").fill_nan(None).fill_null(0)), needed=_CHART_INDICATORS)
     chart = chart.filter(pl.col("date") >= start).select("date", "open", "high", "low", "close", "volume", "amount", "is_complete", *_CHART_INDICATORS)
     float_columns = [column for column, dtype in chart.schema.items() if dtype.is_float()]

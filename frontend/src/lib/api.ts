@@ -342,6 +342,9 @@ export interface BoxOscillation {
   level: 'short' | 'medium' | 'long'
   lower: number
   upper: number
+  /** 支撑、压力的允许触碰区域；旧响应可能未提供。 */
+  lower_zone?: [number, number]
+  upper_zone?: [number, number]
   width: number
   /** 百分数值，例如 5 表示 5%。 */
   width_pct: number
@@ -355,6 +358,8 @@ export interface BoxOscillation {
   lower_touches: { date: string; price: number; confirmed_date: string | null }[]
   missing_conditions: string[]
   parent_id: string | null
+  /** 同范围的新震荡关联此前已结束的箱体；不会复用其触点。 */
+  previous_box_id?: string | null
   breakout: {
     status: 'none' | 'pending' | 'confirmed' | 'returned'
     direction: 'up' | 'down' | null
@@ -362,6 +367,8 @@ export interface BoxOscillation {
     confirmed_date: string | null
   }
   events: { type: 'breakout_pending' | 'breakout_confirmed' | 'returned'; date: string; direction: 'up' | 'down' }[]
+  /** 突破后的区域回访，与原箱体的形成触点和回箱事件分开记录。 */
+  revisits?: { kind: 'touch' | 'entered'; date: string; boundary: 'upper' | 'lower' }[]
 }
 
 export interface BoxOscillationResponse {
@@ -371,6 +378,7 @@ export interface BoxOscillationResponse {
   status: 'ready' | 'no_prices' | 'insufficient_data'
   history_start: string | null
   as_of: string | null
+  as_of_close?: number | null
   rows: KlineRow[]
   boxes: BoxOscillation[]
   diagnostics: string[]
@@ -380,6 +388,10 @@ export interface BoxOscillationResponse {
     medium_bars: number
     long_bars: number
     touch_tolerance_ratio: number
+    release_distance_ratio?: number
+    dedup_tolerance_ratio?: number
+    fine_pivot_window?: number | null
+    min_width_retention_ratio?: number
     breakout_margin_ratio: number
     breakout_closes: number
   }

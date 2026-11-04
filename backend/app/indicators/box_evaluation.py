@@ -27,6 +27,8 @@ class _Interval:
     lower: float
     upper: float
     original: dict
+    lower_zone: tuple[float, float] | None = None
+    upper_zone: tuple[float, float] | None = None
 
     @property
     def width(self) -> float:
@@ -64,7 +66,27 @@ def _positive_price(value: Any, field: str) -> float:
     return price
 
 
-def _intervals(values: list[dict], indices: dict[str, int]) -> list[_Interval]:
+def validate_boundary_zones(
+    lower: float, upper: float, lower_zone: Any, upper_zone: Any,
+) -> tuple[tuple[float, float] | None, tuple[float, float] | None]:
+    """参考边界带必须成对、包含代表线且彼此分离；不由检测结果推导。"""
+    if lower_zone is None and upper_zone is None:
+        return None, None
+    zones = []
+    for name, zone, boundary in (("lower_zone", lower_zone, lower),
+                                 ("upper_zone", upper_zone, upper)):
+        if not isinstance(zone, (list, tuple)) or len(zone) != 2:
+            raise ValueError("lower_zone/upper_zone 必须成对提供，各含两个有限正数")
+        start, end = (_positive_price(value, name) for value in zone)
+        if not start <= boundary <= end:
+            raise ValueError(f"{name} 必须有序并包含对应代表边界")
+        zones.append((start, end))
+    if zones[0][1] >= zones[1][0]:
+        raise ValueError("上下边界带不得相交或接触")
+    return zones[0], zones[1]
+
+
+def _intervals(values: list[dict], indices: dict[str, int], *, validate_zones: bool = True) -> list[_Interval]:
     result = []
     seen = set()
     for value in values:
@@ -81,7 +103,12 @@ def _intervals(values: list[dict], indices: dict[str, int]) -> list[_Interval]:
         if (value.get("confirmed_date") is not None
                 and _index(value["confirmed_date"], indices, "confirmed_date") < start):
             raise ValueError("confirmed_date 不得早于结构起点")
-        result.append(_Interval(identifier, start, end, lower, upper, value))
+        # 检测自身的容差带不属于参考契约，不参与评价或扩大参考边界。
+        lower_zone, upper_zone = (validate_boundary_zones(
+            lower, upper, value.get("lower_zone"), value.get("upper_zone"))
+            if validate_zones else (None, None))
+        result.append(_Interval(identifier, start, end, lower, upper, value,
+                                lower_zone, upper_zone))
     return sorted(result, key=lambda item: item.id)
 
 
@@ -118,13 +145,23 @@ def _pair(detection: _Interval, reference: _Interval) -> dict:
     iou = _iou(detection, reference)
     error = max(abs(detection.lower - reference.lower),
                 abs(detection.upper - reference.upper)) / reference.width
+    # 带内偏差为零；带外只计算到最近边缘的距离。代表线误差仍独立保留。
+    zone_error = error
+    if reference.lower_zone is not None and reference.upper_zone is not None:
+        zone_error = max(
+            reference.lower_zone[0] - detection.lower,
+            detection.lower - reference.lower_zone[1],
+            reference.upper_zone[0] - detection.upper,
+            detection.upper - reference.upper_zone[1],
+            0.0,
+        ) / reference.width
     start_error = abs(detection.start - reference.start)
     end_error = abs(detection.end - reference.end)
     return {
         "detection_id": detection.id, "reference_id": reference.id,
-        "time_iou": iou, "boundary_error": error,
+        "time_iou": iou, "boundary_error": error, "zone_boundary_error": zone_error,
         "start_error_bars": start_error, "end_error_bars": end_error,
-        "cost": 1 - iou + error + (start_error + end_error) / reference.length,
+        "cost": 1 - iou + zone_error + (start_error + end_error) / reference.length,
     }
 
 
@@ -201,13 +238,14 @@ def evaluate_structures(
 
     结构端点必须属于 dates。预测 confirmed_date 非空即为已确认结构，
     包括历史 broken；其余单列候选。参考与预测通过双边界、有效 bar 时间
-    Jaccard、起止误差四条件后作最优一对一匹配。
+    Jaccard、起止误差四条件后作最优一对一匹配；参考带存在时按带外偏差配对，
+    同时保留代表线偏差。参考带只能来自独立标注，不能按检测框事后扩张。
     负样 FPR 的分母为人工明确标注的负样区间数量；预测已确认区间与某负样
     共享至少一根有效 bar 即命中该区间，不按候选数量重复计数。
     """
     indices = _date_indices(dates)
     config = _config(match_config)
-    all_detections = _intervals(detections, indices)
+    all_detections = _intervals(detections, indices, validate_zones=False)
     confirmed = [item for item in all_detections if item.original.get("confirmed_date") is not None]
     candidates = [item.id for item in all_detections if item.original.get("confirmed_date") is None]
     refs = _intervals(references, indices)
@@ -216,7 +254,7 @@ def evaluate_structures(
         for ref_index, reference in enumerate(refs):
             pair = _pair(detection, reference)
             if (pair["time_iou"] >= config.min_time_iou
-                    and pair["boundary_error"] <= config.max_boundary_error
+                    and pair["zone_boundary_error"] <= config.max_boundary_error
                     and pair["start_error_bars"] <= config.max_start_error_bars
                     and pair["end_error_bars"] <= config.max_end_error_bars):
                 eligible[det_index, ref_index] = pair
@@ -263,7 +301,8 @@ def evaluate_structures(
             "assignment": "maximum_cardinality_then_minimum_total_cost",
             "time_iou": "inclusive_valid_bar_intersection_over_union",
             "boundary_error": "max_absolute_boundary_error_divided_by_reference_width",
-            "cost": "1-time_iou+boundary_error+(start_error_bars+end_error_bars)/reference_bars",
+            "zone_boundary_error": "max_distance_outside_reference_zones_divided_by_reference_width_or_boundary_error_if_no_zones",
+            "cost": "1-time_iou+zone_boundary_error+(start_error_bars+end_error_bars)/reference_bars",
             "negative_fpr": "negative_segments_with_any_confirmed_interval_overlap/negative_segments",
         },
     }

@@ -44,20 +44,20 @@ def established(end: int = 25) -> pl.DataFrame:
 
 def test_confirmed_pivots_and_first_confirmation_do_not_repaint_prefix():
     frame = established()
-    before = outer(compute_box_oscillation(frame.head(16)))
+    before = outer(compute_box_oscillation(frame.head(15)))
     assert before["status"] == "candidate"
     assert before["confirmed_date"] is None
     assert before["lower_touches"][-1] == {
         "date": day(14), "price": 99.8, "confirmed_date": None,
     }
-    at_confirmation = outer(compute_box_oscillation(frame.head(17)))
+    at_confirmation = outer(compute_box_oscillation(frame.head(16)))
     assert at_confirmation["status"] == "confirmed"
     assert at_confirmation["start_date"] == day(2)
-    assert at_confirmation["confirmed_date"] == day(16)
-    assert at_confirmation["lower_touches"][-1]["confirmed_date"] == day(16)
+    assert at_confirmation["confirmed_date"] == day(15)
+    assert at_confirmation["lower_touches"][-1]["confirmed_date"] == day(15)
     extended = outer(compute_box_oscillation(frame))
     assert extended["id"] == at_confirmation["id"]
-    assert extended["confirmed_date"] == day(16)
+    assert extended["confirmed_date"] == day(15)
     assert extended["upper"] == at_confirmation["upper"]
     assert extended["lower"] == at_confirmation["lower"]
     assert [touch["date"] for touch in extended["upper_touches"]] == [day(2), day(10), day(18)]
@@ -103,14 +103,14 @@ def test_sloped_and_converging_swings_do_not_form_horizontal_box(anchors):
 
 
 def test_minimum_daily_length_is_required_after_all_four_touches_confirm():
-    frame = wave([(0, 105), (2, 110), (5, 100), (8, 110), (11, 100), (13, 105)], end=16)
-    short = outer(compute_box_oscillation(frame.head(16)))
+    frame = prices([105, 110, 100, 110, 100, 105, 105, 105, 105])
+    short = outer(compute_box_oscillation(frame.head(8)))
     assert len(short["upper_touches"]) == len(short["lower_touches"]) == 2
-    assert short["duration_bars"] == 14
+    assert short["duration_bars"] == 7
     assert short["status"] == "candidate"
-    assert short["missing_conditions"] == ["有效K线不足15根"]
+    assert short["missing_conditions"] == ["有效K线不足8根"]
     ready = outer(compute_box_oscillation(frame))
-    assert ready["confirmed_date"] == day(16)
+    assert ready["confirmed_date"] == day(8)
 
 
 def test_nested_inner_breakout_leaves_outer_structure_active():
@@ -142,7 +142,7 @@ def test_nested_inner_breakout_leaves_outer_structure_active():
 
 def test_returned_excursion_and_later_breakout_preserve_boundaries_and_events():
     frame = established()
-    extra = prices([111.5, 105, 112, 112.5, 115]).with_columns(
+    extra = prices([113.5, 105, 114, 114.5, 115]).with_columns(
         pl.col("date") + pl.duration(days=frame.height),
     )
     all_bars = pl.concat([frame, extra])
@@ -187,12 +187,12 @@ def test_week_and_month_use_their_own_pivot_and_duration_defaults(period, confir
     box = outer(compute_box_oscillation(frame, period))
     assert box["period"] == period
     assert box["confirmed_date"] == day(confirmation)
-    assert not any(item["status"] == "confirmed" for item in compute_box_oscillation(frame))
+    assert outer(compute_box_oscillation(frame))["confirmed_date"] == day(8)
 
 
 def test_downward_breakout_is_symmetric_and_invalid_data_is_rejected():
     frame = established()
-    tail = prices([98, 97]).with_columns(pl.col("date") + pl.duration(days=frame.height))
+    tail = prices([97, 96]).with_columns(pl.col("date") + pl.duration(days=frame.height))
     box = outer(compute_box_oscillation(pl.concat([frame, tail])))
     assert box["status"] == "broken"
     assert box["breakout"]["direction"] == "down"
@@ -201,3 +201,175 @@ def test_downward_breakout_is_symmetric_and_invalid_data_is_rejected():
     assert compute_box_oscillation(pl.DataFrame()) == []
     with pytest.raises(ValueError, match="有效的正数"):
         compute_box_oscillation(prices([0]))
+
+
+def test_candidate_medians_accept_price_regions_then_freeze_without_repainting():
+    frame = wave([(0, 105), (2, 110), (6, 100), (10, 111.6), (14, 101.7),
+                  (18, 109), (22, 100.5), (25, 105)])
+    candidate = next(box for box in compute_box_oscillation(frame.head(15))
+                     if box['start_date'] == day(2))
+    assert candidate['status'] == 'candidate'  # 最新下沿尚未得到右侧K线确认。
+    assert candidate['lower'] == pytest.approx(99.8)
+    assert candidate['upper'] == pytest.approx((110.2 + 111.8) / 2)
+    confirmed = next(box for box in compute_box_oscillation(frame.head(16))
+                     if box['id'] == candidate['id'])
+    assert confirmed['confirmed_date'] == day(15)
+    assert confirmed['lower'] == pytest.approx((99.8 + 101.5) / 2)
+    frozen = ('lower', 'upper', 'lower_zone', 'upper_zone', 'confirmed_date')
+    for length in range(16, frame.height + 1):
+        box = next(box for box in compute_box_oscillation(frame.head(length))
+                   if box['id'] == confirmed['id'])
+        assert {key: box[key] for key in frozen} == {key: confirmed[key] for key in frozen}
+    assert confirmed['lower_zone'] == pytest.approx([97.72, 101.88])
+    assert confirmed['upper_zone'] == pytest.approx([108.12, 112.28])
+
+
+def test_single_recovered_wick_can_seed_range_but_repeated_excursions_cannot():
+    frame = established().with_columns(
+        pl.when(pl.col('date') == date.fromisoformat(day(4)))
+        .then(125.).otherwise(pl.col('high')).alias('high'),
+    )
+    box = outer(compute_box_oscillation(frame))
+    assert box['start_date'] == day(2)
+    assert box['confirmed_date'] == day(15)
+    repeated = frame.with_columns(
+        pl.when(pl.col('date') == date.fromisoformat(day(5)))
+        .then(125.).otherwise(pl.col('high')).alias('high'),
+    )
+    assert not any(box['start_date'] == day(2) and box['upper'] == pytest.approx(110.2)
+                   and box['confirmed_date'] is not None
+                   for box in compute_box_oscillation(repeated))
+
+
+def test_daily_fine_pivots_retain_fast_independent_short_swings(monkeypatch):
+    from dataclasses import replace
+
+    frame = prices([105, 110, 100, 110, 100, 105, 110, 100, 110,
+                    100, 105, 110, 100, 110, 100, 105, 105])
+    fine = outer(compute_box_oscillation(frame))
+    assert fine['status'] == 'confirmed'
+    assert fine['duration_bars'] >= 15
+    all_touches = fine['upper_touches'] + fine['lower_touches']
+    assert len({touch['date'] for touch in all_touches}) == len(all_touches)
+    assert all(touch['confirmed_date'] > touch['date'] for touch in all_touches)
+    monkeypatch.setitem(PERIOD_CONFIG, 'daily', replace(PERIOD_CONFIG['daily'], fine_pivot_window=None))
+    coarse = outer(compute_box_oscillation(frame))
+    assert coarse['confirmed_date'] > fine['confirmed_date']
+
+
+def test_breakout_buffer_is_independent_and_soft_excursion_is_not_a_return():
+    frame = established()
+    tail = prices([111., 112., 111.5, 112., 112.1]).with_columns(
+        pl.col('date') + pl.duration(days=frame.height),
+    )
+    combined = pl.concat([frame, tail])
+    waiting = outer(compute_box_oscillation(combined.head(29)))
+    assert waiting['status'] == 'confirmed'
+    assert waiting['breakout']['status'] == 'pending'
+    assert waiting['events'] == [{'type': 'breakout_pending', 'date': day(26), 'direction': 'up'}]
+    broken = outer(compute_box_oscillation(combined))
+    assert broken['breakout']['first_date'] == day(26)
+    assert broken['breakout']['confirmed_date'] == day(30)
+    assert broken['lower_zone'] == waiting['lower_zone']
+    assert broken['upper_zone'] == waiting['upper_zone']
+    assert broken['events'][-1] == {'type': 'breakout_confirmed', 'date': day(30), 'direction': 'up'}
+
+
+def test_seed_history_and_live_box_share_two_close_exit_rule():
+    # 尚未组成种子的历史里，一次越界后回箱不能被当成已确认突破。
+    frame = established().with_columns(
+        pl.when(pl.col('date') == date.fromisoformat(day(4)))
+        .then(113.5).otherwise(pl.col('close')).alias('close'),
+        pl.when(pl.col('date') == date.fromisoformat(day(4)))
+        .then(113.7).otherwise(pl.col('high')).alias('high'),
+    )
+    box = outer(compute_box_oscillation(frame))
+    assert box['start_date'] == day(2)
+    assert box['confirmed_date'] == day(15)
+    persistent = frame.with_columns(
+        pl.when(pl.col('date') == date.fromisoformat(day(5)))
+        .then(113.5).otherwise(pl.col('close')).alias('close'),
+        pl.when(pl.col('date') == date.fromisoformat(day(5)))
+        .then(113.7).otherwise(pl.col('high')).alias('high'),
+    )
+    assert not any(box['start_date'] == day(2) and box['upper'] == pytest.approx(110.2)
+                   and box['confirmed_date'] is not None
+                   for box in compute_box_oscillation(persistent))
+
+
+def test_jumping_to_opposite_side_does_not_report_a_close_inside_box():
+    frame = established()
+    tail = prices([111., 99., 105.]).with_columns(pl.col('date') + pl.duration(days=frame.height))
+    box = outer(compute_box_oscillation(pl.concat([frame, tail])))
+    assert box['status'] == 'confirmed'
+    assert box['events'] == [
+        {'type': 'breakout_pending', 'date': day(26), 'direction': 'up'},
+        {'type': 'breakout_pending', 'date': day(27), 'direction': 'down'},
+        {'type': 'returned', 'date': day(28), 'direction': 'down'},
+    ]
+
+
+@pytest.mark.parametrize('direction', ['up', 'down'])
+def test_historical_revisits_rearm_after_leaving_each_zone_inside_box(direction):
+    frame = established()
+    # 回箱后离开上下沿区域；贴边期间即使收盘离开，影线仍相交也不能重复计数。
+    tail = prices([114., 115., 109., 105., 109., 108., 109.,
+                   105., 101., 102., 101., 105., 109.]).with_columns(
+        pl.col('date') + pl.duration(days=frame.height),
+    )
+    full = pl.concat([frame, tail])
+    if direction == 'down':
+        full = full.with_columns((220. - pl.col('open')).alias('open'),
+                                 (220. - pl.col('low')).alias('high'),
+                                 (220. - pl.col('high')).alias('low'),
+                                 (220. - pl.col('close')).alias('close'))
+    boundary = 'upper' if direction == 'up' else 'lower'
+    opposite = 'lower' if direction == 'up' else 'upper'
+    expected = [
+        {'kind': 'entered', 'date': day(28), 'boundary': boundary},
+        {'kind': 'touch', 'date': day(30), 'boundary': boundary},
+        {'kind': 'touch', 'date': day(34), 'boundary': opposite},
+        {'kind': 'touch', 'date': day(38), 'boundary': boundary},
+    ]
+    for length in range(28, full.height + 1):
+        historical = next(box for box in compute_box_oscillation(full.head(length))
+                          if box['confirmed_date'] == day(15))
+        assert historical['revisits'] == [event for event in expected
+                                         if event['date'] <= day(length - 1)]
+
+
+@pytest.mark.parametrize('direction', ['up', 'down'])
+def test_long_delayed_revisits_preserve_ended_box_and_new_box_needs_fresh_touches(direction):
+    frame = established()
+    # 远离150根后先访问旧区域，再重新进入；连续贴边只记录一次区域回访。
+    tail = prices([114., 115.] + [120.] * 150 + [112.1, 112., 112.1, 109., 108., 105.]
+                  + [110., 100., 110., 100., 105., 110., 100., 110., 100., 105.]).with_columns(
+        pl.col('date') + pl.duration(days=frame.height),
+    )
+    full = pl.concat([frame, tail])
+    if direction == 'down':
+        full = full.with_columns((220. - pl.col('open')).alias('open'),
+                                 (220. - pl.col('low')).alias('high'),
+                                 (220. - pl.col('high')).alias('low'),
+                                 (220. - pl.col('close')).alias('close'))
+    broken = next(box for box in compute_box_oscillation(full.head(28))
+                  if box['confirmed_date'] == day(15))
+    boxes = compute_box_oscillation(full)
+    historical = next(box for box in boxes if box['id'] == broken['id'])
+    frozen = ['status', 'confirmed_date', 'end_date', 'duration_bars', 'lower', 'upper',
+              'lower_zone', 'upper_zone', 'upper_touches', 'lower_touches', 'breakout', 'events']
+    assert {key: historical[key] for key in frozen} == {key: broken[key] for key in frozen}
+    assert historical['breakout']['direction'] == direction
+    boundary = 'upper' if direction == 'up' else 'lower'
+    assert historical['revisits'][:2] == [
+        {'kind': 'touch', 'date': day(178), 'boundary': boundary},
+        {'kind': 'entered', 'date': day(181), 'boundary': boundary},
+    ]
+    before_new_structure = compute_box_oscillation(full.head(184))
+    assert not any(box['previous_box_id'] == historical['id'] for box in before_new_structure)
+    renewed = [box for box in boxes if box['previous_box_id'] == historical['id']]
+    assert len(renewed) == 1
+    assert renewed[0]['id'] != historical['id']
+    assert renewed[0]['start_date'] > historical['breakout']['confirmed_date']
+    assert all(touch['date'] > historical['breakout']['confirmed_date']
+               for touch in renewed[0]['upper_touches'] + renewed[0]['lower_touches'])

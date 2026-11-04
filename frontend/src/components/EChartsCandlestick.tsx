@@ -508,11 +508,11 @@ function buildBoxOscillationSeries(boxes: BoxOscillation[] | undefined, dates: s
   const fills = { short: 'rgba(56,189,248,0.07)', medium: 'rgba(45,212,191,0.07)', long: 'rgba(167,139,250,0.07)' }
 
   for (const box of boxes) {
-    if (box.upper <= box.lower || box.end_date < dates[0] || box.start_date > dates[dates.length - 1]) continue
+    if (box.upper <= box.lower || box.start_date > dates[dates.length - 1]) continue
+    if (box.end_date < dates[0] && box.status !== 'broken') continue
     const startIndex = dates.findIndex(date => date >= box.start_date)
     let endIndex = dates.length - 1
     while (endIndex >= 0 && dates[endIndex] > box.end_date) endIndex -= 1
-    if (startIndex < 0 || endIndex < startIndex) continue
 
     const color = box.status === 'invalidated' ? CT().text : colors[box.level]
     const precision = box.lower.toFixed(2) === box.upper.toFixed(2) ? 4 : 2
@@ -558,11 +558,28 @@ function buildBoxOscillationSeries(boxes: BoxOscillation[] | undefined, dates: s
     const confirmedIndex = box.status !== 'candidate' && box.confirmed_date
       ? dates.findIndex(date => date >= box.confirmed_date!)
       : -1
-    if (confirmedIndex < 0 || confirmedIndex > endIndex) {
-      addSegment(dates[startIndex], dates[endIndex], true)
-    } else {
-      if (confirmedIndex > startIndex) addSegment(dates[startIndex], dates[confirmedIndex], true)
-      addSegment(dates[Math.max(startIndex, confirmedIndex)], dates[endIndex], false)
+    if (startIndex >= 0 && endIndex >= startIndex) {
+      if (confirmedIndex < 0 || confirmedIndex > endIndex) {
+        addSegment(dates[startIndex], dates[endIndex], true)
+      } else {
+        if (confirmedIndex > startIndex) addSegment(dates[startIndex], dates[confirmedIndex], true)
+        addSegment(dates[Math.max(startIndex, confirmedIndex)], dates[endIndex], false)
+      }
+    }
+
+    if (box.status === 'broken' && box.breakout.confirmed_date) {
+      const historyStart = dates.find(date => date >= box.breakout.confirmed_date!)
+      const historyEnd = [...dates].reverse().find(date => date <= box.observed_until)
+      if (historyStart && historyEnd && historyStart <= historyEnd) {
+        for (const value of [box.lower, box.upper]) {
+          lines.push([
+            { xAxis: historyStart, yAxis: value },
+            { xAxis: historyEnd, yAxis: value,
+              lineStyle: { color, type: 'dotted', width: 1, opacity: 0.5 }, label: { show: false },
+              tooltip: markerTooltip(`${title} · 历史边界参考\n${description}\n震荡已经结束，虚线不表示箱体仍在延续。`) },
+          ])
+        }
+      }
     }
 
     for (const [side, touches] of [['上沿', box.upper_touches], ['下沿', box.lower_touches]] as const) {
@@ -593,13 +610,26 @@ function buildBoxOscillationSeries(boxes: BoxOscillation[] | undefined, dates: s
         name: event.date, coord: [event.date, up ? box.upper : box.lower],
         symbol: event.type === 'returned' ? 'diamond' : 'triangle', symbolSize: 9,
         symbolRotate: up ? 0 : 180, symbolOffset: [0, up ? -10 : 10], itemStyle: { color: eventColor },
-        label: { show: true, formatter: eventLabel, position: up ? 'top' : 'bottom', color: eventColor, fontSize: 10 },
+        label: { show: event.type === 'breakout_confirmed', formatter: eventLabel, position: up ? 'top' : 'bottom', color: eventColor, fontSize: 10 },
+        emphasis: { label: { show: true } },
         tooltip: markerTooltip(`${title} · ${eventLabel}\n事件日期：${event.date}\n方向：${up ? '向上' : '向下'}\n${description}`),
+      })
+    }
+    for (const visit of box.revisits ?? []) {
+      if (!dateIndexMap.has(visit.date)) continue
+      const upper = visit.boundary === 'upper'
+      const label = visit.kind === 'entered' ? '再入原区间' : `回访${upper ? '上' : '下'}沿`
+      points.push({
+        name: visit.date, coord: [visit.date, upper ? box.upper : box.lower],
+        symbol: 'emptyDiamond', symbolSize: 9, symbolOffset: [0, upper ? -10 : 10],
+        itemStyle: { color }, label: { show: false, formatter: label, position: upper ? 'top' : 'bottom', color, fontSize: 10 },
+        emphasis: { label: { show: true } },
+        tooltip: markerTooltip(`${title} · ${label}\n回访日期：${visit.date}\n原箱体于 ${box.breakout.confirmed_date} 突破结束；本次回访不会恢复其震荡状态。`),
       })
     }
   }
 
-  if (!areas.length) return undefined
+  if (!areas.length && !lines.length && !points.length) return undefined
   return {
     id: 'box-oscillation-overlay', name: '箱体区域', type: 'line', data: [], symbol: 'none', animation: false,
     xAxisIndex: 0, yAxisIndex: 0,

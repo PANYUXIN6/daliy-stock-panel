@@ -8,12 +8,14 @@ Starter+ 盘后可用 quotes.get(universes) 顺便补充 name。
 from __future__ import annotations
 
 import logging
+import re
 from datetime import date
 from pathlib import Path
 
 import polars as pl
 
-from app.market_time import cn_today
+from app.market_time import cn_now, cn_today
+from app.price_limits import is_risk_warning_name
 from app.services.fs_utils import atomic_write_parquet
 from app.tickflow.client import get_client
 
@@ -22,9 +24,75 @@ logger = logging.getLogger(__name__)
 _EXCHANGES = ["SH", "SZ", "BJ"]
 
 
-def _flatten_instruments(items: list[dict]) -> list[dict]:
+METADATA_RULE_VERSION = "instrument-scope-v1"
+
+
+def _valid_name(name: object, symbol: object) -> bool:
+    text = str(name or "").strip()
+    return bool(text and text not in {str(symbol), str(symbol).split(".")[0]}
+                and not text.isdigit() and text.upper() not in {"UNKNOWN", "N/A", "NONE"})
+
+
+def _scope_metadata(item: dict, ext: dict) -> dict:
+    """本轮来源类型、交易所和代码共同归一；冲突不凭单一代码猜测。"""
+    symbol = str(item.get("symbol") or "")
+    match = re.fullmatch(r"([0-9]{6})\.(SH|SZ|BJ)", symbol)
+    exchange = item.get("exchange")
+    asset_type = item.get("type")
+    code_ok = match is not None and exchange == match[2] and item.get("code") in (None, "", match[1])
+    board = security_type = None
+    basis = "证券类型、交易所或代码缺失／冲突，范围未知"
+    if asset_type and asset_type != "stock":
+        security_type, basis = "other", "来源声明非股票资产"
+    elif asset_type == "stock" and code_ok:
+        code = match[1]
+        if exchange == "SH":
+            if code.startswith(("600", "601", "603", "605")):
+                board, security_type = "main", "a_share"
+            elif code.startswith("688"):
+                board, security_type = "star", "a_share"
+            elif code.startswith("689"):
+                board, security_type = "star", "other"
+            elif code.startswith("900"):
+                security_type = "b_share"
+        elif exchange == "SZ":
+            if code.startswith(("000", "001", "002", "003")):
+                board, security_type = "main", "a_share"
+            elif code.startswith(("300", "301", "302")):
+                board, security_type = "chinext", "a_share"
+            elif code.startswith("200"):
+                security_type = "b_share"
+        elif exchange == "BJ":
+            board, security_type = "beijing", "a_share"
+        basis = "本轮来源stock类型、交易所及代码制式联合归一"
+        for key, allowed, inferred in (
+            ("board", {"main", "chinext", "star", "beijing"}, board),
+            ("security_type", {"a_share", "b_share", "other"}, security_type),
+        ):
+            if key not in ext:
+                continue
+            explicit = ext[key]
+            normalized = explicit if isinstance(explicit, str) and explicit in allowed and (inferred is None or explicit == inferred) else None
+            if key == "board":
+                board = normalized
+            else:
+                security_type = normalized
+            basis += f"；{key}使用来源显式字段" if normalized is not None else f"；{key}来源未知或与代码制式冲突"
+    name = item.get("name")
+    if "is_st" in ext:
+        is_st = ext["is_st"] if isinstance(ext["is_st"], bool) else None
+        st_source = "provider_explicit"
+    else:
+        is_st = is_risk_warning_name(name) if _valid_name(name, symbol) and asset_type == "stock" else None
+        st_source = "provider_name" if is_st is not None else "unknown"
+    return {"board": board, "security_type": security_type, "is_st": is_st,
+            "metadata_basis": basis, "is_st_source": st_source}
+
+
+def _flatten_instruments(items: list[dict], *, source: str = "unknown") -> list[dict]:
     """把 SDK 返回的 Instrument 列表 flatten 成扁平行。"""
     rows = []
+    observed_at = cn_now().isoformat()
     for item in items:
         row = {
             "symbol": item.get("symbol"),
@@ -35,6 +103,9 @@ def _flatten_instruments(items: list[dict]) -> list[dict]:
             "type": item.get("type"),
         }
         ext = item.get("ext") or {}
+        row.update(_scope_metadata(item, ext))
+        row.update(metadata_source=source, metadata_observed_at=observed_at,
+                   metadata_rule_version=METADATA_RULE_VERSION)
         # None 表示来源未声明当前成员状态，不能推断为退市或停牌。
         row["is_current"] = ext.get("is_current")
         listing_date = ext.get("listing_date")
@@ -96,7 +167,7 @@ def _fetch_instruments_via_provider(*, require_complete: bool = False) -> list[d
             raise RuntimeError(f"数据源 {provider_name} 股票维表同步失败") from e
         logger.warning("provider %s get_instruments 失败: %s", provider_name, e)
         return None
-    rows = _flatten_instruments(items)
+    rows = _flatten_instruments(items, source=provider_name)
     logger.info("instruments via %s: %d stocks", provider_name, len(rows))
     return rows
 
@@ -116,7 +187,7 @@ def sync_instruments(data_dir: Path, *, require_complete: bool = False) -> int:
             try:
                 items = tf.exchanges.get_instruments(ex, instrument_type="stock")
                 if items:
-                    all_rows.extend(_flatten_instruments(items))
+                    all_rows.extend(_flatten_instruments(items, source="tickflow"))
                     logger.info("instruments %s: %d stocks", ex, len(items))
                 elif require_complete:
                     raise RuntimeError(f"{ex} 股票维表为空")
@@ -188,17 +259,29 @@ def enrich_names_from_quotes(
 
     df = pl.read_parquet(inst_path)
 
-    # 只更新空 name 的行
+    # 仅补空名称；风险警示派生同步补齐，来源显式声明不由行情覆盖。
+    name_map = {symbol: name for symbol, name in name_map.items() if _valid_name(name, symbol)}
+    if not name_map:
+        return 0
+    for column, dtype in (("is_st", pl.Boolean), ("is_st_source", pl.String), ("name_observed_at", pl.String)):
+        if column not in df.columns:
+            df = df.with_columns(pl.lit(None, dtype=dtype).alias(column))
     updates = pl.DataFrame({
         "symbol": list(name_map.keys()),
         "_new_name": list(name_map.values()),
     })
     df = df.join(updates, on="symbol", how="left")
+    fill_name = (pl.col("name").is_null() | (pl.col("name") == "")) & pl.col("_new_name").is_not_null()
+    fill_st = fill_name & (pl.col("is_st_source").fill_null("") != "provider_explicit")
     df = df.with_columns(
-        pl.when(pl.col("name").is_null() | (pl.col("name") == ""))
-        .then(pl.col("_new_name"))
-        .otherwise(pl.col("name"))
-        .alias("name"),
+        pl.when(fill_name).then(pl.col("_new_name")).otherwise(pl.col("name")).alias("name"),
+        pl.when(fill_st)
+        .then(pl.col("_new_name").map_elements(is_risk_warning_name, return_dtype=pl.Boolean))
+        .otherwise(pl.col("is_st")).alias("is_st"),
+        pl.when(fill_st).then(pl.lit("quote_name"))
+        .otherwise(pl.col("is_st_source")).alias("is_st_source"),
+        pl.when(fill_name).then(pl.lit(cn_now().isoformat()))
+        .otherwise(pl.col("name_observed_at")).alias("name_observed_at"),
     ).drop("_new_name")
 
     atomic_write_parquet(df, inst_path)

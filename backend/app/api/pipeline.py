@@ -153,6 +153,13 @@ async def _submit_job(repo, quote_service, make_run, *, request_key=None, datase
             invalidate_storage_cache()
         finally:
             release_run_slot(job_id)
+            if (request_key or "").startswith(("postmarket:", "evening_report:")):
+                from app.services.evening_report_jobs import after_job
+
+                try:
+                    await after_job(repo, job_store.get(job_id))
+                except Exception:
+                    logger.exception("每日晚报任务收尾／派生失败，保留后续检查重试")
 
         # 周度研究沿用原全量同步后触发的语义, 不依赖已停用的盘后采集定时器。
         if (request_key == "pipeline" or (request_key or "").startswith("postmarket:")) and job_store.get(job_id)["status"] == "succeeded":

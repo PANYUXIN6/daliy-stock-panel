@@ -500,6 +500,8 @@ def create_app(role: str | None = None) -> FastAPI:
     app.include_router(regime.router)
     app.include_router(analysis.router)
     app.include_router(pipeline.router)
+    from app.api.evening_report import router as evening_report_router
+    app.include_router(evening_report_router)
     app.include_router(data.router)
     app.include_router(ext_data.router)
     app.include_router(financials.router)

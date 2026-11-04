@@ -61,6 +61,12 @@ def closing(tmp_path, monkeypatch):
     steps = []
     controls = SimpleNamespace(symbols=list(SYMBOLS), daily=bars(), bad_enriched=False,
                                index_symbols=list(CORE_INDEX_SYMBOLS))
+    from app.enriched_generation import bump_enriched_generation
+    from app.services import evening_report_inputs
+    from app.services.evening_report_store import atomic_json
+
+    monkeypatch.setattr(evening_report_inputs, "cn_now", lambda: datetime(2026, 10, 16, 16, tzinfo=CN_TZ))
+    atomic_json(tmp_path / "calendar" / "trading_days.json", {"days": [str(DAY)], "start": str(DAY), "end": str(DAY)})
     monkeypatch.setattr(daily_pipeline, "cn_today", lambda: DAY)
     monkeypatch.setattr(daily_pipeline, "cn_now", lambda: datetime(2026, 10, 16, 16, tzinfo=CN_TZ))
     monkeypatch.setattr(preferences, "load", lambda: {
@@ -103,6 +109,7 @@ def closing(tmp_path, monkeypatch):
         if controls.bad_enriched:
             frame = frame.head(1)
         write(tmp_path, "kline_daily_enriched", frame)
+        bump_enriched_generation(tmp_path, "stock")
         return frame.height
 
     def index(repo, capset, *, coverage, symbols_override, **kwargs):
@@ -126,7 +133,10 @@ def closing(tmp_path, monkeypatch):
         return index(repo, None, coverage=coverage, symbols_override=list(CORE_INDEX_SYMBOLS))
 
     async def prepare_classification(config_id, data_dir):
-        return SimpleNamespace(config=SimpleNamespace(id=config_id, label=config_id))
+        return SimpleNamespace(config=SimpleNamespace(id=config_id, label=config_id), observation={
+            "id": config_id, "source": config_id, "obtained_at": "2026-10-16T16:00:00+08:00",
+            "complete": True, "symbols": list(controls.symbols), "memberships": [],
+        })
 
     def commit_classification(prepared, data_dir):
         if prepared.config.id == "ext_gn_ths":
@@ -280,7 +290,7 @@ def test_optional_board_prefetch_error_is_reported_without_blocking_core_publica
     assert "publication" in steps
 
 
-@pytest.mark.parametrize("problem", ["paper", "publication"])
+@pytest.mark.parametrize("problem", ["paper", "publication", "evening_readiness"])
 def test_task_failure_is_attributed_to_the_actual_stage_not_successful_cleanup(closing, monkeypatch, problem):
     repo, caps, _, _ = closing
     store = JobStore(store_dir=repo.store.data_dir / "jobs")
@@ -289,9 +299,13 @@ def test_task_failure_is_attributed_to_the_actual_stage_not_successful_cleanup(c
     if problem == "paper":
         monkeypatch.setattr(user_runtime, "settle_user_accounts", Mock(side_effect=ValueError("结算失败")))
         expected = "paper_settle"
-    else:
+    elif problem == "publication":
         monkeypatch.setattr(review_publication, "publish_review_if_ready", Mock(side_effect=ValueError("发布失败")))
         expected = "publish_review"
+    else:
+        from app.services import evening_report_inputs
+        monkeypatch.setattr(evening_report_inputs, "save_ready", Mock(side_effect=ValueError("晚报输入保存失败")))
+        expected = "evening_report_ready"
     with pytest.raises((daily_pipeline.PipelineStageError, ValueError)):
         daily_pipeline.run_now(repo, caps, postmarket=True,
                                on_progress=lambda *args, **kwargs: store.progress(job_id, *args, **kwargs))

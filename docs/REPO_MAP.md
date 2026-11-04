@@ -51,6 +51,7 @@ authority_status: observed
 | 行情纯本地查询 | `api/kline.py`、`api/indices.py` → 本机仓库／共享行情快照；`live` 不触发采集 | `test_local_market_reads.py` |
 | 普通分时、显式任务与取消 | `services/ordinary_minute.py` → 股票／ETF／指数分钟分区；`services/pipeline_jobs.py`、`api/pipeline.py`；数据页 `components/data/MinuteSyncConfig.tsx` 复用现有任务 API 与 `lib/useCollectorJob.ts`；单日分时空态 `components/StockIntradayChart.tsx`／`MinuteCollectionButton.tsx` → `POST /api/kline/minute/fetch` 显式补采所选标的和日期，在途共享任务、锁内复查已有数据，专用进度 GET 仅暴露分钟补采任务；浏览与刷新仍只读；财务按需入口见下文 | `test_minute_fetch_api.py`、`test_minute_fetch_access.py`；前端 `components/StockIntradayChart.test.tsx`、`components/data/MaintenanceControls.test.tsx`、`components/StockMultiDayIntradayChart.test.tsx`、`lib/minuteBatchIncremental.test.ts`、`pages/Financials.test.tsx` |
 | 当日复盘发布与 AI 归档 | `services/review_publication.py`、`analysis_archive.py` → `api/market_recap.py`、`financials.py`、`stock_analysis.py`；前端 `pages/Review.tsx`、分析报告 store | 前端 `pages/Review.test.tsx`、`lib/analysisArchival.test.ts` |
+| 每日晚报：限定范围、身份与长期归档 | `api/evening_report.py` → `services/evening_report_inputs.py` 的本轮正式输入 → `evening_report_engine.py`／`evening_report_rules.py` 的完整组计算和跨日状态 → `evening_report_store.py` 的原发布与修订分支；`evening_report_jobs.py` 在盘后步骤8就绪、主管道释放执行槽后独立生成；前端 `pages/EveningReport.tsx`、`components/evening-report/`，页面路径 `/evening-report`，默认侧栏首项 | `test_evening_report_rules.py`、`test_evening_report_engine.py`、`test_evening_report_infra.py`、`test_instrument_scope_metadata.py`；前端 `pages/EveningReport.test.tsx`；[实施与验收](evening-report-implementation.md) |
 | 板块复盘：事件共振／调整逆势 | `api/sector_review.py` → `services/sector_review.py`、`sector_review_rules.py` → `tickflow/sector_review_reader.py`；`KlineRepository.sector_review_reader` 只读正式原始日线与同版前复权收盘，不预热指标；前端独立 `pages/SectorReview.tsx`、`components/sector-review/` | `test_sector_review.py`；`pages/SectorReview.test.tsx`；规模脚本 `scripts/benchmark_sector_review.py`；[实现与验证记录](sector-review-implementation.md) |
 | 个人复盘提示词 | `api/market_recap.py::get_recap_prompt/update_recap_prompt` → `services/recap_prompt.py`、个人 preferences；`market_recap.py` 生成时固定模板快照；前端 `ReviewPromptDialog.tsx`，Pro／admin 可编辑 | `test_market_recap_prompt.py`；复盘页面、提示词弹窗与归档测试 |
 | 指标发布中断恢复 | `enriched_generation.py` 的发布锁和写入标记 → `indicators/pipeline.py::run_pipeline` 异常释放与完整重建，collector 启动恢复未写入状态 | `test_enriched_generation.py`、`test_enriched_full_rebuild.py`、`test_data_clear_generation.py` |
@@ -107,6 +108,11 @@ authority_status: observed
           → postmarket.run_scheduled → 复用 pipeline 任务与写入槽 → run_now(postmarket=True)
           → 正式日线／因子／指标／核心指数验收 → 分类 → 环境／情绪／主线
           → 模拟盘／可选分钟／盘口／榜单 → 复盘发布 → 释放槽后按开关触发周度研究
+
+每日晚报：盘后步骤8保存输入就绪证据 → 主管道退出并释放槽
+          → evening_report_jobs 独立任务重新核对输入 → 完整组评分／身份／风险／用途
+          → evening_report_store 原子发布 → data_updated(evening_report) → 只读页面
+          后续非依赖步骤失败不阻止已就绪晚报；手动取消不自动派生
 
 筛选：api/screener → ScreenerService.build_strategy_context
       → StrategyEngine.run → 过滤、评分、排序 → 策略结果缓存 / 响应

@@ -28,6 +28,9 @@ it.each(['guest', 'pro', 'admin'] as const)('saved menu order respects %s permis
     const links = [...host.querySelectorAll('a')].map(a => a.getAttribute('href'))
     for (const path of ['/backtest', '/monitor', '/signals', '/lots']) expect(links.includes(path)).toBe(role === 'admin')
     expect(links).toContain('/watchlist')
+    expect(links[0]).toBe('/evening-report')
+    expect(host.textContent).toContain('每日晚报')
+    if (role === 'admin') expect(links.indexOf('/backtest')).toBeLessThan(links.indexOf('/watchlist'))
   } finally {
     await act(async () => root.unmount())
     client.clear()

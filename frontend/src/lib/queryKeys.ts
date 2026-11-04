@@ -8,6 +8,10 @@
 // ===== Query Key 工厂 =====
 
 export const QK = {
+  eveningReportRoot: ['evening-report'] as const,
+  eveningReportDates: (mode = 'live') => ['evening-report', 'dates', mode] as const,
+  eveningReport: (date: string, version = '', mode = 'live') => ['evening-report', 'report', mode, date, version] as const,
+  eveningReportStatus: (date = '') => ['evening-report', 'status', date] as const,
   sectorReviewAvailability: ['sector-review', 'availability'] as const,
   sectorReview: (mode: string, params: object) => ['sector-review', mode, params] as const,
   sectorReviewMembers: (mode: string, params: object, sector: string, snapshot: string, page: number) => ['sector-review', 'members', mode, params, sector, snapshot, page] as const,
@@ -196,6 +200,7 @@ export const SSE_INVALIDATE_PREFIXES = [
 
 // 后台落盘事件不受实时行情显示开关影响；仅失效受影响的数据集。
 export const DATASET_QUERY_PREFIXES: Record<string, readonly string[]> = {
+  evening_report: ['evening-report'],
   etf_reference: ['etf-reference'],
   daily: ['sector-review', 'kline-gaps', 'earnings-breakout', 'kline', 'kline-latest', 'kline-batch', 'index-daily', 'index-quotes', 'screener-kline-batch', 'watchlist-enriched', 'overview-market', 'limit-ladder', 'market-snapshot', 'stock-levels', 'lots-kline', 'sector-rotation-index-daily', 'screener-cached', 'regime-history', 'regime-observations', 'regime-latest', 'regime-states', 'regime-coverage', 'regime-phases', 'regime-mainline', 'rps-rotation'],
   minute: ['kline-minute', 'kline-minute-range', 'index-minute', 'minute-batch', 'sector-rotation', 'sector-rotation-index-minute', 'dimension-intraday'],

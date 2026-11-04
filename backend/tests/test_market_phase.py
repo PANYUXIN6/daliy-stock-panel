@@ -193,6 +193,7 @@ class TestRefreshPhaseLabels:
         n = refresh_phase_labels(tmp_path)
         assert n == 10
         out = pl.read_parquet(regime_path(tmp_path))
+        assert {"phase_reason", "phase_candidate", "phase_candidate_count"}.issubset(out.columns)
         assert "phase" in out.columns
         assert PHASE_RALLY in set(out["phase"].to_list())
         assert set(out["state"].to_list()) == {"strong"}
@@ -302,3 +303,19 @@ class TestLadderMissingAndAdjacency:
         assert rows[0]["promo_pool"] is None
         assert rows[1]["promo_pool"] == 0
         assert rows[1]["promo_rate"] is None
+
+
+def test_phase_reason_pending_and_confirmed_preserves_existing_phase():
+    rows = pl.DataFrame({
+        "date": _days(4), "max_consecutive": [3, 3, 20, 20],
+        "first_board": [10, 10, 1000, 1000], "ge2_count": [2, 2, 100, 100],
+        "promo_rate": [.1] * 4, "seal_rate": [.5] * 4,
+    })
+    result = classify_phase_series(rows).to_dicts()
+    assert result[0]["phase"] == "unclassified"
+    assert result[0]["phase_reason"] == "pending_confirmation"
+    assert result[0]["phase_candidate"] == "ice" and result[0]["phase_candidate_count"] == 1
+    assert result[1]["phase"] == "ice"
+    assert result[2]["phase"] == "ice"  # Pending switch keeps the prior confirmed phase.
+    assert result[2]["phase_reason"] == "pending_confirmation"
+    assert result[3]["phase_candidate_count"] == 2

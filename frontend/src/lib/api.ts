@@ -2519,7 +2519,111 @@ function sectorReviewQuery(params: object): string {
   return new URLSearchParams(Object.entries(params).filter(([, v]) => v != null).map(([k, v]) => [k, String(v)])).toString()
 }
 
+export interface EveningJudgement {
+  value: boolean | null
+  failed_reasons: string[]
+  unknown_reasons: string[]
+  inputs?: Record<string, unknown>
+}
+export interface EveningIdentity {
+  unverified_since?: string | null
+  unverified_duration_market_days?: number | null
+  verification_events?: { started_at: string; resolved_at: string; outcome: 'decidable' | 'invalidated'; duration_market_days: number }[]
+  type: 'board' | 'trend'
+  status: string
+  valid: boolean | null
+  intervals: { confirmed_at: string; ended_at: string | null; observed_at?: string }[]
+  entry?: boolean | null
+  confirmation?: boolean | null
+  maintenance?: boolean | null
+}
+export interface EveningPath {
+  id: string
+  source: 'concept' | 'industry'
+  sector_id: string
+  sector_name: string
+  round_id: string | null
+  round_status: string
+  selected_path?: boolean
+  selection_role?: string | null
+  features: Record<string, number | boolean | null>
+  calculation_reasons: string[]
+  identities: EveningIdentity[]
+  resilience: { status: string; quality: string | null; R: number | null; D: number | null; C: number | null; F: number | null; pressure_days: number | null; mature_events: number; ongoing: boolean | null; local_weak: boolean | null; unknown_reasons: string[] }
+  catchup: EveningJudgement & { references: Record<string, unknown>[] }
+  judgements: Record<string, EveningJudgement>
+  selection: EveningJudgement
+  limitations: string[]
+}
+export interface EveningRecord {
+  symbol: string
+  name: string
+  purpose: string | null
+  regime: string | null
+  paths: EveningPath[]
+  risk: { risk_now: boolean | null; paused: boolean; clear_count: number; judgement: EveningJudgement }
+  position: EveningJudgement & { observation_eligibility?: EveningJudgement }
+  limitations: string[]
+  selected: boolean
+  wait_conditions?: string[]
+}
+export interface EveningReport {
+  date: string
+  trade_date: string
+  next_trade_date: string | null
+  cutoff: string
+  generated_at: string
+  version: string
+  parent_version: string | null
+  branch_id?: string | null
+  late_generation?: boolean
+  recovery_note?: string | null
+  kind: string
+  mode: 'live'
+  status: 'published'
+  rule_version: string
+  selection_policy_version?: string
+  disclaimer: string
+  summary?: string
+  market: Record<string, unknown>
+  records: EveningRecord[]
+  selected: string[]
+  limitations?: string[]
+  sectors: { id: string; calculation_reasons: string[]; membership_change: Record<string, unknown>; source: string; sector_id: string; sector_name: string; members?: string[]; member_count: number; regime_counts: Record<string, number>; features: Record<string, number | null>; round: Record<string, unknown>; entry: EveningJudgement; coverage: Record<string, unknown> }[]
+  events: { date: string; symbol?: string; sector_id?: string; type: string; reason: string }[]
+  statistics: { scope_count: number; eligible_count: number; scored_count: number; unknown_count: number; failed_count: number; report_count: number; selected_count: number; purpose_counts: Record<string, number>; amount_coverage: Record<string, unknown>[]; sector_coverage: Record<string, unknown>; zero_selection_reasons: string[]
+    publication_frequency?: Record<string, unknown>
+    selection_blocking_counts?: Record<string, number>
+    risk_unknown_only_stock_count?: number
+    risk_unknown_mixed_stock_count?: number
+    suspension_sector_audit?: Record<string, unknown>[]
+    catchup_reference_coverage?: Record<string, number>
+    previous_open_identity_count?: number
+    unverified_identity_count?: number
+    unverified_identity_rate?: number | null
+    unverified_stock_count?: number
+  }
+  provenance: Record<string, unknown>
+}
+
+export interface EveningReportStatus {
+  progress?: number
+  date: string
+  status: 'waiting' | 'ready' | 'generating' | 'published' | 'failed' | 'cancelled'
+  reason?: string | null
+  job_id?: string | null
+  last_attempt_at?: string | null
+  missing_dependencies?: string[]
+}
+export interface EveningReportDates {
+  dates: { date: string; status: string; versions: { version: string; kind: string; generated_at: string; branch_id?: string | null }[] }[]
+}
+
 export const api = {
+  eveningReportDates: (signal?: AbortSignal) => request<EveningReportDates>('/api/evening-report/dates?mode=live', { signal, quiet: true }),
+  eveningReport: (date: string, version = '', signal?: AbortSignal) => request<EveningReport | EveningReportStatus>(`/api/evening-report?${new URLSearchParams({ date, mode: 'live', ...(version ? { version } : {}) })}`, { signal, quiet: true }),
+  eveningReportStatus: (date = '', signal?: AbortSignal) => request<EveningReportStatus>(`/api/evening-report/status${date ? `?date=${encodeURIComponent(date)}` : ''}`, { signal, quiet: true }),
+  eveningReportRebuild: (date: string, mode: 'live' | 'revision' = 'live') => request<{ job_id: string; status: string }>('/api/evening-report/rebuild', { method: 'POST', body: JSON.stringify({ date, mode }), quiet: true }),
   sectorReviewAvailability: (signal?: AbortSignal) => request<SectorReviewAvailability>('/api/sector-review/availability', { signal, quiet: true }),
   sectorReview: (mode: SectorReviewMode, params: SectorReviewParams, signal?: AbortSignal) => request<SectorReviewResult>(`/api/sector-review/${mode}?${sectorReviewQuery(params)}`, { signal, quiet: true }),
   sectorReviewMembers: (mode: SectorReviewMode, params: SectorReviewParams, sectorId: string, snapshotId: string, page: number, signal?: AbortSignal) => request<SectorReviewMembers>(`/api/sector-review/members?${sectorReviewQuery({ ...params, mode, sector_id: sectorId, snapshot_id: snapshotId, page, page_size: 30 })}`, { signal, quiet: true }),

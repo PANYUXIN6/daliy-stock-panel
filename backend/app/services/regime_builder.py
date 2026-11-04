@@ -650,6 +650,8 @@ def refresh_phase_labels(data_dir: Path) -> int:
 
     阶段判定需要完整日序(EMA 平滑 + 持续性确认), 不能在单批内完成,
     因此每次 upsert 后调用本函数整体重标并写回。行数为天数(千级), 开销可忽略。
+    同次分类的 phase_reason / phase_candidate / phase_candidate_count 一并原子保存，
+    不从后来的阶段反推历史发布原因。
     返回标注的天数; 阶段列缺失所需指标(旧 schema 未重算)时返回 0。
     """
     from app.services.market_phase import classify_phase_series

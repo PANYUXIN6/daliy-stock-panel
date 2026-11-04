@@ -222,6 +222,9 @@ def classify_phase_series(daily: pl.DataFrame) -> pl.DataFrame:
         return PHASE_UNCLASSIFIED
 
     labels: list[str] = []
+    reasons: list[str] = []
+    candidates: list[str | None] = []
+    counts: list[int] = []
     current = PHASE_UNCLASSIFIED
     pending: str | None = None
     pending_run = 0
@@ -232,17 +235,26 @@ def classify_phase_series(daily: pl.DataFrame) -> pl.DataFrame:
             current = raw
             pending, pending_run = None, 0
             labels.append(raw)
+            reasons.append("missing_core_inputs" if raw == PHASE_UNKNOWN else "no_rule_match")
+            candidates.append(None)
+            counts.append(0)
             continue
         if current == PHASE_UNKNOWN:
             current = PHASE_UNCLASSIFIED
         if raw == current:
             labels.append(current)
             pending, pending_run = None, 0
+            reasons.append("confirmed")
+            candidates.append(None)
+            counts.append(0)
             continue
         if raw == pending:
             pending_run += 1
         else:
             pending, pending_run = raw, 1
+        reasons.append("confirmed" if pending_run >= _CONFIRM_DAYS else "pending_confirmation")
+        candidates.append(raw)
+        counts.append(pending_run)
         if pending_run >= _CONFIRM_DAYS:
             current = raw
             labels.append(current)
@@ -250,5 +262,8 @@ def classify_phase_series(daily: pl.DataFrame) -> pl.DataFrame:
         else:
             labels.append(current)
     return rows.with_columns(
-        pl.Series("phase", labels, dtype=pl.Utf8).alias("phase")
+        pl.Series("phase", labels, dtype=pl.Utf8).alias("phase"),
+        pl.Series("phase_reason", reasons, dtype=pl.Utf8),
+        pl.Series("phase_candidate", candidates, dtype=pl.Utf8),
+        pl.Series("phase_candidate_count", counts, dtype=pl.Int64)
     ).sort("date")

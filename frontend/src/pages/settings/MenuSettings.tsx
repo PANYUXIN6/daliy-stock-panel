@@ -34,6 +34,7 @@ interface NavEntry {
 
 // 与 Layout 侧边栏默认顺序保持一致 (nav_order 未保存时的默认展示顺序)
 const BUILTIN_PAGES: NavEntry[] = [
+  { id: '/evening-report', label: '每日晚报', type: 'builtin', visible: true },
   { id: '/', label: '看板', type: 'builtin', visible: true },
   { id: '/watchlist', label: '自选', type: 'builtin', visible: true },
   { id: '/screener', label: '策略', type: 'builtin', visible: true },
@@ -62,6 +63,7 @@ const BUILTIN_PAGES: NavEntry[] = [
 // 与「类型」列的区别: 类型标注页面来源 (内置/自定义), 归属标注架构分层。
 type ArchKind = 'core' | 'ext'
 const ARCH_CLASS: Record<string, { kind: ArchKind; reason: string }> = {
+  '/evening-report': { kind: 'ext', reason: '每日晚报 — 消费共享选股结果与历史证据' },
   '/':               { kind: 'core', reason: '总览页 — 聚合核心数据的多维视图' },
   '/watchlist':      { kind: 'core', reason: '订阅锚点 — 监控/提醒/看板的数据范围基准' },
   '/screener':       { kind: 'core', reason: '策略引擎 — 选股/评分/信号定义' },

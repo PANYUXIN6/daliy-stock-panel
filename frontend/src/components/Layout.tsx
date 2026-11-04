@@ -22,6 +22,7 @@ import {
 import { QK } from '@/lib/queryKeys'
 import {
   Settings,
+  Newspaper,
   Loader2,
   Tags,
   BarChart3,
@@ -86,6 +87,7 @@ export const CORE_INDEXES = [
 type CoreIndex = (typeof CORE_INDEXES)[number]
 
 const nav = [
+  { to: '/evening-report', label: '每日晚报', icon: Newspaper },
   { to: '/',                 label: '看板',     icon: IconDashboard },
   { to: '/watchlist',        label: '自选',     icon: IconWatchlist },
   { to: '/screener',         label: '策略',     icon: IconStrategy },

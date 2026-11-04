@@ -317,6 +317,12 @@ def _run_now(
     coverage = DailyCoverage(today) if postmarket else None
     index_coverage = DailyCoverage(today) if postmarket else None
     readiness: dict = {}
+    if postmarket:
+        from app.services.evening_report_store import EveningReportStore
+
+        EveningReportStore(repo.store.data_dir).save_readiness(today.isoformat(), {
+            "date": today.isoformat(), "complete": False, "reason": "新一轮盘后输入正在验收",
+        })
 
     # Step 0: 先同步个股维表, 再解析标的池 — 确保标的池基于最新 instruments
     emit("sync_instruments", 2, "同步个股维表…")
@@ -805,9 +811,11 @@ def _run_now(
         emit("sync_classifications", 89, "同步概念与行业分类…")
         from app.services import ext_presets
         classifications: dict[str, int] = {}
+        classification_observations: list[dict] = []
         for task_id in ("prefetch_concept", "prefetch_industry"):
             prepared = prefetch.result(task_id)
             classifications[prepared.config.id] = ext_presets.commit_prepared_preset(prepared, repo.store.data_dir)
+            classification_observations.append(getattr(prepared, "observation", None))
             emit("sync_classifications", 89, f"{prepared.config.label}同步完成，{classifications[prepared.config.id]} 行")
         # 概念映射有进程缓存，刷新后供本轮主线和复盘读取。
         from app.services.rps_rotation import invalidate_cache as invalidate_rotation_cache
@@ -901,6 +909,23 @@ def _run_now(
             stage_errors.append(f"compute_mainline: {e}")
             skipped.append("mainline")
             emit.finish("failed", str(e))
+
+    if postmarket and "mainline" not in skipped:
+        # Readiness belongs to steps 1–8, not to optional minute/book/list stages.
+        # Evening calculation runs later as its own job after this writer exits.
+        from app.services.evening_report_inputs import save_ready
+
+        emit("evening_report_ready", 94, "记录每日晚报输入就绪证据…")
+        try:
+            save_ready(repo.store.data_dir, today, coverage, classification_observations,
+                       current.to_dicts()[0])
+        except Exception as exc:  # noqa: BLE001 -- 晚报证据失败不阻断后续原有结算／采集
+            logger.warning("每日晚报输入待就绪: %s", exc)
+            stage_errors.append(f"evening_report_ready: {exc}")
+            emit.finish("failed", str(exc))
+            EveningReportStore(repo.store.data_dir).save_readiness(today.isoformat(), {
+                "date": today.isoformat(), "complete": False, "reason": str(exc),
+            })
 
     # Step 2.8: 模拟盘结算: 顺延单按当日开盘/收盘撮合 → 除权调整 → 定版净值。
     # 幂等: 重跑同日不会重复成交/二次除权 (订单状态与 corp_action 台账守卫)。

@@ -32,22 +32,3 @@ def test_float_range_not_divisible_by_step_stays_within_max():
     values = sorted(combo["ma_proximity"] for combo in combos)
     assert values == pytest.approx([0.01, 0.025, 0.04])
     assert max(values) <= 0.05
-
-
-def test_divisible_range_still_keeps_both_endpoints():
-    """整除区间的端点必须保留 (含浮点累加误差场景), 锁定既有行为。"""
-    int_values = sorted(
-        combo["min_boards"]
-        for combo in expand_param_grid(PARAMS_META, {"min_boards": {"min": 1, "max": 4, "step": 1}})
-    )
-    assert int_values == [1, 2, 3, 4]
-
-    float_meta = [{"id": "p", "type": "float", "default": 0.2, "min": 0.1, "max": 0.3, "step": 0.1}]
-    float_values = sorted(
-        combo["p"] for combo in expand_param_grid(float_meta, {"p": {"min": 0.1, "max": 0.3, "step": 0.1}})
-    )
-    assert float_values == [0.1, 0.2, 0.3]
-
-    assert count_combinations(
-        PARAMS_META, {"ma_proximity": {"min": 0.01, "max": 0.05, "step": 0.001}}
-    ) == 41

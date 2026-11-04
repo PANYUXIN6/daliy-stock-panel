@@ -10,16 +10,14 @@
 - d < 今天 且 时刻 ≥ d 15:00 → 尾盘定版 (close_final) → 完整
 - batch 权威行中仅夹杂少量零成交实时行 → 停牌残留 → 忽略
 - d == 今天         → 实时更新中, 属正常, 不校验
-- 分区缺失的候选日  → 缺口 (fuyao 日历可用按真实交易日, 否则工作日近似;
-  节假日误报对修复只是空拉取, 但对 realtime_gate 是 409 死锁 —
-  休市日永远无数据, 门禁循环放行不了, 故日历优先, 见 §4.24)
+- 分区缺失的候选日  → 缺口 (fuyao 日历可用按真实交易日, 否则工作日近似)
+
+显式盘后管道使用检测结果选择修复起点；启动和实时开关不创建修复任务。
 
 检测成本: 每分区只读 parquet 元数据 statistics (不解压数据页), 实测 ~0.5ms/分区。
 """
 from __future__ import annotations
 
-import asyncio
-import contextlib
 import logging
 import threading
 import time
@@ -35,17 +33,11 @@ from app.market_time import CN_TZ
 
 logger = logging.getLogger(__name__)
 
-# asyncio 仅弱引用后台任务；保留修复任务直到 executor 执行结束。
-_REPAIR_TASKS: set[asyncio.Task[None]] = set()
-
 # 尾盘定版线: quote_ts 达到当日 15:00 即视为收盘后写入 (含 close_final 定版)
 CLOSE_CUTOFF = dt_time(15, 0)
 
 # 扫描窗口: 最近 N 个自然日内、今天之前的交易日
 SCAN_WINDOW_DAYS = 7
-
-# 自动修复窗口: 最早坏日距今超过 N 个自然日 → 只报告不自动修 (更大缺口由用户手动 repair)
-AUTO_REPAIR_MAX_LAG_DAYS = 5
 
 # 参与检测的日K族表 (实时 flush 会写这三族的 daily/enriched)
 _DAILY_TABLES = ("kline_daily", "kline_etf_daily", "kline_index_daily")
@@ -206,7 +198,7 @@ def _trading_calendar() -> set[date] | None:
     """A 股交易日集合 (fuyao 近一年); 从未取到过 → None (调用方回退周几近似)。
 
     与 trading_day.is_trading_day 探测链第 1 环同源; 这里需要**任意历史日**
-    的判定, 故直接消费整年集合。线程安全 (gate / boot / 修复管道共用)。
+    的判定, 故直接消费整年集合。线程安全，供显式盘后管道扫描使用。
     """
     now = time.monotonic()
     global _CAL
@@ -286,14 +278,6 @@ def earliest_issue_day(
     return min((i.day for i in scoped), default=None)
 
 
-def within_auto_repair_window(day: date | None, *, today: date | None = None) -> bool:
-    """最早坏日是否落在自动修复窗口内 (≤ AUTO_REPAIR_MAX_LAG_DAYS 自然日)。"""
-    if day is None:
-        return False
-    today = today or datetime.now(CN_TZ).date()
-    return (today - day).days <= AUTO_REPAIR_MAX_LAG_DAYS
-
-
 def prune_enriched_partitions(
     data_dir: Path,
     start: date,
@@ -304,7 +288,7 @@ def prune_enriched_partitions(
     股票 enriched 增量重算只算 enriched 里不存在的日期; 盘中快照日分区已存在
     (虽是错的), 不删则永远不会被重算。指数/ETF 的 enriched 走 merge-upsert
     全行覆盖, 无需删除。删除后 run_pipeline(new_dates_only=True) 用剩余分区
-    最近 60 天做历史前缀重算 (修复窗口 ≤5 天, 回看充足)。
+    最近 60 天做历史前缀重算，修复起点由调用方明确传入。
     """
     base = Path(data_dir) / table
     if not base.exists():
@@ -324,7 +308,7 @@ def prune_enriched_partitions(
 
 
 def describe_issues(issues: list[IntegrityIssue]) -> str:
-    """面向用户的一句话描述 (409 详情 / 日志用)。"""
+    """面向用户的一句话描述，供管道日志使用。"""
     if not issues:
         return ""
     days = sorted({i.day for i in issues})
@@ -332,127 +316,3 @@ def describe_issues(issues: list[IntegrityIssue]) -> str:
     kinds = {i.kind for i in issues}
     reason = "停机前的盘中快照" if "snapshot" in kinds else "缺失"
     return f"{day_text} 的数据为{reason}"
-
-
-def launch_integrity_repair(app_state, start_date: date, reason: str) -> tuple[str | None, bool]:
-    """自动创建数据修复任务 (复用 repair_daily 管道 + JobStore 任务体系)。
-
-    返回 (job_id, is_new):
-    - (None, False)  : 无法修复 (无 batch 能力 / 无 repo)
-    - (id, False)    : 已有 pending/running 任务复用 (singleflight)
-    - (id, True)     : 新建并启动
-    任务体与 /api/kline/repair_daily 完全一致: run slot + 实时 paused 互斥 +
-    run_repair_daily(override_start_date)。
-
-    调度自适应: 调用方在事件循环内 (API 端点) → executor 后台执行;
-    无事件循环 (boot Timer 线程) → 独立 daemon 线程执行。
-    """
-    import threading
-
-    repo = getattr(app_state, "repo", None)
-    capset = getattr(app_state, "capabilities", None)
-    if repo is None or capset is None:
-        return None, False
-    try:
-        from app.tickflow.capabilities import Cap
-
-        if not capset.has(Cap.KLINE_DAILY_BATCH):
-            logger.info("integrity repair skipped: no KLINE_DAILY_BATCH capability")
-            return None, False
-    except Exception:  # noqa: BLE001
-        return None, False
-
-    from app.services.pipeline_jobs import (
-        JobCancelledError,
-        job_store,
-        release_run_slot,
-        run_with_capacity,
-        try_acquire_run_slot,
-    )
-    from app.services.repair_daily import run_repair_daily
-
-    job_id, is_new = job_store.create()
-    if not is_new:
-        return job_id, False
-
-    qs = getattr(app_state, "quote_service", None)
-
-    def progress(stage: str, pct: int, msg: str,
-                 stage_pct: int | None = None, skip_log: bool = False,
-                 **task_fields) -> None:
-        job_store.progress(job_id, stage, pct, msg, stage_pct=stage_pct, skip_log=skip_log, **task_fields)
-
-    def _run() -> dict:
-        # 修复期间暂停实时取数, 防止覆写同一批 parquet 竞态
-        if qs:
-            with qs.paused():
-                return run_repair_daily(repo, capset, start_date, on_progress=progress)
-        return run_repair_daily(repo, capset, start_date, on_progress=progress)
-
-    def _execute() -> None:
-        try:
-            if not try_acquire_run_slot(job_id):
-                job_store.fail(job_id, "已有数据任务在运行(或上一次任务卡死未结束),请稍后再试")
-                return
-            result = run_with_capacity(job_id, _run)
-            if isinstance(result, dict) and "error" in result:
-                job_store.fail(job_id, str(result["error"]))
-            else:
-                job_store.succeed(job_id, result)
-        except JobCancelledError:
-            pass  # 已由 terminate() 标记失败
-        except Exception as e:
-            logger.exception("integrity repair failed: job_id=%s", job_id)
-            job_store.fail(job_id, str(e))
-        finally:
-            release_run_slot(job_id)
-            with contextlib.suppress(Exception):
-                from app.api.data import invalidate_storage_cache
-
-                invalidate_storage_cache()
-
-    try:
-        loop = asyncio.get_running_loop()
-
-        async def task() -> None:
-            await loop.run_in_executor(None, _execute)
-
-        repair_task = asyncio.create_task(task())
-        _REPAIR_TASKS.add(repair_task)
-        repair_task.add_done_callback(_REPAIR_TASKS.discard)
-    except RuntimeError:
-        threading.Thread(
-            target=_execute, daemon=True, name=f"integrity-repair-{job_id[:8]}"
-        ).start()
-
-    logger.warning("integrity: 自动修复任务启动 job=%s start=%s reason=%s", job_id, start_date, reason)
-    return job_id, True
-
-
-def boot_integrity_check(app_state) -> None:
-    """启动自检 (后台线程调用): 发现窗口内的坏数据自动创建修复任务。
-
-    分钟K缺口无需单独处理 — 修复管道 Step 2.5 在 minute_sync_enabled 时
-    以 start=max(datetime) 增量补洞, 天然覆盖停机缺口。
-    """
-    repo = getattr(app_state, "repo", None)
-    if repo is None:
-        return
-    try:
-        issues = scan_recent_integrity(repo.store.data_dir)
-    except Exception as e:  # noqa: BLE001
-        logger.warning("boot integrity scan failed: %s", e)
-        return
-    if not issues:
-        logger.info("boot integrity check: 近 %d 个交易日数据完整", SCAN_WINDOW_DAYS)
-        return
-    earliest = earliest_issue_day(issues)
-    logger.warning("boot integrity check: %s (共 %d 个坏分区)", describe_issues(issues), len(issues))
-    if not within_auto_repair_window(earliest):
-        logger.warning(
-            "integrity: 最早坏日 %s 超出自动修复窗口(%d 天), 请在数据页手动执行数据修正",
-            earliest, AUTO_REPAIR_MAX_LAG_DAYS,
-        )
-        return
-    with contextlib.suppress(Exception):
-        launch_integrity_repair(app_state, earliest, "boot_integrity_check")

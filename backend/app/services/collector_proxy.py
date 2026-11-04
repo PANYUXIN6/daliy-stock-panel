@@ -17,14 +17,14 @@ _OWNER_PREFIXES = (
     '/api/factors', '/api/custom-signals',
     '/api/kline/minute/fetch',
     '/api/ai/credits',
-    '/api/screener/run-status',
+    '/api/screener/run-status', '/api/evening-report/status',
 )
 _OWNER_READS = {'/api/data/status', '/api/financials/execution-status', '/api/financials/collection-options', '/api/screener/cached',
                 '/api/screener/cached-summary', '/api/screener/strategies'}
 _WRITE_PREFIXES = (
     '/api/kline', '/api/index', '/api/intraday', '/api/data', '/api/watchlist',
     '/api/screener', '/api/ext-data', '/api/financials', '/api/stock-analysis',
-    '/api/market-recap', '/api/factors', '/api/custom-signals', '/api/lots',
+    '/api/evening-report', '/api/market-recap', '/api/factors', '/api/custom-signals', '/api/lots',
     '/api/alerts', '/api/paper', '/api/analysis-menus', '/api/regime', '/api/rps',
 )
 _HOP_HEADERS = {'host', 'connection', 'keep-alive', 'transfer-encoding', 'content-length',

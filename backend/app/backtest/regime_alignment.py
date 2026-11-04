@@ -28,10 +28,10 @@ def _date_text(value: object) -> str:
 def _normalize_regime_point(value: Any) -> RegimePoint:
     if isinstance(value, Mapping):
         state = str(value.get("state", ""))
-        score = float(value.get("score", 0) or 0)
+        score = float(value["score"]) if value.get("score") is not None else float("nan")
         return state, score
     if isinstance(value, (tuple, list)) and len(value) >= 2:
-        return str(value[0]), float(value[1] or 0)
+        return str(value[0]), float(value[1]) if value[1] is not None else float("nan")
     raise ValueError("市场环境数据格式无效")
 
 

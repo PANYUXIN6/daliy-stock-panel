@@ -430,7 +430,7 @@ def build_market_overview(
             "trend": {"above_ma5": 0, "above_ma20": 0, "above_ma60": 0, "above_ma5_pct": 0, "above_ma20_pct": 0, "above_ma60_pct": 0, "new_high": 0, "new_low": 0},
             "activity": {"avg_turnover": 0, "high_turnover": 0, "high_vol_ratio": 0, "vol_ratio": 1},
             "radar": [],
-            "emotion": {"score": 50, "label": "暂无"},
+            "emotion": {"score": None, "label": "暂无"},
             "top_gainers": [],
             "top_losers": [],
             "turnover_leaders": [],
@@ -451,12 +451,18 @@ def build_market_overview(
         df = df.select([c for c in cols if c in df.columns])
         rows = df.to_dicts()
 
-    # 过滤真停牌（volume=0 且 change_pct=0），保留有涨跌幅的浮点误差股以对齐同花顺口径
-    if rows and "volume" in rows[0]:
-        rows = [r for r in rows
-                if (_finite(r.get("volume")) or 0) > 0
-                or (_finite(r.get("change_pct")) or 0) != 0]
-
+    from app.services import preferences, regime_builder
+    from app.services.market_mainline import load_risk_warning_symbols
+    from app.services.sentiment_observations import (
+        filter_universe,
+        load_observation,
+        observe_current,
+    )
+    exclude_st = preferences.get_sentiment_exclude_st()
+    excluded = load_risk_warning_symbols(repo.store.data_dir) if exclude_st else set()
+    if not df.is_empty():
+        df = filter_universe(df, excluded)
+        rows = df.to_dicts()
     total = len(rows)
     up = sum(1 for r in rows if (_finite(r.get("change_pct")) or 0) > 0)
     down = sum(1 for r in rows if (_finite(r.get("change_pct")) or 0) < 0)
@@ -499,7 +505,7 @@ def build_market_overview(
     seal_rate = limit_up / (limit_up + broken) * 100 if (limit_up + broken) > 0 else 0
 
     def above_ma_count(ma_key: str) -> int:
-        return sum(1 for r in rows if (_finite(r.get("close")) is not None and _finite(r.get(ma_key)) is not None and (_finite(r.get("close")) or 0) >= (_finite(r.get(ma_key)) or 0)))
+        return sum(1 for r in rows if (_finite(r.get("close")) is not None and _finite(r.get(ma_key)) is not None and (_finite(r.get(ma_key)) or 0) > 0 and (_finite(r.get("close")) or 0) > (_finite(r.get(ma_key)) or 0)))
 
     above_ma5 = above_ma_count("ma5")
     above_ma20 = above_ma_count("ma20")
@@ -552,43 +558,46 @@ def build_market_overview(
 
     index_changes = [_finite(r.get("change_pct")) for r in indices]
     index_changes = [v for v in index_changes if v is not None]
-    avg_index_pct = sum(index_changes) / len(index_changes) if index_changes else 0
     vol_ratios = [_finite(r.get("vol_ratio_5d")) for r in rows]
     vol_ratios = [v for v in vol_ratios if v is not None]
     avg_vol_ratio = sum(vol_ratios) / len(vol_ratios) if vol_ratios else 1
-    high_vol_ratio = sum(1 for v in vol_ratios if v >= 1.5)
+    high_vol_pct = sum(1 for v in vol_ratios if v >= 1.5) / len(vol_ratios) * 100 if vol_ratios else None
 
     concept_rank = _dimension_rank(rows, repo, "concept")
     industry_rank = _dimension_rank(rows, repo, "industry", level=2)
 
-    strong_diff_pct = (strong_up - strong_down) / total * 100 if total else 0
-    high_vol_pct = high_vol_ratio / total * 100 if total else 0
-    strong_down_pct = strong_down / total * 100 if total else 0
-    tier2_count = sum(t["count"] for t in tiers if t["boards"] >= 2)
-    mainline_items = [*concept_rank["leading"][:3], *industry_rank["leading"][:3]]
-    mainline_avg = max([_finite(item.get("avg_pct")) or 0 for item in mainline_items], default=0)
-    mainline_cover_pct = max([(_finite(item.get("count")) or 0) / total * 100 for item in mainline_items], default=0) if total else 0
-    mainline_score = round(_score(mainline_avg, -0.005, 0.03) * 0.65 + _score(mainline_cover_pct, 1, 12) * 0.35) if mainline_items else 50
-
-    radar = [
-        {"key": "index", "label": "指数", "value": _score(avg_index_pct, -2.5, 2.5)},
-        {"key": "profit", "label": "赚钱", "value": round(_score(up_pct, 20, 80) * 0.45 + _score(avg_pct, -0.02, 0.02) * 0.25 + _score(median_pct, -0.02, 0.02) * 0.20 + _score(strong_diff_pct, -8, 8) * 0.10)},
-        {"key": "money", "label": "量能", "value": round(_score(avg_vol_ratio, 0.6, 1.8) * 0.70 + _score(high_vol_pct, 2, 12) * 0.30)},
-        {"key": "speculation", "label": "投机", "value": round(_score(limit_up, 5, 90) * 0.25 + _score(seal_rate, 30, 85) * 0.35 + _score(max_boards, 1, 8) * 0.25 + _score(tier2_count, 0, 30) * 0.15)},
-        {"key": "resilience", "label": "抗跌", "value": 100 - round(_score(down_pct, 20, 80) * 0.55 + _score(strong_down_pct, 1, 12) * 0.45)},
-        {"key": "mainline", "label": "主线", "value": mainline_score},
-    ]
-    emotion_score = round(sum(r["value"] for r in radar) / len(radar)) if radar else 50
-    if emotion_score >= 70:
-        emotion_label = "强势"
-    elif emotion_score >= 55:
-        emotion_label = "偏暖"
-    elif emotion_score >= 45:
-        emotion_label = "震荡"
-    elif emotion_score >= 30:
-        emotion_label = "偏冷"
-    else:
-        emotion_label = "冰点"
+    # Shared daily statistics deliberately use the dated daily index, never live quotes.
+    daily = regime_builder._aggregate_daily(
+        df.with_columns(pl.lit(as_of).alias("date")) if not df.is_empty() else df,
+        regime_builder._load_index_pct(repo, as_of, as_of),
+    )
+    daily = regime_builder._attach_daily_context(daily, repo, exclude_st)
+    current = daily.to_dicts()[0] if not daily.is_empty() else {"date": as_of}
+    current["is_complete_day"] = False
+    hist = regime_builder.load_regime_history(repo.store.data_dir)
+    if not hist.is_empty() and "method_version" in hist.columns and "exclude_st" in hist.columns:
+        persisted = hist.filter((pl.col("date") == as_of) & (pl.col("method_version") == regime_builder.VERSION) & (pl.col("exclude_st") == exclude_st))
+        if not persisted.is_empty():
+            current = persisted.to_dicts()[0]
+    sentiment = load_observation(repo.store.data_dir, str(as_of)) if current.get("is_complete_day") is not False else None
+    if sentiment is None:
+        sentiment = observe_current(repo.store.data_dir, current)
+    radar = [{"key": key, "label": label, "value": current.get(f"{key}_score")}
+             for key, label in [("profit", "涨跌强弱"), ("speculation", "短线投机"), ("resilience", "下跌广度"), ("trend", "趋势广度")]]
+    emotion_score = current.get("score")
+    emotion_label = regime_builder.STATE_LABELS.get(current.get("state"), "不可计算")
+    avg_pct, median_pct = current.get("avg_pct"), current.get("median_pct")
+    total_amount = current.get("total_amount")
+    total = current.get("total_count", total)
+    up, down = current.get("up_count", 0), current.get("down_count", 0)
+    flat = (current.get("change_valid_count") or 0) - up - down
+    broken, max_boards = current.get("broken_limit"), current.get("max_consecutive")
+    avg_amount = total_amount / total if total_amount is not None and total else None
+    up_pct, down_pct = current.get("up_pct"), current.get("down_pct")
+    if not sealed_ready:
+        seal_rate = current.get("seal_rate")
+        seal_rate = seal_rate * 100 if seal_rate is not None else None
+        limit_up, limit_down = current.get("limit_up", limit_up), current.get("limit_down", limit_down)
 
     return _json_safe({
         "as_of": str(as_of),
@@ -615,8 +624,8 @@ def build_market_overview(
             "above_ma20": above_ma20,
             "above_ma60": above_ma60,
             "above_ma5_pct": above_ma5 / total * 100 if total else 0,
-            "above_ma20_pct": above_ma20 / total * 100 if total else 0,
-            "above_ma60_pct": above_ma60 / total * 100 if total else 0,
+            "above_ma20_pct": current["above_ma20_pct"] * 100 if current.get("above_ma20_pct") is not None else None,
+            "above_ma60_pct": current["above_ma60_pct"] * 100 if current.get("above_ma60_pct") is not None else None,
             "new_high": new_high,
             "new_low": new_low,
         },
@@ -627,7 +636,8 @@ def build_market_overview(
             "vol_ratio": avg_vol_ratio,
         },
         "radar": radar,
-        "emotion": {"score": emotion_score, "label": emotion_label},
+        "sentiment": sentiment,
+        "emotion": {"score": emotion_score, "label": emotion_label, "method": "项目参考评分"},
         "top_gainers": _top_rows(rows, "change_pct", True),
         "top_losers": _top_rows(rows, "change_pct", False),
         "turnover_leaders": _top_rows(rows, "amount", True),

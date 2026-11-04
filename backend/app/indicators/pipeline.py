@@ -1934,23 +1934,6 @@ def _load_recent_history(enriched_base: Path, symbols: list[str], days: int) -> 
         return pl.DataFrame()
 
 
-def compute_enriched_single(daily_for_symbol: pl.DataFrame) -> pl.DataFrame:
-    """单股版本 — Free 用户用,拉下来单股 K 后即时计算全部指标+信号返回给前端。"""
-    if daily_for_symbol.is_empty():
-        return daily_for_symbol
-
-    # 过滤停牌
-    daily_for_symbol = filter_halt_days(daily_for_symbol)
-    if daily_for_symbol.is_empty():
-        return daily_for_symbol
-
-    # 保留 raw_close 用于涨停判断
-    daily_for_symbol = daily_for_symbol.with_columns(pl.col("close").alias("raw_close"))
-
-    # 即时计算全套指标 + 信号 (无复权因子, 无 instruments)
-    return compute_all(daily_for_symbol)
-
-
 # ================================================================
 # 盘中增量计算: 只算今天 5500 行 (不复算历史)
 # ================================================================

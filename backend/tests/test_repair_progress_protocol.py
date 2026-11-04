@@ -1,21 +1,17 @@
-"""The two repair entry points must forward the pipeline's concurrent task metadata."""
+"""The manual repair entry point must forward the pipeline's concurrent task metadata."""
 from __future__ import annotations
 
 import asyncio
-from datetime import date
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
-import pytest
-
 from app.api import kline
-from app.services import data_integrity, heavy_job_limiter, pipeline_jobs, repair_daily
+from app.services import heavy_job_limiter, pipeline_jobs, repair_daily
 from app.services.pipeline_prefetch import PipelineProgress
 from app.tickflow.capabilities import Cap, CapabilityLimits, CapabilitySet
 
 
-@pytest.mark.parametrize("entry", ["manual", "integrity"])
-async def test_repair_entry_forwards_task_metadata_and_persists_outcome(tmp_path, monkeypatch, entry):
+async def test_repair_entry_forwards_task_metadata_and_persists_outcome(tmp_path, monkeypatch):
     store = pipeline_jobs.JobStore(store_dir=tmp_path / "jobs")
     monkeypatch.setattr(pipeline_jobs, "job_store", store)
     monkeypatch.setattr(pipeline_jobs, "_run_slot_owner", None)
@@ -23,7 +19,6 @@ async def test_repair_entry_forwards_task_metadata_and_persists_outcome(tmp_path
     monkeypatch.setattr(heavy_job_limiter, "shared_heavy_job_limiter",
                         heavy_job_limiter.HeavyJobLimiter(capacity=2))
     monkeypatch.setattr(kline, "_tasks", set())
-    monkeypatch.setattr(data_integrity, "_REPAIR_TASKS", set())
 
     def compute(repo, capset, start_date, *, on_progress):
         progress = PipelineProgress(on_progress)
@@ -39,16 +34,11 @@ async def test_repair_entry_forwards_task_metadata_and_persists_outcome(tmp_path
         capabilities=CapabilitySet({Cap.KLINE_DAILY_BATCH: CapabilityLimits()}),
         quote_service=None,
     )
-    if entry == "manual":
-        request = SimpleNamespace(app=SimpleNamespace(state=state),
-                                  json=AsyncMock(return_value={"start_date": "2026-01-01"}))
-        response = await kline.repair_daily(request)
-        job_id = response["job_id"]
-        tasks = list(kline._tasks)
-    else:
-        job_id, created = data_integrity.launch_integrity_repair(state, date(2026, 1, 1), "测试缺口")
-        assert created
-        tasks = list(data_integrity._REPAIR_TASKS)
+    request = SimpleNamespace(app=SimpleNamespace(state=state),
+                              json=AsyncMock(return_value={"start_date": "2026-01-01"}))
+    response = await kline.repair_daily(request)
+    job_id = response["job_id"]
+    tasks = list(kline._tasks)
     assert tasks
     await asyncio.wait_for(asyncio.gather(*tasks), timeout=5)
     job = store.get(job_id)

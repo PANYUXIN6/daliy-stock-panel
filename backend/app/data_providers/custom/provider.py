@@ -5,7 +5,7 @@ import logging
 import os
 import time
 from collections.abc import Callable
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -40,6 +40,7 @@ _REQUIRED = {
     # 否则缺成交额的源整个被 validate 拒绝, 保存后源从列表消失
     # financial 字段由数据源决定, 只要求能映射出 symbol
     "financial": {"symbol"},
+    "fund_nav": {"symbol", "date", "unit_nav"},
 }
 
 # 未声明 change_pct 单位时沿用的兼容阈值，不是涨跌幅物理上限。
@@ -195,6 +196,19 @@ class GenericHTTPProvider:
                 len(failed), len(symbols), ", ".join(failed[:20]),
             )
         return pl.concat(frames, how="diagonal_relaxed") if frames else pl.DataFrame()
+
+    def get_fund_nav(self, symbols: list[str], start: date, end: date) -> pl.DataFrame:
+        from app.data_providers.fund_nav import normalize_fund_nav
+
+        cfg = self._dataset("fund_nav")
+        rows = []
+        for index, batch in enumerate(chunked(symbols, cfg.batch)):
+            sleep_between_batches(index, cfg.rpm)
+            rows.extend(self._request_rows(
+                cfg, symbols=batch, start_time=datetime.combine(start, datetime.min.time()),
+                end_time=datetime.combine(end, datetime.max.time()),
+            ))
+        return normalize_fund_nav(self._mapped_frame(cfg, rows).to_dicts(), start, end)
 
     def get_adj_factors(
         self,
@@ -434,7 +448,7 @@ class GenericHTTPProvider:
 
     def test_dataset(self, dataset: str, symbols: list[str] | None = None) -> dict:
         cfg = self._dataset(dataset)
-        test_symbols = symbols or ["000001.SZ"]
+        test_symbols = symbols or (["510300.SH"] if dataset == "fund_nav" else ["000001.SZ"])
         end_time = datetime.now()
         start_time = end_time - timedelta(days=7)
         if dataset == "realtime":
@@ -455,7 +469,7 @@ class GenericHTTPProvider:
                 override_params=override or None,
                 override_body=override or None,
             )
-        elif dataset in {"daily", "adj_factor"}:
+        elif dataset in {"daily", "adj_factor", "fund_nav"}:
             rows = self._request_rows(
                 cfg,
                 symbols=test_symbols,

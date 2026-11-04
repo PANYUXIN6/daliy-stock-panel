@@ -8,6 +8,10 @@
 // ===== Query Key 工厂 =====
 
 export const QK = {
+  eveningReportRoot: ['evening-report'] as const,
+  eveningReportDates: (mode = 'live') => ['evening-report', 'dates', mode] as const,
+  eveningReport: (date: string, version = '', mode = 'live') => ['evening-report', 'report', mode, date, version] as const,
+  eveningReportStatus: (date = '') => ['evening-report', 'status', date] as const,
   sectorReviewAvailability: ['sector-review', 'availability'] as const,
   sectorReview: (mode: string, params: object) => ['sector-review', mode, params] as const,
   sectorReviewMembers: (mode: string, params: object, sector: string, snapshot: string, page: number) => ['sector-review', 'members', mode, params, sector, snapshot, page] as const,
@@ -26,6 +30,7 @@ export const QK = {
   quoteStatus:    ['quote-status'] as const,
   quoteInterval:  ['quote-interval'] as const,
   overviewMarket: (asOf?: string) => ['overview-market', asOf ?? 'latest'] as const,
+  etfReference: (asOf?: string) => ['etf-reference', asOf ?? 'latest'] as const,
   indexQuotes:    ['index-quotes'] as const,
 
   // Watchlist
@@ -141,7 +146,8 @@ export const QK = {
   rpsRotation:          (days: number) => ['rps-rotation', days] as const,
 
   // 市场环境(Regime) — 日级离线计算, 后台重算完成后随 data_updated 失效
-  regimeHistory:        (limit?: number) => ['regime-history', limit ?? 0] as const,
+  regimeHistory:        (limit?: number, start?: string, end?: string) => ['regime-history', limit ?? 0, start ?? '', end ?? ''] as const,
+  regimeObservations:   (date: string) => ['regime-observations', date] as const,
   regimeLatest:         ['regime-latest'] as const,
   regimeStates:         (days: number) => ['regime-states', days] as const,
   regimeCoverage:       ['regime-coverage'] as const,
@@ -194,10 +200,12 @@ export const SSE_INVALIDATE_PREFIXES = [
 
 // 后台落盘事件不受实时行情显示开关影响；仅失效受影响的数据集。
 export const DATASET_QUERY_PREFIXES: Record<string, readonly string[]> = {
-  daily: ['sector-review', 'kline-gaps', 'earnings-breakout', 'kline', 'kline-latest', 'kline-batch', 'index-daily', 'index-quotes', 'screener-kline-batch', 'watchlist-enriched', 'overview-market', 'limit-ladder', 'market-snapshot', 'stock-levels', 'lots-kline', 'sector-rotation-index-daily', 'screener-cached', 'regime-history', 'regime-latest', 'regime-states', 'regime-coverage', 'regime-phases', 'regime-mainline', 'rps-rotation'],
+  evening_report: ['evening-report'],
+  etf_reference: ['etf-reference'],
+  daily: ['sector-review', 'kline-gaps', 'earnings-breakout', 'kline', 'kline-latest', 'kline-batch', 'index-daily', 'index-quotes', 'screener-kline-batch', 'watchlist-enriched', 'overview-market', 'limit-ladder', 'market-snapshot', 'stock-levels', 'lots-kline', 'sector-rotation-index-daily', 'screener-cached', 'regime-history', 'regime-observations', 'regime-latest', 'regime-states', 'regime-coverage', 'regime-phases', 'regime-mainline', 'rps-rotation'],
   minute: ['kline-minute', 'kline-minute-range', 'index-minute', 'minute-batch', 'sector-rotation', 'sector-rotation-index-minute', 'dimension-intraday'],
   financials: ['financials', 'earnings-breakout'],
-  regime: ['regime-history', 'regime-latest', 'regime-states', 'regime-coverage', 'regime-phases', 'regime-mainline'],
+  regime: ['overview-market', 'regime-history', 'regime-observations', 'regime-latest', 'regime-states', 'regime-coverage', 'regime-phases', 'regime-mainline'],
   mainline: ['regime-mainline', 'regime-phases'],
   ext_data: ['sector-review', 'ext-data', 'ext-data-rows', 'ext-data-schema-all', 'ext-schema-all', 'dimension-members', 'dimension-intraday', 'market-snapshot', 'watchlist-enriched', 'kline', 'kline-latest', 'kline-batch', 'screener-kline-batch', 'screener-cached', 'rps-rotation', 'sector-rotation'],
   review: ['review-publication', 'review-reports'],
@@ -206,7 +214,8 @@ export const DATASET_QUERY_PREFIXES: Record<string, readonly string[]> = {
   calendar: ['sector-review'],
   index: ['sector-review'],
   etf: ['sector-review'],
-  config: ['sector-review', 'preferences', 'settings', 'capabilities', 'capability-matrix', 'data-sources', 'quote-status', 'quote-interval', 'monitor-rules', 'monitor-rule-options', 'screener-strategies', 'screener-cached', 'strategy-detail', 'watchlist', 'watchlist-groups', 'watchlist-enriched', 'watchlist-quotes', 'factors-library', 'backtest-factor-columns'],
+  // ST/主线过滤配置先于重算发布；其他页面也必须立即重读口径有效性。
+  config: ['overview-market', 'regime-history', 'regime-observations', 'regime-latest', 'regime-states', 'regime-coverage', 'regime-phases', 'regime-mainline', 'sector-review', 'preferences', 'settings', 'capabilities', 'capability-matrix', 'data-sources', 'quote-status', 'quote-interval', 'monitor-rules', 'monitor-rule-options', 'screener-strategies', 'screener-cached', 'strategy-detail', 'watchlist', 'watchlist-groups', 'watchlist-enriched', 'watchlist-quotes', 'factors-library', 'backtest-factor-columns'],
 }
 
 export function dataUpdateQueryPrefixes(datasets: readonly string[]): Set<string> {

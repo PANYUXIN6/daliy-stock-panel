@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import subprocess
-import tomllib
 from types import SimpleNamespace
 
 import httpx
@@ -275,14 +274,6 @@ def test_openai_kwargs_none_max_tokens_omits_limit():
     assert ai_provider._openai_kwargs(temperature=None, max_tokens=8) == {"max_tokens": 8}
 
 
-def test_codex_prompt_none_max_tokens_skips_length_hint():
-    prompt = ai_provider._codex_prompt([{"role": "user", "content": "hi"}], max_tokens=None)
-    assert "Keep the final answer" not in prompt
-
-    bounded = ai_provider._codex_prompt([{"role": "user", "content": "hi"}], max_tokens=300)
-    assert "Keep the final answer" in bounded
-
-
 def test_ai_settings_keep_provider_models_separate(monkeypatch):
     stored = {
         "ai_provider": "openai_compat",
@@ -551,107 +542,9 @@ async def test_iter_openai_text_rejects_stream_without_content():
             pass
 
 
-def test_codex_process_env_excludes_application_secrets(monkeypatch, tmp_path):
-    monkeypatch.setenv("PATH", "test-path")
-    monkeypatch.setenv("HTTPS_PROXY", "http://proxy.example")
-    monkeypatch.setenv("TICKFLOW_API_KEY", "tickflow-secret")
-    monkeypatch.setenv("AI_API_KEY", "ai-secret")
-    monkeypatch.setenv("OPENAI_API_KEY", "openai-secret")
-    monkeypatch.setenv("AUTH_PASSWORD", "password-secret")
-
-    env = ai_provider._codex_process_env(tmp_path / "codex-home")
-
-    assert env["PATH"] == "test-path"
-    assert env["HTTPS_PROXY"] == "http://proxy.example"
-    assert env["NO_COLOR"] == "1"
-    assert env["CODEX_HOME"] == str(tmp_path / "codex-home")
-    assert "TICKFLOW_API_KEY" not in env
-    assert "AI_API_KEY" not in env
-    assert "OPENAI_API_KEY" not in env
-    assert "AUTH_PASSWORD" not in env
-
-
-def test_codex_config_adapts_local_access_provider_for_docker(monkeypatch, tmp_path):
-    monkeypatch.setenv("CODEX_DOCKER_HOST", "host.docker.internal")
-    monkeypatch.setattr(ai_provider, "current_ai_model", lambda: "")
-    monkeypatch.setattr(ai_provider, "current_codex_reasoning_effort", lambda: "")
-    monkeypatch.setattr(
-        ai_provider,
-        "_read_codex_config",
-        lambda: {
-            "model_provider": "codex_local_access",
-            "model": "gpt-5.6-sol",
-            "model_providers": {
-                "codex_local_access": {
-                    "name": "Codex API Service",
-                    "base_url": "http://localhost:62678/v1",
-                    "wire_api": "responses",
-                    "requires_openai_auth": True,
-                    "supports_websockets": False,
-                    "experimental_bearer_token": "local-secret",
-                }
-            },
-        },
-    )
-    path = tmp_path / "config.toml"
-
-    ai_provider._write_compatible_codex_config(path)
-
-    with path.open("rb") as f:
-        config = tomllib.load(f)
-    assert config["model_provider"] == "codex_local_access"
-    provider = config["model_providers"]["codex_local_access"]
-    assert provider["base_url"] == "http://host.docker.internal:62678/v1"
-    assert provider["experimental_bearer_token"] == "local-secret"
-    assert provider["requires_openai_auth"] is True
-    assert provider["supports_websockets"] is False
-
-
-def test_codex_config_preserves_remote_provider_without_docker_rewrite(monkeypatch, tmp_path):
-    monkeypatch.delenv("CODEX_DOCKER_HOST", raising=False)
-    monkeypatch.setattr(ai_provider, "current_ai_model", lambda: "")
-    monkeypatch.setattr(ai_provider, "current_codex_reasoning_effort", lambda: "")
-    monkeypatch.setattr(
-        ai_provider,
-        "_read_codex_config",
-        lambda: {
-            "model_provider": "remote-api",
-            "openai_base_url": "https://builtin.example/v1",
-            "model_providers": {
-                "remote-api": {
-                    "base_url": "https://custom.example/v1",
-                    "wire_api": "responses",
-                    "requires_openai_auth": True,
-                }
-            },
-        },
-    )
-    path = tmp_path / "config.toml"
-
-    ai_provider._write_compatible_codex_config(path)
-
-    with path.open("rb") as f:
-        config = tomllib.load(f)
-    assert config["model_provider"] == "remote-api"
-    assert config["openai_base_url"] == "https://builtin.example/v1"
-    provider = config["model_providers"]["remote-api"]
-    assert provider["base_url"] == "https://custom.example/v1"
-    assert provider["wire_api"] == "responses"
-    assert provider["requires_openai_auth"] is True
-
-
-# Local CLI support is disabled, including old direct-call entry points.
+# Legacy CLI configurations remain unavailable through the public status API.
 
 
 def test_codex_cli_status_never_launches_process(monkeypatch):
     monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: pytest.fail("CLI launched"))
     assert ai_provider.codex_cli_available() is False
-
-
-@pytest.mark.asyncio
-async def test_codex_direct_execution_is_disabled(monkeypatch):
-    monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: pytest.fail("CLI launched"))
-    with pytest.raises(RuntimeError, match="停用"):
-        await ai_provider._run_codex_cli([{"role": "user", "content": "hi"}], max_tokens=None, timeout=1.0)
-    with pytest.raises(RuntimeError, match="停用"):
-        ai_provider._run_codex_process([], "prompt", {}, 1.0)

@@ -190,6 +190,9 @@ class QuoteMirror:
 
 def refresh_web_data(state, datasets: list[str]) -> None:
     """刷新文件视图和相关缓存；行情热路径只安装已经计算好的最新日快照。"""
+    if datasets and set(datasets) <= {"evening_report"}:
+        # Evening GETs read atomic archives directly; no market cache changed.
+        return
     from app.api.data import invalidate_data_cache
     from app.api.ext_data import invalidate_dimension_intraday_cache
     from app.api.overview import invalidate_overview_cache

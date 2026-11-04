@@ -7,7 +7,7 @@
  * 时间范围: 1年(250交易日) / 2年(500) / 自定义(1~1000天) / 全部(走日期范围)。
  * 美化对齐 Dashboard 设计语言: 半透明 surface 卡片 + 渐变竖条标题 + 语义色。
  */
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
 import * as echarts from 'echarts'
@@ -25,21 +25,23 @@ import { useCurrentUser } from '@/lib/auth'
 import { useChartTheme } from '@/lib/theme'
 import { toast } from '@/components/Toast'
 import { Modal } from '@/components/Modal'
+import { SentimentObservations } from '@/components/SentimentObservations'
 import { cn } from '@/lib/cn'
 
-const STATE_ORDER: RegimeState[] = ['strong', 'lean_strong', 'range', 'lean_weak', 'weak']
+const STATE_ORDER: RegimeState[] = ['strong', 'lean_strong', 'range', 'lean_weak', 'weak', 'unavailable']
 
-/** 阶段含义与应对提示 — meaning 与后端 market_phase.py 判定规则对齐, 供当前阶段卡展示 */
-const MARKET_PHASE_GUIDE: Record<MarketPhase, { meaning: string; action: string }> = {
-  ice:     { meaning: '高度/宽度/首板同时贴地, 亏钱效应极致', action: '观望 · 跟踪率先异动股' },
-  ignite:  { meaning: '低位放量扩张, 晋级率回升', action: '试仓主线 · 快进快出' },
-  rally:   { meaning: '高度+宽度+晋级率共振', action: '持股 · 顺势而为' },
-  climax:  { meaning: '情绪极端宣泄, 批量二板+', action: '逐步兑现 · 不追高' },
-  ebb:     { meaning: '自高位回落, 晋级率坍塌', action: '防守 · 不接力' },
-  repair:  { meaning: '多空拉锯, 无明确方向', action: '轻仓试错 · 控回撤' },
+const PHASE_DESCRIPTION: Record<MarketPhase, string> = {
+  ice: '连板高度、二板宽度和首板数量处于低档。',
+  ignite: '较5个交易日前，连板高度或二板宽度扩张，且晋级率达到启动档。',
+  rally: '连板高度、宽度及晋级率达到活跃档条件。',
+  climax: '二板以上或首板数量达到高热档条件。',
+  ebb: '此前高档梯队收缩且晋级率低，或晋级率与封板率同时低。',
+  repair: '较5个交易日前，二板宽度和晋级率同时改善。',
+  unclassified: '尚未满足阶段条件，或候选阶段仍待连续确认。',
+  unknown: '缺少阶段判断所需数据。',
 }
 
-/** 综合分 → 对应状态色(与 classify_state 阈值一致: 70/55/45/30) */
+/** 自定义参考分 → 对应状态色(与 classify_state 阈值一致: 70/55/45/30) */
 function scoreToColor(score: number): string {
   if (score >= 70) return REGIME_STATE_COLORS.strong
   if (score >= 55) return REGIME_STATE_COLORS.lean_strong
@@ -105,7 +107,7 @@ function useEChart(
   }, [])
   useEffect(() => {
     if (!ref.current) return
-    // 惰性 init: 图表容器可能条件渲染晚于组件挂载 (如情绪周期图依赖异步查询结果,
+    // 惰性 init: 图表容器可能条件渲染晚于组件挂载 (如短线投机阶段图依赖异步查询结果,
     // 冷加载时首帧 rows 为空 → div 不在 DOM, 仅挂载时跑一次的 init 会扑空)。
     // 数据到达后 option 变化触发本 effect, 此时 div 已挂载 — 补建实例再 setOption。
     if (!instRef.current) {
@@ -152,7 +154,7 @@ export function Regime() {
     },
   })
   const [range, setRange] = useState<RangePreset>('1y')
-  // 视图 tab: 市场环境(状态/趋势/日历) 与 情绪周期(阶段/主线) 两组内容同页切换,
+  // 视图 tab: 市场环境(状态/趋势/日历) 与 短线投机阶段(阶段/主线) 两组内容同页切换,
   // 避免单页过长需要大幅滚动。两组共用时间范围。
   const [view, setView] = useState<'regime' | 'phase'>('regime')
   const [customOpen, setCustomOpen] = useState(false)
@@ -172,7 +174,7 @@ export function Regime() {
 
   // queryKey 用 range 的完整三元组区分: limit / start+end(全部) / custom天数
   const history = useQuery({
-    queryKey: ['regime-history', range] as const,
+    queryKey: QK.regimeHistory(histRange.limit, histRange.start, histRange.end),
     queryFn: () => api.regimeHistory(histRange.start, histRange.end, histRange.limit),
     staleTime: 5 * 60 * 1000,
   })
@@ -181,7 +183,7 @@ export function Regime() {
     queryFn: () => api.regimeStates(days),
     staleTime: 5 * 60 * 1000,
   })
-  // 情绪周期阶段段 + 主线排行(与 history 同一时间范围)
+  // 短线投机阶段阶段段 + 主线排行(与 history 同一时间范围)
   const phases = useQuery({
     queryKey: QK.regimePhases(histRange.start, histRange.end),
     queryFn: () => api.regimePhases(histRange.start, histRange.end),
@@ -197,15 +199,20 @@ export function Regime() {
     staleTime: 5 * 60 * 1000,
   })
 
-  const rows: RegimeRow[] = history.data?.rows ?? []
+  const rows: RegimeRow[] = useMemo(() => (history.data?.rows ?? []).map(row =>
+    row.method_version === 'observations-v1' && row.method_current === true ? { ...row, phase: row.phase ?? 'unknown' } : {
+      ...row, state: 'unavailable' as const, score: null, phase: 'unknown' as const,
+      profit_score: null, speculation_score: null, resilience_score: null, trend_score: null,
+    }), [history.data])
   const latest = rows.length > 0 ? rows[rows.length - 1] : null
   const hasPhaseData = rows.length > 0 && rows.some(r => r.phase != null)
-  const segments = phases.data?.segments ?? []
+  const segments = useMemo(() => rows.every(r => r.method_version === 'observations-v1' && r.method_current === true) ? phases.data?.segments ?? [] : [], [rows, phases.data])
 
   // 当前阶段持续天数(末尾连续同阶段) + 当前主线(最新交易日 top3)
   const phaseStreak = useMemo(() => {
     if (!hasPhaseData) return null
     const lastPhase = rows[rows.length - 1].phase
+    if (!lastPhase) return null
     let streak = 1
     for (let i = rows.length - 2; i >= 0; i--) {
       if (rows[i].phase === lastPhase) streak++
@@ -225,6 +232,14 @@ export function Regime() {
     () => (selDate ? rows.find(r => r.date === selDate) ?? null : null),
     [rows, selDate],
   )
+  const observationDate = selRow?.date ?? latest?.date ?? ''
+  const observations = useQuery({
+    queryKey: QK.regimeObservations(observationDate),
+    queryFn: () => api.regimeObservations(observationDate),
+    enabled: !!observationDate,
+    staleTime: 5 * 60 * 1000,
+  })
+  const observationData = observations.data?.sentiment?.as_of === observationDate ? observations.data.sentiment : null
   const selMainlines = useMemo(() => {
     if (!selDate) return []
     return (mainline.data?.rows ?? []).filter(r => r.date === selDate && r.rank <= 3)
@@ -239,17 +254,6 @@ export function Regime() {
     }
     return streak
   }, [rows, selRow])
-
-  // ── 指标历史分位: 最新值在当前窗口内的位置 (≤ 它的天数占比), 给指标卡参照系 ──
-  const pctRank = useCallback((field: keyof RegimeRow): number | null => {
-    if (!latest) return null
-    const latestV = latest[field] as number | null
-    if (latestV == null) return null
-    const vals = rows.map(r => r[field] as number | null).filter((v): v is number => v != null)
-    if (vals.length < 20) return null   // 样本太少分位无意义
-    const below = vals.filter(v => v <= latestV).length
-    return Math.round((100 * below) / vals.length)
-  }, [rows, latest])
 
   // ── 阶段规律: 当前阶段的历史段统计 + 下一阶段转移分布 (窗口内 segments) ──
   const phaseStats = useMemo(() => {
@@ -276,7 +280,7 @@ export function Regime() {
 
   // ── 当前势头: 末尾连续同态天数 + score 5日斜率(改善/恶化) + 上次弱势距今 ──
   const momentum = useMemo(() => {
-    if (rows.length === 0) return null
+    if (rows.length === 0 || rows[rows.length - 1].score == null) return null
     const lastState = rows[rows.length - 1].state
     // 末尾连续同态天数
     let streak = 1
@@ -286,9 +290,9 @@ export function Regime() {
     }
     // score 5日斜率(正=改善, 负=恶化)
     const recent = rows.slice(-5)
-    const slope = recent.length >= 2
-      ? (recent[recent.length - 1].score - recent[0].score) / (recent.length - 1)
-      : 0
+    const slope = recent.length === 5 && recent.every(r => r.score != null)
+      ? (recent[recent.length - 1].score! - recent[0].score!) / (recent.length - 1)
+      : null
     // 上次弱势(weak/lean_weak)距今天数
     let lastWeakGap = 0
     for (let i = rows.length - 1; i >= 0; i--) {
@@ -302,7 +306,7 @@ export function Regime() {
 
   // ── 状态转换频率: 近 N 天相邻 state 变化次数 ──
   const transitions = useMemo(() => {
-    if (rows.length < 2) return { count: 0, rate: 0, label: '数据不足' }
+    if (rows.length < 2 || rows.some(r => r.state === 'unavailable')) return { count: null, rate: null, label: '数据不足' }
     let count = 0
     for (let i = 1; i < rows.length; i++) {
       if (rows[i].state !== rows[i - 1].state) count++
@@ -315,7 +319,7 @@ export function Regime() {
 
 
 
-  // 阶段时间轴: 高度折线 + 2板以上宽度柱 + 晋级率曲线, 背景色带=情绪周期阶段
+  // 阶段时间轴: 高度折线 + 2板以上宽度柱 + 晋级率曲线, 背景色带=短线投机阶段阶段
   const phaseOption = useMemo<echarts.EChartsOption | null>(() => {
     if (rows.length === 0 || !hasPhaseData) return null
     const dates = rows.map(r => r.date)
@@ -467,7 +471,7 @@ export function Regime() {
     return () => { zr.off('click', onClick) }
   }, [phaseChartInst, phaseOption, rows])
 
-  // 趋势图: 综合分主线 + 4 子维度曲线(可切换) + 状态背景色带 + 涨停数柱状
+  // 趋势图: 自定义参考分主线 + 4 子维度曲线(可切换) + 状态背景色带 + 涨停数柱状
   const trendOption = useMemo<echarts.EChartsOption | null>(() => {
     if (rows.length === 0) return null
     const dates = rows.map(r => r.date)
@@ -502,10 +506,10 @@ export function Regime() {
       backgroundColor: 'transparent',
       tooltip: { trigger: 'axis', backgroundColor: ct.tooltipBg, borderColor: ct.tooltipBorder, textStyle: { color: ct.tooltipText } },
       legend: {
-        data: ['综合分', '涨停数', '赚钱', '投机', '抗跌', '趋势'],
+        data: ['自定义参考分', '涨停数', '涨跌强弱', '投机', '抗跌', '趋势'],
         textStyle: { color: ct.text, fontSize: 10 }, top: 0,
-        // 默认只显示综合分 + 涨停数(简洁); 4 个子维度默认隐藏, 点图例展开看驱动因素
-        selected: { '综合分': true, '涨停数': true, '赚钱': false, '投机': false, '抗跌': false, '趋势': false },
+        // 默认只显示自定义参考分 + 涨停数(简洁); 4 个子维度默认隐藏, 点图例展开看驱动因素
+        selected: { '自定义参考分': true, '涨停数': true, '涨跌强弱': false, '投机': false, '抗跌': false, '趋势': false },
       },
       grid: { left: 48, right: 64, top: 36, bottom: 56 },
       xAxis: {
@@ -515,7 +519,7 @@ export function Regime() {
       },
       yAxis: [
         { type: 'value', name: '涨停', position: 'left', axisLabel: { color: ct.text, fontSize: 10 }, splitLine: { show: false }, nameTextStyle: { color: ct.text } },
-        { type: 'value', name: '综合分', min: 0, max: 100, position: 'right', axisLabel: { color: ct.text, fontSize: 10 }, splitLine: { lineStyle: { color: ct.grid } }, nameTextStyle: { color: ct.text } },
+        { type: 'value', name: '自定义参考分', min: 0, max: 100, position: 'right', axisLabel: { color: ct.text, fontSize: 10 }, splitLine: { lineStyle: { color: ct.grid } }, nameTextStyle: { color: ct.text } },
       ],
       dataZoom: [
         { type: 'inside', start: Math.max(0, 100 - (60 / days) * 100) },
@@ -525,8 +529,8 @@ export function Regime() {
         // 涨停数柱状(半透明背景, 左轴)
         { name: '涨停数', type: 'bar', data: limitUps, yAxisIndex: 0, barMaxWidth: 6,
           itemStyle: { color: REGIME_STATE_COLORS.strong, opacity: 0.35 }, z: 1 },
-        // 4 子维度曲线(右轴=综合分): 帮助理解综合分由什么驱动(点图例可切换)
-        { name: '赚钱', type: 'line', data: profit, smooth: true, symbol: 'none', yAxisIndex: 1,
+        // 4 子维度曲线(右轴=自定义参考分): 帮助理解自定义参考分由什么驱动(点图例可切换)
+        { name: '涨跌强弱', type: 'line', data: profit, smooth: true, symbol: 'none', yAxisIndex: 1,
           lineStyle: { ...subLineStyle, color: '#f59e0b' }, z: 2 },
         { name: '投机', type: 'line', data: speculation, smooth: true, symbol: 'none', yAxisIndex: 1,
           lineStyle: { ...subLineStyle, color: '#a855f7' }, z: 2 },
@@ -534,8 +538,8 @@ export function Regime() {
           lineStyle: { ...subLineStyle, color: '#10b981' }, z: 2 },
         { name: '趋势', type: 'line', data: trend, smooth: true, symbol: 'none', yAxisIndex: 1,
           lineStyle: { ...subLineStyle, color: '#3b82f6' }, z: 2 },
-        // 综合分主线(加粗置顶, 右轴) + 状态背景色带 + 阈值横虚线
-        { name: '综合分', type: 'line', data: scores, smooth: true, symbol: 'none', yAxisIndex: 1,
+        // 自定义参考分主线(加粗置顶, 右轴) + 状态背景色带 + 阈值横虚线
+        { name: '自定义参考分', type: 'line', data: scores, smooth: true, symbol: 'none', yAxisIndex: 1,
           lineStyle: { width: 1.5, color: ct.textStrong }, areaStyle: { opacity: 0.06 }, z: 3,
           markArea: { silent: true, data: stateBands },
           markLine: {
@@ -561,7 +565,7 @@ export function Regime() {
 
   // 状态分布饼图
   const pieOption = useMemo<echarts.EChartsOption | null>(() => {
-    const dist = states.data?.distribution ?? []
+    const dist = STATE_ORDER.map(state => ({ state, label: REGIME_STATE_LABELS[state], count: rows.filter(r => r.state === state).length })).filter(d => d.count > 0)
     if (dist.length === 0) return null
     return {
       backgroundColor: 'transparent',
@@ -591,7 +595,7 @@ export function Regime() {
           })),
       }],
     }
-  }, [states.data, ct])
+  }, [rows, ct])
   const pieRef = useEChart(pieOption, [pieOption, view])
 
   // 日历热力图数据: 按月分组(纯 CSS 渲染, 不依赖 echarts calendar 的跨年怪异行为)。
@@ -639,9 +643,9 @@ export function Regime() {
     }
   }, [calendarExpanded, calendarMonths])
 
-  const refreshing = [coverage, history, states, phases, mainline].some(query => query.isFetching)
+  const refreshing = [coverage, history, states, phases, mainline, observations].some(query => query.isFetching)
   const handleRefresh = () => {
-    for (const query of [coverage, history, states, phases, mainline]) void query.refetch()
+    for (const query of [coverage, history, states, phases, mainline, observations]) void query.refetch()
   }
 
   // 自定义按钮标签
@@ -654,13 +658,13 @@ export function Regime() {
       {/* ── 头部 (Dashboard 渐变条卡片) ── */}
       <div className={cn(cardCls, 'relative overflow-hidden rounded-card bg-gradient-to-r from-surface/90 to-surface/70 px-4 py-3')}>
         <div className="absolute left-0 top-0 h-full w-1 bg-gradient-to-b from-accent to-accent/20" />
-        <div className="flex items-center gap-3">
-          <Activity className="h-5 w-5 text-accent" />
-          <h1 className="text-[16px] leading-6 font-semibold text-foreground">市场环境</h1>
-          <span className="text-xs text-muted">
-            {view === 'phase' ? '涨停情绪 · 市场阶段 · 主线脉络' : '每日环境状态 · 赚钱效应 · 趋势分析'}
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
+          <Activity className="h-5 w-5 shrink-0 text-accent" />
+          <h1 className="shrink-0 whitespace-nowrap text-[16px] leading-6 font-semibold text-foreground">市场环境</h1>
+          <span className="w-full text-xs text-muted sm:w-auto">
+            {view === 'phase' ? '涨停梯队 · 短线投机阶段 · 主线脉络' : '每日环境状态 · 市场强弱 · 趋势统计'}
           </span>
-          <div className="ml-auto flex items-center gap-2">
+          <div className="flex w-full flex-wrap items-center gap-2 xl:ml-auto xl:w-auto">
             {/* 时间范围按钮组 */}
             <div className="flex items-center rounded-btn border border-border bg-base/60 p-0.5">
               {(['1y', '2y', 'all'] as const).map(k => (
@@ -668,7 +672,7 @@ export function Regime() {
                   key={k}
                   onClick={() => setRange(k)}
                   className={cn(
-                    'h-6 rounded-[5px] px-2.5 text-xs font-medium transition-colors',
+                    'h-6 shrink-0 whitespace-nowrap rounded-[5px] px-2.5 text-xs font-medium transition-colors',
                     isPresetKey(range, k)
                       ? 'bg-accent text-white shadow-sm'
                       : 'text-secondary hover:text-foreground',
@@ -680,7 +684,7 @@ export function Regime() {
               <button
                 onClick={() => setCustomOpen(true)}
                 className={cn(
-                  'inline-flex items-center gap-1 h-6 rounded-[5px] px-2.5 text-xs font-medium transition-colors',
+                  'inline-flex shrink-0 whitespace-nowrap items-center gap-1 h-6 rounded-[5px] px-2.5 text-xs font-medium transition-colors',
                   typeof range === 'object'
                     ? 'bg-accent text-white shadow-sm'
                     : 'text-secondary hover:text-foreground',
@@ -692,7 +696,7 @@ export function Regime() {
             </div>
             {/* 本地数据刷新 */}
             <button onClick={handleRefresh} disabled={refreshing}
-              className="inline-flex items-center gap-1.5 h-7 px-3 rounded-btn border border-border bg-base text-xs text-secondary hover:text-accent disabled:opacity-50">
+              className="inline-flex shrink-0 whitespace-nowrap items-center gap-1.5 h-7 px-3 rounded-btn border border-border bg-base text-xs text-secondary hover:text-accent disabled:opacity-50">
               <RefreshCw className={`h-3.5 w-3.5 ${refreshing ? 'animate-spin' : ''}`} />
               刷新
             </button>
@@ -700,10 +704,10 @@ export function Regime() {
         </div>
       </div>
 
-      {/* ── 视图切换: 市场环境 / 情绪周期 (两组内容 tab 隔离, 减少单页高度) ── */}
+      {/* ── 视图切换: 市场环境 / 短线投机阶段 (两组内容 tab 隔离, 减少单页高度) ── */}
       <div className="flex items-center gap-2">
         <div className="flex items-center rounded-btn border border-border bg-base/60 p-0.5">
-          {([['regime', '市场环境', Activity], ['phase', '情绪周期', Flame]] as const).map(([k, label, Icon]) => (
+          {([['regime', '市场环境', Activity], ['phase', '短线投机阶段', Flame]] as const).map(([k, label, Icon]) => (
             <button key={k} onClick={() => setView(k)}
               className={cn('inline-flex items-center gap-1.5 h-7 rounded-[5px] px-3 text-xs font-medium transition-colors',
                 view === k ? 'bg-accent text-white shadow-sm' : 'text-secondary hover:text-foreground')}>
@@ -715,6 +719,8 @@ export function Regime() {
         <span className="text-[10px] text-muted">两组内容同页切换 · 共用时间范围</span>
       </div>
 
+      {latest && history.isError && <p role="alert" className="text-xs text-warning">刷新失败，当前保留上次成功获取的数据。可点击刷新重试。</p>}
+      {view === 'phase' && phases.isError && <p role="alert" className="text-xs text-warning">阶段历史统计加载失败，可点击刷新重试。</p>}
       {!latest && (
         <div className="rounded-card border border-dashed border-border px-4 py-8 text-center text-sm">
           {history.isLoading ? <span className="text-muted">加载中…</span>
@@ -729,7 +735,7 @@ export function Regime() {
                 <p className="text-secondary">后台尚未生成该范围的市场环境数据</p>
                 {user?.role === 'admin' ? (
                   <>
-                    <p className="text-xs leading-5 text-muted">使用本地行情生成环境状态、情绪周期与市场主线，首次分析可能需要几分钟。</p>
+                    <p className="text-xs leading-5 text-muted">使用本地行情生成环境状态、短线投机阶段与市场主线，首次分析可能需要几分钟。</p>
                     <button type="button" onClick={() => analysis.mutate()} disabled={analysis.isPending}
                       className="inline-flex min-h-9 items-center justify-center gap-1.5 rounded-btn bg-accent px-4 py-2 text-xs font-medium text-white transition-colors hover:bg-accent/90 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:cursor-wait disabled:opacity-50">
                       {analysis.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Activity className="h-3.5 w-3.5" />}
@@ -750,32 +756,40 @@ export function Regime() {
         </div>
       )}
 
-      {/* ══ 情绪周期 tab: 阶段概览 + 时间轴 + 阶段×主线 + 主线排行 ══ */}
+      {latest && <details className={cn(cardCls, 'p-3')}>
+        <summary className="cursor-pointer text-xs font-medium text-foreground">状态分项 · {selRow?.date ?? latest.date} · 原值、固定500日分位与变化</summary>
+        <div className="my-3 flex flex-wrap items-center gap-2 text-xs text-muted">
+          <label htmlFor="observation-date">观察日期</label>
+          <select id="observation-date" className="rounded border border-border bg-base p-1" value={selRow?.date ?? latest.date} onChange={e => setSelDate(e.target.value)}>
+            {[...rows].reverse().map(row => <option key={row.date} value={row.date}>{row.date}</option>)}
+          </select>
+        </div>
+        {observations.isPending ? <p role="status" className="text-xs text-muted">状态观察加载中…</p>
+          : observations.isError ? <p role="alert" className="text-xs text-warning">状态观察加载失败。<button type="button" className="ml-2 underline" onClick={() => void observations.refetch()}>重试观察</button></p>
+          : <SentimentObservations data={observationData} expectedDate={observationDate} />}
+      </details>}
+
+      {/* ══ 短线投机阶段 tab: 阶段概览 + 时间轴 + 阶段×主线 + 主线排行 ══ */}
       <div className={cn('space-y-4', view !== 'phase' && 'hidden')}>
 
-      {/* ── 市场阶段概览 (情绪周期 + 梯队指标 + 当前主线) ── */}
+      {/* ── 市场阶段概览 (短线投机阶段 + 梯队指标 + 当前主线) ── */}
       {hasPhaseData && latest ? (
         <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
           {/* 当前阶段 */}
           <div className={cn(cardCls, 'p-3')}>
             <div className="flex items-center gap-1.5 text-[10px] text-muted">
-              <Flame className="h-3 w-3" /> 当前阶段 · {latest.date}
+              <Flame className="h-3 w-3" /> 短线投机阶段 · {latest.date}
             </div>
             <div className="mt-1.5 flex items-baseline gap-2">
               <span
                 className="text-2xl font-bold cursor-help"
-                style={{ color: MARKET_PHASE_COLORS[phaseStreak?.phase ?? 'repair'] }}
-                title={phaseStreak ? `${MARKET_PHASE_GUIDE[phaseStreak.phase].meaning}\n应对: ${MARKET_PHASE_GUIDE[phaseStreak.phase].action}` : undefined}
+                style={{ color: MARKET_PHASE_COLORS[phaseStreak?.phase ?? 'unknown'] }}
               >
-                {MARKET_PHASE_LABELS[phaseStreak?.phase ?? 'repair']}
+                {MARKET_PHASE_LABELS[phaseStreak?.phase ?? 'unknown']}
               </span>
-              {phaseStreak && <span className="text-xs text-muted">第 {phaseStreak.streak} 天</span>}
+              {phaseStreak && <span className="text-xs text-muted">范围内连续 {phaseStreak.streak} 天</span>}
             </div>
-            {phaseStreak && (
-              <div className="mt-0.5 text-[9px] text-muted/90 truncate" title={MARKET_PHASE_GUIDE[phaseStreak.phase].meaning}>
-                {MARKET_PHASE_GUIDE[phaseStreak.phase].action}
-              </div>
-            )}
+            <p className="mt-1 text-[10px] leading-4 text-muted">{PHASE_DESCRIPTION[phaseStreak?.phase ?? 'unknown']}</p>
             <div className="mt-1.5 flex flex-wrap gap-1">
               {latestMainlines.length > 0 ? latestMainlines.map(m => (
                 <span key={m.member} className="rounded px-1.5 py-px text-[9px] font-medium"
@@ -795,7 +809,7 @@ export function Regime() {
             { label: '梯队完整度', val: latest.ladder_completeness != null ? `${(latest.ladder_completeness * 100).toFixed(0)}%` : '—',
               unit: '', color: '#a855f7', field: 'ladder_completeness' as const, sub: '2板→最高板不断档' },
           ] as { label: string; val: React.ReactNode; unit: string; color: string; field: keyof RegimeRow; sub?: string }[]).map(k => {
-            const p = pctRank(k.field)
+            const p = (observationDate === latest.date ? observationData : latest.sentiment)?.observations.find(o => o.key === k.field)?.percentile
             return (
               <div key={k.label} className={cn(cardCls, 'p-3')}>
                 <div className="flex items-center gap-1.5 text-[10px] text-muted">
@@ -803,14 +817,14 @@ export function Regime() {
                   {p != null && (
                     <span
                       className="ml-auto font-mono text-[9px] text-muted/70"
-                      title={`当前值在所选时间窗口内的历史分位 (p${p})`}
+                      title={`观察日之前固定500个交易日的历史分位 (p${p})`}
                     >
                       p{p}
                     </span>
                   )}
                 </div>
                 <div className="mt-1.5 text-2xl font-bold" style={{ color: k.color }}>
-                  {k.val}<span className="ml-0.5 text-xs font-normal text-muted">{k.unit}</span>
+                  {k.val ?? '—'}<span className="ml-0.5 text-xs font-normal text-muted">{k.unit}</span>
                 </div>
                 {k.sub && <div className="mt-1 text-[9px] text-muted">{k.sub}</div>}
               </div>
@@ -819,21 +833,21 @@ export function Regime() {
         </div>
       ) : latest ? (
         <div className="rounded-card border border-dashed border-border p-4 text-center text-xs text-muted">
-          后台尚未生成市场阶段、情绪周期与主线数据
+          后台尚未生成市场阶段、短线投机阶段与主线数据
         </div>
       ) : null}
 
       {/* ── 阶段规律: 当前阶段的历史统计 + 下阶段转移分布 (窗口内 segments 提炼) ── */}
       {phaseStats && phaseStreak && (
         <div className={cn(cardCls, 'p-3')}>
-          <SectionTitle icon={Flame} title="阶段规律"
-            hint="当前阶段在窗口内的历史统计 · 去向=每段之后进入的阶段" />
+          <SectionTitle icon={Flame} title="阶段历史统计"
+            hint="所选范围内的描述统计，边界阶段可能未完整结束；不代表未来转移概率" />
           <div className="mt-2 flex flex-wrap items-center gap-x-6 gap-y-2 text-[11px]">
             <span className="text-secondary">
               <span style={{ color: MARKET_PHASE_COLORS[phaseStreak.phase], fontWeight: 600 }}>
                 {MARKET_PHASE_LABELS[phaseStreak.phase]}
               </span>
-              <span className="text-muted"> 已持续 </span>
+              <span className="text-muted"> 范围内连续 </span>
               <span className="font-mono text-foreground">{phaseStreak.streak}</span> 天
               <span className="text-muted"> · 历史 {phaseStats.count} 段, 平均 {phaseStats.avgDays} 天, 最长 {phaseStats.maxDays} 天</span>
             </span>
@@ -859,10 +873,10 @@ export function Regime() {
         </div>
       )}
 
-      {/* ── 情绪周期时间轴 (阶段色带 + 高度/宽度/晋级率 + 点击回看) ── */}
+      {/* ── 短线投机阶段时间轴 (阶段色带 + 高度/宽度/晋级率 + 点击回看) ── */}
       {hasPhaseData && rows.length > 0 && (
         <div className={cn(cardCls, 'p-3')}>
-          <SectionTitle icon={Flame} title="情绪周期时间轴"
+          <SectionTitle icon={Flame} title="短线投机阶段时间轴"
             hint="堆叠柱=涨停(首板+2板+) · 高度(红) · 晋级率(蓝) · ▲切换 · 点击日期回看当日" />
           {/* 当日快照: 点击图表日期出现 — 阶段/梯队指标/当日主线 top3 一屏回看 */}
           {selRow && (
@@ -951,8 +965,8 @@ export function Regime() {
                       {seg.start.slice(5)} ~ {seg.end.slice(5)}
                     </td>
                     <td className="border-b border-border/50 py-1.5 pr-3 text-right font-mono">{seg.days}</td>
-                    <td className="border-b border-border/50 py-1.5 pr-3 text-right font-mono">{seg.avg_height}</td>
-                    <td className="border-b border-border/50 py-1.5 pr-3 text-right font-mono">{seg.avg_ge2}</td>
+                    <td className="border-b border-border/50 py-1.5 pr-3 text-right font-mono">{seg.avg_height ?? '—'}</td>
+                    <td className="border-b border-border/50 py-1.5 pr-3 text-right font-mono">{seg.avg_ge2 ?? '—'}</td>
                     <td className="border-b border-border/50 py-1.5 pr-3 text-right font-mono">
                       {seg.avg_promo != null ? `${(seg.avg_promo * 100).toFixed(0)}%` : '—'}
                     </td>
@@ -987,7 +1001,7 @@ export function Regime() {
           <div className="flex items-center rounded-btn border border-border bg-base/60 p-0.5">
             {([['concept', '概念'], ['industry', '行业']] as const).map(([k, label]) => (
               <button key={k} onClick={() => setMainlineKind(k)}
-                className={cn('h-6 rounded-[5px] px-2.5 text-xs font-medium transition-colors',
+                className={cn('h-6 shrink-0 whitespace-nowrap rounded-[5px] px-2.5 text-xs font-medium transition-colors',
                   mainlineKind === k ? 'bg-accent text-white shadow-sm' : 'text-secondary hover:text-foreground')}>
                 {label}
               </button>
@@ -1034,7 +1048,7 @@ export function Regime() {
         </div>
       </div>
 
-      </div>{/* /情绪周期 tab */}
+      </div>{/* /短线投机阶段 tab */}
 
       {/* ══ 市场环境 tab: 最新日概览 + 状态时间轴 + 趋势/分布 + 日历热力图 ══ */}
       <div className={cn('space-y-4', view !== 'regime' && 'hidden')}>
@@ -1051,11 +1065,11 @@ export function Regime() {
               <span className="text-2xl font-bold" style={{ color: REGIME_STATE_COLORS[latest.state] }}>
                 {REGIME_STATE_LABELS[latest.state]}
               </span>
-              <span className="text-sm text-muted">{latest.score} 分</span>
+              <span className="text-sm text-muted">{latest.score == null ? '参考分不可计算' : `${latest.score} 参考分`}</span>
             </div>
             <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-base">
-              <div className="h-full rounded-full transition-all"
-                style={{ width: `${Math.max(2, Math.min(100, latest.score))}%`, backgroundColor: REGIME_STATE_COLORS[latest.state] }} />
+              {latest.score != null && <div className="h-full rounded-full transition-all"
+                style={{ width: `${Math.max(2, Math.min(100, latest.score))}%`, backgroundColor: REGIME_STATE_COLORS[latest.state] }} />}
             </div>
           </div>
 
@@ -1070,10 +1084,10 @@ export function Regime() {
             {momentum ? (
               <>
                 <div className="mt-1.5 text-sm font-semibold text-foreground">
-                  连续 <span style={{ color: REGIME_STATE_COLORS[momentum.state] }}>{momentum.streak}</span> 天{REGIME_STATE_LABELS[momentum.state]}
+                  范围内连续 <span style={{ color: REGIME_STATE_COLORS[momentum.state] }}>{momentum.streak}</span> 天{REGIME_STATE_LABELS[momentum.state]}
                 </div>
                 <div className="mt-1 text-[10px] text-muted">
-                  5日{(momentum.slope > 0 ? '改善' : momentum.slope < 0 ? '恶化' : '持平')}
+                  {momentum.slope == null ? '5日变化不可计算' : `5日参考分${momentum.slope > 0 ? '上升' : momentum.slope < 0 ? '下降' : '持平'}`}
                   {momentum.lastWeakGap > 0 && ` · 上次弱势 ${momentum.lastWeakGap} 天前`}
                 </div>
               </>
@@ -1083,20 +1097,20 @@ export function Regime() {
           {/* 4 子维度迷你条(新) */}
           <div className={cn(cardCls, 'p-3')}>
             <div className="flex items-center gap-1.5 text-[10px] text-muted">
-              <Activity className="h-3 w-3" /> 四维拆解 · {latest.date}
+              <Activity className="h-3 w-3" /> 参考分拆解 · {latest.date}
             </div>
             <div className="mt-2 space-y-1">
               {([
-                { label: '赚钱', val: latest.profit_score, color: '#f59e0b' },
+                { label: '涨跌强弱', val: latest.profit_score, color: '#f59e0b' },
                 { label: '投机', val: latest.speculation_score, color: '#a855f7' },
                 { label: '抗跌', val: latest.resilience_score, color: '#10b981' },
                 { label: '趋势', val: latest.trend_score, color: '#3b82f6' },
               ] as const).map(d => (
                 <div key={d.label} className="flex items-center gap-1.5">
-                  <span className="w-6 shrink-0 text-[9px] text-muted">{d.label}</span>
+                  <span className="w-12 shrink-0 text-[9px] text-muted">{d.label}</span>
                   <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-base">
-                    <div className="h-full rounded-full transition-all"
-                      style={{ width: `${d.val ?? 0}%`, backgroundColor: d.color }} />
+                    {d.val != null && <div className="h-full rounded-full transition-all"
+                      style={{ width: `${d.val}%`, backgroundColor: d.color }} />}
                   </div>
                   <span className="w-5 shrink-0 text-right text-[9px] font-mono text-muted">{d.val ?? '—'}</span>
                 </div>
@@ -1110,11 +1124,11 @@ export function Regime() {
               <Repeat className="h-3 w-3" /> 状态转换 · 近 {days} 天
             </div>
             <div className="mt-1.5 text-lg font-semibold text-foreground">
-              {transitions.count} <span className="text-xs font-normal text-muted">次切换</span>
+              {transitions.count ?? '—'} <span className="text-xs font-normal text-muted">次切换</span>
             </div>
             <div className="mt-1 text-[10px] text-muted">
               节奏：<span className="text-accent">{transitions.label}</span>
-              <span className="ml-1">({(transitions.rate * 100).toFixed(0)}%/天)</span>
+              <span className="ml-1">{transitions.rate == null ? '不可计算' : `(${(transitions.rate * 100).toFixed(0)}%/天)`}</span>
             </div>
           </div>
         </div>
@@ -1123,7 +1137,7 @@ export function Regime() {
       {/* ── 状态色带时间轴 ── */}
       {rows.length > 0 && (
         <div className={cn(cardCls, 'p-3')}>
-          <SectionTitle icon={Activity} title="状态时间轴"
+          <SectionTitle icon={Activity} title="自定义环境状态时间轴"
             hint={`${rows[0]?.date} → ${rows[rows.length - 1]?.date} · ${rows.length} 天`} />
           <div className="mt-2.5 flex h-7 w-full overflow-hidden rounded-md">
             {rows.map(r => (
@@ -1147,8 +1161,8 @@ export function Regime() {
       {/* ── 趋势图 + 分布图 ── */}
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
         <div className={cn(cardCls, 'p-3 lg:col-span-2')}>
-          <SectionTitle icon={Activity} title="环境综合分趋势"
-            hint="综合分(粗) · 赚钱/投机/抗跌/趋势(细, 可点图例切换) · 背景色=状态" />
+          <SectionTitle icon={Activity} title="环境自定义参考分趋势"
+            hint="自定义参考分(粗) · 涨跌强弱/投机/抗跌/趋势(细, 可点图例切换) · 背景色=状态" />
           <div ref={trendRef} className="mt-2 h-[320px]" />
         </div>
         <div className={cn(cardCls, 'p-3')}>
@@ -1157,7 +1171,7 @@ export function Regime() {
         </div>
       </div>
 
-      {/* ── 日历热力图(每日综合分按状态色, 支持单行/展开切换) ── */}
+      {/* ── 日历热力图(每日自定义参考分按状态色, 支持单行/展开切换) ── */}
       {calendarMonths.length > 0 && (
         <div className={cn(cardCls, 'p-3')}>
           <SectionTitle icon={CalendarDays} title="日历热力图"
@@ -1175,9 +1189,9 @@ export function Regime() {
             /* 展开模式: 按月分块的完整日历网格, 自动换行 */
             <div className="mt-3 flex flex-wrap gap-x-5 gap-y-3">
               {calendarMonths.map(mo => {
-                const monthRows = mo.weeks.flat().filter((c): c is RegimeRow => !!c)
+                const monthRows = mo.weeks.flat().filter((c): c is RegimeRow => !!c && c.score != null)
                 const avgScore = monthRows.length > 0
-                  ? Math.round(monthRows.reduce((s, r) => s + r.score, 0) / monthRows.length) : 0
+                  ? Math.round(monthRows.reduce((s, r) => s + r.score!, 0) / monthRows.length) : 0
                 return (
                   <div key={`${mo.year}-${mo.month}`} className="shrink-0">
                     <div className="mb-1 flex items-center gap-1.5">
@@ -1215,9 +1229,9 @@ export function Regime() {
             /* 单行模式(默认): 月份网格横向一行+滚动条, 默认滚到最新, 每月份带月均分 */
             <div ref={calendarScrollRef} className="mt-3 flex gap-x-5 overflow-x-auto pb-2">
               {calendarMonths.map(mo => {
-                const monthRows = mo.weeks.flat().filter((c): c is RegimeRow => !!c)
+                const monthRows = mo.weeks.flat().filter((c): c is RegimeRow => !!c && c.score != null)
                 const avgScore = monthRows.length > 0
-                  ? Math.round(monthRows.reduce((s, r) => s + r.score, 0) / monthRows.length) : 0
+                  ? Math.round(monthRows.reduce((s, r) => s + r.score!, 0) / monthRows.length) : 0
                 return (
                   <div key={`${mo.year}-${mo.month}`} className="shrink-0">
                     <div className="mb-1 flex items-center gap-1.5">

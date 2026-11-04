@@ -18,6 +18,9 @@ from app.services.market_phase import (
     PHASE_IGNITE,
     PHASE_RALLY,
     PHASE_REPAIR,
+    PHASE_UNCLASSIFIED,
+    PHASE_UNKNOWN,
+    _ema,
     classify_phase_series,
     finalize_ladder_row,
     with_prev_consecutive,
@@ -130,7 +133,7 @@ class TestClassifyPhaseSeries:
             {"days": 8, "height": 5, "first": 40, "ge2": 12, "promo": 0.2, "seal": 0.6, "state": "range"},
         ])
         assert PHASE_CLIMAX in labels
-        assert labels[-1] == PHASE_REPAIR
+        assert labels[-1] == PHASE_UNCLASSIFIED
         # EMA 平滑 + 2 日确认: 阶段切换总数有限, 不出现 1 日翻转噪声
         switches = sum(1 for a, b in pairwise(labels) if a != b)
         assert switches <= 4
@@ -141,12 +144,12 @@ class TestClassifyPhaseSeries:
         ])
         assert PHASE_RALLY in labels
 
-    def test_rally_vetoed_in_weak_state(self):
+    def test_short_term_rally_can_diverge_from_weak_state(self):
         labels = self._labels([
             {"days": 8, "height": 8, "first": 60, "ge2": 18, "promo": 0.3, "seal": 0.7, "state": "weak"},
         ])
-        assert PHASE_RALLY not in labels
-        assert all(p == PHASE_REPAIR for p in labels)
+        assert labels[0] == PHASE_UNCLASSIFIED
+        assert labels[1:] == [PHASE_RALLY] * 7
 
     def test_ice(self):
         labels = self._labels([
@@ -169,7 +172,7 @@ class TestClassifyPhaseSeries:
         ])
         assert PHASE_IGNITE in labels
 
-    def test_promo_null_leading_days_ffilled(self):
+    def test_promo_null_leading_days_not_backfilled(self):
         specs = [
             {"days": 4, "height": 5, "first": 40, "ge2": 10, "promo": None, "seal": 0.6, "state": "range"},
             {"days": 4, "height": 6, "first": 50, "ge2": 14, "promo": 0.25, "seal": 0.68, "state": "strong"},
@@ -190,6 +193,7 @@ class TestRefreshPhaseLabels:
         n = refresh_phase_labels(tmp_path)
         assert n == 10
         out = pl.read_parquet(regime_path(tmp_path))
+        assert {"phase_reason", "phase_candidate", "phase_candidate_count"}.issubset(out.columns)
         assert "phase" in out.columns
         assert PHASE_RALLY in set(out["phase"].to_list())
         assert set(out["state"].to_list()) == {"strong"}
@@ -198,3 +202,120 @@ class TestRefreshPhaseLabels:
         regime_path(tmp_path).parent.mkdir(parents=True)
         pl.DataFrame({"date": _days(3), "state": ["range"] * 3}).write_parquet(regime_path(tmp_path))
         assert refresh_phase_labels(tmp_path) == 0
+
+
+class TestCausalPhaseContract:
+    def test_ema_missing_resets_without_future_fill(self):
+        assert _ema([None, float("nan"), 3.0, None, 6.0]) == [None, None, 3.0, None, 6.0]
+        assert _ema([None, None]) == [None, None]
+
+    def test_prefix_invariance_and_unsorted_alignment(self):
+        df = _series([
+            {"days": 3, "height": 5, "first": 40, "ge2": 18, "promo": None, "seal": .7},
+            {"days": 8, "height": 8, "first": 60, "ge2": 18, "promo": .4, "seal": .7},
+        ])
+        full = classify_phase_series(df)
+        for n in range(1, df.height + 1):
+            assert classify_phase_series(df.head(n))["phase"].to_list() == full["phase"].head(n).to_list()
+        assert classify_phase_series(df.reverse()).equals(full)
+
+    def test_initial_confirmation_and_missing_interrupt(self):
+        df = _series([{"days": 5, "height": 8, "first": 60, "ge2": 18, "promo": .3, "seal": .7}])
+        df = df.with_columns(pl.Series("max_consecutive", [8, None, 8, 8, 8]))
+        assert classify_phase_series(df)["phase"].to_list() == [
+            PHASE_UNCLASSIFIED, PHASE_UNKNOWN, PHASE_UNCLASSIFIED, PHASE_RALLY, PHASE_RALLY,
+        ]
+
+    def test_flat_is_not_repair_and_improvement_requires_full_window(self):
+        df = _series([{"days": 6, "height": 5, "first": 40, "ge2": 7, "promo": .16, "seal": .65}])
+        assert classify_phase_series(df)["phase"].to_list() == [PHASE_UNCLASSIFIED] * 6
+        improved = _series([
+            {"days": 5, "height": 5, "first": 40, "ge2": 7, "promo": .16, "seal": .65},
+            {"days": 3, "height": 5, "first": 40, "ge2": 8, "promo": .18, "seal": .65},
+        ])
+        labels = classify_phase_series(improved)["phase"].to_list()
+        assert labels[:6] == [PHASE_UNCLASSIFIED] * 6
+        assert labels[6:] == [PHASE_REPAIR] * 2
+
+
+    def test_repair_cannot_cross_missing_or_truncated_history(self):
+        df = _series([
+            {"days": 5, "height": 5, "first": 40, "ge2": 7, "promo": .16, "seal": .65},
+            {"days": 3, "height": 5, "first": 40, "ge2": 8, "promo": .18, "seal": .65},
+        ])
+        assert PHASE_REPAIR not in classify_phase_series(df.tail(5))["phase"].to_list()
+        interrupted = df.with_columns(pl.Series("promo_rate", [.16, .16, None, .16, .16, .18, .18, .18]))
+        assert PHASE_REPAIR not in classify_phase_series(interrupted)["phase"].to_list()
+
+
+class TestLadderMissingAndAdjacency:
+    def test_missing_counts_are_not_zero(self):
+        assert all(v is None for v in finalize_ladder_row({}).values())
+        row = finalize_ladder_row({"first_board": 0, "ge2_count": 0, "promo_pool": 0})
+        assert row["first_board"] == row["ge2_count"] == row["promo_pool"] == 0
+        assert row["promo_rate"] is None
+        assert finalize_ladder_row({"promo_pool": 20})["promo_rate"] is None
+
+    def test_null_ladder_does_not_aggregate_as_zero(self):
+        d = _days(1)[0]
+        row = _aggregate_daily(_frame([
+            {"symbol": "A", "date": d, "consecutive_limit_ups": None},
+        ])).row(0, named=True)
+        assert row["first_board"] is None
+        assert row["ge2_count"] is None
+        assert row["promo_pool"] is None
+
+    def test_gap_is_not_previous_market_day_and_warmup_survives(self):
+        d1, d2, d3 = _days(3)
+        df = pl.DataFrame([
+            {"symbol": "A", "date": d1, "consecutive_limit_ups": 1},
+            {"symbol": "A", "date": d3, "consecutive_limit_ups": 2},
+            {"symbol": "B", "date": d1, "consecutive_limit_ups": 1},
+            {"symbol": "B", "date": d2, "consecutive_limit_ups": 2},
+            {"symbol": "B", "date": d3, "consecutive_limit_ups": 3},
+        ])
+        # Caller-supplied value alone is not trusted.
+        out = with_prev_consecutive(df.with_columns(pl.lit(99).alias("_prev_consec")))
+        last = with_prev_consecutive(out.filter(pl.col("date") == d3))
+        assert dict(last.select("symbol", "_prev_consec").iter_rows()) == {"A": None, "B": 2}
+        from app.services.market_phase import ladder_promo_aggs
+        assert last.group_by("date").agg(ladder_promo_aggs())["promo_pool"][0] == 1
+
+
+    def test_partial_null_ladder_is_not_complete_count(self):
+        d = _days(1)[0]
+        row = _aggregate_daily(_frame([
+            {"symbol": "A", "date": d, "consecutive_limit_ups": 2},
+            {"symbol": "B", "date": d, "consecutive_limit_ups": None},
+        ])).row(0, named=True)
+        assert row["first_board"] is None
+        assert row["ge2_count"] is None
+        assert row["ladder_completeness"] is None
+        assert row["promo_pool"] is None
+
+    def test_no_previous_samples_and_real_empty_pool_differ(self):
+        d1, d2 = _days(2)
+        df = _frame([
+            {"symbol": "A", "date": d1, "consecutive_limit_ups": 0},
+            {"symbol": "A", "date": d2, "consecutive_limit_ups": 0},
+        ])
+        rows = _aggregate_daily(df).sort("date").to_dicts()
+        assert rows[0]["promo_pool"] is None
+        assert rows[1]["promo_pool"] == 0
+        assert rows[1]["promo_rate"] is None
+
+
+def test_phase_reason_pending_and_confirmed_preserves_existing_phase():
+    rows = pl.DataFrame({
+        "date": _days(4), "max_consecutive": [3, 3, 20, 20],
+        "first_board": [10, 10, 1000, 1000], "ge2_count": [2, 2, 100, 100],
+        "promo_rate": [.1] * 4, "seal_rate": [.5] * 4,
+    })
+    result = classify_phase_series(rows).to_dicts()
+    assert result[0]["phase"] == "unclassified"
+    assert result[0]["phase_reason"] == "pending_confirmation"
+    assert result[0]["phase_candidate"] == "ice" and result[0]["phase_candidate_count"] == 1
+    assert result[1]["phase"] == "ice"
+    assert result[2]["phase"] == "ice"  # Pending switch keeps the prior confirmed phase.
+    assert result[2]["phase_reason"] == "pending_confirmation"
+    assert result[3]["phase_candidate_count"] == 2

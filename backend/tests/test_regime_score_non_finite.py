@@ -37,7 +37,7 @@ def test_classify_state_tolerates_non_finite_metric():
         "index_pct": 0.0, "above_ma20_pct": 0.5,
     })
     assert state in regime_builder.STATE_LABELS
-    assert 0 <= score <= 100
+    assert score is None
 
 
 def test_aggregate_daily_tolerates_non_finite_change_pct():
@@ -56,4 +56,6 @@ def test_aggregate_daily_tolerates_non_finite_change_pct():
     })
     out = regime_builder._aggregate_daily(df)
     assert out.height == 1
-    assert 0 <= out["score"][0] <= 100
+    assert out["score"][0] is None  # 缺少指数，不伪装中性
+    assert out["avg_pct"][0] == 0.005
+    assert out["up_pct"][0] == 50

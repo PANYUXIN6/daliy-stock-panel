@@ -20,6 +20,19 @@ class DailyCoverage:
     halted: set[str] = field(default_factory=set)
     failed: set[str] = field(default_factory=set)
     not_listed: set[str] = field(default_factory=set)
+    halted_evidence: dict[str, dict] = field(default_factory=dict)
+
+    def record_halted(self, symbols, *, source: str, basis: str) -> None:
+        from app.market_time import cn_now
+
+        obtained_at = cn_now().isoformat()
+        for symbol in symbols:
+            self.halted.add(symbol)
+            self.halted_evidence[symbol] = {
+                "symbol": symbol, "date": self.day.isoformat(), "confirmed": True,
+                "source": source, "source_version": None, "basis": basis,
+                "obtained_at": obtained_at,
+            }
 
     def observe(self, frame: pl.DataFrame) -> None:
         required = {"symbol", "date", "open", "high", "low", "close", "volume", "amount"}
@@ -33,7 +46,8 @@ class DailyCoverage:
             ((pl.col("open") == 0) & (pl.col("high") == 0))
             | ((pl.col("volume") == 0) & (pl.col("amount") == 0))
         )
-        self.halted.update(halted["symbol"].drop_nulls().to_list())
+        self.record_halted(halted["symbol"].drop_nulls().to_list(),
+                           source="selected_daily_provider", basis="formal_daily_zero_price_or_volume_amount")
         active = filter_halt_days(current).filter(
             pl.all_horizontal(pl.col(c).is_finite() & (pl.col(c) > 0)
                               for c in ("open", "high", "low", "close"))

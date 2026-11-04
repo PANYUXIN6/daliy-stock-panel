@@ -635,20 +635,10 @@ class DepthService:
         return detect_capabilities()
 
     @staticmethod
-    def _is_trading_hours() -> bool:
-        # 显式北京时间: 容器/服务器本地时区可能是 UTC, 用 naive now() 会整体错开轮询窗口
-        now = cn_now()
-        t = now.time()
-        morning = dt_time(9, 25) <= t <= dt_time(11, 35)
-        afternoon = dt_time(12, 55) <= t <= dt_time(15, 5)
-        return now.weekday() < 5 and (morning or afternoon)
-
-    @staticmethod
     def _is_continuous_trading() -> bool:
         """A股连续竞价时段(北京时间): 9:30-11:30 / 13:00-15:00, 仅本地日历确认的交易日。
 
-        比 _is_trading_hours 严格: 排除午间休市前后(11:30-13:00)。
-        depth sealed 轮询用此窗口而非宽窗口, 关键原因:
+        depth sealed 轮询排除午间休市(11:30-13:00)，关键原因:
         12:55-13:00 午后集合竞价准备期, ask1/bid1 盘口语义与连续竞价不同,
         「涨停价上卖一==0」的真封判定在此期间失效, 会用竞价盘口覆盖 11:30
         已定格的正确 sealed 值, 导致涨停股误判为 sealed=False(假涨停)被错误扣减。

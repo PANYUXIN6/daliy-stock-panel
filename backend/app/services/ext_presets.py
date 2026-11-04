@@ -218,6 +218,7 @@ async def _fetch_json(url: str) -> list[dict]:
 class PreparedPreset:
     config: ExtConfig
     rows: list[dict]
+    observation: dict | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -278,7 +279,31 @@ async def prepare_preset(config_id: str, data_dir: Path) -> PreparedPreset:
     rows = flatten(raw)
     if not rows:
         raise ValueError(f"接口返回 0 行: {config.pull.url}")
-    return PreparedPreset(config, rows)
+    from uuid import uuid4
+
+    from app.market_time import cn_now
+
+    symbols = [row.get("symbol") for row in raw]
+    if any(not isinstance(s, str) or not s.strip() for s in symbols) or len(set(symbols)) != len(symbols):
+        raise ValueError("分类完整响应包含缺失或重复证券标识")
+    memberships = []
+    for row in raw:
+        labels = row.get("concepts" if config_id == "ext_gn_ths" else "industries")
+        if not isinstance(labels, list):
+            raise ValueError("分类完整响应缺少成员列表")
+        labels = [_dimension_label(value) for value in labels]
+        if any(not value for value in labels):
+            raise ValueError("分类完整响应存在无效标签")
+        selected = labels if config_id == "ext_gn_ths" else labels[1:2]
+        for label in selected:
+            memberships.append({"symbol": row["symbol"], "sector_id": label if config_id == "ext_gn_ths" else "-".join(labels[:2]), "sector_name": label,
+                                "source": "concept" if config_id == "ext_gn_ths" else "industry"})
+    observation = {"id": uuid4().hex, "source": config.pull.url,
+                   "obtained_at": cn_now().isoformat(), "source_effective_date": None,
+                   "source_published_at": None, "source_version": None,
+                   "complete": True, "completeness_basis": "完整端点响应，证券标识唯一且分类列表有效",
+                   "symbols": symbols, "memberships": memberships}
+    return PreparedPreset(config, rows, observation)
 
 
 def commit_prepared_preset(prepared: PreparedPreset, data_dir: Path) -> int:

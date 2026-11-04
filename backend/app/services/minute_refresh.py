@@ -430,10 +430,3 @@ class MinuteRefreshService:
             "next_round_at": self._state.next_round_at,
             "last_error": self._state.last_error,
         }
-
-    def trigger_manual_round(self) -> dict[str, Any]:
-        """手动触发一轮 (无视时段门控, 但仍受能力门控); 供状态页「立即刷新」。"""
-        if not self.capability_ok():
-            return {"ok": False, "reason": self._gate_reason() or "capability"}
-        threading.Thread(target=self._run_round, daemon=True, name="minute-refresh-manual").start()
-        return {"ok": True}

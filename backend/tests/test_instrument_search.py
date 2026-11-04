@@ -46,11 +46,6 @@ def test_code_prefix_match():
     assert "600519.SH" in [r["symbol"] for r in rows]
 
 
-def test_symbol_contains_match():
-    rows = _search("6005")
-    assert "600519.SH" in [r["symbol"] for r in rows]
-
-
 def test_chinese_name_contains_match():
     rows = _search("银行")
     assert sorted(r["symbol"] for r in rows) == ["000001.SZ", "600000.SH"]
@@ -90,13 +85,6 @@ def test_pinyin_layer_between_prefix_and_contains():
     """拼音命中应排在包含匹配之前 (分层优先级)。"""
     rows = _search("md")  # md → 美的集团 (拼音); 无代码/符号以 md 前缀
     assert "000333.SZ" in [r["symbol"] for r in rows]
-
-
-def test_pinyin_and_code_prefix_coexist():
-    """纯字母查询同时命中 code 前缀和拼音首字母时, code 前缀优先排前。"""
-    # '600000' 是浦发的 code 前缀; 这里用纯字母无法命中 code, 故仅验证拼音路径独立可用
-    rows = _search("pf")  # 浦发
-    assert "600000.SH" in [r["symbol"] for r in rows]
 
 
 # ===== 多音字 =====

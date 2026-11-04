@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import threading
 import time
 from datetime import date
@@ -15,6 +16,7 @@ from fastapi import APIRouter, Query, Request
 
 from app.market_time import cn_today
 from app.services import regime_builder
+from app.services.sentiment_observations import load_observation, observation_cache_key
 
 logger = logging.getLogger(__name__)
 
@@ -46,8 +48,17 @@ def _df_to_records(df) -> list[dict]:
     for r in df.to_dicts():
         if "date" in r and r["date"] is not None:
             r["date"] = str(r["date"])
-        records.append(r)
+        records.append({k: None if isinstance(v, float) and not math.isfinite(v) else v for k, v in r.items()})
     return records
+
+
+def _mark_method_current(rows: list[dict]) -> None:
+    from app.services import preferences
+    exclude_st = preferences.get_sentiment_exclude_st()
+    for row in rows:
+        row.setdefault("method_version", None)
+        row["method_current"] = (row["method_version"] == regime_builder.VERSION
+                                 and row.get("exclude_st") == exclude_st)
 
 
 @router.get("/history")
@@ -59,7 +70,9 @@ def regime_history(
 ):
     """历史环境时序(含状态/指标)。默认最近 N 天。"""
     global _cache, _cache_ts
-    cache_key = f"hist|{start}|{end}|{limit}"
+    p = regime_builder.regime_path(_data_dir(request))
+    signature = (p.stat().st_mtime_ns, p.stat().st_size) if p.exists() else None
+    cache_key = f"hist|{observation_cache_key(_data_dir(request))}|{signature}|{start}|{end}|{limit}"
     with _cache_lock:
         if (
             _cache is not None
@@ -82,6 +95,9 @@ def regime_history(
             df = df.sort("date", descending=True).head(limit)
         df = df.sort("date")
         rows = _df_to_records(df)
+        _mark_method_current(rows)
+        if rows:
+            rows[-1]["sentiment"] = load_observation(_data_dir(request), rows[-1]["date"])
         result = {"rows": rows, "total": len(rows)}
 
     with _cache_lock:
@@ -106,7 +122,16 @@ def regime_latest(request: Request):
         return {"row": None}
     latest = df.sort("date", descending=True).head(1)
     rows = _df_to_records(latest)
+    if rows:
+        _mark_method_current(rows)
+        rows[0]["sentiment"] = load_observation(_data_dir(request), rows[0]["date"])
     return {"row": rows[0] if rows else None}
+
+
+@router.get("/observations")
+def regime_observations(request: Request, date: Annotated[date | None, Query()] = None):
+    """指定交易日的完整观察；窗口始终取该日之前的历史。"""
+    return {"sentiment": load_observation(_data_dir(request), str(date) if date else None)}
 
 
 @router.get("/states")
@@ -231,29 +256,33 @@ def regime_phases(
                 "_promo_sum": 0.0,
                 "_promo_n": 0,
                 "_seal": 0.0,
+                "_valid": dict.fromkeys(["height", "first_board", "ge2", "seal"], 0),
             }
             segments.append(cur)
         cur["end"] = str(r["date"])
         cur["days"] += 1
-        cur["_height"] += float(r.get("max_consecutive") or 0)
-        cur["_first_board"] += float(r.get("first_board") or 0)
-        cur["_ge2"] += float(r.get("ge2_count") or 0)
+        for target, source in (("height", "max_consecutive"), ("first_board", "first_board"),
+                               ("ge2", "ge2_count"), ("seal", "seal_rate")):
+            value = r.get(source)
+            if value is not None and math.isfinite(value):
+                cur[f"_{target}"] += float(value)
+                cur["_valid"][target] += 1
         promo = r.get("promo_rate")
-        if promo is not None:
+        if promo is not None and math.isfinite(promo):
             cur["_promo_sum"] += float(promo)
             cur["_promo_n"] += 1
-        cur["_seal"] += float(r.get("seal_rate") or 0)
 
     for seg in segments:
-        n = seg["days"]
-        seg["avg_height"] = round(seg.pop("_height") / n, 1)
-        seg["avg_first_board"] = round(seg.pop("_first_board") / n, 1)
-        seg["avg_ge2"] = round(seg.pop("_ge2") / n, 1)
+        valid = seg.pop("_valid")
+        for source, target, digits in (("height", "avg_height", 1),
+                                       ("first_board", "avg_first_board", 1),
+                                       ("ge2", "avg_ge2", 1), ("seal", "avg_seal_rate", 3)):
+            total = seg.pop(f"_{source}")
+            seg[target] = round(total / valid[source], digits) if valid[source] else None
         seg["avg_promo"] = (
             round(seg.pop("_promo_sum") / seg["_promo_n"], 3) if seg["_promo_n"] else None
         )
         seg.pop("_promo_n")
-        seg["avg_seal_rate"] = round(seg.pop("_seal") / n, 3)
         seg["top_mainlines"] = _segment_mainlines(
             mainline, date.fromisoformat(seg["start"]), date.fromisoformat(seg["end"])
         )

@@ -95,6 +95,11 @@ class FuyaoClient:
     def close(self) -> None:
         self._http.close()
 
+    def fund_nav(self, symbol: str) -> dict:
+        return self._get("/api/fund/performance/nav", {
+            "thscode": symbol, "range": "twoyear", "nav_type": "unit",
+        })
+
     # ---- 内部 ----
     def _get(self, path: str, params: dict, *, cancel_event: threading.Event | None = None) -> dict:
         """GET + 信封解包。code != 0 时抛 FuyaoError(含 code 与 message)。"""

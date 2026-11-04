@@ -1,4 +1,4 @@
-import { useState, useCallback, useMemo } from 'react'
+import { lazy, Suspense, useState, useCallback, useMemo } from 'react'
 import { useCurrentUser } from '@/lib/auth'
 import { useQuery } from '@tanstack/react-query'
 import { Check, Gauge, GripVertical, Info, Loader2, RefreshCw, RotateCcw, Timer } from 'lucide-react'
@@ -9,12 +9,14 @@ import { DimensionMembersDialog, type DimensionMembersTarget } from '@/component
 import { useDataStatus, useCapabilities } from '@/lib/useSharedQueries'
 import { StockPreviewDialog } from '@/components/StockPreviewDialog'
 import type { NavItem } from '@/lib/listNav'
-import { scoreColor, quoteAge } from '@/components/dashboard/shared'
+import { quoteAge } from '@/components/dashboard/shared'
 import { DashboardGrid } from '@/components/dashboard/DashboardGrid'
 import { AddWidgetPanel } from '@/components/dashboard/AddWidgetPanel'
 import { useDashboardLayout } from '@/components/dashboard/useDashboardLayout'
 import { DEFAULT_LAYOUT, widgetDef, type WidgetCtx } from '@/components/dashboard/registry'
 import { cloneItems, GRID_COLS, type WidgetType } from '@/components/dashboard/layout'
+
+const EtfReferenceChart = lazy(() => import('@/components/dashboard/EtfReferenceChart'))
 
 /** 打开个股预览的来源榜 (用于行高亮与切股导航列表) */
 type PreviewSource = 'gain' | 'loss' | 'amount' | 'active' | 'concept' | 'industry' | 'alert'
@@ -58,7 +60,11 @@ export function Dashboard() {
     queryKey: QK.overviewMarket(selectedDate),
     queryFn: () => api.overviewMarket(selectedDate),
     staleTime: 5_000,
-    placeholderData: (prev) => prev,
+  })
+  const etfReference = useQuery({
+    queryKey: QK.etfReference(selectedDate),
+    queryFn: () => api.etfReference(selectedDate),
+    staleTime: 60 * 60_000,
   })
   const data = overview.data
   const caps = useCapabilities()
@@ -69,6 +75,7 @@ export function Dashboard() {
   const handleRefresh = () => {
     setManualFetching(true)
     void overview.refetch().finally(() => setManualFetching(false))
+    void etfReference.refetch()
   }
 
   if (overview.isLoading && !data) {
@@ -92,7 +99,7 @@ export function Dashboard() {
     )
   }
 
-  const score = data.emotion?.score ?? 50
+  const score = data.emotion?.score ?? null
   const latestDate = dataStatus.data?.enriched?.latest_date ?? null
   const currentDate = selectedDate ?? data.as_of ?? ''
   const quoteRunning = (!selectedDate || selectedDate === latestDate) && data.quote_status?.running
@@ -123,16 +130,7 @@ export function Dashboard() {
         <div className="flex items-center gap-2">
           <Gauge className="h-4 w-4 text-accent" />
           <h1 className="text-[16px] leading-6 font-semibold text-foreground">市场看板</h1>
-          <span
-            className="rounded-full border px-2 py-0.5 text-[10px] font-medium"
-            style={{
-              color: scoreColor(score),
-              borderColor: `${scoreColor(score)}40`,
-              background: `${scoreColor(score)}14`,
-            }}
-          >
-            {data.emotion.label} · {score}
-          </span>
+          <span className="rounded-full border border-border px-2 py-0.5 text-[10px] text-muted">市场状态观察</span>
         </div>
         <div className="flex items-center gap-3 text-[11px] text-muted">
           {currentDate ? (
@@ -196,6 +194,11 @@ export function Dashboard() {
       )}
 
       <DashboardGrid ctx={widgetCtx} items={dashItems.filter(item => isAdmin || item.t !== 'monitor')} onItemsChange={setDashItems} editing={dashEditing} />
+
+      <Suspense fallback={<div className="mt-1.5 h-[260px] rounded-card border border-border bg-surface/80" />}>
+        <EtfReferenceChart data={etfReference.data} loading={etfReference.isLoading}
+          error={etfReference.isError} onRetry={() => { void etfReference.refetch() }} />
+      </Suspense>
 
       <StockPreviewDialog
         symbol={previewStock?.symbol ?? null}

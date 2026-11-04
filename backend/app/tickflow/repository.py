@@ -614,6 +614,10 @@ class KlineRepository:
                 read_cols = [c for c in ["symbol", "date", "open", "high", "low", "close",
                                          "volume", "amount", "raw_close", "raw_high", "raw_low"]
                              if c in df_latest.columns]
+                # The compatibility scan inserts nulls for legacy partitions.
+                # Preserve provenance from older partitions even when the latest
+                # partition has no quote_ts; cached rows must not become formal history.
+                read_cols.append("quote_ts")
                 lf = (
                     scan_enriched_parquet(self._enriched_glob)
                     .filter(pl.col("date") >= start_full)

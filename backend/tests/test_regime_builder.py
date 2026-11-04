@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import os
 import time
-from datetime import date
+from datetime import date, datetime, timedelta
 
 import polars as pl
 import pytest
@@ -145,6 +145,26 @@ def test_aggregate_daily_ma20_above():
 
 def test_aggregate_empty_returns_empty():
     assert regime_builder._aggregate_daily(pl.DataFrame()).is_empty()
+
+
+@pytest.mark.parametrize("hour,source_times,expected", [
+    (16, [None, None], True),
+    (10, [None, None], False),
+    (15, [(0, 15), (0, 15)], True),
+    (16, [(0, 10), (0, 15)], False),
+    (16, [(-1, 15), (0, 15)], False),
+])
+def test_daily_completion_uses_every_source_timestamp(monkeypatch, hour, source_times, expected):
+    from app.market_time import CN_TZ
+
+    day = date(2026, 1, 2)
+    now = datetime(2026, 1, 2, hour, tzinfo=CN_TZ)
+    monkeypatch.setattr(regime_builder, "cn_now", lambda: now, raising=False)
+    quote_ts = [None if item is None else int(datetime.combine(
+        day + timedelta(days=item[0]), datetime.min.time(), tzinfo=CN_TZ
+    ).replace(hour=item[1]).timestamp() * 1000) for item in source_times]
+    raw = pl.DataFrame({"date": [day, day], "change_pct": [.1, -.1], "quote_ts": quote_ts})
+    assert regime_builder._aggregate_daily(raw).to_dicts()[0].get("is_complete_day") is expected
 
 
 def test_run_regime_batch_excludes_st(tmp_path, monkeypatch):
@@ -286,14 +306,17 @@ def test_run_regime_batch_aggregates_fallback_per_batch(tmp_path, monkeypatch):
         _batch_frame(target_dates[0], target_dates[1]),
         _batch_frame(target_dates[2], target_dates[3]),
     ]).filter(pl.col("symbol") == "B")
-    expected = original_aggregate(expected_detail, {})
+    expected = pl.concat([original_aggregate(part, {}) for part in (
+        expected_detail.filter(pl.col("date") <= target_dates[1]),
+        expected_detail.filter(pl.col("date") >= target_dates[2]),
+    )], how="vertical_relaxed")  # mock batches intentionally contain no warmup dates
 
     assert result.height == len(target_dates)
     assert aggregate_input_heights == [2, 2]
     assert result["up_count"].to_list() == [0, 0, 0, 0]
     assert result["down_count"].to_list() == [1, 1, 1, 1]
     assert result["limit_up"].sum() == 0
-    assert_frame_equal(result.sort("date"), expected.sort("date"))
+    assert_frame_equal(result.drop("exclude_st").sort("date"), expected.sort("date"))
 
 
 # ───────────────────────── 持久化(upsert) ─────────────────────────
@@ -386,7 +409,27 @@ def test_detect_stale_dates_by_mtime(tmp_path):
         store = _Store
     stale = regime_builder.detect_stale_dates(tmp_path, _FakeRepo())
     assert date(2026, 1, 2) in stale
-    assert date(2026, 1, 1) not in stale  # 1/1 没更新
+    assert date(2026, 1, 1) in stale  # 旧方法也必须重算
+
+
+def test_unknown_completion_metadata_requires_recompute(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from app.services import preferences
+
+    monkeypatch.setattr(preferences, "get_sentiment_exclude_st", lambda: True)
+    days = [date(2026, 1, i) for i in (1, 2, 3)]
+    for day in days:
+        part = tmp_path / "kline_daily_enriched" / f"date={day}" / "part.parquet"
+        part.parent.mkdir(parents=True)
+        part.touch()
+    rows = pl.DataFrame({"date": days, "method_version": [regime_builder.VERSION] * 3,
+                         "exclude_st": [True] * 3, "is_complete_day": [True, None, False]})
+    regime_builder.upsert_regime_history(tmp_path, rows)
+    repo = SimpleNamespace(store=SimpleNamespace(data_dir=tmp_path))
+    assert regime_builder.detect_stale_dates(tmp_path, repo) == [days[1]]
+    regime_builder.upsert_regime_history(tmp_path, rows.drop("is_complete_day"))
+    assert regime_builder.detect_stale_dates(tmp_path, repo) == days
 
 
 def test_compute_incremental_missing_dates(tmp_path):

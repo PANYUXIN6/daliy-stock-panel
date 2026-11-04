@@ -15,7 +15,6 @@ import app.data_providers
 from app.market_time import CN_TZ, cn_today
 from app.services import data_integrity as di
 from app.services.data_integrity import (
-    AUTO_REPAIR_MAX_LAG_DAYS,
     IntegrityIssue,
     _candidate_days,
     _is_snapshot,
@@ -24,7 +23,6 @@ from app.services.data_integrity import (
     earliest_issue_day,
     prune_enriched_partitions,
     scan_recent_integrity,
-    within_auto_repair_window,
 )
 
 # 2026-08-19(周三) ~ 2026-08-21(周五) 是工作日; TODAY 取 2026-08-24(周一)
@@ -304,12 +302,6 @@ def test_etf_family_independent(tmp_path):
     assert earliest_issue_day(issues, ("kline_etf_daily",)) is None
 
 
-def test_auto_repair_window():
-    assert within_auto_repair_window(TODAY - timedelta(days=AUTO_REPAIR_MAX_LAG_DAYS), today=TODAY) is True
-    assert within_auto_repair_window(TODAY - timedelta(days=AUTO_REPAIR_MAX_LAG_DAYS + 1), today=TODAY) is False
-    assert within_auto_repair_window(None, today=TODAY) is False
-
-
 # ── enriched 分区删除 ───────────────────────────────────────────────
 
 
@@ -419,7 +411,7 @@ class _QuoteServiceStub:
 
 def test_realtime_enable_does_not_implicitly_repair_snapshot(tmp_path, monkeypatch):
     from app.api import settings as settings_api
-    from app.services import data_integrity
+    from app.services import repair_daily
 
     real_today = datetime.now(CN_TZ).date()
     snapshot_day = _recent_trading_day_before(real_today)
@@ -434,8 +426,8 @@ def test_realtime_enable_does_not_implicitly_repair_snapshot(tmp_path, monkeypat
 
     launched = []
     monkeypatch.setattr(
-        data_integrity, "launch_integrity_repair",
-        lambda state, day, reason: (launched.append((day, reason)) or ("job-x", True)),
+        repair_daily, "run_repair_daily",
+        lambda *args, **kwargs: launched.append((args, kwargs)),
     )
     saved = {}
     monkeypatch.setattr(
@@ -500,56 +492,6 @@ def test_realtime_gate_allows_clean_data(tmp_path, monkeypatch):
     assert result["realtime_quotes_enabled"] is True
     assert qs.enabled is True
     assert saved == {"realtime_quotes_enabled": True}
-
-
-def test_realtime_gate_ignores_old_issues_beyond_window(tmp_path, monkeypatch):
-    from app.api import settings as settings_api
-
-    real_today = datetime.now(CN_TZ).date()
-    old_day = real_today - timedelta(days=AUTO_REPAIR_MAX_LAG_DAYS + 1)
-    while old_day.weekday() >= 5:
-        old_day -= timedelta(days=1)
-    _write_daily_partition(tmp_path, "kline_daily", old_day, _ts_ms(old_day, time(11, 58)))
-    _write_daily_partition(
-        tmp_path, "kline_daily", real_today,
-        _ts_ms(real_today, time(10, 0)),
-    )
-
-    saved = {}
-    monkeypatch.setattr(
-        "app.services.preferences.save", lambda payload: saved.update(payload),
-    )
-    qs = _QuoteServiceStub()
-    request = _gate_state(tmp_path, qs, repo=None)
-    req = settings_api.RealtimeQuotesPrefs(realtime_quotes_enabled=True)
-
-    result = settings_api.update_realtime_quotes(req, request)
-    assert result["realtime_quotes_enabled"] is True
-
-
-def test_boot_check_launches_repair_within_window(tmp_path, monkeypatch):
-    from types import SimpleNamespace
-
-    from app.services import data_integrity
-
-    # boot_integrity_check 用真实"今天" — 往回找最近工作日造盘中快照分区
-    launched = []
-    monkeypatch.setattr(
-        data_integrity, "launch_integrity_repair",
-        lambda state, day, reason: (launched.append(day) or ("job-x", True)),
-    )
-
-    real_today = datetime.now(CN_TZ).date()
-    probe = _recent_trading_day_before(real_today)
-    data_dir = tmp_path / "boot"
-    _write_daily_partition(data_dir, "kline_daily", probe, _ts_ms(probe, time(11, 58)))
-    _write_daily_partition(data_dir, "kline_daily", real_today, _ts_ms(real_today, time(10, 0)))
-
-    state = SimpleNamespace(
-        repo=SimpleNamespace(store=SimpleNamespace(data_dir=data_dir)),
-    )
-    data_integrity.boot_integrity_check(state)
-    assert launched == [probe]
 
 
 # ── 管道自愈端到端 (钩子3, 离线集成) ────────────────────────────────

@@ -658,7 +658,7 @@ function MarketSummaryBar({ data }: { data: OverviewMarket }) {
         </span>
         <div className="leading-tight">
           <div className="text-[11px] font-medium text-foreground">{data.emotion?.label ?? '情绪'}</div>
-          <div className="text-[9px] text-secondary">情绪温度</div>
+          <div className="text-[9px] text-secondary">自定义环境参考分</div>
         </div>
       </div>
 

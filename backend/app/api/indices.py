@@ -16,6 +16,38 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/index", tags=["index"])
 
+
+@router.get("/etf-reference")
+def get_etf_reference(request: Request, as_of: date | None = None) -> dict:
+    from app.services.etf_reference import read_reference
+
+    return read_reference(request.app.state.repo.store.data_dir, as_of)
+
+
+async def submit_etf_reference(repo, quote_service=None, *, force: bool = True) -> dict:
+    from app.api.pipeline import _submit_job
+    from app.services.etf_reference import sync_reference
+    from app.services.pipeline_jobs import JobCancelledError
+
+    def make_run(progress, cancel_event):
+        def check_cancel():
+            if cancel_event.is_set():
+                raise JobCancelledError("etf_reference")
+
+        return lambda: sync_reference(repo.store.data_dir, force=force, progress=progress,
+                                      check_cancel=check_cancel)
+
+    return await _submit_job(
+        repo, quote_service, make_run, request_key="etf_reference",
+        datasets=["etf_reference"], finalize=lambda: None, with_cancel_event=True,
+        pause_quotes=False,
+    )
+
+
+@router.post("/etf-reference/sync")
+async def sync_etf_reference(request: Request) -> dict:
+    return await submit_etf_reference(request.app.state.repo, getattr(request.app.state, "quote_service", None))
+
 def _index_info(repo, symbol: str) -> dict:
     df = repo.get_index_instruments()
     if df.is_empty() or "symbol" not in df.columns:

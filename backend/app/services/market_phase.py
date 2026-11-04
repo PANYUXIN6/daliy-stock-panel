@@ -1,25 +1,12 @@
-"""市场情绪周期阶段(冰点/启动/主升/高潮/退潮/修复) — 纯函数模块。
+"""短线投机阶段：基于连板生态的描述性规则，不代表全 A 市场或收益预测。
 
-与 regime_builder 的 5 档 state(强势/偏强/震荡/偏弱/弱势)并存:
-- state: 综合情绪分(赚钱/投机/抗跌/趋势 4 维加权), 回测环境过滤与挖掘在用, 不动。
-- phase: 基于"连板梯队"的阶段(用户判据: 高度、宽度、晋级率、梯队完整度),
-  刻画情绪周期位置(冰点→启动→主升→高潮→退潮), 供市场环境页分析与主线识别。
-
-驱动量(全部可从已存储的 consecutive_limit_ups 派生, 2020-08 起全历史可回算):
-- height 高度: 当日最高连板数
-- first_board 首板宽度: 首板(1 连板)家数
-- ge2/ge3/ge5 宽度: N 板以上家数
-- promo 晋级率: 昨日连板池今日继续封板的比例 (池 <10 家记 null)
-- seal_rate 封板率: regime 已有列
-- ladder_completeness 梯队完整度: 2..height 档位中非空占比
-
-阈值标定: 2020-08~2026-08 全市场 1454 个交易日的 p10/p60/p90 分位数
-(标定脚本一次性运行, 不提交); 关键异常段抽查(2024-09/10 rally→climax→ebb,
-2024-01/02 微盘退潮)人工核过归属。阈值集中在下方, 调整只需改这里。
+保留旧枚举供持久化/API 兼容，未命中规则为 unclassified，核心输入缺失为
+unknown。阈值是项目历史经验参数，不是论文复现或样本外有效性证明。
 """
 from __future__ import annotations
 
 import logging
+import math
 
 import polars as pl
 
@@ -32,21 +19,23 @@ PHASE_RALLY = "rally"
 PHASE_CLIMAX = "climax"
 PHASE_EBB = "ebb"
 PHASE_REPAIR = "repair"
+PHASE_UNCLASSIFIED = "unclassified"
+PHASE_UNKNOWN = "unknown"
 
 PHASE_LABELS = {
-    PHASE_ICE: "冰点",
-    PHASE_IGNITE: "启动",
-    PHASE_RALLY: "主升",
-    PHASE_CLIMAX: "高潮",
-    PHASE_EBB: "退潮",
-    PHASE_REPAIR: "修复",
+    PHASE_ICE: "短线低迷",
+    PHASE_IGNITE: "短线启动",
+    PHASE_RALLY: "短线活跃",
+    PHASE_CLIMAX: "短线高热",
+    PHASE_EBB: "短线退潮",
+    PHASE_REPAIR: "短线修复",
+    PHASE_UNCLASSIFIED: "未归类",
+    PHASE_UNKNOWN: "数据不足",
 }
 
-# 规则判定优先级: 高潮 > 主升 > 退潮 > 启动 > 冰点 > 修复(兜底)
-_PHASE_PRIORITY = (PHASE_CLIMAX, PHASE_RALLY, PHASE_EBB, PHASE_IGNITE, PHASE_ICE)
-
-# ───────────────────────── 阈值(标定自 2020-08~2026-08 分位数) ─────────────────────────
-# 高潮: 情绪极端宣泄 — 二板以上宽度或首板数达到 p90 的 ~2 倍以上(历史 <2% 天数)
+# ───────────────────────── 项目经验阈值 ─────────────────────────
+# 旧参数注记所述分位来自未入库标定，不构成可复现或样本外验证。
+# 高热: 二板以上宽度或首板数达到项目经验阈值
 CLIMAX_GE2 = 50            # p90(25) 的 2 倍
 CLIMAX_FIRST_BOARD = 220   # p90(88) 的 2.5 倍
 # 主升: 高度/宽度/晋级率同时高于中位 (p60), 或晋级率极强 (p85+)
@@ -79,11 +68,6 @@ PROMO_MIN_POOL = 10
 # 平滑与持续性: EMA alpha≈1/3 (约 5 日), 阶段切换需连续 CONFIRM_DAYS 日同标签
 _EMA_ALPHA = 1.0 / 3.0
 _CONFIRM_DAYS = 2
-# 大盘弱档否决: 正面阶段(主升/高潮/启动)不允许出现在 5 档 state 为弱势/偏弱的日子。
-# 涨停梯队可能与大盘背离(如 2024-01 微盘崩期间中字头涨停生态走强), 该否决
-# 保证"主升"标签在大盘层面也成立; state 列缺失时(单元测试)不启用否决。
-_POSITIVE_PHASES = frozenset({PHASE_CLIMAX, PHASE_RALLY, PHASE_IGNITE})
-_VETO_STATES = frozenset({"weak", "lean_weak"})
 
 
 def with_prev_consecutive(df: pl.DataFrame) -> pl.DataFrame:
@@ -92,12 +76,27 @@ def with_prev_consecutive(df: pl.DataFrame) -> pl.DataFrame:
     df 需含 symbol/date/consecutive_limit_ups; 输入应覆盖前一交易日
     (调用方保证 warmup 或直接传全量), 每个符号首行 _prev_consec 为 null。
     """
-    if "_prev_consec" in df.columns:
-        return df
+    provenance = {"_prev_consec", "_prev_consec_date", "_prev_market_date"}
+    if provenance.issubset(df.columns):
+        # 仅复用本函数在 warmup 截断前生成的日期依据，并再次校验。
+        return df.with_columns(
+            pl.when(pl.col("_prev_consec_date") == pl.col("_prev_market_date"))
+            .then(pl.col("_prev_consec")).otherwise(None).alias("_prev_consec")
+        )
+    df = df.drop([c for c in provenance if c in df.columns])
+    dates = df.select("date").unique().sort("date").with_columns(
+        pl.col("date").shift(1).alias("_prev_market_date")
+    )
     return (
         df.sort(["symbol", "date"])
         .with_columns(
-            pl.col("consecutive_limit_ups").shift(1).over("symbol").alias("_prev_consec")
+            pl.col("consecutive_limit_ups").shift(1).over("symbol").alias("_prev_consec"),
+            pl.col("date").shift(1).over("symbol").alias("_prev_consec_date"),
+        )
+        .join(dates, on="date", how="left")
+        .with_columns(
+            pl.when(pl.col("_prev_consec_date") == pl.col("_prev_market_date"))
+            .then(pl.col("_prev_consec")).otherwise(None).alias("_prev_consec")
         )
     )
 
@@ -115,57 +114,51 @@ def ladder_daily_aggs() -> list[pl.Expr]:
         consec.ge(5).sum().alias("ge5_count"),
         consec.filter(consec.ge(2)).n_unique().alias("rungs_filled"),
     ]
-    return exprs
+    return [pl.when((consec.count() > 0) & (consec.null_count() == 0)).then(expr).otherwise(None).alias(expr.meta.output_name())
+            for expr in exprs]
 
 
 def ladder_promo_aggs() -> list[pl.Expr]:
     """晋级率聚合(分子/分母); 要求 df 已含 _prev_consec 列。"""
     prev = pl.col("_prev_consec")
     consec = pl.col("consecutive_limit_ups")
+    comparable = prev.is_not_null() & consec.is_not_null()
     return [
-        prev.ge(1).sum().alias("promo_pool"),
-        (prev.ge(1) & consec.eq(prev + 1)).sum().alias("promo_ok"),
+        pl.when(comparable.any()).then((comparable & prev.ge(1)).sum())
+        .otherwise(None).alias("promo_pool"),
+        pl.when(comparable.any()).then((comparable & prev.ge(1) & consec.eq(prev + 1)).sum())
+        .otherwise(None).alias("promo_ok"),
     ]
 
 
 def finalize_ladder_row(r: dict) -> dict:
-    """把聚合行的梯队原始值整理为持久化字段(晋级率/ladder_completeness)。"""
-    height = int(r.get("max_consecutive") or 0)
-    rungs = int(r.get("rungs_filled") or 0)
-    completeness = (rungs / (height - 1)) if height >= 3 else 0.0
-    pool = int(r.get("promo_pool") or 0)
-    ok = int(r.get("promo_ok") or 0)
-    promo = (ok / pool) if pool >= PROMO_MIN_POOL else None
+    """保留未覆盖字段的 null；真实零计数仍为零。"""
+    def count(key):
+        value = r.get(key)
+        return int(value) if value is not None else None
+
+    height, rungs = count("max_consecutive"), count("rungs_filled")
+    completeness = rungs / (height - 1) if height is not None and height >= 3 and rungs is not None else None
+    pool, ok = count("promo_pool"), count("promo_ok")
+    promo = ok / pool if pool is not None and pool >= PROMO_MIN_POOL and ok is not None else None
     return {
-        "first_board": int(r.get("first_board") or 0),
-        "ge2_count": int(r.get("ge2_count") or 0),
-        "ge3_count": int(r.get("ge3_count") or 0),
-        "ge5_count": int(r.get("ge5_count") or 0),
-        "ladder_completeness": round(completeness, 4),
+        **{key: count(key) for key in ("first_board", "ge2_count", "ge3_count", "ge5_count")},
+        "ladder_completeness": round(completeness, 4) if completeness is not None else None,
         "promo_pool": pool,
         "promo_rate": round(promo, 4) if promo is not None else None,
     }
 
 
-def _ema(values: list[float], alpha: float = _EMA_ALPHA) -> list[float]:
-    out: list[float] = []
+def _ema(values: list[float | None], alpha: float = _EMA_ALPHA) -> list[float | None]:
+    """因果 EMA；缺失不插值并重置，后续观测不能改写此前输出。"""
+    out: list[float | None] = []
     cur = None
     for v in values:
-        if v is None or v != v:  # None 或 NaN
-            if cur is None:
-                out.append(None)
-                continue
-            out.append(cur)  # ffill: 缺失沿用上一平滑值
-            continue
-        cur = v if cur is None else cur + alpha * (v - cur)
+        if v is None or not math.isfinite(v):
+            cur = None
+        else:
+            cur = v if cur is None else cur + alpha * (v - cur)
         out.append(cur)
-    # 前向回填: 序列开头缺失用首个有效值
-    first_valid = next((i for i, x in enumerate(out) if x is not None), None)
-    if first_valid is not None:
-        for i in range(first_valid):
-            out[i] = out[first_valid]
-    else:
-        out = [0.0] * len(values)
     return out
 
 
@@ -173,7 +166,7 @@ def classify_phase_series(daily: pl.DataFrame) -> pl.DataFrame:
     """对完整日序打阶段标签, 追加 phase 列。
 
     输入列: date, max_consecutive, first_board, ge2_count, promo_rate, seal_rate
-    (promo_rate 允许 null)。处理: promo 前向填充 → 各驱动 EMA 平滑 →
+    (promo_rate 允许 null)。处理: 各驱动因果 EMA 平滑（缺失重置） →
     逐日规则判定(按优先级) → 连续 _CONFIRM_DAYS 日同标签才切换(持续性)。
     """
     required = {"date", "max_consecutive", "first_board", "ge2_count", "promo_rate", "seal_rate"}
@@ -183,7 +176,6 @@ def classify_phase_series(daily: pl.DataFrame) -> pl.DataFrame:
 
     rows = daily.sort("date")
     n = rows.height
-    states = rows["state"].to_list() if "state" in rows.columns else None
     height_s = _ema([float(v) if v is not None else None for v in rows["max_consecutive"].to_list()])
     first_s = _ema([float(v) if v is not None else None for v in rows["first_board"].to_list()])
     ge2_s = _ema([float(v) if v is not None else None for v in rows["ge2_count"].to_list()])
@@ -192,64 +184,86 @@ def classify_phase_series(daily: pl.DataFrame) -> pl.DataFrame:
 
     def raw_label(i: int) -> str:
         h, fb, g2, pr, sr = height_s[i], first_s[i], ge2_s[i], promo_s[i], seal_s[i]
-        g2_prev = ge2_s[max(0, i - 5)]
-        h_prev = height_s[max(0, i - 5)]
+        if h is None or fb is None or g2 is None:
+            return PHASE_UNKNOWN
+        # 变化规则要求完整的 6 行窗口，不能把不足 5 日当成 5 日。
+        history_ok = i >= 5 and all(
+            x is not None for series in (height_s, ge2_s, promo_s)
+            for x in series[i - 5:i + 1]
+        )
+        g2_prev = ge2_s[i - 5] if history_ok else None
+        h_prev = height_s[i - 5] if history_ok else None
         # 高潮
         if g2 >= CLIMAX_GE2 or fb >= CLIMAX_FIRST_BOARD:
             return PHASE_CLIMAX
         # 主升
-        if h >= RALLY_HEIGHT and g2 >= RALLY_GE2 and pr >= RALLY_PROMO:
+        if h >= RALLY_HEIGHT and g2 >= RALLY_GE2 and pr is not None and pr >= RALLY_PROMO:
             return PHASE_RALLY
-        if pr >= RALLY_PROMO_ALT and g2 >= RALLY_GE2_ALT and h >= RALLY_HEIGHT_ALT:
+        if pr is not None and pr >= RALLY_PROMO_ALT and g2 >= RALLY_GE2_ALT and h >= RALLY_HEIGHT_ALT:
             return PHASE_RALLY
-        # 冰点: 高度/宽度/首板同时贴地 — 优先于退潮(持续死寂的市场是"冰点"
+        # 冰点: 高度/宽度/首板同时贴地 — 优先于退潮(持续死寂的市场是"短线低迷"
         # 而非"自高位退潮"; 退潮的规则 B 不带 from_high 条件, 顺序反了会把
         # 长期冰点误标成退潮)
         if h <= ICE_HEIGHT and g2 <= ICE_GE2 and fb <= ICE_FIRST_BOARD:
             return PHASE_ICE
         # 退潮: 自高位回落 + 晋级率坍塌, 或晋级/封板双弱
-        from_high = g2_prev >= EBB_RECENT_GE2 or h_prev >= EBB_RECENT_HEIGHT
+        from_high = history_ok and (g2_prev >= EBB_RECENT_GE2 or h_prev >= EBB_RECENT_HEIGHT)
         if from_high and (pr <= EBB_PROMO and g2 < g2_prev):
             return PHASE_EBB
-        if pr <= EBB_PROMO_STRICT and sr <= EBB_SEAL:
+        if pr is not None and sr is not None and pr <= EBB_PROMO_STRICT and sr <= EBB_SEAL:
             return PHASE_EBB
         # 启动: 自低位扩张
-        if g2 - g2_prev >= IGNITE_GE2_DELTA and g2 >= IGNITE_GE2 and pr >= IGNITE_PROMO:
+        if history_ok and g2 - g2_prev >= IGNITE_GE2_DELTA and g2 >= IGNITE_GE2 and pr >= IGNITE_PROMO:
             return PHASE_IGNITE
-        if h - h_prev >= IGNITE_HEIGHT_DELTA and h >= IGNITE_HEIGHT and pr >= IGNITE_PROMO_SOFT:
+        if history_ok and h - h_prev >= IGNITE_HEIGHT_DELTA and h >= IGNITE_HEIGHT and pr >= IGNITE_PROMO_SOFT:
             return PHASE_IGNITE
-        return PHASE_REPAIR
+        if history_ok and g2 > g2_prev and pr > promo_s[i - 5]:
+            return PHASE_REPAIR
+        return PHASE_UNCLASSIFIED
 
     labels: list[str] = []
-    current = None
+    reasons: list[str] = []
+    candidates: list[str | None] = []
+    counts: list[int] = []
+    current = PHASE_UNCLASSIFIED
     pending: str | None = None
     pending_run = 0
     for i in range(n):
         raw = raw_label(i)
-        if (
-            states is not None
-            and raw in _POSITIVE_PHASES
-            and states[i] in _VETO_STATES
-        ):
-            raw = PHASE_REPAIR
-        if current is None:
+        if raw in {PHASE_UNKNOWN, PHASE_UNCLASSIFIED}:
+            # 无证据时立即撤销旧阶段，不能沿用昨天的修复/活跃。
             current = raw
+            pending, pending_run = None, 0
             labels.append(raw)
+            reasons.append("missing_core_inputs" if raw == PHASE_UNKNOWN else "no_rule_match")
+            candidates.append(None)
+            counts.append(0)
             continue
+        if current == PHASE_UNKNOWN:
+            current = PHASE_UNCLASSIFIED
         if raw == current:
             labels.append(current)
             pending, pending_run = None, 0
+            reasons.append("confirmed")
+            candidates.append(None)
+            counts.append(0)
             continue
         if raw == pending:
             pending_run += 1
         else:
             pending, pending_run = raw, 1
+        reasons.append("confirmed" if pending_run >= _CONFIRM_DAYS else "pending_confirmation")
+        candidates.append(raw)
+        counts.append(pending_run)
         if pending_run >= _CONFIRM_DAYS:
             current = raw
             labels.append(current)
             pending, pending_run = None, 0
         else:
             labels.append(current)
-    return daily.with_columns(
-        pl.Series("phase", labels, dtype=pl.Utf8).alias("phase")
+    return rows.with_columns(
+        pl.Series("phase", labels, dtype=pl.Utf8).alias("phase"),
+        pl.Series("phase_reason", reasons, dtype=pl.Utf8),
+        pl.Series("phase_candidate", candidates, dtype=pl.Utf8),
+        pl.Series("phase_candidate_count", counts, dtype=pl.Int64)
     ).sort("date")

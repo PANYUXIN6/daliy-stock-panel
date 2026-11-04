@@ -330,6 +330,7 @@ class OrdinaryMinutePrefs(BaseModel):
 
 
 class DataProvidersIn(BaseModel):
+    fund_nav_provider: str | None = None
     daily_data_provider: str | None = None
     adj_factor_provider: str | None = None
     minute_data_provider: str | None = None
@@ -434,6 +435,7 @@ def get_preferences() -> dict:
         "depth5_data_provider": preferences.get_depth5_data_provider(),
         "realtime_data_provider": preferences.get_realtime_data_provider(),
         "financial_data_provider": preferences.get_financial_provider(),
+        "fund_nav_provider": preferences.get_fund_nav_provider(),
         "data_source_job_timeout_s": preferences.get_data_source_job_timeout_s(),
         "data_source_long_job_timeout_s": preferences.get_data_source_long_job_timeout_s(),
         "minute_batch_compress": preferences.get_minute_batch_compress(),
@@ -491,7 +493,7 @@ def get_preferences() -> dict:
             "realtime_quotes_enabled", "realtime_allowed", "minute_history_days",
             "daily_data_provider", "adj_factor_provider", "minute_data_provider",
             "full_minute_data_provider", "depth5_data_provider", "realtime_data_provider",
-            "financial_data_provider", "ordinary_minute_enabled",
+            "financial_data_provider", "fund_nav_provider", "ordinary_minute_enabled",
         }
         return {key: value for key, value in result.items() if key in readable}
     return result
@@ -531,6 +533,7 @@ def get_capability_matrix() -> dict:
             "depth5_data_provider": preferences.get_depth5_data_provider(),
             "adj_factor_provider": preferences.get_adj_factor_provider(),
             "financial_data_provider": preferences.get_financial_provider(),
+            "fund_nav_provider": preferences.get_fund_nav_provider(),
         },
         tickflow_tier=policy.base_tier_name(),
     )
@@ -631,6 +634,7 @@ def uninstall_plugin(name: str, request: Request) -> dict:
         (preferences.get_minute_data_provider, "minute_data_provider", "tickflow"),
         (preferences.get_realtime_data_provider, "realtime_data_provider", "tickflow"),
         (preferences.get_financial_provider, "financial_data_provider", "tickflow"),
+        (preferences.get_fund_nav_provider, "fund_nav_provider", "fuyao"),
     ]:
         if getter() == name:
             preferences.save({key: default})
@@ -702,6 +706,8 @@ def delete_data_source(name: str, request: Request) -> dict:
         updates["realtime_data_provider"] = "tickflow"
     if preferences.get_financial_provider() == name:
         updates["financial_data_provider"] = "tickflow"
+    if preferences.get_fund_nav_provider() == name:
+        updates["fund_nav_provider"] = "fuyao"
     if preferences.get_adj_factor_provider() == name:
         updates["adj_factor_provider"] = "tickflow"
     if updates:
@@ -753,6 +759,7 @@ def update_data_providers(req: DataProvidersIn, request: Request) -> dict:
         "depth5_data_provider": preferences.get_depth5_data_provider(),
         "realtime_data_provider": preferences.get_realtime_data_provider(),
         "financial_data_provider": preferences.get_financial_provider(),
+        "fund_nav_provider": preferences.get_fund_nav_provider(),
     }
 
 

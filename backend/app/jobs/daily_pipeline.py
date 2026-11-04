@@ -317,6 +317,12 @@ def _run_now(
     coverage = DailyCoverage(today) if postmarket else None
     index_coverage = DailyCoverage(today) if postmarket else None
     readiness: dict = {}
+    if postmarket:
+        from app.services.evening_report_store import EveningReportStore
+
+        EveningReportStore(repo.store.data_dir).save_readiness(today.isoformat(), {
+            "date": today.isoformat(), "complete": False, "reason": "新一轮盘后输入正在验收",
+        })
 
     # Step 0: 先同步个股维表, 再解析标的池 — 确保标的池基于最新 instruments
     emit("sync_instruments", 2, "同步个股维表…")
@@ -483,7 +489,7 @@ def _run_now(
 
     # 完整性修复时删除股票 enriched 的坏分区: 增量重算只算 enriched 里不存在
     # 的日期, 盘中快照日分区已存在(虽是错的), 不删永远不会被重算。删除后
-    # Step 2 把这些日期当"新日期"重算 (剩余分区最近 60 天做历史前缀, 窗口 ≤5 天回看充足)。
+    # Step 2 把这些日期当"新日期"重算，使用剩余分区最近 60 天做历史前缀。
     repair_start = override_start_date if override_start_date is not None else stale_day
     if postmarket:
         # 正式日线可能只修订成交量额，既有收盘价比较无法发现；当日必须重新加工。
@@ -805,9 +811,11 @@ def _run_now(
         emit("sync_classifications", 89, "同步概念与行业分类…")
         from app.services import ext_presets
         classifications: dict[str, int] = {}
+        classification_observations: list[dict] = []
         for task_id in ("prefetch_concept", "prefetch_industry"):
             prepared = prefetch.result(task_id)
             classifications[prepared.config.id] = ext_presets.commit_prepared_preset(prepared, repo.store.data_dir)
+            classification_observations.append(getattr(prepared, "observation", None))
             emit("sync_classifications", 89, f"{prepared.config.label}同步完成，{classifications[prepared.config.id]} 行")
         # 概念映射有进程缓存，刷新后供本轮主线和复盘读取。
         from app.services.rps_rotation import invalidate_cache as invalidate_rotation_cache
@@ -862,9 +870,20 @@ def _run_now(
             raise DailyCoverageError("当日市场环境计算未完成")
         current = environment.filter(pl.col("date") == today)
         if current.is_empty() or current.select(pl.any_horizontal(
-            pl.col(column).is_null() for column in ("state", "score", "phase")
+            pl.col(column).is_null() for column in ("state", "phase")
         ).any()).item():
             raise DailyCoverageError("当日市场环境或情绪周期未生成")
+        # 已完成计算但合法缺少分母（如当日零触板）可返回 unavailable/null。
+        # 这不替代上游股票、指数、因子和 enriched 的完整性验收。
+        invalid_score = current.filter(pl.col("score").is_null())
+        if not invalid_score.is_empty() and (
+            "method_version" not in invalid_score.columns
+            or invalid_score.filter(
+                (pl.col("state") != "unavailable")
+                | (pl.col("method_version") != regime_builder.VERSION).fill_null(True)
+            ).height
+        ):
+            raise DailyCoverageError("当日环境缺少有效计算状态")
 
     # Step 2.7: 市场主线(概念/行业涨停梯队聚合) 增量计算 — regime 同开关。
     # 只窄扫连板 >=1 的行, 增量通常 1 天, 开销可忽略。软失败: 不阻断主管道。
@@ -890,6 +909,23 @@ def _run_now(
             stage_errors.append(f"compute_mainline: {e}")
             skipped.append("mainline")
             emit.finish("failed", str(e))
+
+    if postmarket and "mainline" not in skipped:
+        # Readiness belongs to steps 1–8, not to optional minute/book/list stages.
+        # Evening calculation runs later as its own job after this writer exits.
+        from app.services.evening_report_inputs import save_ready
+
+        emit("evening_report_ready", 94, "记录每日晚报输入就绪证据…")
+        try:
+            save_ready(repo.store.data_dir, today, coverage, classification_observations,
+                       current.to_dicts()[0])
+        except Exception as exc:  # noqa: BLE001 -- 晚报证据失败不阻断后续原有结算／采集
+            logger.warning("每日晚报输入待就绪: %s", exc)
+            stage_errors.append(f"evening_report_ready: {exc}")
+            emit.finish("failed", str(exc))
+            EveningReportStore(repo.store.data_dir).save_readiness(today.isoformat(), {
+                "date": today.isoformat(), "complete": False, "reason": str(exc),
+            })
 
     # Step 2.8: 模拟盘结算: 顺延单按当日开盘/收盘撮合 → 除权调整 → 定版净值。
     # 幂等: 重跑同日不会重复成交/二次除权 (订单状态与 corp_action 台账守卫)。
@@ -1551,6 +1587,14 @@ def start_scheduler(repo: KlineRepository) -> AsyncIOScheduler:
     inst_sched = preferences.get_instruments_schedule()
 
     scheduler = AsyncIOScheduler(timezone="Asia/Shanghai")
+    from app.services import etf_reference
+
+    scheduler.add_job(
+        etf_reference.run_scheduled, args=[repo],
+        trigger=CronTrigger(hour=f"{etf_reference.CHECK_HOUR}-23", minute=0, timezone="Asia/Shanghai"),
+        id=etf_reference.JOB_ID, replace_existing=True, coalesce=True, max_instances=1,
+        misfire_grace_time=6 * 3600, next_run_time=cn_now(),
+    )
     from app.services import trading_day
     scheduler.add_job(
         trading_day.sync_calendar, args=[repo.store.data_dir],

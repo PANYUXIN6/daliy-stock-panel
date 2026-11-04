@@ -49,6 +49,7 @@ datasets:
 | `minute` | `symbol`、`datetime`、`open/high/low/close`、`volume` | 1 分钟 K，`datetime` 为北京时间墙钟，无时区 |
 | `full_minute` | 同 `minute` | 当日全市场分钟批量修复，节奏下限 60 秒 |
 | `depth5` | `symbol`、`asks`、`bids` | 按标的批量取五档盘口，每档为 `[价格, 数量（手）]` |
+| `fund_nav` | `symbol`、`date`、`unit_nav` | 历史单位净值，元/份；日期为北京时间交易日。按配置分批、限速，完整性由调用服务验收，失败不跨源回退。见 [基金净值方法契约](plugin-development.md#方法契约) |
 | `financial` | 校验仅要求 `symbol` | 同一配置接收不同表名；业务字段与版本时间见 [插件财务契约](plugin-development.md#财务版本时间契约) |
 
 统一代码带交易所后缀，例如 `600519.SH`、`000001.SZ`；`volume` 为手，成交额 `amount` 为元。供应商按股返回的成交量必须显式换算，不能直接透传。

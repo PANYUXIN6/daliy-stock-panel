@@ -15,6 +15,7 @@ import { ExtDataStatCard } from '@/components/ext-data/ExtDataStatCard'
 import { Data } from '@/pages/Data'
 import { SealedBadge } from '@/components/SealedBadge'
 import { QK } from '@/lib/queryKeys'
+import { toast } from '@/components/Toast'
 import { formatScheduleTimePart } from '@/lib/format'
 import type { ExtDataConfig } from '@/lib/api'
 
@@ -1009,4 +1010,26 @@ it('清库请求进行中禁止 Escape 或取消关闭确认框', async () => {
   await act(async () => resolve({ deleted_files: 0 }))
   await settle()
   expect(document.querySelector('[role="dialog"]')).toBeNull()
+})
+
+it('ST配置保存后即使重算失败也失效按日观察和看板缓存', async () => {
+  const keys = [QK.regimeObservations('2026-10-16'), QK.overviewMarket(), QK.overviewMarket('2026-10-16')]
+  for (const key of keys) qc.setQueryData(key, { sentiment: { as_of: '2026-10-16' } })
+  mocks.regimeRecompute.mockRejectedValue(new Error('计算失败'))
+  await render(<RegimeMaintenancePanel />)
+  await act(async () => host.querySelector<HTMLButtonElement>('[aria-label="统计剔除 ST 股"]')!.click())
+  await act(async () => button('保存并重算').click())
+  await settle()
+  for (const key of keys) expect(qc.getQueryState(key)?.isInvalidated).toBe(true)
+  expect(toast).toHaveBeenLastCalledWith('过滤已保存，但重算失败 · 计算失败', 'error')
+})
+
+it('过滤配置保存失败时准确提示，且不启动重算', async () => {
+  mocks.mainlineFilterUpdate.mockRejectedValue(new Error('配置写入失败'))
+  await render(<RegimeMaintenancePanel />)
+  await act(async () => button('保存并重算').click())
+  await settle()
+  expect(toast).toHaveBeenLastCalledWith('保存失败 · 配置写入失败', 'error')
+  expect(mocks.regimeRecompute).not.toHaveBeenCalled()
+  expect(mocks.regimeMainlineRecompute).not.toHaveBeenCalled()
 })

@@ -1243,16 +1243,11 @@ class QuoteService:
     def _should_fetch_for_phase(self, phase: str) -> bool:
         return self._should_poll_for_phase(phase)
 
-    def _is_trading_hours(self) -> bool:
-        """连续交易窗口及尚未完成的收盘定版。"""
-        return self._should_poll_for_phase(self._market_phase())
-
     @staticmethod
     def _is_continuous_trading() -> bool:
         """A股连续竞价时段(北京时间): 9:30-11:30 / 13:00-15:00, 仅本地日历确认的交易日。
 
-        比 _is_trading_hours 严格: 排除 9:15-9:30 集合竞价(指示价, 非成交价)、
-        午间与 15:00 后收盘缓冲。监控评估只在此窗口进行, 不对竞价/收盘后的陈旧价告警。
+        监控评估只在此窗口进行，排除集合竞价、午间与收盘后价格。
         本地日历未知或休市时不评估。
         """
         now = cn_now()
@@ -1285,8 +1280,7 @@ class QuoteService:
         """行情更新后评估统一监控规则引擎,并刷新策略结果缓存。"""
         try:
             # 仅在「交易日 + 连续竞价时段」评估监控 —— 避开集合竞价指示价、盘前/收盘后
-            # 缓冲。轮询窗口(_is_trading_hours)更宽是为盘前预热/收盘捕捉, 但告警不应
-            # 基于这些非连续竞价价格。
+            # 缓冲。收盘确认仍可拉取行情，监控只使用连续竞价价格。
             if not self._is_continuous_trading():
                 return
             # 获取 enriched 数据 (刚算好的)

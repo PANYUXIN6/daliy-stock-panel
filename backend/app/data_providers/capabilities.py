@@ -27,6 +27,14 @@ from app.data_providers import custom as custom_sources
 
 CAPABILITY_REGISTRY: list[dict] = [
     {
+        "id": "fund_nav",
+        "label": "基金净值",
+        "desc": "ETF历史单位净值",
+        "field": "fund_nav_provider",
+        "default": "fuyao",
+        "tf_tier": None,
+    },
+    {
         "id": "daily",
         "label": "日K",
         "desc": "历史K线与实时覆写",
@@ -162,7 +170,7 @@ def build_capability_matrix(current: dict[str, str], tickflow_tier: str = "none"
     for cap in CAPABILITY_REGISTRY:
         # field=None → 不可路由能力 (仅 TickFlow 提供, 无路由偏好), 生效源恒为默认
         effective = current.get(cap["field"], cap["default"]) if cap["field"] else cap["default"]
-        tf_available = tier_rank >= _TIER_RANK[cap["tf_tier"]]
+        tf_available = cap["tf_tier"] is not None and tier_rank >= _TIER_RANK[cap["tf_tier"]]
         candidates: list[dict] = []
         pending: list[dict] = []
         if tf_available:

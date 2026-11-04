@@ -60,7 +60,7 @@ def reconcile_daily_status(coverage: DailyCoverage, expected: list[str], *,
     not_listed = missing & status.not_listed
     if halted & not_listed:
         raise DailyCoverageError("交易状态证据冲突：同一标的同时为停牌和未上市")
-    coverage.halted.update(halted)
+    coverage.record_halted(halted, source=status.source, basis="full_session_suspension_status")
     coverage.not_listed.update(not_listed)
     logger.info("%s 缺行状态核验(%s)：确认停牌 %d 只，尚未上市 %d 只，未解释 %d 只",
                 coverage.day, status.source, len(halted), len(not_listed),
@@ -120,6 +120,12 @@ async def run_scheduled(repo) -> dict | None:
         return None
     if trading_day.is_trading_day(now, data_dir=repo.store.data_dir) is not True:
         return None
+    from app.services import evening_report_jobs
+
+    # Retry an already accepted evening input before repeating unrelated collection.
+    evening_job = await evening_report_jobs.run_scheduled(repo)
+    if evening_job is not None:
+        return evening_job
     key = f"postmarket:{now.date()}"
     # 既有任务终态已落盘，重启仍能去重；失败或取消不视为完成。
     if any(job.get("request_key") == key and (job["status"] == "succeeded"

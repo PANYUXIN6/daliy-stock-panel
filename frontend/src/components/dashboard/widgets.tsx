@@ -17,7 +17,7 @@ import { useCustomSignalNames } from '@/lib/useCustomSignalNames'
 import { strategyEventMeta, strategyName } from '@/lib/strategyMonitorEvents'
 import { boardTag } from '@/components/stock-table/primitives'
 import { toNavItems, type NavItem } from '@/lib/listNav'
-import { fmtPrice, fmtIndexPct, fmtStockPct, pctClass, scoreColor as scoreColorValue, SectionTitle } from './shared'
+import { fmtPrice, fmtIndexPct, fmtStockPct, pctClass, SectionTitle } from './shared'
 
 // 切股导航列表构建 (与列表展示行一致: StockList 只显示前 8)
 export function stockListNav(rows: MarketSnapshotRow[]): NavItem[] {
@@ -55,15 +55,18 @@ export function BreadthBar({ data }: { data: OverviewMarket['breadth'] }) {
   const denom = Math.max(data.total, 1)
   const upW = data.up / denom * 100
   const downW = data.down / denom * 100
-  const flatW = Math.max(0, 100 - upW - downW)
+  const flatW = data.flat / denom * 100
+  const missing = Math.max(0, data.total - data.up - data.down - data.flat)
   return (
     <div className="space-y-2">
       {/* 与上方涨跌分布同向: 左跌(绿) 右涨(红) */}
       <div className="flex h-2.5 overflow-hidden rounded-full bg-elevated">
         <div className="bg-bear/85" style={{ width: `${downW}%` }} />
         <div className="bg-muted/45" style={{ width: `${flatW}%` }} />
+        {missing > 0 && <div className="bg-warning/30" style={{ width: `${missing / denom * 100}%` }} title={`涨跌数据缺失 ${missing} 家`} />}
         <div className="bg-bull/85" style={{ width: `${upW}%` }} />
       </div>
+      {missing > 0 && <p className="text-[10px] text-warning">涨跌数据缺失 {missing} 家</p>}
       <div className="grid grid-cols-3 gap-1.5 text-[11px]">
         <div className="rounded bg-bear/8 px-2 py-1 text-bear">跌 <span className="font-mono">{data.down}</span></div>
         <div className="rounded bg-elevated/70 px-2 py-1 text-muted">平 <span className="font-mono">{data.flat}</span></div>
@@ -96,73 +99,6 @@ export function DistributionBars({ rows }: { rows: OverviewMarket['distribution'
   )
 }
 
-// ===== 情绪雷达 (手写 SVG) =====
-export function EmotionRadar({ radar, score }: { radar: OverviewMarket['radar']; score: number }) {
-  const size = 240
-  const cx = size / 2
-  const cy = size / 2
-  const maxR = 78
-  const color = scoreColorValue(score)
-  if (!radar.length) return <div className="flex h-52 items-center justify-center text-xs text-muted">暂无雷达数据</div>
-  const points = radar.map((r, i) => {
-    const angle = -Math.PI / 2 + i * 2 * Math.PI / radar.length
-    const radius = maxR * Math.max(0, Math.min(100, r.value)) / 100
-    return {
-      ...r,
-      x: cx + Math.cos(angle) * radius,
-      y: cy + Math.sin(angle) * radius,
-      lx: cx + Math.cos(angle) * (maxR + 27),
-      ly: cy + Math.sin(angle) * (maxR + 27),
-      gx: cx + Math.cos(angle) * maxR,
-      gy: cy + Math.sin(angle) * maxR,
-    }
-  })
-  const polygon = points.map(p => `${p.x},${p.y}`).join(' ')
-  const gridPolygons = [1, 0.66, 0.33].map((level, idx) => ({
-    level,
-    idx,
-    points: radar.map((_, i) => {
-      const angle = -Math.PI / 2 + i * 2 * Math.PI / radar.length
-      return `${cx + Math.cos(angle) * maxR * level},${cy + Math.sin(angle) * maxR * level}`
-    }).join(' '),
-  }))
-  return (
-    <div className="flex justify-center">
-      <svg viewBox={`0 0 ${size} ${size}`} className="h-56 w-full">
-        <defs>
-          <radialGradient id="emotionRadarFill" cx="50%" cy="45%" r="70%">
-            <stop offset="0%" stopColor={`${color}57`} />
-            <stop offset="100%" stopColor={`${color}1f`} />
-          </radialGradient>
-          {/* 中心/网格用 CSS 变量取色, 亮暗主题自动切换 (SVG 属性支持 hsl(var(--x))) */}
-          <radialGradient id="emotionRadarCenter" cx="50%" cy="50%" r="55%">
-            <stop offset="0%" stopColor="hsl(var(--surface) / 0.92)" />
-            <stop offset="68%" stopColor="hsl(var(--surface) / 0.70)" />
-            <stop offset="100%" stopColor="hsl(var(--surface) / 0)" />
-          </radialGradient>
-        </defs>
-        {gridPolygons.map(g => (
-          <polygon
-            key={g.level}
-            points={g.points}
-            fill={g.idx % 2 === 0 ? 'hsl(var(--elevated) / 0.55)' : 'hsl(var(--elevated) / 0.3)'}
-            stroke={g.level === 1 ? 'hsl(var(--border) / 0.9)' : 'hsl(var(--border) / 0.5)'}
-            strokeWidth={g.level === 1 ? 1.2 : 0.8}
-          />
-        ))}
-        {points.map(p => <line key={p.key} x1={cx} y1={cy} x2={p.gx} y2={p.gy} stroke="hsl(var(--border) / 0.4)" />)}
-        <polygon points={polygon} fill="url(#emotionRadarFill)" stroke={color} strokeWidth="2" />
-        {points.map(p => <circle key={p.key} cx={p.x} cy={p.y} r="2.8" fill={color} stroke="hsl(var(--surface) / 0.9)" strokeWidth="1" />)}
-        <circle cx={cx} cy={cy} r="29" fill="url(#emotionRadarCenter)" />
-        <text x={cx} y={cy + 7} textAnchor="middle" className="fill-foreground font-mono text-[24px] font-bold">{score}</text>
-        {points.map(p => (
-          <text key={`${p.key}-label`} x={p.lx} y={p.ly + 4} textAnchor="middle" className="fill-secondary text-[10px] font-medium">{p.label}</text>
-        ))}
-      </svg>
-    </div>
-  )
-}
-
 // ===== 涨停梯队 =====
 export function LadderMini({ limit }: { limit: OverviewMarket['limit'] }) {
   const tiers = limit.tiers.filter(t => t.boards >= 2).slice(0, 6)
@@ -170,7 +106,7 @@ export function LadderMini({ limit }: { limit: OverviewMarket['limit'] }) {
     <div className="space-y-1.5">
       <div className="flex items-center justify-between rounded bg-elevated/55 px-2 py-1.5 text-[11px]">
         <span className="text-muted">封板率</span>
-        <span className="font-mono text-accent">{(limit.seal_rate ?? 0).toFixed(0)}%</span>
+        <span className="font-mono text-accent">{limit.seal_rate == null ? '不可计算' : `${limit.seal_rate.toFixed(0)}%`}</span>
       </div>
       {tiers.length === 0 && <div className="rounded border border-dashed border-border py-5 text-center text-xs text-muted">暂无 2 板以上</div>}
       {tiers.map(t => {

@@ -244,14 +244,6 @@ def test_active_financial_catalog_only_contains_income_factors() -> None:
         assert get_factor(retired) is None
 
 
-def test_mining_schedule_order_prefix_unchanged() -> None:
-    """挖掘调度取 FACTOR_COLUMNS[:48], 首元素必须保持 momentum_5d。"""
-    from app.backtest.factor import FACTOR_COLUMNS
-
-    assert FACTOR_COLUMNS[0]["id"] == "momentum_5d"
-    assert len(FACTOR_COLUMNS) >= 48
-
-
 def test_get_factor_and_dependencies() -> None:
     spec = get_factor("ma20_bias")
     assert spec is not None

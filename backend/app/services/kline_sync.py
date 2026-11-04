@@ -309,7 +309,8 @@ def sync_and_persist_daily_batch(
             # provider 若已过滤停牌行，只有明确的当日日线证据才能豁免缺失标的。
             halted_symbols = getattr(provider, "get_daily_halted_symbols", None)
             if callable(halted_symbols):
-                coverage.halted.update(halted_symbols(coverage.day))
+                coverage.record_halted(halted_symbols(coverage.day),
+                                       source=type(provider).__name__, basis="provider_formal_daily_halted_symbols")
         zero_full = [s for s in requested if s not in seen and s not in failed_syms]
         if zero_full or skipped_bare:
             zero = [orig_by_full.get(s, s) for s in zero_full] + skipped_bare

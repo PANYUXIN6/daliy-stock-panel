@@ -99,7 +99,11 @@ def test_environment_maintenance_notifies_existing_readers(maintenance, monkeypa
     assert market_mainline.load_mainline_history(root)["member"].to_list() == ["新主线"]
     if path.endswith("/regime/recompute"):
         rows = client.get("/api/regime/history").json()["rows"]
-        assert rows == [{"date": "2026-10-09", "state": "warming"}]
+        assert len(rows) == 1
+        assert rows[0]["date"] == "2026-10-09"
+        assert rows[0]["state"] == "warming"
+        assert rows[0]["method_version"] is None
+        assert rows[0]["sentiment"]["coverage"]["method_current"] is False
 
 
 @pytest.mark.parametrize("preset,field,source_field,labels,expected", [

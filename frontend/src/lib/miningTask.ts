@@ -416,23 +416,6 @@ export function tryReconnectMining(): boolean {
   return true
 }
 
-export function clearMiningTask() {
-  closeEvents()
-  accountStorage.removeItem(ACTIVE_RUN_KEY)
-  current = {
-    runId: null,
-    isPending: false,
-    cancelling: false,
-    reconnecting: false,
-    run: null,
-    progress: null,
-    result: null,
-    previousResult: current.result ?? current.previousResult,
-    error: null,
-  }
-  emit()
-}
-
 export function useMiningTask(): MiningTask {
   return useSyncExternalStore(subscribe, () => current, () => current)
 }

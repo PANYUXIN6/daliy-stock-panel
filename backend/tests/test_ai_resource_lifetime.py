@@ -1,38 +1,13 @@
 from __future__ import annotations
 
 import asyncio
-import subprocess
-import tempfile
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock
 
 import anyio
 import pytest
 
 from app.services import ai_provider
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize('entrypoint', ['cli', 'process'])
-async def test_disabled_codex_does_not_create_process_or_temporary_home(monkeypatch, entrypoint):
-    process = Mock(side_effect=AssertionError('disabled CLI must not spawn a process'))
-    temporary = Mock(side_effect=AssertionError('disabled CLI must not create a home'))
-    prepare = Mock(side_effect=AssertionError('disabled CLI must not copy credentials'))
-    monkeypatch.setattr(subprocess, 'Popen', process)
-    monkeypatch.setattr(tempfile, 'TemporaryDirectory', temporary)
-    monkeypatch.setattr(ai_provider, '_prepare_codex_home', prepare)
-
-    with pytest.raises(RuntimeError, match='本地 Codex CLI 模式已停用'):
-        if entrypoint == 'cli':
-            await asyncio.wait_for(
-                ai_provider._run_codex_cli([], max_tokens=None, timeout=10), timeout=1,
-            )
-        else:
-            ai_provider._run_codex_process(['codex'], '', {}, 10)
-
-    process.assert_not_called()
-    temporary.assert_not_called()
-    prepare.assert_not_called()
 
 
 @pytest.mark.asyncio

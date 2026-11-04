@@ -12,6 +12,7 @@ import {
 // 代码分割: 页面全部 lazy 加载, 避免首屏打包所有页面 (ECharts / lightweight-charts /
 // framer-motion 等重库) → 大幅减小首屏 bundle。命名导出用 .then 映射为 default。
 // Layout 为应用外壳, 保持同步加载。
+const EveningReport = lazy(() => import('./pages/EveningReport').then(m => ({ default: m.EveningReport })))
 const Watchlist = lazy(() => import('./pages/Watchlist').then(m => ({ default: m.Watchlist })))
 const Screener = lazy(() => import('./pages/Screener').then(m => ({ default: m.Screener })))
 const Backtest = lazy(() => import('./pages/Backtest').then(m => ({ default: m.Backtest })))
@@ -41,6 +42,7 @@ const Dev = lazy(() => import('./pages/Dev').then(m => ({ default: m.Dev })))
 
 const CORE_ROUTE_PATHS = new Set([
   '/',
+  '/evening-report',
   '/overview',
   '/analysis',
   '/analysis/:menuId',
@@ -92,6 +94,7 @@ export const router = createBrowserRouter([
     children: [
       { path: 'login', element: <Navigate to="/" replace /> },
       { index: true, element: <Dashboard /> },
+      { path: 'evening-report', element: <EveningReport /> },
       { path: 'overview', element: <Navigate to="/" replace /> },
       { path: 'analysis', element: <Navigate to="/settings?tab=ext-pages" replace /> },
       { path: 'analysis/:menuId', element: <AnalysisDetail /> },

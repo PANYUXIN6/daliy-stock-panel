@@ -24,11 +24,15 @@ def test_scheduler_registers_beijing_postmarket_and_keeps_maintenance(tmp_path, 
         try:
             ids = {job.id for job in scheduler.get_jobs()}
             assert ids == {"trading_calendar", "pre_market_instruments", "reprobe_capabilities",
-                           "daily_pipeline", "post_market_retry", "csi300_etf_reference"}
+                           "daily_pipeline", "post_market_retry", "csi300_etf_reference", "etf_flow"}
             reference = scheduler.get_job("csi300_etf_reference")
             assert str(reference.trigger).endswith("hour='16-23', minute='0']")
             assert str(reference.trigger.timezone) == "Asia/Shanghai"
             assert reference.coalesce and reference.max_instances == 1
+            etf_flow = scheduler.get_job("etf_flow")
+            assert str(etf_flow.trigger).endswith("hour='20-23', minute='0,15,30,45']")
+            assert str(etf_flow.trigger.timezone) == "Asia/Shanghai"
+            assert etf_flow.coalesce and etf_flow.max_instances == 1
             postmarket = scheduler.get_job("daily_pipeline")
             assert str(postmarket.trigger).endswith("hour='16', minute='0']")
             assert str(postmarket.trigger.timezone) == "Asia/Shanghai"

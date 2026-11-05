@@ -9,8 +9,10 @@ import polars as pl
 import pytest
 
 from app.data_providers import custom as custom_sources
-from app.services import instrument_sync, postmarket, preferences
+from app.jobs import daily_pipeline
+from app.services import instrument_sync, postmarket, preferences, repair_daily
 from app.services.daily_coverage import DailyCoverage, DailyCoverageError
+from app.tickflow.capabilities import Cap, CapabilityLimits, CapabilitySet
 
 DAY = date(2026, 10, 21)
 ACTIVE = "600000.SH"
@@ -195,3 +197,78 @@ def test_membership_without_optional_count_is_accepted(tmp_path, tickflow):
     tickflow.universes.get.return_value = {"symbols": MEMBERS.copy()}
     instrument_sync.sync_instruments(tmp_path, require_complete=True)
     assert postmarket.stock_universe(repo_at(tmp_path), DAY) == sorted(MEMBERS)
+
+
+class DailyRequestCapturedError(Exception):
+    """在正式日线请求边界停止，不运行与股票池无关的后续加工。"""
+
+
+@pytest.fixture
+def repair_request(tmp_path, monkeypatch):
+    monkeypatch.setattr(daily_pipeline, "cn_today", lambda: DAY)
+    monkeypatch.setattr(repair_daily, "cn_today", lambda: DAY)
+    monkeypatch.setattr(daily_pipeline, "_refresh_instruments_view", lambda *_: None)
+    monkeypatch.setattr(daily_pipeline, "_invalidate", lambda *_: None)
+    monkeypatch.setattr(preferences, "get_pipeline_pull_a_share", lambda: False)
+    # 行情快照返回非空的四只标的，不能被当作完整 A 股名单。
+    monkeypatch.setattr(daily_pipeline, "get_pool", Mock(return_value=[
+        ACTIVE, "000001.SZ", "000001.SH", "510300.SH",
+    ]))
+    batch = Mock(side_effect=DailyRequestCapturedError)
+    monkeypatch.setattr(daily_pipeline.kline_sync, "sync_and_persist_daily_batch", batch)
+    repo = repo_at(tmp_path)
+    repo.latest_daily_date = lambda: DAY
+    caps = CapabilitySet({Cap.KLINE_DAILY_BATCH: CapabilityLimits()})
+    return repo, caps, batch
+
+
+@pytest.mark.parametrize("provider_name", ["tickflow", "custom-source"])
+def test_manual_repair_requests_complete_current_members(
+    repair_request, tickflow, monkeypatch, provider_name,
+):
+    repo, caps, batch = repair_request
+    if provider_name == "custom-source":
+        provider = SimpleNamespace(get_instruments=Mock(return_value=[
+            *[instrument(symbol, current=True) for symbol in MEMBERS],
+            instrument(DELISTED, current=False),
+        ]))
+        monkeypatch.setattr(preferences, "get_daily_data_provider", lambda: provider_name)
+        monkeypatch.setattr(custom_sources, "is_custom_provider", lambda name: name == provider_name)
+        monkeypatch.setattr(custom_sources, "get_provider", lambda _: provider)
+        monkeypatch.setattr(instrument_sync, "get_client", Mock(
+            side_effect=AssertionError("自定义维表不应访问 TickFlow"),
+        ))
+    start = date(2024, 7, 1)
+    with pytest.raises(DailyRequestCapturedError):
+        repair_daily.run_repair_daily(repo, caps, start)
+    assert batch.call_args.args[0] == sorted(MEMBERS)
+    assert batch.call_args.kwargs["start_date"].date() == start
+    assert batch.call_args.kwargs["end_date"].date() == DAY
+
+
+def test_manual_repair_stops_before_daily_when_membership_is_incomplete(
+    repair_request, tickflow,
+):
+    repo, caps, batch = repair_request
+    path = save_instruments(repo.store.data_dir, pl.DataFrame({
+        "symbol": MEMBERS, "as_of": [DAY] * len(MEMBERS),
+    }))
+    original = path.read_bytes()
+    tickflow.universes.get.return_value = {"symbols": [ACTIVE], "symbol_count": len(MEMBERS)}
+    with pytest.raises(RuntimeError, match="当前 A 股成员名单数量不一致"):
+        repair_daily.run_repair_daily(repo, caps, date(2024, 7, 1))
+    batch.assert_not_called()
+    assert path.read_bytes() == original
+
+
+def test_manual_repair_does_not_reuse_old_metadata_after_empty_sync(
+    repair_request, monkeypatch,
+):
+    repo, caps, batch = repair_request
+    save_instruments(repo.store.data_dir, pl.DataFrame({
+        "symbol": MEMBERS, "as_of": [DAY] * len(MEMBERS),
+    }))
+    monkeypatch.setattr(instrument_sync, "sync_instruments", lambda *_, **__: 0)
+    with pytest.raises(DailyCoverageError, match="当日股票维表未返回有效数据"):
+        repair_daily.run_repair_daily(repo, caps, date(2024, 7, 1))
+    batch.assert_not_called()

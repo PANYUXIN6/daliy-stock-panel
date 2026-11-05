@@ -42,12 +42,12 @@ export function SentimentObservations({ data, expectedDate, compact = false }: {
           <table className={`w-full whitespace-nowrap text-left text-[11px] ${compact ? '' : 'min-w-[640px]'}`}><thead className="text-[10px] text-muted"><tr><th className="py-1 font-normal">指标</th><th className="font-normal">原值</th><th className="font-normal">历史分位</th>{!compact && <><th className="font-normal">较5日前</th><th className="font-normal">极端持续</th><th className="font-normal">有效样本</th></>}</tr></thead>
             <tbody>{items.map(o => <tr key={o.key} className="border-t border-border/40">
               <td className="py-1 pr-2">{o.label}</td><td className="pr-2 font-mono">{o.value == null ? <span className="font-sans text-muted" title={o.missing_reason ?? '尚无可用数据'}>尚无可用数据</span> : observationValue(o)}</td>
-              <td className="pr-2 font-mono" title={`${o.percentile_reason ?? '此前500交易日'}；有效 ${o.history_sample_count} 日`}>{o.percentile == null ? '—' : `P${o.percentile.toFixed(0)}`}</td>
+              <td className="pr-2 font-mono" title={`${o.percentile_reason ?? '此前500交易日'}；有效 ${o.history_sample_count} 日`}>{o.percentile == null ? <><span>—</span><span className="ml-1 text-[10px] text-muted">{o.history_sample_count}/500日</span></> : `P${o.percentile.toFixed(0)}`}</td>
               {!compact && <><td className="pr-2 font-mono">{o.change_5d == null ? '—' : observationValue(o, o.change_5d, true)}</td><td className="pr-2">{o.extreme_side ? `${o.extreme_side === 'low' ? '低' : '高'}分位 ${o.extreme_streak} 日` : '—'}</td><td>{o.denominator == null ? '—' : `${o.denominator} 家`}</td></>}
             </tr>)}</tbody>
           </table>
         </div>
-        {!compact && items.filter(o => o.value == null).map(o => <p key={o.key} className="mt-1 text-[10px] text-muted">{o.label}：{o.missing_reason ?? '尚无可用数据'}</p>)}
+        {items.filter(o => o.value == null).map(o => <p key={o.key} className="mt-1 break-words text-[10px] leading-4 text-muted">{o.label}：{o.missing_reason ?? '尚无可用数据'}</p>)}
       </section>
     })}
     {compact && <p className="text-[10px] text-muted">融资、期权、行业ETF净申购：尚无可用数据。完整分项与变化见市场环境。</p>}

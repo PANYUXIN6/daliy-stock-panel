@@ -3,7 +3,7 @@ import { Check, Loader2 } from 'lucide-react'
 import { api } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 
-type PullKey = 'pipeline_pull_a_share' | 'pipeline_pull_etf' | 'pipeline_pull_index'
+type PullKey = 'pipeline_pull_etf'
 
 interface ScopeItem {
   key: PullKey
@@ -13,8 +13,6 @@ interface ScopeItem {
 }
 
 const ITEMS: ScopeItem[] = [
-  { key: 'pipeline_pull_a_share', label: 'A股', desc: '沪深京 A 股日K(约 5500 只)', defaultOn: true },
-  { key: 'pipeline_pull_index', label: '指数', desc: '主要市场指数(默认全量约 600 只)', defaultOn: true },
   { key: 'pipeline_pull_etf', label: 'ETF', desc: '场内交易基金(约 1500 只,首次较慢)', defaultOn: false },
 ]
 
@@ -35,7 +33,7 @@ export function PipelineScopeConfig() {
   return (
     <div className="space-y-2.5">
       <p className="text-xs text-secondary leading-relaxed">
-        勾选每次点击“立即同步”时拉取的数据类型。仅影响后续同步，已存储的历史数据不受影响。
+        股票、核心指数、板块分类及关联分析固定包含在日常更新和历史补齐中。ETF 可按需一并更新；分钟历史独立更新。
       </p>
       <div className="space-y-1.5">
         {ITEMS.map((item) => {
@@ -76,7 +74,7 @@ export function PipelineScopeConfig() {
         </div>
       )}
       <div className="text-[10px] text-muted leading-relaxed pt-1">
-        数据通道基于免费接口,所有档位均可拉取。
+        其他指数范围、单项重算和数据源配置保留在高级维护及各数据卡片中。
       </div>
     </div>
   )

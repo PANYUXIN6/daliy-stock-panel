@@ -253,14 +253,20 @@ def compute_mainline_range(repo, data_dir: Path, start: date, end: date,
     return result
 
 
-def upsert_mainline_history(data_dir: Path, new_rows: pl.DataFrame) -> None:
+def upsert_mainline_history(data_dir: Path, new_rows: pl.DataFrame, *,
+                           replace_range: tuple[date, date, str] | None = None) -> None:
     """按 (date, kind) 整日覆盖 upsert; schema 以 new_rows 为权威(同 regime 模式)。"""
-    if new_rows.is_empty() or "date" not in new_rows.columns:
+    if replace_range is None and (new_rows.is_empty() or "date" not in new_rows.columns):
         return
     p = mainline_path(data_dir)
     p.parent.mkdir(parents=True, exist_ok=True)
     old = pl.read_parquet(p) if p.exists() else pl.DataFrame()
-    if old.is_empty():
+    if replace_range is not None and not old.is_empty():
+        start, end, kind = replace_range
+        old = old.filter(~(pl.col("date").is_between(start, end) & (pl.col("kind") == kind)))
+    if new_rows.is_empty():
+        combined = old
+    elif old.is_empty():
         combined = new_rows
     else:
         # 按 (date, kind) 整日覆盖: anti-join 掉本次重算的 (日, 维度) 组合
@@ -276,12 +282,15 @@ def upsert_mainline_history(data_dir: Path, new_rows: pl.DataFrame) -> None:
         ]
         kept = kept.select(keep_exprs)
         combined = pl.concat([kept, new_rows.select(target_cols)], how="vertical_relaxed")
+    if not combined.columns:
+        return
     combined = combined.sort(["date", "kind", "rank"])
     atomic_write_parquet(combined, p)
 
 
 def compute_mainline_incremental(repo, data_dir: Path, *, today: date | None = None,
-                                 kind: str = "concept", refresh_today: bool = False) -> pl.DataFrame:
+                                 kind: str = "concept", refresh_today: bool = False,
+                                 refresh_from: date | None = None) -> pl.DataFrame:
     """增量补算主线(供 daily_pipeline / 手动触发): 补 enriched 已有而主线缺失的日。"""
     today = today or cn_today()
     from app.services.regime_builder import enriched_date_set
@@ -292,10 +301,13 @@ def compute_mainline_incremental(repo, data_dir: Path, *, today: date | None = N
     missing = sorted(d for d in enriched_dates if d not in existing_dates and d <= today)
     if refresh_today and today in enriched_dates:
         missing = sorted(set(missing) | {today})
+    if refresh_from is not None:
+        missing = sorted(set(missing) | {day for day in enriched_dates if refresh_from <= day <= today})
     if not missing:
         return pl.DataFrame()
     logger.info("mainline incremental(%s): compute %d days", kind, len(missing))
     new_rows = compute_mainline_range(repo, data_dir, missing[0], missing[-1], kind=kind)
-    if not new_rows.is_empty():
-        upsert_mainline_history(data_dir, new_rows)
+    # 历史修正后没有主线也是新结果，须原子移除区间内的旧主线。
+    upsert_mainline_history(data_dir, new_rows,
+                           replace_range=(missing[0], missing[-1], kind))
     return new_rows

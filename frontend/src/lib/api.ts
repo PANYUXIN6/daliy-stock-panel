@@ -4591,6 +4591,13 @@ export interface PipelineJob {
     /** 单标的、指定日期的分钟补采行数。 */
     rows?: number
     skipped_stages?: string[]
+    analysis?: {
+      as_of: string
+      is_complete_day: boolean
+      radar_ready: boolean
+      radar_history_min: number
+      radar_history_max: number
+    }
   } | null
   error: string | null
 }

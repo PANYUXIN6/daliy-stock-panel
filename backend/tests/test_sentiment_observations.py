@@ -166,7 +166,33 @@ def test_amount_window_excludes_unclosed_history():
                  exclude_st=True, is_complete_day=True, total_amount=100.) for i in range(20)]
     assert observation(so.observations_series(rows)[-1], "amount_ratio_5_20")["value"] == 1
     rows[3]["is_complete_day"] = False
-    assert observation(so.observations_series(rows)[-1], "amount_ratio_5_20")["value"] is None
+    missing = observation(so.observations_series(rows)[-1], "amount_ratio_5_20")
+    assert missing["value"] is None
+    assert "当前有效19/20日" in missing["missing_reason"]
+    assert "2020-01-04收盘口径未确认" in missing["missing_reason"]
+    assert missing["percentile_reason"] == missing["missing_reason"]
+    # Replacing the source with a confirmed close restores the ratio, while
+    # its historical percentile still needs the separate 500-day window.
+    rows[3]["is_complete_day"] = True
+    restored = observation(so.observations_series(rows)[-1], "amount_ratio_5_20")
+    assert restored["value"] == 1
+    assert restored["missing_reason"] is None
+    assert "当前有效0/500日" in restored["percentile_reason"]
+
+
+@pytest.mark.parametrize(("change", "reason"), [
+    ({"method_version": "old"}, "2020-01-04口径不一致"),
+    ({"exclude_st": False}, "2020-01-04口径不一致"),
+    ({"total_amount": None}, "2020-01-04成交额缺失"),
+])
+def test_amount_gap_explains_the_required_repair(change, reason):
+    rows = [dict(date=date(2020, 1, 1) + timedelta(days=i), method_version=so.VERSION,
+                 exclude_st=True, is_complete_day=True, total_amount=100.) for i in range(20)]
+    rows[3].update(change)
+    obs = observation(so.observations_series(rows)[-1], "amount_ratio_5_20")
+    assert obs["value"] is None
+    assert "当前有效19/20日" in obs["missing_reason"]
+    assert reason in obs["missing_reason"]
 
 
 def test_changed_st_marks_raw_history_and_recompute_stale(tmp_path, monkeypatch):

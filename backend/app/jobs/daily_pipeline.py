@@ -10,6 +10,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Callable
 from contextlib import suppress
@@ -265,6 +266,7 @@ def run_now(
     *,
     postmarket: bool = False,
     target_date: _date | None = None,
+    with_analysis: bool = False,
 ) -> dict:
     from app.services.pipeline_prefetch import PipelinePrefetch, PipelineProgress
 
@@ -272,7 +274,8 @@ def run_now(
     prefetch = PipelinePrefetch(progress)
     try:
         return _run_now(repo, capset, progress, override_start_date,
-                        postmarket=postmarket, target_date=target_date, prefetch=prefetch)
+                        postmarket=postmarket, target_date=target_date,
+                        with_analysis=with_analysis, prefetch=prefetch)
     except BaseException as exc:
         from app.services.pipeline_jobs import JobCancelledError
 
@@ -291,6 +294,7 @@ def _run_now(
     *,
     postmarket: bool = False,
     target_date: _date | None = None,
+    with_analysis: bool = False,
     prefetch,
 ) -> dict:
     """立即执行一次盘后管道,支持进度回调。
@@ -301,6 +305,7 @@ def _run_now(
     override_start_date: 传入时强制走 batch 拉取分支,用该日期作为日K/除权/指数的
         拉取起点(到今天),用于「数据修正/补数据」场景。None 时走原有自动判定逻辑。
     postmarket: 自动盘后任务强制同步 A 股、核心指数与环境，并验收当日正式数据。
+    with_analysis: 用户主动更新／补齐历史，固定准备分析依赖，分钟历史独立更新。
     target_date: 排队任务的目标北京日期，跨日期后不执行。
     """
     emit = on_progress
@@ -312,6 +317,8 @@ def _run_now(
     from app.services.daily_coverage import DailyCoverage, DailyCoverageError
 
     today = cn_today()
+    if with_analysis and not capset.has(Cap.KLINE_DAILY_BATCH):
+        raise DailyCoverageError("日线批量能力不可用，无法更新股票与核心指数，请先配置数据源")
     if postmarket and target_date is not None and target_date != today:
         raise DailyCoverageError("盘后任务已跨日期，取消本次排队执行")
     coverage = DailyCoverage(today) if postmarket else None
@@ -324,12 +331,14 @@ def _run_now(
             "date": today.isoformat(), "complete": False, "reason": "新一轮盘后输入正在验收",
         })
 
+    # 自动盘后与显式修正都需要完整当前 A 股名单，不能使用可能只返回部分行情的池。
+    require_full_universe = postmarket or with_analysis or override_start_date is not None
     # Step 0: 先同步个股维表, 再解析标的池 — 确保标的池基于最新 instruments
     emit("sync_instruments", 2, "同步个股维表…")
     inst_rows = instrument_sync.sync_instruments(
-        repo.store.data_dir, **({"require_complete": True} if postmarket else {}),
+        repo.store.data_dir, **({"require_complete": True} if require_full_universe else {}),
     )
-    if postmarket and inst_rows <= 0:
+    if require_full_universe and inst_rows <= 0:
         raise DailyCoverageError("当日股票维表未返回有效数据")
     if inst_rows > 0:
         _refresh_instruments_view(repo)
@@ -337,7 +346,7 @@ def _run_now(
     _invalidate("instruments")
 
     emit("resolve_universe", 9, "解析标的池…")
-    universe = (postmarket_service.stock_universe(repo, today) if postmarket
+    universe = (postmarket_service.stock_universe(repo, today) if require_full_universe
                 else _resolve_universe(capset, repo))
     emit("resolve_universe", 10, f"标的池规模:{len(universe)} 只")
 
@@ -348,7 +357,7 @@ def _run_now(
     #   无任何数据 → batch K-line API 拉首次 1 年
     from datetime import datetime as _dt
     from datetime import timedelta as _td
-    boundary_tz = CN_TZ if postmarket else None
+    boundary_tz = CN_TZ if postmarket or with_analysis else None
     latest_daily = repo.latest_daily_date()
     # 管道「今天」必须是北京日期: 美西主机 15:35 北京时间仍是本地昨天,
     # date.today() 会把昨日日K当成已齐, 当日官方收盘价永远拉不进来。
@@ -385,7 +394,7 @@ def _run_now(
 
     # A 股日K拉取开关(默认开);关闭时跳过日K同步,保留已有数据。
     # 数据修正(override_start_date)时即使关闭开关也强制拉取 — 修正就是来补数据的。
-    pull_a_share = postmarket or _prefs.get_pipeline_pull_a_share()
+    pull_a_share = postmarket or with_analysis or _prefs.get_pipeline_pull_a_share()
     if not pull_a_share and not override_start_date:
         emit("sync_daily", 45, "已跳过 A 股日K同步(拉取内容未勾选)")
         emit.finish("skipped")
@@ -418,6 +427,7 @@ def _run_now(
         and capset.has(Cap.QUOTE_POOL)
         and _prefs.get_daily_data_provider() == "tickflow"
         and not postmarket
+        and not with_analysis
     ):
         # 付费档:今天有数据(QuoteService 已落盘)→ 实时行情覆写,确保最新。
         # stale_day 非空时禁用本分支: "只刷今天"会让停机日的盘中快照永久留存,
@@ -491,6 +501,9 @@ def _run_now(
     # 的日期, 盘中快照日分区已存在(虽是错的), 不删永远不会被重算。删除后
     # Step 2 把这些日期当"新日期"重算，使用剩余分区最近 60 天做历史前缀。
     repair_start = override_start_date if override_start_date is not None else stale_day
+    if with_analysis:
+        # 本轮重拉的日期同步重算，成交量额修订也不能留下旧指标。
+        repair_start = min(d for d in (repair_start, daily_range_start) if d is not None)
     if postmarket:
         # 正式日线可能只修订成交量额，既有收盘价比较无法发现；当日必须重新加工。
         repair_start = min(d for d in (repair_start, today) if d is not None)
@@ -502,7 +515,9 @@ def _run_now(
             )
             if pruned:
                 logger.info("integrity: 已删除 %d 个待重算的 enriched 分区 (≥ %s)", pruned, repair_start)
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
+            if with_analysis:
+                raise
             logger.warning("enriched prune failed (soft): %s", e)
 
 
@@ -530,7 +545,7 @@ def _run_now(
     affected_symbols: list[str] = []
     adj_provider = _prefs.get_adj_factor_provider()
     can_sync_adj = capset.has(Cap.ADJ_FACTOR) or adj_provider != "tickflow"
-    if postmarket and not can_sync_adj:
+    if (postmarket or with_analysis) and not can_sync_adj:
         raise DailyCoverageError("除权因子能力不可用，无法确认复权指标已更新")
     if can_sync_adj:
         from datetime import datetime, timedelta
@@ -553,7 +568,7 @@ def _run_now(
             universe, repo, capset,
             start_time=adj_start, end_time=adj_end,
             on_chunk_done=_adj_chunk_progress,
-            **({"require_complete": True} if postmarket else {}),
+            **({"require_complete": True} if postmarket or with_analysis else {}),
         )
         if affected_symbols:
             _refresh_single_view(repo, "adj_factor")
@@ -674,7 +689,7 @@ def _run_now(
     index_count = 0
     etf_count = 0
     etf_adj_symbols = 0
-    pull_index = postmarket or _prefs.get_pipeline_pull_index()
+    pull_index = postmarket or with_analysis or _prefs.get_pipeline_pull_index()
     pull_etf = _prefs.get_pipeline_pull_etf()
 
     if capset.has(Cap.KLINE_DAILY_BATCH) and (pull_index or pull_etf):
@@ -712,7 +727,7 @@ def _run_now(
                         end_date=_dt.combine(today, _dt.min.time(), tzinfo=boundary_tz),
                         on_chunk_done=_index_chunk,
                         **({"symbols_override": list(CORE_INDEX_SYMBOLS), "coverage": index_coverage}
-                           if postmarket else {}),
+                           if postmarket or with_analysis else {}),
                     )
                 emit("sync_index", 88, f"指数日K完成,{written_index_daily} 行")
                 _invalidate("index_instruments")
@@ -821,14 +836,28 @@ def _run_now(
         from app.services.rps_rotation import invalidate_cache as invalidate_rotation_cache
         invalidate_rotation_cache()
 
+    if with_analysis and not postmarket:
+        # 手动更新也必须先让环境／主线读到本轮行情；分钟与自动当日验收保持独立。
+        if stage_errors:
+            raise PipelineStageError(stage_errors)
+        repo.refresh_cache()
+        from app.services import ext_presets
+        from app.services.rps_rotation import invalidate_cache as invalidate_rotation_cache
+
+        classifications = {}
+        asyncio.run(ext_presets.sync_classifications(
+            repo.store.data_dir, classifications,
+            lambda _stage, pct, msg: emit("sync_classifications", 89, msg, stage_pct=pct),
+        ))
+        invalidate_rotation_cache()
+
     # Step 2.6: 市场环境(regime) 增量计算 — enriched 已就绪后聚合环境指标。
-    # 双检测(缺口+stale), 自动补算遗漏/被覆写的日。软失败: 不阻断主管道。
-    # 默认关闭: regime 是本地聚合计算(非拉取), 首次/regime 表为空时需全量回填
-    # 多日, 内存与耗时较高。用户可在数据页「市场环境」卡片设置里开启自动计算,
-    # 或直接在该页面点「重算」手动触发(不受此开关影响)。
+    # 双检测(缺口+stale)，自动补算遗漏/被覆写的日。
+    # 用户更新与自动盘后固定计算；内部旧调用保留原偏好行为。
     regime_days = 0
     from app.services import preferences as _prefs_regime
-    regime_enabled = postmarket or _prefs_regime.get_pipeline_regime_enabled()
+    regime_enabled = postmarket or with_analysis or _prefs_regime.get_pipeline_regime_enabled()
+    new_regime = pl.DataFrame()
     if not regime_enabled:
         skipped.append("regime")
         emit.task("compute_regime", "计算市场环境", "skipped", message="手动同步未启用环境计算")
@@ -840,7 +869,7 @@ def _run_now(
             from app.services import regime_builder
             new_regime = regime_builder.compute_regime_incremental(
                 repo, repo.store.data_dir,
-                **({"refresh_today": True} if postmarket else {}),
+                **({"refresh_today": True} if postmarket or with_analysis else {}),
             )
             if postmarket and (new_regime.is_empty() or not new_regime["date"].eq(today).any()):
                 raise DailyCoverageError("本轮未生成当日市场环境，不能沿用旧结果")
@@ -861,6 +890,9 @@ def _run_now(
             stage_errors.append(f"compute_regime: {e}")
             skipped.append("regime")
             emit.finish("failed", str(e))
+
+    if with_analysis and "regime" in skipped:
+        raise PipelineStageError(stage_errors)
 
     if postmarket:
         from app.services import regime_builder
@@ -899,6 +931,8 @@ def _run_now(
                 rows = market_mainline.compute_mainline_incremental(
                     repo, repo.store.data_dir, kind=_kind,
                     **({"refresh_today": True} if postmarket else {}),
+                    **({"refresh_from": (override_start_date or new_regime["date"].min())}
+                       if with_analysis and (override_start_date is not None or not new_regime.is_empty()) else {}),
                 )
                 mainline_rows += rows.height if not rows.is_empty() else 0
             if mainline_rows:
@@ -944,7 +978,7 @@ def _run_now(
 
     # Step 2.9: 分钟 K 同步(可选) — 未启用或无 capability 时静默跳过(不 emit)
     from app.services import preferences
-    minute_on = preferences.get_minute_sync_enabled()
+    minute_on = preferences.get_minute_sync_enabled() and not with_analysis
     minute_days = preferences.get_minute_sync_days()
     written_minute = 0
     if minute_on and capset.has(Cap.KLINE_MINUTE_BATCH):
@@ -967,7 +1001,8 @@ def _run_now(
     else:
         skipped.append("sync_minute")
         emit.task("sync_minute", "同步分钟K", "skipped",
-                  message="分钟同步未启用" if not minute_on else "普通分钟能力不可用")
+                  message="分钟历史按需独立更新" if with_analysis else
+                  "分钟同步未启用" if not minute_on else "普通分钟能力不可用")
         if minute_on:
             logger.info("sync_minute skipped: no KLINE_MINUTE_BATCH capability")
         else:
@@ -1007,12 +1042,28 @@ def _run_now(
     if stage_errors:
         raise PipelineStageError(stage_errors)
 
+    if with_analysis:
+        from app.services.sentiment_observations import load_observation
+
+        observation = load_observation(repo.store.data_dir)
+        if observation is None or not observation["coverage"]["method_current"]:
+            raise DailyCoverageError("市场环境尚未生成有效结果，请检查行情和指标数据")
+        axes = {"up_pct", "above_ma20_pct", "total_amount", "index_position_60", "limit_up_pct", "seal_rate"}
+        radar = [item for item in observation["observations"] if item["key"] in axes]
+        result["analysis"] = {
+            "as_of": observation["as_of"],
+            "is_complete_day": observation["coverage"]["is_complete_day"],
+            "radar_ready": len(radar) == 6 and all(item["percentile"] is not None for item in radar),
+            "radar_history_min": min((item["history_sample_count"] for item in radar), default=0),
+            "radar_history_max": max((item["history_sample_count"] for item in radar), default=0),
+        }
+
     # 发布市场数据不依赖可选的 AI 文本生成，也不增加缺口补齐门禁。
     from app.services.review_publication import publish_review_if_ready
     state = _get_app_state()
     # 自动管道在验收后已刷新股票缓存；后续只写环境、分钟和榜单。
     # 最终快照和通知统一由任务边界刷新，避免这里再全量加载一次股票指标。
-    if not postmarket:
+    if not postmarket and not with_analysis:
         repo.refresh_cache()
     if postmarket:
         depth = getattr(state, "depth_service", None)

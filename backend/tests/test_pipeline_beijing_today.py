@@ -9,6 +9,7 @@ from __future__ import annotations
 from datetime import date
 from types import SimpleNamespace
 
+import polars as pl
 import pytest
 
 from app.jobs import daily_pipeline
@@ -34,9 +35,15 @@ def test_pipeline_daily_window_ends_on_beijing_today(monkeypatch, tmp_path) -> N
         captured.append(end_date.date() if hasattr(end_date, "date") else end_date)
         raise _StopError()
 
+    def sync_instruments(data_dir, **kwargs):
+        path = data_dir / "instruments" / "instruments.parquet"
+        path.parent.mkdir(parents=True)
+        pl.DataFrame({"symbol": ["600000.SH"], "as_of": [BJ]}).write_parquet(path)
+        return 1
+
     monkeypatch.setattr(daily_pipeline, "cn_today", lambda: BJ, raising=False)
-    monkeypatch.setattr(instrument_sync, "sync_instruments", lambda data_dir: 0)
-    monkeypatch.setattr(daily_pipeline, "_resolve_universe", lambda capset, repo=None: ["600000.SH"])
+    monkeypatch.setattr(instrument_sync, "sync_instruments", sync_instruments)
+    monkeypatch.setattr(daily_pipeline, "_refresh_instruments_view", lambda repo: None)
     monkeypatch.setattr(daily_pipeline, "_invalidate", lambda table=None: None)
     monkeypatch.setattr(kline_sync, "sync_and_persist_daily_batch", fake_batch)
 

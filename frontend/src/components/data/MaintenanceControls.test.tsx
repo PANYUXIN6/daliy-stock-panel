@@ -85,7 +85,7 @@ beforeEach(() => {
   mocks.updateInstrumentsSchedule.mockResolvedValue({ hour: 9, minute: 11 })
   mocks.updateDepthPollingInterval.mockResolvedValue({ depth_polling_interval: 30 })
   mocks.runLimitLadderFix.mockResolvedValue({ ok: true, count: 10, msg: '已更新 10 只标的的盘口' })
-  mocks.capabilityMatrix.mockResolvedValue({ capabilities: [{ id: 'daily', usable: true }, { id: 'realtime', usable: true }] })
+  mocks.capabilityMatrix.mockResolvedValue({ capabilities: [{ id: 'daily', usable: true }, { id: 'adj_factor', usable: true }, { id: 'realtime', usable: true }] })
   mocks.updatePipelineRegimeEnabled.mockResolvedValue({ pipeline_regime_enabled: true })
   qc = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } })
   host = document.createElement('div')
@@ -128,7 +128,7 @@ it('财务维护展示共享画像并引导按股获取，不再提供全量任�
 it('单标的分钟采集明确本地日历交易日口径并保持参数，失败会显示原因', async () => {
   const onJobStart = vi.fn()
   await render(<MinuteSyncConfig hasCap onJobStart={onJobStart} />)
-  expect(host.textContent).toContain('随全量同步已关闭')
+  expect(host.textContent).toContain('随盘后自动同步已关闭')
   expect(host.textContent).toContain('批量分钟历史首次回溯 5 自然日；已有数据回补最新数据日，并更新到现在')
   expect(host.textContent).toContain('按本地交易日历采集指定标的最近 1 ~ 30 个交易日')
   expect(host.textContent).toContain('交易日数')
@@ -289,7 +289,7 @@ it('并发任务按各自真实状态高亮卡片，预取完成不冒充指数�
 it('进度查询失败显示可重试提示，恢复后继续展示同一后台任务', async () => {
   mocks.pipelineJob.mockRejectedValueOnce(new Error('采集服务暂时不可用'))
   await render(<Data />)
-  await act(async () => button('同步行情与基础数据').click())
+  await act(async () => button('更新日常数据').click())
   await settle()
   expect(host.textContent).toContain('后台任务可能仍在执行')
   await act(async () => button('重试获取进度').click())
@@ -302,7 +302,7 @@ it('进度查询失败显示可重试提示，恢复后继续展示同一后台�
 it('失败详情保留供查看，停止请求失败在确认框中显示原因', async () => {
   mocks.pipelineJob.mockResolvedValue({ id: 'pipeline-new', status: 'failed', stage: 'sync_daily', progress: 30, stage_pct: 20, log: [], error: '当日正式日线尚未齐全' })
   await render(<Data />)
-  await act(async () => button('同步行情与基础数据').click())
+  await act(async () => button('更新日常数据').click())
   await settle()
   vi.useFakeTimers()
   try {
@@ -339,7 +339,7 @@ it('保留终态详情期间发现新的后台重试任务，自动切到新进�
   await act(async () => host.querySelector<HTMLButtonElement>('[aria-label="关闭任务详情"]')!.click())
   await act(async () => { await new Promise(resolve => setTimeout(resolve, 350)) })
   expect(host.querySelector('[aria-label="关闭任务详情"]')).toBeNull()
-  expect(button('同步行情与基础数据').disabled).toBe(false)
+  expect(button('更新日常数据').disabled).toBe(false)
 })
 
 it('任务详情已结束而列表 active_id 尚未刷新时，关闭后不恢复同一任务，新任务仍能恢复', async () => {
@@ -351,7 +351,7 @@ it('任务详情已结束而列表 active_id 尚未刷新时，关闭后不恢�
   await act(async () => host.querySelector<HTMLButtonElement>('[aria-label="关闭任务详情"]')!.click())
   await act(async () => { await new Promise(resolve => setTimeout(resolve, 350)) })
   expect(host.querySelector('[aria-label="关闭任务详情"]')).toBeNull()
-  expect(button('同步行情与基础数据').disabled).toBe(false)
+  expect(button('更新日常数据').disabled).toBe(false)
   await act(async () => qc.setQueryData(QK.pipelineJobs, { active_id: 'next', jobs: [] }))
   await settle()
   expect(mocks.pipelineJob).toHaveBeenLastCalledWith('next')
@@ -370,7 +370,7 @@ it.each(['retained', 'history'] as const)('终态详情 %s 不会启动高频数
     await act(async () => root.render(<MemoryRouter><QueryClientProvider client={qc}><Data /></QueryClientProvider></MemoryRouter>))
     for (let i = 0; i < 8; i++) await act(async () => vi.advanceTimersByTimeAsync(1))
     if (mode === 'retained') {
-      await act(async () => button('同步行情与基础数据').click())
+      await act(async () => button('更新日常数据').click())
       for (let i = 0; i < 8; i++) await act(async () => vi.advanceTimersByTimeAsync(1))
     } else {
       const historyButton = [...host.querySelectorAll('button')].find(item => item.querySelector('div.font-mono')?.textContent === 'finished')!
@@ -416,7 +416,7 @@ it('列表暂时保留已删除任务时，404不会造成反复恢复与请求'
   await settle()
   expect(mocks.pipelineJob).toHaveBeenCalledExactlyOnceWith('removed')
   expect(host.querySelector('[aria-label="关闭任务详情"]')).toBeNull()
-  expect(button('同步行情与基础数据').disabled).toBe(false)
+  expect(button('更新日常数据').disabled).toBe(false)
 })
 
 it.each(['succeeded', 'failed'] as const)('保留 %s 详情时，修正与重算维护仍可用', async status => {
@@ -424,10 +424,10 @@ it.each(['succeeded', 'failed'] as const)('保留 %s 详情时，修正与重算
   mocks.pipelineJob.mockResolvedValue({ id: 'finished', status, stage: 'done', progress: 100, log: [] })
   await render(<Data />)
   expect(host.querySelector('[aria-label="关闭任务详情"]')).not.toBeNull()
-  await act(async () => button('修正数据').click())
+  await act(async () => button('补齐历史').click())
   await settle()
-  expect(button('开始修正').disabled).toBe(false)
-  const repairTitle = [...host.querySelectorAll('h3')].find(node => node.textContent === '日 K · 修正 / 补数据')!
+  expect(button('开始补齐').disabled).toBe(false)
+  const repairTitle = [...host.querySelectorAll('h3')].find(node => node.textContent === '补齐历史')!
   await act(async () => repairTitle.parentElement!.querySelector<HTMLButtonElement>('button')!.click())
   await settle()
   const enrichedTitle = [...host.querySelectorAll('h3')].find(node => node.textContent === 'Enriched')!
@@ -440,7 +440,7 @@ it('列表摘要已知为终态时，不将陈旧 active_id 当作运行中的�
   mocks.pipelineJobs.mockResolvedValue({ active_id: 'finished', jobs: [{ id: 'finished', status: 'succeeded' }] })
   await render(<Data />)
   expect(mocks.pipelineJob).not.toHaveBeenCalled()
-  expect(button('同步行情与基础数据').disabled).toBe(false)
+  expect(button('更新日常数据').disabled).toBe(false)
 })
 
 async function selectHistoricalJob() {
@@ -470,18 +470,36 @@ async function openDataSettings(title: string) {
   await settle()
 }
 
+it('历史补齐统一提交任务，失败原因可见且保留日期供重试', async () => {
+  mocks.repairDaily.mockRejectedValueOnce(new Error('日线来源暂不可用'))
+  await render(<Data />)
+  await act(async () => button('补齐历史').click())
+  await settle()
+  expect(host.textContent).toContain('已有数据按股票和日期合并，无需先清除；分钟历史单独更新')
+  await act(async () => button('开始补齐').click())
+  await settle()
+  expect(host.querySelector('[role="alert"]')?.textContent).toBe('日线来源暂不可用')
+  expect(button('开始补齐').disabled).toBe(false)
+  const requestedDate = mocks.repairDaily.mock.calls[0][0]
+  await act(async () => button('开始补齐').click())
+  await settle()
+  expect(mocks.repairDaily).toHaveBeenLastCalledWith(requestedDate)
+  expect(mocks.pipelineJob).toHaveBeenCalledWith('repair-new')
+  expect(mocks.syncMinute).not.toHaveBeenCalled()
+})
+
 it.each([
-  ['repair', 'repair-new'], ['extend', 'extend-new'], ['enriched', 'enriched-new'],
+  ['repair', 'repair-new'], ['daily-settings', 'repair-new'], ['enriched', 'enriched-new'],
   ['turnover', 'enriched-new'], ['minute', 'minute-new'], ['adj', 'adj-new'],
 ] as const)('查看历史详情后显式启动 %s，立即跟踪新任务并恢复后续任务跟踪', async (entry, jobId) => {
   await selectHistoricalJob()
   if (entry === 'repair') {
-    await act(async () => button('修正数据').click())
+    await act(async () => button('补齐历史').click())
     await settle()
-    await act(async () => button('开始修正').click())
-  } else if (entry === 'extend') {
+    await act(async () => button('开始补齐').click())
+  } else if (entry === 'daily-settings') {
     await openDataSettings('日 K')
-    await act(async () => button('获取数据').click())
+    await act(async () => button('开始补齐').click())
   } else if (entry === 'enriched' || entry === 'turnover') {
     await openDataSettings(entry === 'enriched' ? 'Enriched' : '财务数据')
     await act(async () => button(entry === 'enriched' ? '全量计算' : '重新计算并覆盖').click())
@@ -598,7 +616,7 @@ it('数据页展示盘前与交易日盘后自动同步时间，手动维护仍�
   expect(card.textContent).toContain('交易日 · 盘后自动同步')
   expect(card.textContent).toContain('16:00 北京时间')
   expect(card.textContent).toContain('当天行情与指标核验通过后')
-  for (const [title, label] of [['个股维表', '自动'], ['日 K', '随同步'], ['除权因子', '随同步'], ['Enriched', '随同步'], ['指数', '随同步'], ['分钟 K', '不随同步'], ['市场环境', '不随同步']]) {
+  for (const [title, label] of [['个股维表', '自动'], ['日 K', '随同步'], ['除权因子', '随同步'], ['Enriched', '随同步'], ['指数', '随同步'], ['分钟 K', '不随同步'], ['市场环境', '随同步']]) {
     const cardTitle = [...host.querySelectorAll('h3')].find(node => node.textContent === title)!
     expect(cardTitle.parentElement!.textContent).toContain(label)
   }
@@ -608,7 +626,7 @@ it('数据页展示盘前与交易日盘后自动同步时间，手动维护仍�
   await act(async () => button('保存').click())
   await settle()
   expect(mocks.updateInstrumentsSchedule).toHaveBeenCalledWith(9, 11)
-  await act(async () => button('同步行情与基础数据').click())
+  await act(async () => button('更新日常数据').click())
   await settle()
   expect(mocks.pipelineRun).toHaveBeenCalledOnce()
   expect(mocks.collectionSyncCheck).toHaveBeenCalledWith({ kind: 'pipeline' })
@@ -629,7 +647,7 @@ it.each([
   expect(mocks.pipelineJob).toHaveBeenCalledWith(jobId)
   expect(mocks.extDataPresetFetch).not.toHaveBeenCalled()
   expect(mocks.syncMinuteSingle).not.toHaveBeenCalled()
-  for (const title of ['同步行情与基础数据', '同步分钟历史数据', '同步板块分类']) {
+  for (const title of ['更新日常数据', '同步分钟历史数据', '同步板块分类']) {
     expect(button(title).disabled).toBe(true)
   }
 })
@@ -642,12 +660,9 @@ it.each([false, true])('数据页分钟批量提示首次自然日回溯与最�
     .find(node => node.textContent === title)!.parentElement!.parentElement!
   const range = '首次回溯 7 自然日；已有数据回补最新数据日，并更新到现在'
   expect(card('分钟历史数据').textContent).toContain(range)
-  expect(card('分钟历史数据').textContent).toContain('可独立更新，不受随行情同步开关影响')
-  if (minuteAuto) {
-    expect(card('行情与基础数据').textContent).toContain(`同时更新分钟 K：${range}`)
-  } else {
-    expect(card('行情与基础数据').textContent).not.toContain('同时更新分钟 K')
-  }
+  expect(card('分钟历史数据').textContent).toContain('按需独立更新，供分时图与板块轮动使用')
+  expect(host.textContent).toContain('日常更新不拉取分钟历史')
+  expect(card('日常数据').textContent).toContain('自动计算技术指标、市场环境、情绪周期与主线')
   expect(mocks.syncMinute).not.toHaveBeenCalled()
   expect(mocks.pipelineRun).not.toHaveBeenCalled()
 })
@@ -694,13 +709,12 @@ it.each([
   expect(qc.getQueryState(affectedKey)?.isInvalidated).toBe(true)
 })
 
-it('环境计算明确随手动全量同步执行，并保留原范围偏好开关', async () => {
+it('环境计算随日常更新和历史补齐自动执行，并保留单项维护', async () => {
   await render(<RegimeConfigCard />)
-  expect(host.textContent).toContain('随手动同步计算')
-  expect(host.textContent).toContain('此开关控制手动“同步行情与基础数据”时是否一并计算')
-  await act(async () => host.querySelector<HTMLButtonElement>('[role="checkbox"]')!.click())
-  await settle()
-  expect(mocks.updatePipelineRegimeEnabled).toHaveBeenCalledWith(true)
+  expect(host.textContent).toContain('随数据更新自动计算')
+  expect(host.textContent).toContain('“更新日常数据”和“补齐历史”都会自动计算市场环境、情绪周期与主线')
+  expect(host.textContent).toContain('全量回填分批参数')
+  expect(button('全量重算环境').disabled).toBe(false)
 })
 
 it('盘口配置保留盘中轮询间隔，说明盘后自动更新与手动补采', async () => {
@@ -891,9 +905,10 @@ it('指数重复确认保留原请求窗口，取消不启动同步任务', asyn
   expect(mocks.syncIndexDaily).not.toHaveBeenCalled()
   await act(async () => button('获取数据').click())
   await settle()
+  const confirmedRequest = mocks.collectionSyncCheck.mock.calls.at(-1)![0]
   await act(async () => dialogButton('重新拉取').click())
   await settle()
-  expect(mocks.syncIndexDaily).toHaveBeenCalledExactlyOnceWith(request.days)
+  expect(mocks.syncIndexDaily).toHaveBeenCalledExactlyOnceWith(confirmedRequest.days)
 })
 
 it('普通分钟自动采集开关独立保存，关闭不会启动行情或全量同步', async () => {

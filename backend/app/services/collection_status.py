@@ -53,15 +53,18 @@ def collection_context(request_key: str | None, repo) -> dict | None:
         return None
     kind = request_key.split(":", 1)[0]
     if kind == "pipeline":
+        from app.services.index_const import CORE_INDEX_SYMBOLS
+
         return {
             "daily_provider": preferences.get_daily_data_provider(),
             "adj_provider": preferences.get_adj_factor_provider(),
-            "minute_provider": preferences.get_minute_data_provider(),
-            **preferences.get_pipeline_pull_types(),
-            "index_symbols": preferences.get_pipeline_index_symbols(),
-            "minute_enabled": preferences.get_minute_sync_enabled(),
-            "minute_days": preferences.get_minute_sync_days(),
-            "regime_enabled": preferences.get_pipeline_regime_enabled(),
+            "pipeline_pull_a_share": True,
+            "pipeline_pull_index": True,
+            "pipeline_pull_etf": preferences.get_pipeline_pull_etf(),
+            "index_symbols": list(CORE_INDEX_SYMBOLS),
+            "minute_enabled": False,
+            "regime_enabled": True,
+            "classifications_enabled": True,
             "mainline_filter": preferences.get_mainline_filter_config(),
         }
     if kind == "adj_factor":

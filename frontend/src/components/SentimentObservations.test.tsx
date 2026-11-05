@@ -27,6 +27,7 @@ it('distinguishes missing data from insufficient history; old APIs cannot fabric
   const result = text(renderToStaticMarkup(<SentimentObservations data={partial} />))
   expect(result).toContain('61.0%')
   expect(result).toContain('历史不足或不可比')
+  expect(result).toContain('20/500日')
   expect(result).toContain('期权情绪：数据源未接入')
   expect(text(renderToStaticMarkup(<SentimentObservations />))).toContain('不可计算')
   expect(renderToStaticMarkup(<SentimentRadar data={partial} />)).not.toContain('<polygon')
@@ -41,4 +42,22 @@ it('shows intraday incompleteness without calling it a low or neutral state', ()
   const result = text(renderToStaticMarkup(<SentimentObservations data={{ ...data, coverage: { ...data.coverage, is_complete_day: false } }} />))
   expect(result).toContain('收盘口径尚未确认')
   expect(result).not.toContain('冰点')
+})
+it('shows the amount repair reason in the compact dashboard without a hover', () => {
+  const partial: Data = { ...data, observations: [{ ...observation, key: 'amount_ratio_5_20', label: '5日/20日成交额', group: 'activity', value: null, percentile: null, history_sample_count: 228, missing_reason: '需完整20日成交额，当前有效19/20日；2026-10-19收盘口径未确认，需补采正式日线后重算环境' }] }
+  const result = text(renderToStaticMarkup(<SentimentObservations data={partial} compact />))
+  expect(result).toContain('228/500日')
+  expect(result).toContain('当前有效19/20日')
+  expect(result).toContain('2026-10-19收盘口径未确认')
+})
+it('reports radar readiness and preserves complete percentile axes', () => {
+  const keys = ['up_pct', 'above_ma20_pct', 'total_amount', 'index_position_60', 'limit_up_pct', 'seal_rate']
+  const partial: Data = { ...data, observations: keys.map((key, i) => ({ ...observation, key, percentile: i === 0 ? 82 : null, history_sample_count: i === 0 ? 500 : 198 })) }
+  const result = renderToStaticMarkup(<SentimentRadar data={partial} />)
+  expect(text(result)).toContain('六项中1项已有完整500日分位')
+  expect(text(result)).toContain('有效历史198–500日')
+  expect(result).not.toContain('<polygon')
+  expect(text(renderToStaticMarkup(<SentimentRadar data={{ ...partial, coverage: { ...data.coverage, is_complete_day: false } }} />))).toContain('当日收盘口径尚未确认')
+  const complete = { ...data, observations: keys.map(key => ({ ...observation, key })) }
+  expect(renderToStaticMarkup(<SentimentRadar data={complete} />)).toContain('<polygon')
 })

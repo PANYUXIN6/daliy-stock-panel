@@ -2,10 +2,9 @@
 
 典型场景: 昨天没看盘 / 服务挂了一天,本地日K缺了若干天。
 
-设计原则: 不重复盘后管道的任何逻辑。直接调用 daily_pipeline.run_now(),
-通过 override_start_date 参数把"自动算日期"换成"用户指定起点",
-其余 (维表 / A股日K / 除权因子 / enriched / 指数 / ETF / 错误兜底) 全部原样复用。
-这样修正功能与盘后管道永远保持一致,不会出现遗漏。
+复用 daily_pipeline.run_now，通过 override_start_date 指定起点，with_analysis
+固定完成维表、股票日K、除权因子、指标、核心指数、分类、市场环境和主线。
+ETF 保留可选配置；分钟历史独立更新，不启用自动任务专属的当日完整性验收。
 
 落盘是 merge-upsert (按 symbol+date 去重 keep="last"), 新数据天然覆盖旧值,
 不会产生重复。日K/指数/ETF 族无需先删分区; 股票 enriched 例外 — 增量重算
@@ -35,7 +34,7 @@ def run_repair_daily(
     """修正 / 补全数据 — 复用盘后管道,日期范围由用户指定。
 
     通过 run_now(override_start_date=start_date) 把日K/除权/指数的拉取起点
-    统一设为 start_date (到今天),其余流程与盘后管道完全一致。
+    统一设为 start_date (到今天)，并自动完成关联分析。
 
     Args:
         repo:        数据仓库
@@ -54,4 +53,5 @@ def run_repair_daily(
     logger.info("repair_daily: run pipeline with override_start_date=%s", start_date)
 
     from app.jobs.daily_pipeline import run_now
-    return run_now(repo, capset, on_progress=on_progress, override_start_date=start_date)
+    return run_now(repo, capset, on_progress=on_progress, override_start_date=start_date,
+                   with_analysis=True)

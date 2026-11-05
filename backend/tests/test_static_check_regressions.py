@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 
-from app.api import data, kline
+from app.api import data, kline, pipeline
 from app.market_time import CN_TZ
 from app.services import collection_status, kline_sync, pipeline_jobs
 from app.tickflow.capabilities import Cap, CapabilityLimits, CapabilitySet
@@ -68,12 +68,16 @@ def test_delayed_sdk_callbacks_keep_original_chunk_and_window(monkeypatch, mode)
 @pytest.mark.asyncio
 @pytest.mark.parametrize("kind", ["minute", "extend", "repair", "rebuild"])
 async def test_maintenance_task_owned_until_worker_finishes(tmp_path, monkeypatch, kind):
+    # 历史补数已委托给公共 pipeline；其他维护入口仍由 kline 持有任务。
+    task_owner = pipeline if kind == "repair" else kline
+    job_owner = pipeline if kind == "repair" else pipeline_jobs
     store = pipeline_jobs.JobStore(store_dir=tmp_path / "jobs")
-    monkeypatch.setattr(pipeline_jobs, "job_store", store)
+    monkeypatch.setattr(job_owner, "job_store", store)
     monkeypatch.setattr(pipeline_jobs, "_run_slot_owner", None)
     monkeypatch.setattr(pipeline_jobs, "_CANCEL_FLAGS", {})
-    monkeypatch.setattr(kline, "_tasks", set(), raising=False)
-    monkeypatch.setattr(collection_status, "collection_context", lambda *_args: None)
+    monkeypatch.setattr(task_owner, "_tasks", set())
+    monkeypatch.setattr(pipeline if kind == "repair" else collection_status,
+                        "collection_context", lambda *_args: None)
     monkeypatch.setattr("app.tickflow.pools.get_pool", lambda _name: ["600000.SH"])
     entered, release = Event(), Event()
 
@@ -82,7 +86,7 @@ async def test_maintenance_task_owned_until_worker_finishes(tmp_path, monkeypatc
         assert release.wait(3)
         return 0 if kind in {"minute", "rebuild"} else {"days": 1}
 
-    monkeypatch.setattr(pipeline_jobs, "run_with_capacity", queued)
+    monkeypatch.setattr(job_owner, "run_with_capacity", queued)
     capset = CapabilitySet({
         Cap.KLINE_MINUTE_BATCH: CapabilityLimits(),
         Cap.KLINE_DAILY_BATCH: CapabilityLimits(),
@@ -106,14 +110,14 @@ async def test_maintenance_task_owned_until_worker_finishes(tmp_path, monkeypatc
     try:
         assert result["status"] == "started"
         assert len(tasks) == 1
-        assert kline._tasks == tasks
+        assert task_owner._tasks == tasks
         assert await asyncio.to_thread(entered.wait, 2)
-        assert all(not task.done() for task in kline._tasks)
+        assert all(not task.done() for task in task_owner._tasks)
         release.set()
         await asyncio.gather(*tasks)
         await asyncio.sleep(0)
         assert store.get(result["job_id"])["status"] == "succeeded"
-        assert not kline._tasks
+        assert not task_owner._tasks
         assert pipeline_jobs._run_slot_owner is None
     finally:
         release.set()

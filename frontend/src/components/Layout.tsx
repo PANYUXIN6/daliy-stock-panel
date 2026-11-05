@@ -107,6 +107,7 @@ const nav = [
   { to: '/sector-review',    label: '板块复盘', icon: IconReview },
   { to: '/review',           label: '复盘',     icon: IconReview },
   { to: '/indices',          label: '指数',     icon: IconIndices },
+  { to: '/etf-flow',         label: 'ETF资金',  icon: IconIndices },
   { to: '/data',             label: '数据',     icon: IconData },
 ] as const
 

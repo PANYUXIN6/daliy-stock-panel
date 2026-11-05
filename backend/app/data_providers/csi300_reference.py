@@ -30,6 +30,8 @@ class Csi300ReferenceSource:
         self.client = httpx.Client(
             timeout=httpx.Timeout(20, connect=5),
             headers={"User-Agent": "Mozilla/5.0", "Referer": "https://www.sse.com.cn/"},
+            # 公开交易所固定直连；系统代理自动发现会导致本机TLS握手失败。
+            trust_env=False,
         )
         self._last_request = 0.0
 
@@ -43,7 +45,8 @@ class Csi300ReferenceSource:
             time.sleep(delay)
         self.check()
         self._last_request = time.monotonic()
-        referer = ("https://www.szse.cn/market/fund/volume/etf/index.html"
+        referer = ("https://fund.szse.cn/marketdata/fundslist/index.html"
+                   if url.startswith("https://fund.szse.cn/") else "https://www.szse.cn/market/fund/volume/etf/index.html"
                    if url == SZSE_URL else "https://www.csindex.com.cn/"
                    if "csindex.com.cn" in url else "https://www.sse.com.cn/")
         response = self.client.get(url, params=params, headers={"Referer": referer})
@@ -96,7 +99,8 @@ class Csi300ReferenceSource:
             raise ValueError("沪深300流通市值日期重复")
         return sorted(rows, key=lambda r: r["date"])
 
-    def sse_shares(self, day: date) -> list[dict]:
+    def sse_shares(self, day: date, symbols: tuple[str, ...] = FUNDS,
+                   *, require_complete: bool = True) -> list[dict]:
         payload = self._get(SSE_URL, {
             "sqlId": "COMMON_SSE_ZQPZ_ETFZL_XXPL_ETFGM_SEARCH_L", "isPagination": "true",
             "STAT_DATE": day.isoformat(), "pageHelp.pageSize": "10000", "pageHelp.pageNo": "1",
@@ -106,7 +110,7 @@ class Csi300ReferenceSource:
         total = payload.get("pageHelp", {}).get("total")
         if not isinstance(data, list) or total is None or int(total) != len(data):
             raise ValueError("上交所ETF份额分页不完整")
-        wanted = {s[:6] for s in FUNDS if s.endswith(".SH")}
+        wanted = {s[:6] for s in symbols if s.endswith(".SH")}
         rows = []
         for item in data:
             if item.get("SEC_CODE") not in wanted:
@@ -115,11 +119,13 @@ class Csi300ReferenceSource:
                 raise ValueError("上交所ETF份额日期不匹配")
             rows.append({"symbol": item["SEC_CODE"] + ".SH", "date": day.isoformat(),
                          "shares": positive_number(item["TOT_VOL"]) * 1e4})
-        if len(rows) != 3 or len({r["symbol"] for r in rows}) != 3:
-            raise ValueError("上交所未完整返回三只ETF份额")
+        if len({r["symbol"] for r in rows}) != len(rows):
+            raise ValueError("上交所ETF份额代码重复")
+        if require_complete and len(rows) != len(wanted):
+            raise ValueError("上交所未完整返回目标ETF份额")
         return rows
 
-    def szse_shares(self, start: date, end: date) -> list[dict]:
+    def szse_shares(self, start: date, end: date, symbol: str = "159919.SZ") -> list[dict]:
         rows = []
         while start <= end:
             stop = min(start + timedelta(days=169), end)
@@ -129,7 +135,7 @@ class Csi300ReferenceSource:
                 payload = self._get(SZSE_URL, {
                     "SHOWTYPE": "JSON", "CATALOGID": "scsj_fund_jjgm", "TABKEY": "tab1",
                     "jjlb": "ETF", "txtStart": start.isoformat(), "txtEnd": stop.isoformat(),
-                    "txtDm": "159919", "PAGENO": str(page),
+                    "txtDm": symbol[:6], "PAGENO": str(page),
                 })
                 if not isinstance(payload, list) or not payload or payload[0].get("error"):
                     raise ValueError("深交所ETF份额查询失败")
@@ -142,9 +148,9 @@ class Csi300ReferenceSource:
                     raise ValueError("深交所ETF份额分页发生变化")
                 for item in report["data"]:
                     day = date.fromisoformat(item["size_date"])
-                    if item["fund_code"] != "159919" or not start <= day <= stop:
+                    if item["fund_code"] != symbol[:6] or not start <= day <= stop:
                         raise ValueError("深交所ETF份额代码或日期不匹配")
-                    batch.append({"symbol": "159919.SZ", "date": day.isoformat(),
+                    batch.append({"symbol": symbol, "date": day.isoformat(),
                                   "shares": positive_number(item["current_size"]) * 1e4})
                 if page >= counts[0]:
                     break

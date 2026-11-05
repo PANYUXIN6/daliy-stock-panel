@@ -22,7 +22,7 @@ _OWNER_PREFIXES = (
 _OWNER_READS = {'/api/data/status', '/api/financials/execution-status', '/api/financials/collection-options', '/api/screener/cached',
                 '/api/screener/cached-summary', '/api/screener/strategies'}
 _WRITE_PREFIXES = (
-    '/api/kline', '/api/index', '/api/intraday', '/api/data', '/api/watchlist',
+    '/api/kline', '/api/index', '/api/etf-flow', '/api/intraday', '/api/data', '/api/watchlist',
     '/api/screener', '/api/ext-data', '/api/financials', '/api/stock-analysis',
     '/api/evening-report', '/api/market-recap', '/api/factors', '/api/custom-signals', '/api/lots',
     '/api/alerts', '/api/paper', '/api/analysis-menus', '/api/regime', '/api/rps',

@@ -32,6 +32,7 @@ const SectorReview = lazy(() => import('./pages/SectorReview').then(m => ({ defa
 const Review = lazy(() => import('./pages/Review').then(m => ({ default: m.Review })))
 const LimitUpLadder = lazy(() => import('./pages/LimitUpLadder').then(m => ({ default: m.LimitUpLadder })))
 const Indices = lazy(() => import('./pages/Indices').then(m => ({ default: m.Indices })))
+const EtfFlow = lazy(() => import('./pages/EtfFlow').then(m => ({ default: m.EtfFlow })))
 const Branding = lazy(() => import('./pages/Branding').then(m => ({ default: m.Branding })))
 const Settings = lazy(() => import('./pages/Settings').then(m => ({ default: m.Settings })))
 const Regime = lazy(() => import('./pages/Regime').then(m => ({ default: m.Regime })))
@@ -63,6 +64,7 @@ const CORE_ROUTE_PATHS = new Set([
   '/lots',
   '/limit-ladder',
   '/indices',
+  '/etf-flow',
   '/regime',
   '/abnormal',
   '/branding',
@@ -116,6 +118,7 @@ export const router = createBrowserRouter([
       { path: 'signals', element: <AdminOnly><Signals /></AdminOnly> },
       { path: 'limit-ladder', element: <LimitUpLadder /> },
       { path: 'indices', element: <Indices /> },
+      { path: 'etf-flow', element: <EtfFlow /> },
     { path: 'regime', element: <Regime /> },
       { path: 'abnormal', element: <AbnormalMoves /> },
       { path: 'branding', element: <Branding /> },

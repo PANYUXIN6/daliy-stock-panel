@@ -54,6 +54,8 @@ datasets:
 
 统一代码带交易所后缀，例如 `600519.SH`、`000001.SZ`；`volume` 为手，成交额 `amount` 为元。供应商按股返回的成交量必须显式换算，不能直接透传。
 
+重点ETF资金看板复用 `daily`、`minute`、`fund_nav` 路由；分钟成交额需要有效的原始 `amount`，不能用成交量或价格近似补出。基金份额和分类目录使用固定公开交易所适配器，不混入股票主力资金流。具体单位、日期对齐与缺失处理见 [ETF看板契约](etf-flow-board.md)。
+
 - `adj_factor` 可提供 `dividend`、`bonus`、`allot`、`allot_price`、`prev_close`，用于等差显示投影和全精度因子链重建，缺省为空。
 - `realtime` 建议补充 `amount`、`change_pct`、`change_amount`、`amplitude`、`turnover_rate`、`name`、`timestamp`。涨跌额为元，时间戳为毫秒。
 - `minute/full_minute` 的 `amount` 可缺省；无法提供可靠成交额时留空，前端累计均价线停止绘制后续值并显示 `—`。

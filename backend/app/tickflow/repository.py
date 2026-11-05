@@ -1723,6 +1723,8 @@ class KlineRepository:
         symbols: list[str],
         trade_date: date,
         asset_type: str = "stock",
+        *,
+        adjust: bool = True,
     ) -> pl.DataFrame:
         """批量分钟K查询 — 多 symbol 一次 scan, 优先直读当日分区文件。
 
@@ -1740,7 +1742,8 @@ class KlineRepository:
                     & (pl.col("datetime").dt.date() == trade_date)
                 ).sort(["symbol", "datetime"])
             )
-            return self._maybe_adjust_minute(df, asset_type)
+            # 成交额统计读取存储事实值；复权投影中的amount只用于同口径VWAP。
+            return self._maybe_adjust_minute(df, asset_type) if adjust else df
         except Exception as e:  # noqa: BLE001
             logger.warning("批量分钟K查询失败: %s", e)
             return pl.DataFrame()

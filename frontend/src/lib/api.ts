@@ -2277,6 +2277,76 @@ export interface EtfReference {
   rows: { date: string; ratio: number; etf_assets_yuan: number; float_cap_yuan: number }[]
 }
 
+export interface EtfFlowAggregate {
+  net_flow_yuan: number | null
+  available_flow_yuan: number | null
+  covered: number
+  expected: number
+}
+export interface EtfFlowDay extends EtfFlowAggregate {
+  broad: EtfFlowAggregate
+  date: string
+  amount_yuan: number | null
+  amount_covered: number
+  index_close: number | null
+  signal: boolean | null
+  categories: Record<string, EtfFlowAggregate>
+}
+export interface EtfMinutePoint {
+  time: string
+  amount_yuan: number | null
+  cumulative_yuan: number | null
+  covered: number
+  index_close: number | null
+}
+export interface EtfMinuteAverage {
+  time: string
+  amount_yuan: number | null
+  cumulative_yuan: number | null
+  samples: number
+  cumulative_samples: number
+}
+export interface EtfMinuteProfile {
+  date: string
+  as_of: string | null
+  amount_yuan: number | null
+  covered: number
+  expected: number
+  complete: boolean
+  points: EtfMinutePoint[]
+  ranking: { symbol: string; name: string; category: string; amount_yuan: number | null;
+    change_pct: number | null; weight: number | null; minutes: number; expected_minutes: number }[]
+}
+export interface EtfFlowBoard {
+  state: 'ready' | 'no_data'
+  selected_date: string
+  calendar_through: string | null
+  calendar_current: boolean
+  dates: string[]
+  updated_at: string | null
+  status: { checked_at?: string; state?: 'ready' | 'partial' | 'failed'; errors?: string[]; flow_as_of?: string | null; target_date?: string }
+  sources: { daily?: string; minute?: string; nav?: string; shares?: string }
+  catalog_as_of: string | null
+  funds: { symbol: string; name: string; category: string; list_date: string; classification: string }[]
+  categories: string[]
+  daily: EtfFlowDay[]
+  coverage: { start: string | null; end: string | null; flow_days: number; daily_days: number;
+    minute_days: number; minute_start: string | null; minute_end: string | null; comparison_days: number }
+  history: {
+    daily: { target_start: string; start: string | null; end: string | null; expected_days: number; amount_days: number;
+      flow_days: number; flow_start: string | null; flow_end: string | null; broad_flow_days: number; missing_flow_dates: string[] }
+    minute: { start: string | null; end: string | null; observed_days: number; complete_days: number; expected_days: number;
+      complete_start: string | null; missing_dates: string[]; symbols: { symbol: string; start: string | null; end: string | null; days: number }[] }
+  }
+  intraday: EtfMinuteProfile
+  previous: EtfMinuteProfile | null
+  average: EtfMinuteAverage[]
+  signal_average: EtfMinuteAverage[]
+  normal_average: EtfMinuteAverage[]
+  cases: EtfMinuteProfile[]
+  threshold_yuan: number
+}
+
 export interface Preferences {
   realtime_quotes_enabled: boolean
   ordinary_minute_enabled: boolean
@@ -3376,6 +3446,8 @@ export const api = {
     request<{ as_of: string | null; rows: MarketSnapshotRow[] }>('/api/screener/market-snapshot'),
   etfReference: (asOf?: string) => request<EtfReference>(`/api/index/etf-reference${asOf ? `?as_of=${encodeURIComponent(asOf)}` : ''}`),
   syncEtfReference: () => request<{ job_id: string; reused: boolean }>('/api/index/etf-reference/sync', { method: 'POST' }),
+  etfFlow: (date?: string, window = 60) => request<EtfFlowBoard>(`/api/etf-flow?window=${window}${date ? `&trade_date=${encodeURIComponent(date)}` : ''}`),
+  syncEtfFlow: (days = 22, fullHistory = false) => request<{ job_id: string; reused: boolean }>(`/api/etf-flow/sync?days=${days}&full_history=${fullHistory}`, { method: 'POST' }),
   overviewMarket: (asOf?: string) => request<OverviewMarket>(`/api/overview/market${asOf ? `?as_of=${asOf}` : ''}`),
 
   // 概念涨幅轮动矩阵: 每列(日期)各自把所有概念按当天涨幅从高到低排序

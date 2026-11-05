@@ -31,6 +31,8 @@ export const QK = {
   quoteInterval:  ['quote-interval'] as const,
   overviewMarket: (asOf?: string) => ['overview-market', asOf ?? 'latest'] as const,
   etfReference: (asOf?: string) => ['etf-reference', asOf ?? 'latest'] as const,
+  etfFlow: (date?: string, window = 60) => ['etf-flow', date ?? 'latest', window] as const,
+  etfFlowAll: ['etf-flow'] as const,
   indexQuotes:    ['index-quotes'] as const,
 
   // Watchlist
@@ -203,8 +205,9 @@ export const SSE_INVALIDATE_PREFIXES = [
 export const DATASET_QUERY_PREFIXES: Record<string, readonly string[]> = {
   evening_report: ['evening-report'],
   etf_reference: ['etf-reference'],
+  etf_flow: ['etf-flow'],
   daily: ['sector-review', 'kline-boxes', 'kline-gaps', 'earnings-breakout', 'kline', 'kline-latest', 'kline-batch', 'index-daily', 'index-quotes', 'screener-kline-batch', 'watchlist-enriched', 'overview-market', 'limit-ladder', 'market-snapshot', 'stock-levels', 'lots-kline', 'sector-rotation-index-daily', 'screener-cached', 'regime-history', 'regime-observations', 'regime-latest', 'regime-states', 'regime-coverage', 'regime-phases', 'regime-mainline', 'rps-rotation'],
-  minute: ['kline-minute', 'kline-minute-range', 'index-minute', 'minute-batch', 'sector-rotation', 'sector-rotation-index-minute', 'dimension-intraday'],
+  minute: ['kline-minute', 'kline-minute-range', 'index-minute', 'minute-batch', 'sector-rotation', 'sector-rotation-index-minute', 'dimension-intraday', 'etf-flow'],
   financials: ['financials', 'earnings-breakout'],
   regime: ['overview-market', 'regime-history', 'regime-observations', 'regime-latest', 'regime-states', 'regime-coverage', 'regime-phases', 'regime-mainline'],
   mainline: ['regime-mainline', 'regime-phases'],
@@ -212,7 +215,7 @@ export const DATASET_QUERY_PREFIXES: Record<string, readonly string[]> = {
   review: ['review-publication', 'review-reports'],
   dragon_tiger: ['dragon-tiger'],
   auction_benchmark: ['auction-benchmark', 'abnormal-overview'],
-  calendar: ['sector-review', 'kline-boxes'],
+  calendar: ['sector-review', 'kline-boxes', 'etf-flow'],
   index: ['sector-review', 'kline-boxes'],
   etf: ['sector-review', 'kline-boxes'],
   // ST/主线过滤配置先于重算发布；其他页面也必须立即重读口径有效性。

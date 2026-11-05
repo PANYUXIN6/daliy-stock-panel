@@ -390,8 +390,10 @@ def sync_etf_adj_factor(
     start_time: datetime | None = None,
     end_time: datetime | None = None,
     on_chunk_done=None,
+    *,
+    require_complete: bool = False,
 ) -> tuple[int, list[str]]:
-    """同步 ETF 复权因子；失败由调用方降级为 warning。"""
+    """经既有路由同步 ETF 复权因子；严格模式禁止用失败结果发布新指标。"""
     return kline_sync.sync_adj_factor(
         symbols,
         repo,
@@ -400,6 +402,7 @@ def sync_etf_adj_factor(
         end_time=end_time,
         on_chunk_done=on_chunk_done,
         asset_type="etf",
+        require_complete=require_complete,
     )
 
 
@@ -461,6 +464,20 @@ def _recover_etf_enriched(
         repo.invalidate_etf_enriched_cache()
 
 
+def persist_etf_daily(raw: pl.DataFrame, repo: KlineRepository, *, factors: pl.DataFrame | None = None) -> None:
+    """提交标准化ETF日线，按完整本地历史重建受影响标的的复权指标。"""
+    if raw.is_empty():
+        return
+    symbols = raw["symbol"].unique().to_list()
+    repo.append_etf_daily(raw)
+    if factors is None:
+        factors = _load_etf_factors(repo)
+    batch_factors = factors.filter(pl.col("symbol").is_in(symbols)) if not factors.is_empty() else factors
+    local = _load_local_etf_daily(repo, symbols)
+    enriched = compute_enriched(local if not local.is_empty() else raw, factors=batch_factors, instruments=None)
+    repo.append_etf_enriched(enriched)
+
+
 def sync_and_persist_etf_daily(
     repo: KlineRepository,
     capset: CapabilitySet,
@@ -512,20 +529,12 @@ def sync_and_persist_etf_daily(
         if raw.is_empty():
             continue
 
-        repo.append_etf_daily(raw)
-        batch_factors = factors.filter(pl.col("symbol").is_in(chunk)) if not factors.is_empty() else factors
-        # 前复权 ratio = cum/total, 新除权事件会改写全部历史价。只用本次拉取
-        # 窗口算 enriched 时, 拆分日前的分区停在未复权价, 日K 留下跳空。
-        local = _load_local_etf_daily(repo, chunk)
-        hist = local if not local.is_empty() else raw
-        # ETF 使用复权和通用技术指标; 不传 instruments, 避免套用 A股涨跌停/连板逻辑。
-        enriched = compute_enriched(hist, factors=batch_factors, instruments=None)
-        repo.append_etf_enriched(enriched)
+        persist_etf_daily(raw, repo, factors=factors)
         total_rows += raw.height
         logger.info("etf daily synced: %d/%d chunks, +%d rows", i + 1, len(chunks), raw.height)
         if on_chunk_done:
             on_chunk_done(i + 1, len(chunks))
-        del raw, enriched, local, hist
+        del raw
         gc.collect()
     repo.refresh_index_views()
     return total_rows

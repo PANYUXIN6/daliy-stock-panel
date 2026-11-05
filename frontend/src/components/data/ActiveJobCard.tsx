@@ -30,6 +30,7 @@ export const STAGE_LABELS: Record<string, string> = {
   sync_minute: '同步分钟 K',
   financials: '同步财务数据',
   classifications: '同步板块分类',
+  etf_reference: '更新持仓占比参考',
   extend_history: '扩展日K历史',
   extend_minute: '扩展分钟K历史',
   rebuild_enriched: '全量计算',

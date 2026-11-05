@@ -84,6 +84,7 @@ def read_reference(data_dir: Path, as_of: date | None = None) -> dict:
         "state": "ready" if rows else "no_data", "rows": rows,
         "as_of": rows[-1]["date"] if rows else None,
         "checked_at": check.get("checked_at"), "update_failed": check.get("success") is False,
+        "failure_stage": check.get("failure_stage") if check.get("success") is False else None,
     }
 
 
@@ -106,6 +107,7 @@ def sync_reference(data_dir: Path, *, force: bool = False,
         return {"updated": False, "reason": "今日已检查"}
     owned_source = source is None
     source = source or Csi300ReferenceSource(check)
+    stage = "沪深300流通市值"
     try:
         check()
         snapshot = _read(path)
@@ -119,12 +121,14 @@ def sync_reference(data_dir: Path, *, force: bool = False,
         if not cap_rows:
             raise ValueError("官方沪深300流通市值尚未发布")
         last = date.fromisoformat(cap_rows[-1]["date"])
+        stage = "沪深300交易日期"
         days = source.trading_days(start, last)
         old = {(r["symbol"], r["date"]): r for r in snapshot.get("inputs", [])
                if start.isoformat() <= r["date"] <= last.isoformat()}
         cap_dates = set(caps)
         wanted = {(symbol, day) for symbol in FUNDS for day in cap_dates}
         missing = wanted - old.keys()
+        stage = "四只ETF单位净值"
         if nav_provider is None:
             name = preferences.get_fund_nav_provider()
             if not custom_sources.provider_has_dataset(name, "fund_nav"):
@@ -140,6 +144,7 @@ def sync_reference(data_dir: Path, *, force: bool = False,
         if missing:
             sh_days = sorted({day for symbol, day in missing if symbol.endswith(".SH")})
             shares = []
+            stage = "上交所ETF历史份额"
             for index, day in enumerate(sh_days):
                 check()
                 emit("etf_reference", 15 + int(index * 65 / max(1, len(sh_days))),
@@ -147,6 +152,7 @@ def sync_reference(data_dir: Path, *, force: bool = False,
                 shares.extend(source.sse_shares(date.fromisoformat(day)))
             sz_days = sorted(day for symbol, day in missing if symbol.endswith(".SZ"))
             if sz_days:
+                stage = "深交所ETF历史份额"
                 shares.extend(source.szse_shares(date.fromisoformat(sz_days[0]), date.fromisoformat(sz_days[-1])))
             for row in shares:
                 key = (row["symbol"], row["date"])
@@ -156,6 +162,7 @@ def sync_reference(data_dir: Path, *, force: bool = False,
                     raise ValueError("ETF份额与净值日期不一致")
                 old[key] = {**row, "unit_nav": nav_map[key]}
         inputs = [old[key] for key in sorted(wanted) if key in old]
+        stage = "份额、净值与流通市值的交易日对齐"
         rows = build_points(inputs, cap_rows, days)
         check()
         emit("etf_reference", 95, "核验比例与交易日覆盖…")
@@ -167,7 +174,11 @@ def sync_reference(data_dir: Path, *, force: bool = False,
         emit("done", 100, "国家队持仓占比参考已更新")
         return {"updated": True, "rows": len(rows), "as_of": rows[-1]["date"] if rows else None}
     except Exception:
-        atomic_write_text(status_path, json.dumps({"checked_at": now.isoformat(), "success": False}))
+        # 对外仅保存固定阶段名称；供应商异常可能包含请求地址或凭据，不能透出到看板。
+        atomic_write_text(status_path, json.dumps({
+            "checked_at": now.isoformat(), "success": False, "failure_stage": stage,
+        }, ensure_ascii=False))
+        publish_data_update(data_dir, ["etf_reference"])
         raise
     finally:
         if owned_source:

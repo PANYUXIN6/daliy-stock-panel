@@ -53,8 +53,11 @@ class Csi300ReferenceSource:
         return payload
 
     def trading_days(self, start: date, end: date) -> list[date]:
+        # 走势图接口会在非交易日的查询起点补一个同日锚点（复制下一交易日行情）。
+        # 多查一天，再裁回目标窗口，避免将该边界锚点误当作真实交易日。
+        query_start = start - timedelta(days=1)
         data = self._get("https://www.csindex.com.cn/csindex-home/perf/index-perf", {
-            "indexCode": "000300", "startDate": start.strftime("%Y%m%d"),
+            "indexCode": "000300", "startDate": query_start.strftime("%Y%m%d"),
             "endDate": end.strftime("%Y%m%d"),
         })
         if str(data.get("code")) != "200" or not isinstance(data.get("data"), list):

@@ -33,6 +33,7 @@ const mocks = vi.hoisted(() => ({
   pipelineJobs: vi.fn(), regimeCoverage: vi.fn(),
   repairDaily: vi.fn(), extendHistory: vi.fn(), rebuildEnriched: vi.fn(),
   updateIndexDailyBatchSize: vi.fn(), updateEnrichedBatchSize: vi.fn(),
+  syncEtfReference: vi.fn(),
 }))
 vi.mock('@/lib/api', () => ({ api: {
   ...mocks,
@@ -77,6 +78,7 @@ beforeEach(() => {
   mocks.pipelineRun.mockResolvedValue({ job_id: 'pipeline-new' })
   mocks.syncMinute.mockResolvedValue({ job_id: 'minutes-batch-new', status: 'started' })
   mocks.extDataPresetsSync.mockResolvedValue({ job_id: 'classifications-new', reused: false })
+  mocks.syncEtfReference.mockResolvedValue({ job_id: 'etf-reference-new', reused: false })
   mocks.repairDaily.mockResolvedValue({ status: 'started', job_id: 'repair-new' })
   mocks.extendHistory.mockResolvedValue({ status: 'started', job_id: 'extend-new' })
   mocks.rebuildEnriched.mockResolvedValue({ status: 'started', job_id: 'enriched-new' })
@@ -696,8 +698,23 @@ it('大模块显示后台冲突错误，失败后允许重新提交', async () =
   expect(button('同步板块分类').disabled).toBe(false)
 })
 
+it('持仓占比可单独重试并追踪任务，执行期间与其他数据操作互锁', async () => {
+  mocks.syncEtfReference.mockRejectedValueOnce(new Error('已有数据任务正在运行'))
+  await render(<Data />)
+  await act(async () => button('更新持仓占比参考').click())
+  await settle()
+  expect(host.querySelector('[role="alert"]')?.textContent).toBe('已有数据任务正在运行')
+  expect(button('更新持仓占比参考').disabled).toBe(false)
+  await act(async () => button('更新持仓占比参考').click())
+  await settle()
+  expect(mocks.pipelineJob).toHaveBeenCalledWith('etf-reference-new')
+  expect(button('更新持仓占比参考').disabled).toBe(true)
+  expect(button('更新日常数据').disabled).toBe(true)
+})
+
 it.each([
   ['同步板块分类', 'classifications', 'failed', ['ext-data-rows', 'ext_gn_ths']],
+  ['更新持仓占比参考', 'etf_reference', 'failed', ['etf-reference', 'latest']],
 ] as const)('模块 %s 终态刷新对应本地缓存，保留已分块落盘的失败结果', async (label, requestKey, status, affectedKey) => {
   mocks.capabilityMatrix.mockResolvedValue({ capabilities: [{ id: 'financial', usable: true }] })
   mocks.pipelineJob.mockImplementation(async (id: string) => ({ id, request_key: requestKey, status, stage: 'done', progress: 100, log: [], result: {}, error: status === 'failed' ? '行业请求失败' : null }))

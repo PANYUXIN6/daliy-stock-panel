@@ -2273,6 +2273,7 @@ export interface EtfReference {
   as_of: string | null
   checked_at: string | null
   update_failed: boolean
+  failure_stage?: string | null
   rows: { date: string; ratio: number; etf_assets_yuan: number; float_cap_yuan: number }[]
 }
 
@@ -3374,6 +3375,7 @@ export const api = {
   marketSnapshot: () =>
     request<{ as_of: string | null; rows: MarketSnapshotRow[] }>('/api/screener/market-snapshot'),
   etfReference: (asOf?: string) => request<EtfReference>(`/api/index/etf-reference${asOf ? `?as_of=${encodeURIComponent(asOf)}` : ''}`),
+  syncEtfReference: () => request<{ job_id: string; reused: boolean }>('/api/index/etf-reference/sync', { method: 'POST' }),
   overviewMarket: (asOf?: string) => request<OverviewMarket>(`/api/overview/market${asOf ? `?as_of=${asOf}` : ''}`),
 
   // 概念涨幅轮动矩阵: 每列(日期)各自把所有概念按当天涨幅从高到低排序

@@ -95,6 +95,28 @@ def test_szse_units_and_page_validation(public_source):
         public_source.szse_shares(DAY, DAY)
 
 
+@pytest.mark.parametrize(("start", "query_start", "returned", "expected"), [
+    ("2025-11-01", "20251031", ["20251031", "20251103", "20251104"], ["2025-11-03", "2025-11-04"]),
+    ("2025-11-02", "20251101", ["20251101", "20251103", "20251104"], ["2025-11-03", "2025-11-04"]),
+    ("2025-11-03", "20251102", ["20251102", "20251103", "20251104"], ["2025-11-03", "2025-11-04"]),
+    ("2025-10-01", "20250930", ["20250930", "20251009"], ["2025-10-09"]),
+])
+def test_index_chart_boundary_anchor_is_not_a_trading_day(public_source, start, query_start, returned, expected):
+    # 实测非交易日起点会复制下一交易日行情为图表锚点，不能作为交易日历使用。
+    public_source.client.close()
+
+    def respond(request):
+        assert request.url.params["startDate"] == query_start
+        return httpx.Response(200, json={"code": 200, "data": [
+            {"indexCode": "000300", "tradeDate": day} for day in returned
+        ]})
+
+    public_source.client = httpx.Client(transport=httpx.MockTransport(respond))
+    assert public_source.trading_days(date.fromisoformat(start), date(2025, 11, 4)) == [
+        date.fromisoformat(day) for day in expected
+    ]
+
+
 def test_fund_nav_uses_unit_value_and_shanghai_date(monkeypatch):
     provider = FuyaoProvider()
     ms = int(datetime(2026, 9, 29, tzinfo=ZoneInfo("Asia/Shanghai")).timestamp() * 1000)
@@ -177,6 +199,7 @@ def test_failed_update_and_cancellation_keep_previous_snapshot(tmp_path, runtime
         ref.sync_reference(tmp_path, force=True, source=source, nav_provider=provider)
     assert ref._path(tmp_path).read_bytes() == before
     assert ref.read_reference(tmp_path)["update_failed"] is True
+    assert ref.read_reference(tmp_path)["failure_stage"] == "沪深300流通市值"
     source.fail = False
 
     from app.services.pipeline_jobs import JobCancelledError
@@ -187,6 +210,32 @@ def test_failed_update_and_cancellation_keep_previous_snapshot(tmp_path, runtime
     with pytest.raises(JobCancelledError):
         ref.sync_reference(tmp_path, force=True, source=source, nav_provider=provider, check_cancel=cancel)
     assert ref._path(tmp_path).read_bytes() == before
+    assert len(events) == 2  # 成功数据及失败状态都失效看板查询；取消不改写已保存状态。
+    ref.sync_reference(tmp_path, force=True, source=source, nav_provider=provider)
+    assert ref.read_reference(tmp_path)["failure_stage"] is None
+    assert ref.read_reference(tmp_path)["update_failed"] is False
+
+
+@pytest.mark.parametrize(("failed_method", "stage"), [
+    ("trading_days", "沪深300交易日期"),
+    ("get_fund_nav", "四只ETF单位净值"),
+    ("sse_shares", "上交所ETF历史份额"),
+    ("szse_shares", "深交所ETF历史份额"),
+])
+def test_first_collection_failure_reports_safe_stage(tmp_path, runtime, monkeypatch, failed_method, stage):
+    source, provider, events = runtime
+
+    def fail(*args):
+        raise RuntimeError("upstream request with private credentials")
+
+    monkeypatch.setattr(provider if failed_method == "get_fund_nav" else source, failed_method, fail)
+    with pytest.raises(RuntimeError):
+        ref.sync_reference(tmp_path, source=source, nav_provider=provider)
+    result = ref.read_reference(tmp_path)
+    assert result["state"] == "no_data"
+    assert result["update_failed"] is True
+    assert result["failure_stage"] == stage
+    assert "private credentials" not in ref._path(tmp_path).with_name("last_check.json").read_text()
     assert len(events) == 1
 
 

@@ -132,6 +132,10 @@ export function Data() {
     mutationFn: () => api.extDataPresetsSync(),
     onSuccess: trackModuleJob,
   })
+  const syncEtfReference = useMutation({
+    mutationFn: api.syncEtfReference,
+    onSuccess: trackModuleJob,
+  })
 
   // 停止同步: 二次确认后调 cancel 端点 (协作式终止, 当前分块完成后线程自行退出)
   const [showStopConfirm, setShowStopConfirm] = useState(false)
@@ -341,7 +345,8 @@ export function Data() {
       const requestKey = job.data.request_key ?? ''
       const moduleDataset = requestKey.startsWith('financial:') ? 'financials'
         : requestKey.startsWith('minute_batch:') || requestKey.startsWith('minute:') ? 'minute'
-        : requestKey === 'classifications' ? 'ext_data' : null
+        : requestKey === 'classifications' ? 'ext_data'
+        : requestKey === 'etf_reference' ? 'etf_reference' : null
       if (moduleDataset) {
         // 失败或取消前可能已有分块落盘，终态也要刷新本地画像与消费方。
         for (const prefix of DATASET_QUERY_PREFIXES[moduleDataset]) {
@@ -381,7 +386,7 @@ export function Data() {
   const s = status.data
   const isLoading = status.isLoading
   const isRunning = !!activeJobId && (!job.data || job.data.status === 'running' || job.data.status === 'pending')
-  const isStarting = startSync.isPending || syncMinuteHistory.isPending || syncClassifications.isPending || pipelineConfirmation.busy
+  const isStarting = startSync.isPending || syncMinuteHistory.isPending || syncClassifications.isPending || syncEtfReference.isPending || pipelineConfirmation.busy
   const collectionBusy = isRunning || isStarting || (!!liveId && !liveJobFinished) || syncIndexDaily.isPending || indexConfirmation.busy || refreshQuotes.isPending || quoteConfirmation.busy || updateDepth.isPending || depthConfirmation.busy
   const financialRunning = isRunning && job.data?.request_key?.startsWith('financial:') === true
   const minuteHistoryDays = prefs.data?.minute_sync_days ?? 5
@@ -704,6 +709,7 @@ export function Data() {
               <div className="absolute right-0 top-full z-30 mt-2 flex w-64 flex-col gap-2 rounded-card border border-border bg-surface p-3 shadow-xl">
                 <button type="button" onClick={() => setOpenSettings('pipeline-scope')} className="inline-flex items-center gap-1 px-2 py-1 text-left text-xs text-secondary hover:text-accent"><CheckSquare className="h-3.5 w-3.5" />同步选项</button>
                 <button type="button" disabled={collectionBusy} onClick={() => pipelineConfirmation.run({ kind: 'classifications' }, () => syncClassifications.mutate())} className="px-2 py-1 text-left text-xs text-secondary hover:text-accent disabled:opacity-40">同步板块分类</button>
+                <button type="button" disabled={collectionBusy} onClick={() => syncEtfReference.mutate()} className="px-2 py-1 text-left text-xs text-secondary hover:text-accent disabled:opacity-40">更新持仓占比参考</button>
                 <button type="button" disabled={!hasData || collectionBusy} onClick={() => setOpenSettings('enriched')} className="px-2 py-1 text-left text-xs text-secondary hover:text-accent disabled:opacity-40">重算技术指标</button>
                 <button type="button" disabled={!hasData || collectionBusy} onClick={() => setOpenSettings('regime')} className="px-2 py-1 text-left text-xs text-secondary hover:text-accent disabled:opacity-40">重算市场环境</button>
                 <div className="h-px w-full bg-border" />
@@ -748,6 +754,7 @@ export function Data() {
                   </button>
                 </div>
                 {syncClassifications.error && <p role="alert" className="text-xs text-danger">{syncClassifications.error.message}</p>}
+                {syncEtfReference.error && <p role="alert" className="text-xs text-danger">{syncEtfReference.error.message}</p>}
               </div>
             </details>
           </div>

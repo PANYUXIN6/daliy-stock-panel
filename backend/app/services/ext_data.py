@@ -685,12 +685,16 @@ def write_ext_parquet(
     snapshot_date: date | None = None,
     *,
     keep_strategy_cache: bool = False,
+    replace_snapshot: bool = False,
 ) -> int:
     """将 DataFrame 写入扩展数据 Parquet。
 
     目录结构:
       - snapshot:  data/ext_data/{id}/part.parquet（与 config.json 同级，覆盖写）
       - timeseries: data/ext_data/{id}/timeseries/date=xxx/part.parquet（按日分区）
+
+    snapshot 默认合并已有证券；完整分类快照显式 replace_snapshot=True，
+    使本轮已退出的证券和关系不会因合并旧行而残留。
 
     Returns:
         写入行数。
@@ -710,7 +714,7 @@ def write_ext_parquet(
         out_path = cfg_dir / "part.parquet"
 
         # 如果已有文件，合并去重后覆盖
-        if out_path.exists():
+        if out_path.exists() and not replace_snapshot:
             try:
                 existing = pl.read_parquet(out_path)
                 key = "symbol" if "symbol" in df.columns else df.columns[0]
@@ -846,6 +850,7 @@ def rows_to_parquet(
     snapshot_date: date | None = None,
     *,
     keep_strategy_cache: bool = False,
+    replace_snapshot: bool = False,
 ) -> int:
     """将 JSON 行列表转为 DataFrame 写入 Parquet，复用 write_ext_parquet 的存储逻辑。
 
@@ -859,4 +864,5 @@ def rows_to_parquet(
     return write_ext_parquet(
         df, config, data_dir, snapshot_date=snapshot_date,
         keep_strategy_cache=keep_strategy_cache,
+        replace_snapshot=replace_snapshot,
     )

@@ -42,7 +42,7 @@ def input_versions(data_dir: Path, day: date) -> dict:
 def save_ready(data_dir: Path, day: date, coverage, observations: list[dict], market: dict) -> dict:
     """Called only after required stages 1–8 succeeded, inside the pipeline slot."""
     if len(observations) != 2 or any(not o or o.get('complete') is not True for o in observations):
-        raise DailyCoverageError('本轮概念及二级行业完整分类观察尚未就绪')
+        raise DailyCoverageError('本轮概念及行业完整分类观察尚未就绪')
     if any(date.fromisoformat(o['obtained_at'][:10]) != day for o in observations):
         raise DailyCoverageError('分类观察并非目标交易日取得，不能作为当晚原发布输入')
     metadata = pl.read_parquet(data_dir / 'instruments' / 'instruments.parquet').to_dicts()
@@ -68,6 +68,11 @@ def save_ready(data_dir: Path, day: date, coverage, observations: list[dict], ma
                                           for item in prior.get('halted_evidence', []))
             if prior_day == previous_days[-1]:
                 previous_classification_input_id = prior['input_id']
+    # 关系源/行业语义变化后不续接旧来源的核心身份与连续轮次；历史证据不回写。
+    membership_semantics = sorted({o['membership_semantics'] for o in observations if o.get('membership_semantics')})
+    scope_version = 'main-chinext-nonst-v1/' + evening_report_classification.RULE_VERSION
+    if membership_semantics:
+        scope_version += '/' + '+'.join(membership_semantics)
     evidence = {
         'date': day.isoformat(), 'cutoff': cn_now().isoformat(),
         'versions': input_versions(data_dir, day), 'classifications': observations,
@@ -76,7 +81,7 @@ def save_ready(data_dir: Path, day: date, coverage, observations: list[dict], ma
         'market': market, 'complete': True, 'metadata': metadata,
         'calendar': calendar, 'sector_filter_config': get_mainline_filter_config(),
         'filter_rule_version': evening_report_classification.RULE_VERSION,
-        'scope_version': 'main-chinext-nonst-v1/' + evening_report_classification.RULE_VERSION,
+        'scope_version': scope_version,
         'historical_suspensions': historical_suspensions,
         'previous_classification_input_id': previous_classification_input_id,
     }

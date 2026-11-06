@@ -107,7 +107,7 @@ def _revision_plan(data_dir: Path, start: date) -> tuple[list[tuple[date, str]],
 
 
 def generate(repo, day: date, *, revision: bool, progress, automatic: bool = False, authorize=None) -> dict:
-    from app.services.evening_report_engine import SCOPE_VERSION, build_report
+    from app.services.evening_report_engine import build_report
     from app.services.evening_report_rules import RULE_VERSION, SELECTION_POLICY_VERSION
     from app.services.shared_runtime import publish_data_update
 
@@ -131,13 +131,19 @@ def generate(repo, day: date, *, revision: bool, progress, automatic: bool = Fal
         plan, gaps = [(day, require_ready(data_dir, day)['input_id'])], []
     input_ids = {target.isoformat(): input_id for target, input_id in plan}
     if revision:
+        scope_versions = {target.isoformat(): require_ready(data_dir, target, input_id=input_id)['scope_version']
+                          for target, input_id in plan}
         for manifest in store.branch_manifests():
-            if manifest.get('input_ids') == input_ids and manifest.get('rule_version') == RULE_VERSION and manifest.get('selection_policy_version') == SELECTION_POLICY_VERSION and manifest.get('scope_version') == SCOPE_VERSION:
+            if (manifest.get('input_ids') == input_ids and manifest.get('rule_version') == RULE_VERSION
+                    and manifest.get('selection_policy_version') == SELECTION_POLICY_VERSION
+                    and all(manifest['dates'][value].get('scope_version') == scope
+                            for value, scope in scope_versions.items())):
                 publish_data_update(data_dir, ['evening_report'])
                 return {'date': day.isoformat(), 'version': manifest['dates'][day.isoformat()]['version'],
                         'branch_id': manifest['branch_id'], 'reused': True}
         if all((report := store.original_metadata(target.isoformat())) and report.get('input_id') == input_ids[target.isoformat()]
-               and report.get('rule_version') == RULE_VERSION and report.get('selection_policy_version') == SELECTION_POLICY_VERSION and report.get('scope_version') == SCOPE_VERSION
+               and report.get('rule_version') == RULE_VERSION and report.get('selection_policy_version') == SELECTION_POLICY_VERSION
+               and report.get('scope_version') == scope_versions[target.isoformat()]
                for target, _ in plan):
             publish_data_update(data_dir, ['evening_report'])
             return {'date': day.isoformat(), 'version': store.original_metadata(day.isoformat())['version'], 'reused': True}
@@ -153,13 +159,11 @@ def generate(repo, day: date, *, revision: bool, progress, automatic: bool = Fal
             check()
             evidence = require_ready(data_dir, target, input_id=input_id)
             inputs = load_inputs(data_dir, target, evidence, check)
-            inputs.provenance['scope_version'] = SCOPE_VERSION
             payload = build_report(inputs, history=history, cancel_check=check)
             check()
             require_ready(data_dir, target, input_id=evidence['input_id'])
             payload['rule_version'] = RULE_VERSION
             payload['selection_policy_version'] = SELECTION_POLICY_VERSION
-            payload['scope_version'] = SCOPE_VERSION
             payload['late_generation'] = target != cn_now().date()
             payload['recovery_note'] = ('恢复计算、当时未发布'
                                         if payload['late_generation'] and not store.has_original(target.isoformat()) else None)
@@ -191,7 +195,6 @@ def generate(repo, day: date, *, revision: bool, progress, automatic: bool = Fal
 async def trigger(repo, quote_service=None, *, day: date, revision: bool = False, automatic: bool = False) -> dict:
     from app.api.pipeline import _submit_job
     from app.services.daily_coverage import DailyCoverageError
-    from app.services.evening_report_engine import SCOPE_VERSION
     from app.services.evening_report_rules import RULE_VERSION, SELECTION_POLICY_VERSION
 
     data_dir = repo.store.data_dir
@@ -216,7 +219,7 @@ async def trigger(repo, quote_service=None, *, day: date, revision: bool = False
     mode = 'revision' if revision else 'live'
     # The persisted observation IDs plus ready cutoff identify one accepted input;
     # no digest or duplicate market-data snapshot is introduced.
-    key = f'evening_report:{day}:{mode}:{RULE_VERSION}:{SELECTION_POLICY_VERSION}:{SCOPE_VERSION}:{evidence["input_id"]}'
+    key = f'evening_report:{day}:{mode}:{RULE_VERSION}:{SELECTION_POLICY_VERSION}:{evidence["scope_version"]}:{evidence["input_id"]}'
     result = await _submit_job(
         repo, quote_service,
         lambda progress: lambda: context.run(generate, repo, day, revision=revision, progress=progress,

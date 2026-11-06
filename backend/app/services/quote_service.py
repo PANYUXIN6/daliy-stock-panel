@@ -1267,13 +1267,16 @@ class QuoteService:
     # ================================================================
 
     def _evaluate_monitors(self, daily_df: pl.DataFrame, quote_extra: pl.DataFrame | None) -> None:
+        from contextlib import suppress
+
+        from app.services.auth import AuthError
         from app.services.user_context import user_scope
         registry = getattr(self._app_state, "user_runtimes", None)
         if registry is None:
             return
         round_data = {}
         for runtime in registry.background_active():
-            with user_scope(runtime.user):
+            with suppress(AuthError), user_scope(runtime.user):
                 self._evaluate_user_monitors(daily_df, quote_extra, runtime, round_data=round_data)
 
     def _evaluate_user_monitors(self, daily_df: pl.DataFrame, quote_extra: pl.DataFrame | None, runtime, *, round_data=None) -> None:

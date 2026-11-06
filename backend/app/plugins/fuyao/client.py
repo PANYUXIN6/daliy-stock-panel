@@ -23,6 +23,7 @@ from app.data_providers.base import ProviderRateLimitError
 logger = logging.getLogger(__name__)
 
 BASE_URL = "https://fuyao.aicubes.cn"
+CLASSIFICATIONS_PATH = "/api/a-share-index/constituents/ths-index-list-by-stock"
 
 # 单页 6000 覆盖全市场(实测 ~5600 含北交所, 2026-08 服务端不截断 limit=6000),
 # 一次请求拉完; 分页循环兜底未来标的扩容或服务端改为截断的场景。
@@ -99,6 +100,16 @@ class FuyaoClient:
 
     def close(self) -> None:
         self._http.close()
+
+    def stock_classifications(
+        self, symbols: list[str], kind: str, *, cancel_event: threading.Event | None = None,
+    ) -> dict:
+        """当前个股分类；官方契约每批最多 100 只，空分类仍返回该证券分组。"""
+        if not 1 <= len(symbols) <= 100 or kind not in {"concept", "industry"}:
+            raise ValueError("分类查询须为 1–100 只股票及 concept/industry 类型")
+        return self._get(CLASSIFICATIONS_PATH, {
+            "thscode": ",".join(symbols), "type": "cn_concept" if kind == "concept" else "industry",
+        }, cancel_event=cancel_event)
 
     def fund_nav(self, symbol: str) -> dict:
         global _next_fund_nav_request_at

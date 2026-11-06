@@ -8,6 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from app.api.auth import COOKIE_NAME, store_for
 from app.services.ai_credits import get_credit_store
 from app.services.auth import AuthError
+from app.services.user_deletion import delete_user as delete_user_data
 
 router = APIRouter(prefix="/api/users", tags=["users"])
 
@@ -89,6 +90,15 @@ def reset_password(
     user_id: str, req: ResetPassword, request: Request, actor: str = Depends(require_admin)
 ):
     store_for(request).reset_password(user_id, req.password, actor_id=actor)
+    return {"ok": True}
+
+
+@router.delete("/{user_id}")
+def delete_user(user_id: str, request: Request, actor: str = Depends(require_admin)):
+    delete_user_data(
+        store_for(request), user_id, actor_id=actor,
+        runtimes=getattr(request.app.state, "user_runtimes", None),
+    )
     return {"ok": True}
 
 

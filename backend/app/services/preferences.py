@@ -42,6 +42,12 @@ def _invalidate_cache() -> None:
     _cache.clear()
 
 
+def forget_user_cache(data_dir: Path, uid: str) -> None:
+    from app.services.user_context import user_data_dir
+    with _SAVE_LOCK:
+        _cache.pop(str(user_data_dir(data_dir, uid) / "user_data" / "preferences.json"), None)
+
+
 def _read(p: Path) -> dict:
     try:
         st = p.stat()

@@ -381,6 +381,56 @@ class FuyaoProvider:
             self._client = fuyao_client.FuyaoClient(api_key=get_api_key())
         return self._client
 
+    def get_classifications(
+        self, symbols: list[str], kind: str, *, on_progress: Callable[[int, int], None] | None = None,
+        cancel_event: Event | None = None,
+    ) -> list[dict]:
+        """内置分类预设专用：批量反查并校验完整响应，不把漏组视为空分类。
+
+        industry 是接口提供的独立行业名称集合，不是一级→二级→三级路径。
+        请求复用全进程的限频和传输重试；进度回调在每批前后检查任务取消。
+        """
+        if kind not in {"concept", "industry"}:
+            raise ValueError(f"未知分类类型: {kind}")
+        symbols = sorted(set(symbols))
+        if not symbols or any(not re.fullmatch(r"[0-9]{6}\.(SH|SZ|BJ)", s) for s in symbols):
+            raise ValueError("分类查询需要有效的完整股票代码")
+        expected_type = "cn_concept" if kind == "concept" else "industry"
+        field_name = "concepts" if kind == "concept" else "industries"
+        out = []
+        for offset in range(0, len(symbols), 100):
+            if on_progress:
+                on_progress(offset, len(symbols))
+            batch = symbols[offset:offset + 100]
+            payload = self._get_client().stock_classifications(batch, kind, cancel_event=cancel_event)
+            groups = payload.get("item") if isinstance(payload, dict) else None
+            if not isinstance(groups, list):
+                raise FuyaoError("扶摇分类响应缺少证券分组")
+            seen = set()
+            for group in groups:
+                symbol = group.get("thscode") if isinstance(group, dict) else None
+                if not isinstance(symbol, str) or symbol not in batch or symbol in seen:
+                    raise FuyaoError("扶摇分类响应包含未知或重复证券")
+                seen.add(symbol)
+                boards = group.get("index_list")
+                if not isinstance(boards, list):
+                    raise FuyaoError(f"扶摇分类响应缺少板块列表: {symbol}")
+                names = set()
+                for board in boards:
+                    label = board.get("name") if isinstance(board, dict) else None
+                    if (not isinstance(label, str) or not label.strip()
+                            or label.strip().casefold() in {"nan", "none", "null"}
+                            or board.get("type") != expected_type
+                            or not isinstance(board.get("thscode"), str) or not board["thscode"].strip()):
+                        raise FuyaoError(f"扶摇分类响应包含无效板块: {symbol}")
+                    names.add(label.strip())
+                out.append({"symbol": symbol, field_name: sorted(names)})
+            if seen != set(batch):
+                raise FuyaoError(f"扶摇分类响应缺少 {len(set(batch) - seen)} 只股票，保留已有分类")
+            if on_progress:
+                on_progress(offset + len(batch), len(symbols))
+        return out
+
     # ---- dump 缓存 ----
     def _expire_dump(self, dump_kind: str) -> None:
         # collector 长驻；跨日和盘后重试必须重新查询 release，不能永久复用昨日 dump。

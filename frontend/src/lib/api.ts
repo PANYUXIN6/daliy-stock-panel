@@ -2550,7 +2550,7 @@ export interface AssistantToolPermissionsResponse {
 }
 export interface User {
   id: string; username: string; is_initial_admin: boolean; role: UserRole; pro_expires_on: string | null
-  is_active: boolean; must_change_password: boolean; created_at: string
+  is_active: boolean; deletion_pending?: boolean; must_change_password: boolean; created_at: string
   last_login_at: string | null; last_login_ip: string | null; login_count: number
 }
 export interface AiUserUsage {
@@ -2777,6 +2777,7 @@ export const api = {
   }),
   users: (search = '', offset = 0) => request<{ users: ManagedUser[]; total: number }>(`/api/users?search=${encodeURIComponent(search)}&offset=${offset}&limit=50`),
   createUser: (value: { username: string; password: string; role: UserRole; pro_expires_on?: string | null }) => request<{ user: User }>('/api/users', { method: 'POST', body: JSON.stringify(value) }),
+  deleteUser: (id: string) => request<{ ok: boolean }>(`/api/users/${encodeURIComponent(id)}`, { method: 'DELETE' }),
   updateUser: (id: string, value: { role?: UserRole; pro_expires_on?: string | null; is_active?: boolean }) => request<{ user: User }>(`/api/users/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify(value) }),
   resetUserPassword: (id: string, password: string) => request<{ ok: boolean }>(`/api/users/${encodeURIComponent(id)}/reset-password`, { method: 'POST', body: JSON.stringify({ password }) }),
   revokeUserSession: (id: string) => request<{ ok: boolean }>(`/api/users/${encodeURIComponent(id)}/revoke-session`, { method: 'POST' }),

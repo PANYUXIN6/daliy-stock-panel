@@ -72,10 +72,10 @@ async def consume_updates(state, expected_tables):
         app.include_router(ext_data.router)
         for table, label in expected_tables.items():
             # collector 刷新动态视图, web 现有查询通过本地文件读取分类。
-            assert state.writer.db.execute(f'SELECT "{label}" FROM ext_{table}').fetchone()[0] in {"机器人;人工智能", "制造-设备"}
+            assert state.writer.db.execute(f'SELECT "{label}" FROM ext_{table}').fetchone()[0] in {"机器人;人工智能", "设备"}
             async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://local") as client:
                 rows = (await client.get(f"/api/ext-data/{table}/rows")).json()["rows"]
-            assert rows[0][label] in {"机器人;人工智能", "制造-设备"}
+            assert rows[0][label] in {"机器人;人工智能", "设备"}
         assert subscription.empty()
 
 
@@ -83,13 +83,13 @@ async def test_classifications_action_preserves_both_schemas_and_publishes_once(
     state = classification_app
     calls = []
 
-    async def fetch(url):
-        calls.append(url)
-        if "concepts" in url:
+    async def fetch(config_id, data_dir, on_progress=None):
+        calls.append(config_id)
+        if config_id == "ext_gn_ths":
             return [{"symbol": "600000.SH", "name": "示例", "concepts": ["机器人", "人工智能"]}]
-        return [{"symbol": "600000.SH", "name": "示例", "industries": ["制造", "设备"]}]
+        return [{"symbol": "600000.SH", "name": "示例", "industries": ["设备"]}]
 
-    monkeypatch.setattr(ext_presets, "_fetch_json", fetch)
+    monkeypatch.setattr(ext_presets, "_fetch_classification_rows", fetch)
     assert collector_proxy.collector_owns("POST", "/api/ext-data/presets/sync")
     response = await state.client.post("/api/ext-data/presets/sync")
     assert response.status_code == 200
@@ -105,12 +105,12 @@ async def test_classifications_action_preserves_both_schemas_and_publishes_once(
 async def test_second_classification_failure_keeps_first_table_readable(classification_app, monkeypatch):
     state = classification_app
 
-    async def fetch(url):
-        if "industries" in url:
+    async def fetch(config_id, data_dir, on_progress=None):
+        if config_id == "ext_hy_ths":
             raise RuntimeError("行业接口失败")
         return [{"symbol": "600000.SH", "name": "示例", "concepts": ["机器人", "人工智能"]}]
 
-    monkeypatch.setattr(ext_presets, "_fetch_json", fetch)
+    monkeypatch.setattr(ext_presets, "_fetch_classification_rows", fetch)
     response = await state.client.post("/api/ext-data/presets/sync")
     await asyncio.gather(*list(pipeline._tasks))
     job = state.jobs.get(response.json()["job_id"])
@@ -126,7 +126,7 @@ async def test_classification_cancel_preserves_written_table_and_reuses_shared_j
     original = ext_presets.commit_prepared_preset
     calls = []
 
-    async def fetch(url):
+    async def fetch(config_id, data_dir, on_progress=None):
         return [{"symbol": "600000.SH", "name": "示例", "concepts": ["机器人", "人工智能"]}]
 
     def held_commit(prepared, root):
@@ -136,7 +136,7 @@ async def test_classification_cancel_preserves_written_table_and_reuses_shared_j
         assert release.wait(3)
         return rows
 
-    monkeypatch.setattr(ext_presets, "_fetch_json", fetch)
+    monkeypatch.setattr(ext_presets, "_fetch_classification_rows", fetch)
     monkeypatch.setattr(ext_presets, "commit_prepared_preset", held_commit)
     before = (await state.client.get("/api/data/status")).json()["storage"]["ext_data_files"]
     assert before == 0
@@ -165,10 +165,10 @@ async def test_classification_action_reports_busy_and_no_write_does_not_publish(
     assert (await state.client.post("/api/ext-data/presets/sync")).status_code == 409
     state.jobs.fail(busy_id, "测试完成")
 
-    async def fail(url):
+    async def fail(config_id, data_dir, on_progress=None):
         raise RuntimeError("概念接口失败")
 
-    monkeypatch.setattr(ext_presets, "_fetch_json", fail)
+    monkeypatch.setattr(ext_presets, "_fetch_classification_rows", fail)
     response = await state.client.post("/api/ext-data/presets/sync")
     await asyncio.gather(*list(pipeline._tasks))
     assert state.jobs.get(response.json()["job_id"])["status"] == "failed"

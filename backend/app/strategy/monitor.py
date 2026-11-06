@@ -247,6 +247,11 @@ _group_cache: dict[str, Any] = {}
 _warned_missing_groups: set[tuple[str, str]] = set()
 
 
+def forget_user_cache(data_dir, uid: str) -> None:
+    with _group_cache_lock:
+        _group_cache.pop(str(data_dir.resolve() / uid), None)
+
+
 def _watchlist_groups_snapshot() -> dict[str, frozenset[str]]:
     """返回 {group_id: 成员symbol集}。读前后版本一致才写缓存, 避免缓存住写竞态下的旧数据。"""
     from app.services import watchlist

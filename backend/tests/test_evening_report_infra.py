@@ -21,7 +21,7 @@ from app.services import evening_report_jobs as jobs
 from app.services import evening_report_store as archive
 from app.services import ext_presets, pipeline_jobs, preferences, shared_runtime
 from app.services.daily_coverage import DailyCoverage, DailyCoverageError
-from app.services.evening_report_engine import build_report
+from app.services.evening_report_engine import SCOPE_VERSION, build_report
 from app.services.evening_report_rules import RULE_VERSION
 from app.services.evening_report_store import EveningReportStore, RevisionBranch, atomic_json
 
@@ -156,9 +156,9 @@ def test_new_day_generation_does_not_block_recovery_but_rewritten_input_does(acc
 def test_classification_observation_uses_response_not_merged_table(tmp_path, monkeypatch):
     answers = [[{'symbol': '600000.SH', 'concepts': ['银行']}],
                [{'symbol': '600001.SH', 'concepts': ['机械']}]]
-    async def fetch(_):
+    async def fetch(config_id, data_dir, on_progress=None):
         return answers.pop(0)
-    monkeypatch.setattr(ext_presets, '_fetch_json', fetch)
+    monkeypatch.setattr(ext_presets, '_fetch_classification_rows', fetch)
     first = asyncio.run(ext_presets.prepare_preset('ext_gn_ths', tmp_path))
     ext_presets.commit_prepared_preset(first, tmp_path)
     second = asyncio.run(ext_presets.prepare_preset('ext_gn_ths', tmp_path))
@@ -175,6 +175,99 @@ def test_classification_missing_scope_blocks_readiness_and_unknown_effective_dat
     observations[0]['symbols'] = observations[0]['symbols'][1:]
     with pytest.raises(DailyCoverageError, match='本轮分类响应缺少 1'):
         inputs.save_ready(state.root, state.day, state.coverage, observations, {})
+
+
+def test_new_classification_semantics_start_new_scope_without_rewriting_old_evidence(accepted, monkeypatch):
+    from copy import deepcopy
+
+    state = accepted
+    old_scope = state.evidence['scope_version']
+    observations = deepcopy(state.evidence['classifications'])
+    for observation in observations:
+        observation['membership_semantics'] = 'fuyao-flat-v1'
+    updated = inputs.save_ready(state.root, state.day, state.coverage, observations, {})
+    assert updated['scope_version'] == old_scope + '/fuyao-flat-v1'
+    old = EveningReportStore(state.root).input_evidence(state.evidence['input_id'])
+    assert old['scope_version'] == old_scope
+    assert all('membership_semantics' not in observation for observation in old['classifications'])
+    monkeypatch.setattr(shared_runtime, 'publish_data_update', lambda *_: None)
+    submitted = AsyncMock(return_value={'job_id': 'queued'})
+    monkeypatch.setattr(pipeline, '_submit_job', submitted)
+    asyncio.run(jobs.trigger(state.repo, day=state.day, automatic=True))
+    assert f':{updated["scope_version"]}:' in submitted.call_args.kwargs['request_key']
+    jobs.generate(state.repo, state.day, revision=False, progress=lambda *a, **k: None)
+    report = EveningReportStore(state.root).get(str(state.day))
+    assert report['scope_version'] == report['provenance']['scope_version'] == updated['scope_version']
+
+
+@pytest.mark.parametrize('revision', [False, True])
+def test_generation_restarts_classification_continuity_and_reuses_matching_daily_scopes(tmp_path, monkeypatch, revision):
+    from test_evening_report_engine import inputs_at
+
+    store = EveningReportStore(tmp_path)
+    repo = SimpleNamespace(store=SimpleNamespace(data_dir=tmp_path))
+    values = {value.trade_date: value for value in (inputs_at(index) for index in range(65, 71))}
+    days = list(values)
+    new_scope = SCOPE_VERSION + '/fuyao-flat-v1'
+    for index, day in enumerate(days):
+        store.save_readiness(day, {
+            'date': day, 'complete': True, 'cutoff': day, 'versions': {}, 'classifications': [],
+            'calendar': {'days': days}, 'scope_version': SCOPE_VERSION if index < 3 else new_scope,
+        })
+
+    def ready(root, day, *, input_id=None):
+        return store.input_evidence(input_id) if input_id else store.readiness(str(day))
+
+    def load(root, day, evidence, check):
+        value = values[str(day)]
+        value.provenance['scope_version'] = evidence['scope_version']
+        return value
+
+    monkeypatch.setattr(jobs, 'require_ready', ready)
+    monkeypatch.setattr(jobs, 'load_inputs', load)
+    monkeypatch.setattr(shared_runtime, 'publish_data_update', lambda *_: None)
+    for day in days[:3]:
+        jobs.generate(repo, date.fromisoformat(day), revision=False, progress=lambda *a, **k: None)
+    previous = store.get(days[2])
+    assert any(identity['valid'] is True for identity in previous['state']['identities'].values())
+
+    if revision:
+        # Reproduce archives produced by the faulty entry point: new input IDs
+        # were saved with the old scope, so matching input IDs alone cannot reuse them.
+        for day in days[3:]:
+            payload = build_report(values[day], store.history(day, RULE_VERSION))
+            store.save(day, payload, {'input_id': store.readiness(day)['input_id']})
+        old_branch = RevisionBranch(store)
+        for day in days[2:]:
+            payload = store.get(day)
+            if day in days[4:]:
+                payload['scope_version'] = new_scope
+            old_branch.append(day, payload, payload['input_reference'])
+        old_branch.commit()
+        # The last day matches, but the first switched day does not. A branch
+        # spanning the source change must compare every date, not its last scope.
+        original_reports = [store.get(day) for day in days]
+        result = jobs.generate(repo, date.fromisoformat(days[2]), revision=True, progress=lambda *a, **k: None)
+        assert not result['reused']
+        manifest = next(item for item in store.branch_manifests() if item['branch_id'] == result['branch_id'])
+        reports = [store.get(day, manifest['dates'][day]['version']) for day in days[3:]]
+        assert [store.get(day) for day in days] == original_reports
+        repeated = jobs.generate(repo, date.fromisoformat(days[2]), revision=True, progress=lambda *a, **k: None)
+        assert repeated['reused'] and repeated['version'] == result['version']
+    else:
+        for day in days[3:]:
+            jobs.generate(repo, date.fromisoformat(day), revision=False, progress=lambda *a, **k: None)
+        reports = [store.get(day) for day in days[3:]]
+
+    first, second, third = reports
+    assert all(report['scope_version'] == new_scope for report in reports)
+    assert first['sectors'][0]['round']['status'] == 'probing'
+    assert not any(identity['valid'] is True for identity in first['state']['identities'].values())
+    assert first['statistics']['publication_frequency']['report_days'] == 1
+    assert second['sectors'][0]['round']['status'] == 'active'
+    assert third['statistics']['publication_frequency']['report_days'] == 3
+    assert any(identity['valid'] is True for identity in third['state']['identities'].values())
+    assert store.get(days[2]) == previous
 
 
 def test_concept_filter_uses_original_members_and_never_filters_industry():
@@ -246,7 +339,8 @@ def test_revision_recomputes_forward_without_borrowing_original_future_states(tm
     plan = [(day, chr(97 + index) * 32) for index, day in enumerate(days[1:])]
     monkeypatch.setattr(jobs, '_revision_plan', lambda *_: (plan, []))
     monkeypatch.setattr(jobs, 'require_ready', lambda root, day, input_id=None: {
-        'input_id': input_id, 'date': str(day), 'cutoff': str(day), 'versions': {}, 'classifications': []})
+        'input_id': input_id, 'date': str(day), 'cutoff': str(day), 'versions': {}, 'classifications': [],
+        'scope_version': SCOPE_VERSION})
     monkeypatch.setattr(jobs, 'load_inputs', lambda root, day, evidence, check: SimpleNamespace(trade_date=str(day), provenance={}))
     observed = []
     def calculate(value, history, cancel_check):
@@ -273,7 +367,8 @@ def test_revision_cancel_after_first_staged_date_exposes_no_new_version(tmp_path
         store.save(str(day), {'trade_date': str(day), 'rule_version': RULE_VERSION, 'state': {}}, {'input_id': str(index) * 32})
     monkeypatch.setattr(jobs, '_revision_plan', lambda *_: ([(day, chr(97 + i) * 32) for i, day in enumerate(days)], []))
     monkeypatch.setattr(jobs, 'require_ready', lambda root, day, input_id=None: {
-        'input_id': input_id, 'date': str(day), 'cutoff': str(day), 'versions': {}, 'classifications': []})
+        'input_id': input_id, 'date': str(day), 'cutoff': str(day), 'versions': {}, 'classifications': [],
+        'scope_version': SCOPE_VERSION})
     def load(root, day, evidence, check):
         if day == days[1]:
             raise pipeline_jobs.JobCancelledError('cancel')
@@ -575,8 +670,6 @@ def test_explicit_rebuild_revalidates_revoked_session_before_delayed_execution(t
 
 def test_selection_policy_revision_recomputes_same_inputs_and_preserves_original(accepted, monkeypatch):
     from app.services import evening_report_rules
-    from app.services.evening_report_engine import SCOPE_VERSION
-
     state = accepted
     store = EveningReportStore(state.root)
     current_policy = evening_report_rules.SELECTION_POLICY_VERSION

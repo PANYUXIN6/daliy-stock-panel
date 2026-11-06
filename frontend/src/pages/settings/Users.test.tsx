@@ -6,8 +6,8 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { SettingsUsersPanel } from './Users'
 import type { AiUserUsage } from '@/lib/api'
 
-const mocks = vi.hoisted(() => ({ list: vi.fn(), events: vi.fn(), create: vi.fn(), update: vi.fn(), reset: vi.fn(), revoke: vi.fn(), toast: vi.fn() }))
-vi.mock('@/lib/api', () => ({ api: { users: mocks.list, loginEvents: mocks.events, createUser: mocks.create, updateUser: mocks.update, resetUserPassword: mocks.reset, revokeUserSession: mocks.revoke } }))
+const mocks = vi.hoisted(() => ({ list: vi.fn(), events: vi.fn(), create: vi.fn(), update: vi.fn(), reset: vi.fn(), revoke: vi.fn(), delete: vi.fn(), toast: vi.fn() }))
+vi.mock('@/lib/api', () => ({ api: { users: mocks.list, loginEvents: mocks.events, createUser: mocks.create, updateUser: mocks.update, resetUserPassword: mocks.reset, revokeUserSession: mocks.revoke, deleteUser: mocks.delete } }))
 vi.mock('@/components/Toast', () => ({ toast: mocks.toast }))
 const alice = { id: 'a', username: 'alice', role: 'guest', pro_expires_on: null, is_active: true, must_change_password: false, login_count: 9, last_login_at: null, last_login_ip: null }
 function usage(values: Partial<AiUserUsage> = {}): AiUserUsage {
@@ -21,7 +21,7 @@ beforeEach(() => {
   Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true })
   vi.clearAllMocks()
   mocks.list.mockResolvedValue({ users: [alice], total: 1 }); mocks.events.mockResolvedValue({ events: [], total: 0 })
-  mocks.create.mockResolvedValue({ user: alice }); mocks.update.mockResolvedValue({ user: alice }); mocks.reset.mockResolvedValue({ ok: true }); mocks.revoke.mockResolvedValue({ ok: true })
+  mocks.create.mockResolvedValue({ user: alice }); mocks.update.mockResolvedValue({ user: alice }); mocks.reset.mockResolvedValue({ ok: true }); mocks.revoke.mockResolvedValue({ ok: true }); mocks.delete.mockResolvedValue({ ok: true })
   qc = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } })
   host = document.createElement('div'); document.body.append(host); root = createRoot(host)
 })
@@ -32,6 +32,7 @@ async function click(text: string) { const button = [...host.querySelectorAll('b
 async function fill(label: string, value: string) { const e = host.querySelector<HTMLInputElement>(`input[aria-label="${label}"]`)!; await act(async () => { Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(e, value); e.dispatchEvent(new Event('input', { bubbles: true })) }) }
 async function submit() { await act(async () => host.querySelector('form')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }))); await settle() }
 async function selectRole(value: string) { const role = host.querySelector<HTMLSelectElement>('select[aria-label="角色"]')!; await act(async () => { role.value = value; role.dispatchEvent(new Event('change', { bubbles: true })) }) }
+async function togglePermanent() { await act(async () => host.querySelector<HTMLInputElement>('input[aria-label="永久 Pro"]')!.click()); await settle() }
 it('creates a guest with a temporary password and clears modal data after success', async () => {
   await render(); await click('创建用户')
   expect(host.querySelector<HTMLSelectElement>('select[aria-label="角色"]')!.value).toBe('guest')
@@ -53,9 +54,52 @@ it('requires a pro expiry date and submits the selected date unchanged', async (
   await fill('Pro 到期日', '2026-12-31'); await submit()
   expect(mocks.update).toHaveBeenCalledWith('a', { role: 'pro', pro_expires_on: '2026-12-31' })
 })
+it('creates permanent pro without an expiry and resets the choice on reopening', async () => {
+  await render(); await click('创建用户'); await selectRole('pro'); await togglePermanent()
+  expect(host.querySelector('input[aria-label="Pro 到期日"]')).toBeNull()
+  await fill('用户名', 'permanent'); await fill('临时密码', 'temp-password'); await submit()
+  expect(mocks.create).toHaveBeenCalledWith({ username: 'permanent', password: 'temp-password', role: 'pro', pro_expires_on: null })
+  await click('创建用户'); await selectRole('pro')
+  expect(host.querySelector<HTMLInputElement>('input[aria-label="永久 Pro"]')!.checked).toBe(false)
+  expect(host.querySelector<HTMLInputElement>('input[aria-label="Pro 到期日"]')!.required).toBe(true)
+})
+it('switches dated pro to permanent and allows setting a date for an existing permanent pro', async () => {
+  mocks.list.mockResolvedValue({ users: [{ ...alice, role: 'pro', pro_expires_on: '2026-12-31' }], total: 1 })
+  await render(); await click('编辑权限'); await togglePermanent(); await submit()
+  expect(mocks.update).toHaveBeenCalledWith('a', { role: 'pro', pro_expires_on: null })
+  mocks.list.mockResolvedValue({ users: [{ ...alice, role: 'pro', pro_expires_on: null }], total: 1 })
+  await click('刷新用量')
+  expect(host.textContent).toContain('永久 Pro')
+  await click('编辑权限')
+  expect(host.querySelector<HTMLInputElement>('input[aria-label="永久 Pro"]')!.checked).toBe(true)
+  await togglePermanent(); await fill('Pro 到期日', '2027-01-31'); await submit()
+  expect(mocks.update).toHaveBeenLastCalledWith('a', { role: 'pro', pro_expires_on: '2027-01-31' })
+})
+it('deletes only after a clear irreversible-data warning and refreshes the user and login lists', async () => {
+  await render(); await click('登录记录'); await click('彻底删除')
+  const dialog = host.querySelector('[role="dialog"]')!
+  expect(dialog.textContent).toContain('alice')
+  expect(dialog.textContent).toContain('全部个人数据将一并删除，无法恢复')
+  expect(mocks.delete).not.toHaveBeenCalled()
+  mocks.list.mockResolvedValue({ users: [], total: 0 })
+  await click('确认彻底删除')
+  expect(host.querySelector('[role="dialog"]')).toBeNull()
+  expect(host.textContent).toContain('没有匹配的用户')
+  expect(mocks.events).toHaveBeenLastCalledWith('', 0)
+})
+it('shows interrupted deletion as retryable without offering account restoration', async () => {
+  mocks.list.mockResolvedValue({ users: [{ ...alice, is_active: false, deletion_pending: true }], total: 1 })
+  await render()
+  expect(host.textContent).toContain('删除未完成')
+  const actions = [...host.querySelectorAll('tbody tr')][0].querySelectorAll('button')
+  expect([...actions].map(button => button.textContent)).toEqual(['重试彻底删除', '登录记录'])
+  await click('重试彻底删除'); await click('确认彻底删除')
+  expect(mocks.delete).toHaveBeenCalledWith('a')
+})
 it.each([
   ['禁用', '确认禁用', 'update'],
   ['强制下线', '确认下线', 'revoke'],
+  ['彻底删除', '确认彻底删除', 'delete'],
 ] as const)('requires confirmation for %s and allows cancellation and retry', async (action, confirm, method) => {
   await render(); await click(action)
   expect(host.querySelector('[role="dialog"]')?.textContent).toContain('alice')
@@ -72,7 +116,10 @@ it.each([
   await click(confirm)
   expect(host.querySelector('[role="dialog"]')).toBeNull()
   if (method === 'update') expect(mocks.update).toHaveBeenCalledWith('a', { is_active: false })
-  else {
+  else if (method === 'delete') {
+    expect(mocks.delete).toHaveBeenCalledWith('a')
+    expect(mocks.toast).toHaveBeenCalledExactlyOnceWith('已彻底删除用户「alice」及其个人数据', 'success')
+  } else {
     expect(mocks.revoke).toHaveBeenCalledWith('a')
     expect(mocks.toast).toHaveBeenCalledExactlyOnceWith('已将用户「alice」强制下线', 'success')
   }
@@ -126,7 +173,7 @@ it('only allows viewing login history for the admin account', async () => {
   const guestRow = rows.find(row => row.textContent?.includes('alice'))!
   expect([...adminRow.querySelectorAll('button')].map(button => button.textContent)).toEqual(['登录记录'])
   expect(adminRow.textContent).toContain('管理员账号受保护')
-  expect([...guestRow.querySelectorAll('button')].map(button => button.textContent)).toEqual(['编辑权限', '禁用', '重置密码', '强制下线', '登录记录'])
+  expect([...guestRow.querySelectorAll('button')].map(button => button.textContent)).toEqual(['编辑权限', '禁用', '重置密码', '强制下线', '彻底删除', '登录记录'])
   await act(async () => adminRow.querySelector<HTMLButtonElement>('button')!.click())
   await settle()
   expect(mocks.events).toHaveBeenLastCalledWith('admin-id', 0)

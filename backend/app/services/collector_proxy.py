@@ -36,6 +36,8 @@ def _under(path: str, prefix: str) -> bool:
 
 
 def collector_owns(method: str, path: str) -> bool:
+    if method == 'DELETE' and _under(path, '/api/users'):
+        return True  # Deletion must stop the owner's live tasks before removing files.
     if method == 'POST' and path in _LOCAL_POSTS:
         return False
     if any(_under(path, prefix) for prefix in _OWNER_PREFIXES):

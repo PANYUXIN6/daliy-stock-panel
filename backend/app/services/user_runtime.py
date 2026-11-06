@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import threading
+from contextlib import suppress
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -79,25 +80,36 @@ class UserRuntimeRegistry:
             runtime.monitor_engine.invalidate_strategy_state()
             runtime.paper_monitor_engine.invalidate_strategy_state()
 
+    def stop_user(self, uid: str):
+        with self._lock:
+            runtime = self._runtimes.get(uid)
+        if runtime is not None:
+            runtime.strategy_monitor.stop_all()
+            runtime.mining_manager.shutdown()
+
+    def forget_user(self, uid: str):
+        with self._lock:
+            self._runtimes.pop(uid, None)
+
     def recover_interrupted(self):
         # Recovery needs persisted manifests, not an engine per registered account.
-        from app.services.auth import get_store
+        from app.services.auth import AuthError, get_store
         from app.services.mining_jobs import MiningRunStore
         root = self.state.repo.store.data_dir
         for row in get_store(root).list_active_users():
-            with user_scope(UserContext(row['id'], row['role'], root)):
+            with suppress(AuthError), user_scope(UserContext(row['id'], row['role'], root)):
                 MiningRunStore(root).recover_interrupted()
 
     def background_active(self):
         """Keep offline tasks running without constructing idle users' engines."""
         from app.services import preferences
-        from app.services.auth import get_store
+        from app.services.auth import AuthError, get_store
         from app.strategy import monitor_rules, paper
         root = self.state.repo.store.data_dir
         result = []
         for row in get_store(root).list_active_users():
             user = UserContext(row['id'], row['role'], root)
-            with user_scope(user):
+            with suppress(AuthError), user_scope(user):
                 with self._lock:
                     existing = self._runtimes.get(user.id)
                 has_paper = any(paper.accounts_base(root).glob('*/account.json'))
@@ -113,17 +125,25 @@ class UserRuntimeRegistry:
         return result
 
     def shutdown(self):
+        from app.services.auth import AuthError
         with self._lock:
             runtimes = list(self._runtimes.values())
         for runtime in runtimes:
-            with user_scope(runtime.user):
-                runtime.mining_manager.shutdown()
+            try:
+                with user_scope(runtime.user):
+                    runtime.mining_manager.shutdown()
+            except AuthError:
+                continue  # Deletion already stopped this runtime; never recreate its files.
 
     def active(self):
-        from app.services.auth import get_store
+        from app.services.auth import AuthError, get_store
         root = self.state.repo.store.data_dir
         users = get_store(root).list_active_users()
-        return [self.get(UserContext(row['id'], row['role'], root)) for row in users]
+        result = []
+        for row in users:
+            with suppress(AuthError):
+                result.append(self.get(UserContext(row['id'], row['role'], root)))
+        return result
 
 
 def runtime_for(request):
@@ -139,11 +159,11 @@ def strategy_directories(root: Path) -> list[Path]:
 
 def settle_user_accounts(root: Path, day: str) -> dict:
     from app.services import alert_store
-    from app.services.auth import get_store
+    from app.services.auth import AuthError, get_store
     from app.strategy import paper
     settled = 0
     for user in get_store(root).list_active_users():
-        with user_scope(UserContext(user['id'], user['role'], root)):
+        with suppress(AuthError), user_scope(UserContext(user['id'], user['role'], root)):
             for account in paper.list_account_ids(root):
                 result = paper.settle_day(root, day, account_id=account)
                 if result.get('filled'):
@@ -154,9 +174,9 @@ def settle_user_accounts(root: Path, day: str) -> dict:
 
 def active_watchlist_symbols(root: Path) -> set[str]:
     from app.services import watchlist
-    from app.services.auth import get_store
+    from app.services.auth import AuthError, get_store
     symbols = set()
     for user in get_store(root).list_active_users():
-        with user_scope(UserContext(user['id'], user['role'], root)):
+        with suppress(AuthError), user_scope(UserContext(user['id'], user['role'], root)):
             symbols.update(row['symbol'] for row in watchlist.list_symbols())
     return symbols

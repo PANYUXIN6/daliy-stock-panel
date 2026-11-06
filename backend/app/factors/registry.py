@@ -304,6 +304,14 @@ _USER_LOADING: set[str] = set()
 _USER_LOCK = threading.RLock()
 
 
+def forget_user_cache(data_dir, uid: str) -> None:
+    key = str(data_dir.resolve() / uid)
+    with _USER_LOCK:
+        _USER_REGISTRIES.pop(key, None)
+        _USER_FINGERPRINTS.pop(key, None)
+        _USER_REVISIONS.pop(key, None)
+
+
 def _owner_key() -> str | None:
     from app.services.user_context import current_user
     owner = current_user(required=False)

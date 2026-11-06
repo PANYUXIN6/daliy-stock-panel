@@ -332,6 +332,17 @@ async def fetch_and_ingest(
     """
     # 同上: 落盘分区按北京日期, 否则 UTC 容器在北京时间 08:00 之前写的是前一天。
     day = target_date or cn_today()
+    from app.services.ext_presets import (
+        commit_prepared_preset,
+        is_builtin_classification_pull,
+        prepare_preset,
+    )
+
+    if is_builtin_classification_pull(config):
+        if day != cn_today():
+            raise ValueError("板块分类接口仅提供当前快照，不能回补历史分类")
+        prepared = await prepare_preset(config.id, Path(data_dir))
+        return commit_prepared_preset(prepared, Path(data_dir), keep_strategy_cache=keep_strategy_cache), day.isoformat()
     rows = await fetch_rows_for_date(config, day)
     if not rows:
         raise ValueError("提取到的行数为 0")

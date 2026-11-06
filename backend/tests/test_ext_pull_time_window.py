@@ -18,6 +18,7 @@ import pytest
 
 from app.market_time import CN_TZ
 from app.services import ext_pull
+from app.services.ext_data import ExtConfig, ExtField, PullConfig
 
 
 @pytest.fixture
@@ -29,6 +30,15 @@ def at_beijing(monkeypatch: pytest.MonkeyPatch):
         monkeypatch.setattr(ext_pull, "cn_today", lambda: moment.date())
 
     return freeze
+
+
+@pytest.fixture
+def pull_config() -> ExtConfig:
+    return ExtConfig(
+        id="time_window", label="日期测试", mode="timeseries",
+        fields=[ExtField("symbol", "string"), ExtField("v", "float")],
+        pull=PullConfig(url="https://example.test/data"),
+    )
 
 
 def test_window_follows_beijing_time_not_the_machine_clock(at_beijing) -> None:
@@ -57,7 +67,7 @@ def test_no_window_configured_is_still_unrestricted(at_beijing) -> None:
     assert ext_pull._in_time_window(None, "15:00") is True
 
 
-async def test_default_landing_date_is_the_beijing_date(at_beijing, monkeypatch) -> None:
+async def test_default_landing_date_is_the_beijing_date(at_beijing, monkeypatch, pull_config) -> None:
     """不传 target_date 时按北京日期落盘。
 
     北京 00:30 对应 UTC 前一天 16:30, 裸 date.today() 在 UTC 容器上会把当天的
@@ -77,7 +87,7 @@ async def test_default_landing_date_is_the_beijing_date(at_beijing, monkeypatch)
     monkeypatch.setattr(ext_pull, "fetch_rows_for_date", fake_fetch)
     monkeypatch.setattr(ext_pull, "rows_to_parquet", fake_write)
 
-    written, day_str = await ext_pull.fetch_and_ingest(object(), "/tmp")
+    written, day_str = await ext_pull.fetch_and_ingest(pull_config, "/tmp")
 
     assert written == 1
     assert seen["fetched"] == date(2026, 3, 2)
@@ -85,7 +95,7 @@ async def test_default_landing_date_is_the_beijing_date(at_beijing, monkeypatch)
     assert day_str == "2026-03-02"
 
 
-async def test_an_explicit_target_date_still_wins(at_beijing, monkeypatch) -> None:
+async def test_an_explicit_target_date_still_wins(at_beijing, monkeypatch, pull_config) -> None:
     # 历史回补路径不受影响。
     at_beijing(datetime(2026, 3, 2, 10, 0, tzinfo=CN_TZ))
     seen: dict[str, date] = {}
@@ -97,7 +107,7 @@ async def test_an_explicit_target_date_still_wins(at_beijing, monkeypatch) -> No
     monkeypatch.setattr(ext_pull, "fetch_rows_for_date", fake_fetch)
     monkeypatch.setattr(ext_pull, "rows_to_parquet", lambda *a, **k: 1)
 
-    _, day_str = await ext_pull.fetch_and_ingest(object(), "/tmp", date(2026, 1, 5))
+    _, day_str = await ext_pull.fetch_and_ingest(pull_config, "/tmp", date(2026, 1, 5))
 
     assert seen["fetched"] == date(2026, 1, 5)
     assert day_str == "2026-01-05"

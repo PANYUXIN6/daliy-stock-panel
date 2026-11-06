@@ -28,7 +28,7 @@ from pathlib import Path
 
 from app.services.private_storage import private_path
 from app.services.task_scheduler import TaskScheduler
-from app.services.user_context import current_user
+from app.services.user_context import current_user, user_scope
 
 logger = logging.getLogger(__name__)
 
@@ -163,6 +163,20 @@ class StrategyRunManager:
                 break
             self._completed.popitem(last=False)
 
+    def forget_user(self, data_dir: Path, uid: str) -> None:
+        """Drop personal results after active operations have drained."""
+        owner_key = (str(data_dir.resolve()), uid)
+        with self._lock:
+            for key, handle in list(self._handles.items()):
+                if key[:2] == owner_key:
+                    handle.future.cancel()
+                    handle.fail("账号已删除")
+                    self._handles.pop(key)
+                    self._runs.pop(handle.run_id, None)
+            for run_id, (owner, _, _) in list(self._completed.items()):
+                if owner == owner_key:
+                    self._completed.pop(run_id)
+
     def status(self, run_id: str) -> dict | None:
         owner = current_user()
         owner_key = (str(owner.data_dir.resolve()), owner.id)
@@ -187,7 +201,10 @@ class StrategyRunManager:
         context = copy_context()
         original_job = job
         def owned_job(handle):
-            return context.run(original_job, handle)
+            def run():
+                with user_scope(owner):
+                    return original_job(handle)
+            return context.run(run)
         with self._lock:
             self._prune_statuses()
             existing = self._handles.get(key)

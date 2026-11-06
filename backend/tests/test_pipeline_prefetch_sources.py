@@ -79,14 +79,14 @@ async def test_classifications_fetch_concurrently_then_commit_without_overwritin
     user_config.label = "自定义概念标题"
     ExtConfigStore(tmp_path).upsert(user_config)
 
-    async def fetch(url):
-        started.add(url)
+    async def fetch(config_id, data_dir, on_progress=None):
+        started.add(config_id)
         if len(started) == 2:
             both_started.set()
         await asyncio.wait_for(both_started.wait(), timeout=1)
         # 两个请求完成前均未写入结果。
         assert not commits
-        if "concepts" in url:
+        if config_id == "ext_gn_ths":
             return [{"symbol": "600000.SH", "concepts": ["金融"]}]
         return [{"symbol": "600000.SH", "industries": ["金融", "银行"]}]
 
@@ -94,7 +94,7 @@ async def test_classifications_fetch_concurrently_then_commit_without_overwritin
         commits.append(prepared.config.id)
         return original_commit(prepared, root)
 
-    monkeypatch.setattr(ext_presets, "_fetch_json", fetch)
+    monkeypatch.setattr(ext_presets, "_fetch_classification_rows", fetch)
     monkeypatch.setattr(ext_presets, "commit_prepared_preset", commit)
     results = {}
     await ext_presets.sync_classifications(tmp_path, results, lambda *args: None)
@@ -105,10 +105,10 @@ async def test_classifications_fetch_concurrently_then_commit_without_overwritin
 
 
 async def test_preset_prepare_does_not_create_config_or_parquet(tmp_path, monkeypatch):
-    async def fetch(url):
+    async def fetch(config_id, data_dir, on_progress=None):
         return [{"symbol": "600000.SH", "concepts": ["金融"]}]
 
-    monkeypatch.setattr(ext_presets, "_fetch_json", fetch)
+    monkeypatch.setattr(ext_presets, "_fetch_classification_rows", fetch)
     prepared = await ext_presets.prepare_preset("ext_gn_ths", tmp_path)
     assert not list(tmp_path.iterdir())
     assert prepared.rows[0]["所属概念"] == "金融"

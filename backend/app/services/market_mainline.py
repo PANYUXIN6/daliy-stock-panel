@@ -28,8 +28,8 @@ from app.services.rps_rotation import _load_concept_map_df
 logger = logging.getLogger(__name__)
 
 MEMBERSHIP_NOTE = (
-    "概念成分为当前快照回看历史(本地自 2026-07 起留存, 无历史版本), "
-    "早年主线存在归属漂移, 越近越准"
+    "板块成分为当前快照回看历史，无历史成员版本，早年主线存在归属漂移。"
+    "旧行业路径按前两级聚合，fuyao 行业按原始名称聚合；已保存的历史主线保留当时标签与结果"
 )
 
 MAINLINE_DIR = "mainline_history"
@@ -116,13 +116,6 @@ def load_mainline_history(data_dir: Path, kind: str = "concept") -> pl.DataFrame
     return df.filter(pl.col("kind") == kind)
 
 
-def _industry_member(member: str, kind: str) -> str:
-    """行业维度取前 _INDUSTRY_LEVEL 级; 概念原样返回。"""
-    if kind != "industry":
-        return member
-    return "-".join(member.split("-")[:_INDUSTRY_LEVEL])
-
-
 def compute_mainline_range(repo, data_dir: Path, start: date, end: date,
                            kind: str = "concept",
                            filter_cfg: dict | None = None,
@@ -149,9 +142,18 @@ def compute_mainline_range(repo, data_dir: Path, start: date, end: date,
     if map_df.is_empty():
         return pl.DataFrame()
 
+    # 先统一实际聚合粒度再计成员数；旧三级路径可能合到同一二级，
+    # 同一股票不能因多条细分路径被重复计入人数、涨停家数和梯队。
+    if kind == "industry":
+        map_df = map_df.with_columns(pl.col(kind).str.split("-").list.slice(0, _INDUSTRY_LEVEL).list.join("-"))
+    map_df = map_df.unique(subset=["_sym_up", kind])
+
     cfg = _resolve_filter_config(filter_cfg)
     if cfg["min_members"] > 1 or cfg["max_members"] < 5000 or cfg["blacklist"]:
-        member_counts = map_df.group_by(kind).len().rename({"len": "_members"})
+        # 映射同时保留完整代码和六位代码用于匹配，成员数不能把别名算成两只股票。
+        member_counts = map_df.group_by(kind).agg(
+            pl.col("_sym_up").str.replace(r"\.(SH|SZ|BJ)$", "").n_unique().alias("_members"),
+        )
         member_counts = member_counts.filter(
             pl.col("_members").ge(cfg["min_members"])
             & pl.col("_members").le(cfg["max_members"])
@@ -192,12 +194,7 @@ def compute_mainline_range(repo, data_dir: Path, start: date, end: date,
     joined = limit_rows.join(map_df, on="_sym_up", how="inner")
     if joined.is_empty():
         return pl.DataFrame()
-    joined = joined.with_columns(
-        pl.col(kind).map_elements(
-            lambda m: _industry_member(str(m), kind),
-            return_dtype=pl.Utf8,
-        ).alias("member")
-    )
+    joined = joined.with_columns(pl.col(kind).alias("member"))
 
     agg = (
         joined.group_by(["date", "member"])

@@ -151,6 +151,22 @@ class TestComputeMainline:
         assert sw["limit_up_count"] == 3
         assert sw["max_boards"] == 3
 
+    def test_legacy_industry_paths_count_each_stock_once_before_member_filter(self, tmp_path, monkeypatch):
+        day = date(2024, 1, 2)
+        _write_enriched(tmp_path, _mk_rows(day, [("S1.SH", 3, 3e8), ("S2.SH", 2, 2e8), ("S3.SH", 1, 1e8)]))
+        _patch_map(monkeypatch, {
+            "S1.SH": ["计算机-软件开发-应用软件", "计算机-软件开发-基础软件"],
+            "S2.SH": ["计算机-软件开发-应用软件"],
+            "S3.SH": ["计算机-软件开发-基础软件"],
+        }, kind="industry")
+        result = market_mainline.compute_mainline_range(
+            _fake_repo(tmp_path), tmp_path, day, day, kind="industry", exclude_st=False,
+            filter_cfg={"min_members": 3, "max_members": 3, "blacklist": []},
+        )
+        assert result["member"].to_list() == ["计算机-软件开发"]
+        assert result["limit_up_count"].to_list() == [3]
+        assert result["boards_sum"].to_list() == [6]
+
 
 class TestMainlineFilterPreferences:
     def test_blacklist_string_parsing_and_clamp(self, tmp_path, monkeypatch):

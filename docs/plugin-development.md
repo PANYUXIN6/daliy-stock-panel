@@ -143,6 +143,14 @@ fuyao 只读 GET 的连接、超时、远端断流最多尝试 3 次，共用 0.
 
 当前可选财务因子保留毛利率、净利率、营收增速和归母净利润增速；PB、ROE、资产负债率已退出目录。旧研究格式的时间线仍可读，旧策略缺失评分不静默重分权重，缺少现金流等输入时保留缺失。
 
+## 内置概念与行业分类
+
+内置 `ext_gn_ths`／`ext_hy_ths` 由 `services/ext_presets.py` 调用 Fuyao 的 `get_classifications(symbols, kind, on_progress=..., cancel_event=...)`，属于这两个预设的专用接入，不是通用行情能力路由。复用数据源设置中的 Fuyao API Key；需要先有当前股票维表。底层使用[个股所属板块查询](https://fuyao.aicubes.cn/docs/api-reference/a-share-index/#stock-sector-memberships) `ths-index-list-by-stock`，每批最多100只，分别请求 `cn_concept` 与 `industry`，沿用全进程限频、传输重试及取消机制。
+
+provider 返回 `[{symbol, concepts: [...]}]` 或 `[{symbol, industries: [...]}]`。每个请求证券必须有且仅有一个响应分组，缺组、重复组、非法标签或类型不匹配均失败；明确的空分类列表保留为空，不从旧表补齐。每张表全部批次成功后才原子替换快照，失败保留该表原内容；两表仍按既有顺序独立提交并发布已保存结果。
+
+表ID、股票代码／简称、`symbol`／`code` 与分类字段保持兼容。概念和新行业的多个独立名称均用分号分隔；Fuyao 未提供行业父子层级，不能拼造三级路径。旧层级表继续可读，主线将旧路径聚合到前两级，新分类保留源名称；已保存主线与晚报不因换源改写。当前分类没有历史生效日或源版本，相关字段保留未知，不能用本次关系补造历史身份。旧出厂URL在启动时定向迁移，用户自定义地址和调度开关保持；启动不取数。
+
 ## 盘后完整性与异常语义
 
 交易日盘后验收遵循 [盘后管道](postmarket-pipeline.md)。请求成功、旧分区和少量当天行均不等于全市场完整。

@@ -75,13 +75,35 @@ def _build_observations(rows: list[dict], today: str, after_close: bool) -> list
     for i, row in enumerate(rows):
         current = row.get("method_version") == VERSION
         complete = row.get("is_complete_day") is True and (str(row["date"]) < today or (str(row["date"]) == today and after_close))
-        same_method = [r for r in rows[max(0, i - 19):i + 1]
+        amount_window = rows[max(0, i - 19):i + 1]
+        same_method = [r for r in amount_window
                        if r.get("method_version") == VERSION and r.get("exclude_st") == row.get("exclude_st")
                        and r.get("is_complete_day") is True
                        and (str(r["date"]) < today or (str(r["date"]) == today and after_close))]
         amounts = [finite(r.get("total_amount")) for r in same_method]
         row["amount_ratio_5_20"] = (sum(amounts[-5:]) / 5 / (sum(amounts) / 20)
                                        if len(amounts) == 20 and all(v is not None for v in amounts) and sum(amounts) > 0 else None)
+        amount_reason = None
+        if row["amount_ratio_5_20"] is None:
+            valid_amount_days = sum(v is not None for v in amounts)
+            problems = []
+            if len(amount_window) < 20:
+                problems.append(f"历史仅有{len(amount_window)}日")
+            incompatible = [str(r["date"]) for r in amount_window
+                            if r.get("method_version") != VERSION or r.get("exclude_st") != row.get("exclude_st")]
+            unclosed = [str(r["date"]) for r in amount_window
+                        if r.get("is_complete_day") is not True or str(r["date"]) > today
+                        or (str(r["date"]) == today and not after_close)]
+            missing_amount = [str(r["date"]) for r in same_method if finite(r.get("total_amount")) is None]
+            for dates, reason in ((incompatible, "口径不一致，需重算环境"),
+                                  (unclosed, "收盘口径未确认，需补采正式日线后重算环境"),
+                                  (missing_amount, "成交额缺失，需补齐源数据后重算环境")):
+                if dates:
+                    dates_text = "、".join(dates[:3]) + (f"等{len(dates)}日" if len(dates) > 3 else "")
+                    problems.append(f"{dates_text}{reason}")
+            if valid_amount_days == 20 and sum(amounts) <= 0:
+                problems.append("20日成交额均值不大于零")
+            amount_reason = f"需完整20日成交额，当前有效{valid_amount_days}/20日；" + "；".join(problems)
         observations = []
         for key, label, group, unit in SPECS:
             value = finite(row.get(key)) if current else None
@@ -94,8 +116,16 @@ def _build_observations(rows: list[dict], today: str, after_close: bool) -> list
             old = prior[-5][0] if len(prior) >= 5 and prior[-5][1] == row.get("exclude_st") else None
             denom_key = {"above_ma20_pct": "ma20_valid_count", "above_ma60_pct": "ma60_valid_count", "seal_rate": "touched_limit", "broken_rate": "touched_limit"}.get(key)
             denominator = row.get(denom_key) if denom_key else row.get("change_valid_count") if key in {"up_pct", "down_pct"} else row.get("total_count") if key in {"limit_up_pct", "limit_down_pct"} else None
+            missing_reason = None
+            if value is None:
+                missing_reason = ("旧方法记录，需重算" if not current else amount_reason if key == "amount_ratio_5_20"
+                                  else "尚未接入可用数据源" if group == "external" else "有效数据或分母不足")
+            percentile_reason = None
+            if percentile is None:
+                percentile_reason = (missing_reason if value is None else "收盘口径尚未确认，需刷新或重算" if not complete
+                                     else f"需当日之前500个有效交易日，当前有效{len(valid)}/500日")
             observations.append(dict(key=key, label=label, group=group, unit=unit, value=value,
-                denominator=finite(denominator), missing_reason=None if value is not None else ("旧方法记录，需重算" if not current else "有效数据或分母不足，或数据源未接入"), percentile_reason=None if percentile is not None else "收盘口径尚未确认，需刷新或重算" if not complete else "需当日之前500个有效交易日", status="available" if value is not None else "unavailable",
+                denominator=finite(denominator), missing_reason=missing_reason, percentile_reason=percentile_reason, status="available" if value is not None else "unavailable",
                 percentile=percentile, history_sample_count=len(valid), history_coverage=len(valid) / WINDOW,
                 change_5d=value - old if value is not None and old is not None else None,
                 extreme_streak=streaks[key], extreme_side=side))

@@ -2,17 +2,15 @@ import { useEffect, useMemo, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import { Activity, RefreshCw } from 'lucide-react'
-import { api, type IndexInstrument, type KlineRow, type MinuteKlineRow } from '@/lib/api'
+import { api, type IndexInstrument, type KlinePeriod, type KlineRow, type MinuteKlineRow } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { EChartsCandlestick, type OHLC } from '@/components/EChartsCandlestick'
 import { EChartsIntraday } from '@/components/EChartsIntraday'
+import { BoxOscillationControls } from '@/components/BoxOscillationControls'
+import { getKlineDefaultRange, KLINE_PERIOD_LABELS, useBoxOscillation } from '@/lib/useBoxOscillation'
 
 function defaultRange() {
-  const now = new Date()
-  const end = now.toISOString().slice(0, 10)
-  const s = new Date(now)
-  s.setMonth(s.getMonth() - 6)
-  return { start: s.toISOString().slice(0, 10), end }
+  return getKlineDefaultRange()
 }
 
 function toOHLC(rows: KlineRow[]): OHLC[] {
@@ -29,6 +27,7 @@ function toOHLC(rows: KlineRow[]): OHLC[] {
       ma10: r.ma10 != null ? Number(r.ma10) : null,
       ma20: r.ma20 != null ? Number(r.ma20) : null,
       ma60: r.ma60 != null ? Number(r.ma60) : null,
+      bull_bear_line: r.bull_bear_line != null ? Number(r.bull_bear_line) : null,
       macd_dif: r.macd_dif != null ? Number(r.macd_dif) : null,
       macd_dea: r.macd_dea != null ? Number(r.macd_dea) : null,
       macd_hist: r.macd_hist != null ? Number(r.macd_hist) : null,
@@ -65,6 +64,7 @@ export function Indices() {
   const symbolParam = searchParams.get('symbol') ?? ''
   const [selected, setSelected] = useState<string>(symbolParam)
   const [range, setRange] = useState(defaultRange)
+  const [startOverrides, setStartOverrides] = useState<Partial<Record<KlinePeriod, string>>>({})
   const [selectedDate, setSelectedDate] = useState<string | null>(null)
   const [linkedPrice, setLinkedPrice] = useState<number | null>(null)
 
@@ -74,6 +74,8 @@ export function Indices() {
   }))
 
   const selectedSymbol = selected || topRows[0]?.symbol || ''
+  const boxView = useBoxOscillation(selectedSymbol, range, startOverrides)
+  const isDaily = boxView.period === 'daily'
 
   useEffect(() => {
     if (symbolParam && symbolParam !== selected) setSelected(symbolParam)
@@ -91,9 +93,9 @@ export function Indices() {
   })
 
   const daily = useQuery({
-    queryKey: QK.indexDaily(selectedSymbol, range.start, range.end),
-    queryFn: () => api.indexDaily(selectedSymbol, 180, range),
-    enabled: !!selectedSymbol,
+    queryKey: QK.indexDaily(selectedSymbol, boxView.requestRange.start, range.end),
+    queryFn: () => api.indexDaily(selectedSymbol, 180, boxView.requestRange),
+    enabled: !!selectedSymbol && isDaily && !boxView.rangeError,
     placeholderData: (prev) => prev?.symbol === selectedSymbol ? prev : undefined,
   })
 
@@ -101,6 +103,19 @@ export function Indices() {
     queryKey: QK.indexMinute(selectedSymbol, selectedDate ?? ''),
     queryFn: () => api.indexMinute(selectedSymbol, selectedDate ?? undefined),
     enabled: !!selectedSymbol && !!selectedDate,
+  })
+
+  // 周月K点击仍查看该根最后一个交易日的分时；其昨收取实际日K，不能用上根周月收盘替代。
+  const minuteDailyRange = useMemo(() => {
+    if (!selectedDate) return null
+    const start = new Date(`${selectedDate}T12:00:00Z`)
+    start.setUTCDate(start.getUTCDate() - 30)
+    return { start: start.toISOString().slice(0, 10), end: selectedDate }
+  }, [selectedDate])
+  const minuteDaily = useQuery({
+    queryKey: QK.indexDaily(selectedSymbol, minuteDailyRange?.start ?? '', minuteDailyRange?.end ?? ''),
+    queryFn: () => api.indexDaily(selectedSymbol, 30, minuteDailyRange!),
+    enabled: !!selectedSymbol && !isDaily && !!minuteDailyRange,
   })
 
   const quoteBySymbol = useMemo(() => {
@@ -112,28 +127,32 @@ export function Indices() {
   const selectedQuoteValue = selectedQuote?.last_price ?? selectedQuote?.price ?? selectedQuote?.close
   const selectedQuotePct = selectedQuote?.change_pct ?? selectedQuote?.pct
 
-  const chartRows = useMemo(() => toOHLC(daily.data?.rows ?? []), [daily.data?.rows])
+  const currentRows = isDaily ? daily.data?.rows : boxView.report?.rows
+  const currentSymbol = isDaily ? daily.data?.symbol : boxView.report?.symbol
+  const chartQuery = isDaily ? daily : boxView.query
+  const chartRows = useMemo(() => toOHLC(currentRows ?? []), [currentRows])
   const selectedInfo = topRows.find(r => r.symbol === selectedSymbol) || daily.data?.index_info
   const minuteRows: MinuteKlineRow[] = minute.data?.symbol === selectedSymbol
-    && minute.data?.date === selectedDate && daily.data?.symbol === selectedSymbol
+    && minute.data?.date === selectedDate && currentSymbol === selectedSymbol
     ? minute.data.rows : []
-  const selectedIdx = selectedDate ? chartRows.findIndex(r => r.date === selectedDate) : -1
+  const dailyRows = isDaily ? chartRows : minuteDaily.data?.symbol === selectedSymbol ? minuteDaily.data.rows : []
+  const selectedIdx = selectedDate ? dailyRows.findIndex(r => r.date === selectedDate) : -1
   const prevClose = selectedIdx > 0
-    ? chartRows[selectedIdx - 1].close
-    : chartRows.length >= 2
-      ? chartRows[chartRows.length - 2].close
+    ? dailyRows[selectedIdx - 1].close
+    : isDaily && dailyRows.length >= 2
+      ? dailyRows[dailyRows.length - 2].close
       : undefined
 
   useEffect(() => {
     setSelectedDate(null)
     setLinkedPrice(null)
-  }, [selectedSymbol])
+  }, [selectedSymbol, boxView.period])
 
   useEffect(() => {
-    if ((!selectedDate || !chartRows.some(r => r.date === selectedDate)) && chartRows.length > 0 && daily.data?.symbol === selectedSymbol) {
+    if ((!selectedDate || !chartRows.some(r => r.date === selectedDate)) && chartRows.length > 0 && currentSymbol === selectedSymbol) {
       setSelectedDate(chartRows[chartRows.length - 1].date)
     }
-  }, [chartRows, daily.data?.symbol, selectedDate, selectedSymbol])
+  }, [chartRows, currentSymbol, selectedDate, selectedSymbol])
   const renderIndexItem = (item: IndexInstrument) => {
     const q = quoteBySymbol.get(item.symbol)
     const pct = q?.change_pct ?? q?.pct
@@ -163,22 +182,22 @@ export function Indices() {
         <div>
           <h1 className="text-lg font-semibold text-foreground">指数</h1>
           <p className="mt-1 text-xs text-muted">
-            查看后台已采集的指数日线与分时数据。
+            查看后台已采集的指数日、周、月K线、箱体与分时数据。
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
           <button
             type="button"
-            onClick={() => { void quotes.refetch(); void daily.refetch(); if (selectedDate) void minute.refetch() }}
-            disabled={quotes.isFetching || daily.isFetching || minute.isFetching}
-            className="inline-flex items-center gap-1.5 rounded-btn border border-border bg-elevated px-3 py-1.5 text-xs text-secondary hover:text-foreground disabled:opacity-50"
+            onClick={() => { void quotes.refetch(); if (isDaily) void daily.refetch(); if (boxView.enabled || !isDaily) void boxView.query.refetch(); if (selectedDate) void minute.refetch() }}
+            disabled={!!boxView.rangeError || quotes.isFetching || chartQuery.isFetching || boxView.query.isFetching || minute.isFetching}
+            className="inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-btn border border-border bg-elevated px-3 py-1.5 text-xs text-secondary hover:text-foreground disabled:opacity-50"
           >
-            <RefreshCw className={`h-3.5 w-3.5 ${quotes.isFetching || daily.isFetching || minute.isFetching ? 'animate-spin' : ''}`} />刷新
+            <RefreshCw className={`h-3.5 w-3.5 ${quotes.isFetching || chartQuery.isFetching || boxView.query.isFetching || minute.isFetching ? 'animate-spin' : ''}`} />刷新
           </button>
         </div>
       </div>
 
-      <div className="grid grid-cols-[15rem_1fr] gap-4">
+      <div className="grid grid-cols-1 gap-4 lg:grid-cols-[15rem_1fr]">
         <aside className="rounded-card border border-border bg-surface p-3">
           <div className="mb-2 px-1 text-[11px] uppercase tracking-wider text-muted">核心指数</div>
           <div className="space-y-1">
@@ -187,7 +206,7 @@ export function Indices() {
         </aside>
 
         <main className="min-w-0 rounded-card border border-border bg-surface p-3">
-          <div className="mb-3 flex items-center justify-between gap-3">
+          <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
             <div className="min-w-0">
               <div className="flex items-center gap-2">
                 <Activity className="h-4 w-4 text-accent" />
@@ -199,37 +218,43 @@ export function Indices() {
                 {selectedSymbol && <span className={`font-mono text-xs ${Number(selectedQuotePct ?? 0) >= 0 ? 'text-bull' : 'text-bear'}`}>{fmtPct(selectedQuotePct)}</span>}
               </div>
               <div className="mt-1 text-xs text-muted">
-                实时缓存 {quotes.data?.count ?? 0} 只指数 · 日K来源 {daily.data?.source ?? '--'}
+                实时缓存 {quotes.data?.count ?? 0} 只指数 · {KLINE_PERIOD_LABELS[boxView.period]}来源 {isDaily ? daily.data?.source ?? '--' : '本地日线聚合'}
               </div>
             </div>
             <div className="flex items-center gap-2 text-xs">
               <input
                 type="date"
-                value={range.start}
-                onChange={e => setRange(r => ({ ...r, start: e.target.value }))}
+                aria-label="K线起始日期"
+                value={boxView.requestRange.start}
+                max={range.end}
+                onChange={e => { if (e.target.value) setStartOverrides(current => ({ ...current, [boxView.period]: e.target.value })) }}
                 className="rounded-btn border border-border bg-base px-2 py-1 text-secondary outline-none focus:border-accent"
               />
               <span className="text-muted">至</span>
               <input
                 type="date"
+                aria-label="K线截止日期"
                 value={range.end}
-                onChange={e => setRange(r => ({ ...r, end: e.target.value }))}
+                min={boxView.requestRange.start}
+                onChange={e => { if (e.target.value) setRange(r => ({ ...r, end: e.target.value })) }}
                 className="rounded-btn border border-border bg-base px-2 py-1 text-secondary outline-none focus:border-accent"
               />
             </div>
           </div>
 
-          {daily.isLoading && <div className="py-10 text-center text-sm text-muted">日K加载中…</div>}
-          {daily.isError && <div className="py-4 text-sm text-danger">指数日K加载失败</div>}
-          {!daily.isLoading && !daily.isError && chartRows.length === 0 && (
+          <BoxOscillationControls view={boxView} />
+          {chartQuery.isLoading && <div className="py-10 text-center text-sm text-muted">{KLINE_PERIOD_LABELS[boxView.period]}加载中…</div>}
+          {chartQuery.isError && <div className="py-4 text-sm text-danger">指数{KLINE_PERIOD_LABELS[boxView.period]}加载失败</div>}
+          {!chartQuery.isLoading && !chartQuery.isError && chartRows.length === 0 && (
             <div className="rounded-card bg-elevated p-6 text-center text-sm text-muted">
-              后台尚未采集该指数的日K数据。
+              后台尚未采集该指数的{KLINE_PERIOD_LABELS[boxView.period]}数据。
             </div>
           )}
           {chartRows.length > 0 && (
-            <div className="flex items-start gap-3">
+            <div className="flex flex-col items-stretch gap-3 xl:flex-row xl:items-start">
               <div className="min-w-0 flex-1">
                 <EChartsCandlestick
+                  key={`${selectedSymbol}:${boxView.period}`}
                   data={chartRows}
                   height={620}
                   showMA={true}
@@ -243,9 +268,10 @@ export function Indices() {
                   }}
                   visibleBars={48}
                   activeIndicators={['vol', 'macd']}
+                  boxes={boxView.boxes}
                 />
               </div>
-              <div className="min-w-0 flex-1 border-l border-border pl-3" style={{ height: 620 }}>
+              <div className="min-w-0 flex-1 border-border xl:border-l xl:pl-3" style={{ height: 620 }}>
                 {minute.isLoading && <div className="py-2 text-xs text-muted">分时加载中…</div>}
                 {!minute.isLoading && minuteRows.length === 0 && (
                   <div className="flex h-full items-center justify-center text-xs text-muted">

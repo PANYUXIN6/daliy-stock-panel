@@ -1,13 +1,13 @@
 import { useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Check, Loader2, Activity, Layers } from 'lucide-react'
+import { Loader2, Activity, Layers } from 'lucide-react'
 import { api } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { toast } from '@/components/Toast'
 import { RegimeMaintenancePanel } from './RegimeMaintenancePanel'
 
 /**
- * 市场环境(regime) 计算设置 —— 控制是否随全量同步计算 + 全量回填分批参数。
+ * 市场环境(regime) 计算设置 —— 全量回填分批参数与单项维护。
  *
  * regime 是本地聚合计算(非外部拉取): 首次/regime 表为空时需全量回填多日,
  * 内存与耗时较高。分批参数控制全量回填的内存峰值: 范围超过「每批天数」时
@@ -16,11 +16,6 @@ import { RegimeMaintenancePanel } from './RegimeMaintenancePanel'
 export function RegimeConfigCard() {
   const qc = useQueryClient()
   const prefs = useQuery({ queryKey: QK.preferences, queryFn: api.preferences })
-
-  const updateEnabled = useMutation({
-    mutationFn: (enabled: boolean) => api.updatePipelineRegimeEnabled(enabled),
-    onSuccess: () => qc.invalidateQueries({ queryKey: QK.preferences }),
-  })
 
   // 分批参数本地草稿(失焦/回车时整体保存), 避免每次按键都请求
   const batchDays = prefs.data?.regime_batch_days ?? 60
@@ -67,37 +62,12 @@ export function RegimeConfigCard() {
     if (n !== warmupDays) updateParams.mutate({ warmup_days: n })
   }
 
-  // 默认关闭: 未设置过时视为 false
-  const on = prefs.data?.pipeline_regime_enabled ?? false
-
   return (
     <div className="space-y-3">
-      {/* 全量同步时计算环境 */}
-      <label className={`flex items-start gap-2.5 rounded-card border px-3 py-2.5 transition-colors cursor-pointer ${
-        on ? 'border-accent/40 bg-accent/[0.05]' : 'border-border bg-base/30 hover:border-border/70'
-      }`}>
-        <button
-          type="button"
-          onClick={() => updateEnabled.mutate(!on)}
-          disabled={updateEnabled.isPending}
-          className={`mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded border transition-colors ${
-            on ? 'bg-accent border-accent' : 'bg-base border-border'
-          }`}
-          role="checkbox"
-          aria-checked={on}
-        >
-          {on && <Check className="h-3 w-3 text-white" strokeWidth={3} />}
-        </button>
-        <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-1.5">
-            <Activity className="h-3.5 w-3.5 text-accent" />
-            <span className="text-xs font-medium text-foreground">随手动同步计算</span>
-          </div>
-          <div className="text-[10px] text-muted leading-snug mt-0.5">
-            交易日盘后自动同步会在行情与指标核验通过后计算环境，不受此开关影响。此开关控制手动“同步行情与基础数据”时是否一并计算；首次回填耗时与内存较高。
-          </div>
-        </div>
-      </label>
+      <div className="rounded-card border border-border bg-base/30 px-3 py-2.5">
+        <div className="flex items-center gap-1.5 text-xs font-medium text-foreground"><Activity className="h-3.5 w-3.5 text-accent" />随数据更新自动计算</div>
+        <p className="mt-1 text-[11px] leading-relaxed text-muted">“更新日常数据”和“补齐历史”都会自动计算市场环境、情绪周期与主线。下方单项重算仅用于维护，无需在每次更新后操作。</p>
+      </div>
 
       {/* 分批参数 */}
       <div className="rounded-card border border-border bg-base/30 px-3 py-2.5">
@@ -166,7 +136,7 @@ export function RegimeConfigCard() {
         </div>
       </div>
 
-      {(updateEnabled.isPending || updateParams.isPending) && (
+      {updateParams.isPending && (
         <div className="flex items-center gap-1.5 text-[10px] text-muted">
           <Loader2 className="h-3 w-3 animate-spin" />保存中…
         </div>

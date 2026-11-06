@@ -118,7 +118,8 @@ def test_etf_adj_window_with_file_continues_from_last_event(tmp_path):
     assert got == datetime(2026, 1, 15, 0, 0)
 
 
-def test_sync_adj_factor_etf_custom_empty_falls_back_to_tickflow(tmp_path, monkeypatch):
+@pytest.mark.parametrize("require_complete", [False, True])
+def test_sync_adj_factor_etf_custom_empty_falls_back_to_tickflow(tmp_path, monkeypatch, require_complete):
     """扶摇等自定义源对 ETF 空返回时, 有 TickFlow 除权能力则回退, 不能当成无事件。"""
     repo = KlineRepository(DataStore(tmp_path))
     empty = pl.DataFrame(
@@ -161,6 +162,7 @@ def test_sync_adj_factor_etf_custom_empty_falls_back_to_tickflow(tmp_path, monke
         repo,
         _capset(),
         asset_type="etf",
+        require_complete=require_complete,
     )
     assert written == 1
     assert affected == [ETF]

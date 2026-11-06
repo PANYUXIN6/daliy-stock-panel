@@ -76,6 +76,20 @@ it('新增管道阶段均有中文名称', () => {
   }
 })
 
+it.each([
+  [true, true, 500, 500, '情绪雷达六项历史已齐备'],
+  [true, false, 256, 493, '各项有效 256–493 / 500 日'],
+  [true, false, 500, 500, '历史样本已齐，当前部分指标仍不可计算'],
+  [false, false, 256, 493, '该日尚未确认正式收盘数据'],
+] as const)('完成后明确展示雷达就绪或未就绪原因 %s/%s', async (complete, ready, min, max, message) => {
+  await render(job({ status: 'succeeded', result: { analysis: {
+    as_of: '2026-11-04', is_complete_day: complete, radar_ready: ready,
+    radar_history_min: min, radar_history_max: max,
+  } } }))
+  expect(host.textContent).toContain('行情与关联分析已更新 · 2026-11-04')
+  expect(host.textContent).toContain(message)
+})
+
 it('历史记录以取消文案和中性图标展示用户取消', async () => {
   const value = job({ status: 'failed', outcome: 'cancelled', error: '用户手动取消' })
   await act(async () => root.render(<HistoryRow job={value} onClick={() => {}} />))

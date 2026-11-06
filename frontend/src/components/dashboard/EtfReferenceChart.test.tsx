@@ -56,6 +56,17 @@ it('更新失败仍展示已保存曲线', async () => {
   expect(host.textContent).toContain('更新失败，显示已保存数据')
 })
 
+it('首次采集失败显示具体环节，兼容没有失败详情的旧状态', async () => {
+  const render = async (failure_stage?: string) => act(async () => root.render(
+    <EtfReferenceChart data={{ ...data, rows: [], as_of: null, update_failed: true, failure_stage }} loading={false} error={false} onRetry={() => {}} />))
+  await render('深交所ETF历史份额')
+  expect(host.textContent).toContain('数据采集失败，尚无可展示数据')
+  expect(host.textContent).toContain('未完成：深交所ETF历史份额')
+  expect(host.textContent).not.toContain('暂无已对齐的数据')
+  await render()
+  expect(host.textContent).toContain('请在数据页查看采集任务的失败记录')
+})
+
 it('切日期时图表销毁不移除加载状态，加载完成和空数据均可继续切换', async () => {
   const render = async (next: EtfReference | undefined, loading = false) => act(async () => root.render(
     <EtfReferenceChart data={next} loading={loading} error={false} onRetry={() => {}} />))

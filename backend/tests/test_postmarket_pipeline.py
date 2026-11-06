@@ -25,6 +25,7 @@ from app.services import (
     postmarket,
     preferences,
     regime_builder,
+    repair_daily,
     review_publication,
     user_runtime,
 )
@@ -91,11 +92,12 @@ def closing(tmp_path, monkeypatch):
         pl.DataFrame({"symbol": controls.symbols, "as_of": [DAY] * len(controls.symbols)}).write_parquet(path)
         return len(controls.symbols)
 
-    def daily(symbols, repo, capset, *, coverage, **kwargs):
+    def daily(symbols, repo, capset, *, coverage=None, **kwargs):
         assert set(symbols) == set(controls.symbols)
         assert kwargs["end_date"].date() == DAY
         steps.append("daily")
-        coverage.observe(controls.daily)
+        if coverage is not None:
+            coverage.observe(controls.daily)
         write(tmp_path, "kline_daily", controls.daily)
         return controls.daily.height
 
@@ -112,11 +114,12 @@ def closing(tmp_path, monkeypatch):
         bump_enriched_generation(tmp_path, "stock")
         return frame.height
 
-    def index(repo, capset, *, coverage, symbols_override, **kwargs):
+    def index(repo, capset, *, coverage=None, symbols_override, **kwargs):
         steps.append("indices")
         assert symbols_override == list(CORE_INDEX_SYMBOLS)
         frame = bars(controls.index_symbols)
-        coverage.observe(frame)
+        if coverage is not None:
+            coverage.observe(frame)
         write(tmp_path, "kline_index_daily", frame)
         write(tmp_path, "kline_index_enriched", frame.with_columns(
             pl.col("close").alias("raw_close"), pl.col("high").alias("raw_high"), pl.col("low").alias("raw_low"),
@@ -145,12 +148,15 @@ def closing(tmp_path, monkeypatch):
 
     def environment(repo, data_dir, **kwargs):
         steps.append("regime")
-        result = pl.DataFrame({"date": [DAY], "state": ["range"], "score": [50], "phase": ["repair"]})
+        result = pl.DataFrame({"date": [DAY], "state": ["range"], "score": [50], "phase": ["repair"],
+                               "method_version": [regime_builder.VERSION], "exclude_st": [True],
+                               "is_complete_day": [True]})
         regime_builder.upsert_regime_history(data_dir, result)
         return result
 
-    def mainline(repo, data_dir, *, kind, refresh_today):
-        assert refresh_today is True
+    def mainline(repo, data_dir, *, kind, refresh_today=False, refresh_from=None):
+        assert refresh_today or refresh_from is not None
+        controls.mainline_refresh_from = refresh_from
         steps.append(kind)
         return pl.DataFrame()
 
@@ -198,6 +204,37 @@ def test_automatic_order_forces_core_inputs_and_environment_but_keeps_manual_pre
     assert result["readiness"]["indices"]["active"] == 4
     assert result["readiness"]["enriched"]["symbols"] == 2
     assert preferences.get_pipeline_regime_enabled() is False
+
+
+@pytest.mark.parametrize("repair_start", [None, DAY - timedelta(days=400)])
+def test_user_workflows_complete_analysis_and_leave_minutes_independent(closing, repair_start):
+    repo, caps, steps, controls = closing
+    result = (daily_pipeline.run_now(repo, caps, with_analysis=True) if repair_start is None
+              else repair_daily.run_repair_daily(repo, caps, repair_start))
+    assert [step for step in steps if step != "cache"] == [
+        "instruments", "daily", "adj", "enriched", "indices", "classifications",
+        "regime", "concept", "industry", "paper", "boards", "publication",
+    ]
+    assert steps.index("cache") < steps.index("regime")
+    assert controls.mainline_refresh_from == (repair_start or DAY)
+    assert result["analysis"]["as_of"] == DAY.isoformat()
+    assert result["analysis"]["radar_ready"] is False
+    assert result["analysis"]["radar_history_min"] == 0
+    assert preferences.get_pipeline_regime_enabled() is False
+    assert preferences.get_minute_sync_enabled() is True
+
+
+def test_user_workflow_does_not_compute_analysis_after_classification_failure(closing, monkeypatch):
+    repo, caps, steps, _ = closing
+
+    async def unavailable(*args, **kwargs):
+        raise RuntimeError("行业分类请求失败")
+
+    monkeypatch.setattr(ext_presets, "sync_classifications", unavailable)
+    with pytest.raises(RuntimeError, match="行业分类请求失败"):
+        daily_pipeline.run_now(repo, caps, with_analysis=True)
+    assert "regime" not in steps
+    assert "publication" not in steps
 
 
 def test_pure_index_and_classification_fetch_overlap_indicators_but_commit_on_owner_thread(closing, monkeypatch):
@@ -359,8 +396,9 @@ def test_queued_automatic_job_cannot_run_for_a_different_day(closing):
     assert steps == []
 
 
-def test_real_indicator_storage_and_environment_builder_complete_together(closing, monkeypatch):
-    mocked_repo, caps, _, _ = closing
+@pytest.mark.parametrize("manual", [False, True])
+def test_real_indicator_storage_and_environment_builder_complete_together(closing, monkeypatch, manual):
+    mocked_repo, caps, _, controls = closing
     repo = KlineRepository(DataStore(mocked_repo.store.data_dir))
     history = []
     cursor = DAY - timedelta(days=1)
@@ -375,7 +413,8 @@ def test_real_indicator_storage_and_environment_builder_complete_together(closin
     monkeypatch.setattr(daily_pipeline, "_refresh_instruments_view", lambda r: r.rebuild_views())
     monkeypatch.setattr(daily_pipeline, "_refresh_views", lambda r: r.rebuild_views())
     try:
-        result = daily_pipeline.run_now(repo, caps, postmarket=True)
+        options = {"with_analysis": True} if manual else {"postmarket": True}
+        result = daily_pipeline.run_now(repo, caps, **options)
         frame = regime_builder.load_regime_history(repo.store.data_dir).filter(pl.col("date") == DAY)
         assert result["regime_days"] > 0
         assert frame.height == 1
@@ -386,6 +425,11 @@ def test_real_indicator_storage_and_environment_builder_complete_together(closin
         assert frame["state"][0] == "unavailable"
         assert frame["method_version"][0] == regime_builder.VERSION
         assert repo.get_enriched_latest()[1] == DAY
+        # 同价修订成交额：日常更新仍须刷新指标及下游环境。
+        controls.daily = bars().with_columns((pl.col("amount") * 2).alias("amount"))
+        daily_pipeline.run_now(repo, caps, **options)
+        updated = regime_builder.load_regime_history(repo.store.data_dir).filter(pl.col("date") == DAY)
+        assert updated["total_amount"][0] == frame["total_amount"][0] * 2
     finally:
         repo.db.close()
 
@@ -444,7 +488,8 @@ def test_user_cancel_pauses_automatic_retries_for_that_day(schedule):
 
 
 @pytest.mark.parametrize("failed", [False, True])
-def test_automatic_api_job_publishes_after_cache_refresh_even_on_partial_failure(tmp_path, monkeypatch, failed):
+@pytest.mark.parametrize("postmarket", [False, True])
+def test_api_job_publishes_after_cache_refresh_even_on_partial_failure(tmp_path, monkeypatch, failed, postmarket):
     from app.services import shared_runtime
 
     store = JobStore(store_dir=tmp_path / "jobs")
@@ -456,7 +501,8 @@ def test_automatic_api_job_publishes_after_cache_refresh_even_on_partial_failure
     steps = []
     def compute(*args, **kwargs):
         steps.append("compute")
-        assert kwargs["postmarket"] is True
+        assert kwargs.get("postmarket", False) is postmarket
+        assert kwargs.get("with_analysis", False) is (not postmarket)
         if failed:
             raise RuntimeError("上游未齐")
         return {"daily_days": 1}
@@ -466,7 +512,7 @@ def test_automatic_api_job_publishes_after_cache_refresh_even_on_partial_failure
     repo = SimpleNamespace(store=SimpleNamespace(data_dir=tmp_path), refresh_cache=lambda: steps.append("cache"))
 
     async def run():
-        result = await pipeline.trigger_pipeline_job(repo, object(), postmarket=True)
+        result = await pipeline.trigger_pipeline_job(repo, object(), postmarket=postmarket)
         await asyncio.gather(*pipeline._tasks)
         return result["job_id"]
     job_id = asyncio.run(run())

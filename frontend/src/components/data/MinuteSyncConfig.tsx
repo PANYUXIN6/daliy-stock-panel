@@ -109,7 +109,7 @@ export function MinuteSyncConfig({ hasCap, onJobStart, disabled = false }: { has
             />
           </button>
           <span className="text-xs text-foreground font-medium">
-            随全量同步{enabled ? '已开启' : '已关闭'}
+            随盘后自动同步{enabled ? '已开启' : '已关闭'}
           </span>
         </div>
         <div className="flex items-center gap-2">
@@ -135,7 +135,7 @@ export function MinuteSyncConfig({ hasCap, onJobStart, disabled = false }: { has
         </div>
       </div>
       <p className="text-[10px] text-muted leading-relaxed">
-        批量分钟历史首次回溯 {localDays} 自然日；已有数据回补最新数据日，并更新到现在。开启随全量同步后，“同步行情与基础数据”也会一并采集。
+        批量分钟历史首次回溯 {localDays} 自然日；已有数据回补最新数据日，并更新到现在。此开关只控制盘后自动任务；手动“更新日常数据”和“补齐历史”不采集分钟历史。
       </p>
 
       {/* 分段大小: 按交易日数估算单次 SDK 请求的自然日区间。每段拉完即落盘,避免全量攒内存 OOM。
@@ -175,7 +175,7 @@ export function MinuteSyncConfig({ hasCap, onJobStart, disabled = false }: { has
         <div className="flex items-center gap-1.5">
           <Download className="h-3 w-3 text-secondary" />
           <span className="text-[11px] text-secondary font-medium">手动获取</span>
-          <span className="text-[10px] text-muted">不受全量同步范围开关影响</span>
+          <span className="text-[10px] text-muted">不受盘后自动同步开关影响</span>
         </div>
         <div className="grid grid-cols-2 gap-2">
         <button

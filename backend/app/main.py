@@ -17,6 +17,7 @@ from app.api import (
     analysis,
     backtest,
     data,
+    etf_flow,
     events,
     ext_data,
     factors,
@@ -494,6 +495,7 @@ def create_app(role: str | None = None) -> FastAPI:
     app.include_router(mining.router)
     app.include_router(intraday.router)
     app.include_router(indices.router)
+    app.include_router(etf_flow.router)
     app.include_router(overview.router)
     app.include_router(paper.router)
     app.include_router(abnormal.router)

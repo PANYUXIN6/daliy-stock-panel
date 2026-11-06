@@ -16,7 +16,6 @@ import {
   SlidersHorizontal,
   AlertTriangle,
   Info,
-  WandSparkles,
   RefreshCw,
   ChevronDown,
 } from 'lucide-react'
@@ -38,7 +37,6 @@ import { QK, DATASET_QUERY_PREFIXES } from '@/lib/queryKeys'
 import { toast } from '@/components/Toast'
 import { PageHeader } from '@/components/PageHeader'
 import { Modal } from '@/components/Modal'
-import { useAdjFactorSyncGate } from '@/components/AdjFactorSyncGate'
 import { formatScheduleDatePart, formatScheduleTimePart, isToday } from '@/lib/format'
 import { findDataSource } from '@/lib/dataSources'
 
@@ -48,7 +46,6 @@ import { ActiveJobCard } from '@/components/data/ActiveJobCard'
 import { SectionTitle, HistoryRow } from '@/components/data/SectionTitle'
 import { SettingsModal } from '@/components/data/SettingsModal'
 import { ScheduleEditor } from '@/components/data/ScheduleEditor'
-import { ExtendHistoryPanel } from '@/components/data/ExtendHistoryPanel'
 import { RepairDailyPanel } from '@/components/data/RepairDailyPanel'
 import { EnrichedRebuildPanel } from '@/components/data/EnrichedRebuildPanel'
 import { FinancialSyncPanel } from '@/components/data/FinancialSyncPanel'
@@ -135,6 +132,10 @@ export function Data() {
     mutationFn: () => api.extDataPresetsSync(),
     onSuccess: trackModuleJob,
   })
+  const syncEtfReference = useMutation({
+    mutationFn: api.syncEtfReference,
+    onSuccess: trackModuleJob,
+  })
 
   // 停止同步: 二次确认后调 cancel 端点 (协作式终止, 当前分块完成后线程自行退出)
   const [showStopConfirm, setShowStopConfirm] = useState(false)
@@ -145,9 +146,6 @@ export function Data() {
       qc.invalidateQueries({ queryKey: QK.pipelineJob(activeJobId!) })
     },
   })
-
-  // 无除权因子能力时同步前置确认 (静默降级告知)
-  const adjGate = useAdjFactorSyncGate()
 
   const [showClearConfirm, setShowClearConfirm] = useState(false)
   const clearCancelRef = useRef<HTMLButtonElement>(null)
@@ -312,7 +310,6 @@ export function Data() {
   const indexConfirmation = useCollectionSyncConfirmation(`${openSettings}:${indexExtendValue}:${indexExtendUnit}:${hasDailyBatchCap}:${routeCap(matrix.data, 'daily')?.effective}:${prefs.data?.daily_data_provider}:${activeJobId}`)
   const depthConfirmation = useCollectionSyncConfirmation(`${hasDepthCap}:${matrix.data?.capabilities.find(cap => cap.id === 'depth5')?.effective}:${prefs.data?.depth5_data_provider}:${!!quoteStatus.data?.paused}:${activeJobId}`)
   const quoteConfirmation = useCollectionSyncConfirmation(`${routeCapUsable(matrix.data, 'realtime')}:${routeCap(matrix.data, 'realtime')?.effective}:${prefs.data?.realtime_data_provider}:${!!quoteStatus.data?.paused}:${activeJobId}`)
-  const indexAuto = prefs.data?.pipeline_pull_index ?? true
   const etfAuto = prefs.data?.pipeline_pull_etf ?? false
   // 管道步骤 + 各步能力路由 (路由徽标数据源 = 能力矩阵, 单一权威; 指标为本地计算无路由)
   const pipelineSteps: { label: string; cap?: RouteCapId }[] = [
@@ -348,7 +345,8 @@ export function Data() {
       const requestKey = job.data.request_key ?? ''
       const moduleDataset = requestKey.startsWith('financial:') ? 'financials'
         : requestKey.startsWith('minute_batch:') || requestKey.startsWith('minute:') ? 'minute'
-        : requestKey === 'classifications' ? 'ext_data' : null
+        : requestKey === 'classifications' ? 'ext_data'
+        : requestKey === 'etf_reference' ? 'etf_reference' : null
       if (moduleDataset) {
         // 失败或取消前可能已有分块落盘，终态也要刷新本地画像与消费方。
         for (const prefix of DATASET_QUERY_PREFIXES[moduleDataset]) {
@@ -388,7 +386,7 @@ export function Data() {
   const s = status.data
   const isLoading = status.isLoading
   const isRunning = !!activeJobId && (!job.data || job.data.status === 'running' || job.data.status === 'pending')
-  const isStarting = startSync.isPending || syncMinuteHistory.isPending || syncClassifications.isPending || pipelineConfirmation.busy
+  const isStarting = startSync.isPending || syncMinuteHistory.isPending || syncClassifications.isPending || syncEtfReference.isPending || pipelineConfirmation.busy
   const collectionBusy = isRunning || isStarting || (!!liveId && !liveJobFinished) || syncIndexDaily.isPending || indexConfirmation.busy || refreshQuotes.isPending || quoteConfirmation.busy || updateDepth.isPending || depthConfirmation.busy
   const financialRunning = isRunning && job.data?.request_key?.startsWith('financial:') === true
   const minuteHistoryDays = prefs.data?.minute_sync_days ?? 5
@@ -534,8 +532,8 @@ export function Data() {
             customProvider={routeProviderDisplay(matrix.data, 'daily')}
             auto
             onShowFields={() => setSchemaTable('daily')}
-            onSettings={hasData ? () => setOpenSettings(v => v === 'daily' ? null : 'daily') : undefined}
-            settingsOpen={openSettings === 'daily'}
+            onSettings={() => setShowRepair(true)}
+            settingsOpen={showRepair}
           />
         )
       case 'adj_factor':
@@ -592,7 +590,7 @@ export function Data() {
             stagePct={cardProgress('index_daily')}
             tierKey="daily"
             capLimits={mergedCaps}
-            auto={indexAuto}
+            auto
             subLabel={indexOverviewLabel}
             fieldTabs={[
               { label: '维表', table: 'index_instruments' },
@@ -673,7 +671,7 @@ export function Data() {
             stagePct={cardProgress('regime')}
             tierKey="regime"
             capLimits={mergedCaps}
-            auto={prefs.data?.pipeline_regime_enabled === true}
+            auto
             subLabel="状态 · 综合分 · 指标"
             onSettings={hasData ? () => setOpenSettings(v => v === 'regime' ? null : 'regime') : undefined}
             settingsOpen={openSettings === 'regime'}
@@ -689,12 +687,12 @@ export function Data() {
       <div ref={topRef} />
       <PageHeader
         title="数据"
-        subtitle="按模块同步 · 本地数据画像 · 历史记录"
+        subtitle="更新日常数据 · 补齐历史 · 查看可用状态"
         className="flex-wrap pl-14 md:pl-5"
         right={
           <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
             {!hasData && !isLoading && (
-              <span className="text-xs text-accent animate-pulse">首次使用请同步行情与基础数据</span>
+              <span className="text-xs text-accent animate-pulse">首次使用请选择更新日常数据或补齐历史</span>
             )}
             {isRunning && !!activeJobId && (
               <button
@@ -706,62 +704,59 @@ export function Data() {
                 停止
               </button>
             )}
-            <button
-              onClick={() => setOpenSettings('pipeline-scope')}
-              className="inline-flex items-center gap-1 px-2 py-1 rounded-btn text-secondary hover:text-accent hover:bg-accent/8 text-xs transition-colors duration-150"
-            >
-              <CheckSquare className="h-3.5 w-3.5" />
-              数据范围
-            </button>
-            <button
-              onClick={() => setShowRepair(true)}
-              disabled={!hasData || collectionBusy}
-              className="inline-flex items-center gap-1 px-2 py-1 rounded-btn text-secondary hover:text-accent hover:bg-accent/8 text-xs transition-colors duration-150 disabled:opacity-40 disabled:pointer-events-none"
-            >
-              <WandSparkles className="h-3.5 w-3.5" />
-              修正数据
-            </button>
-            <div className="w-px h-4 bg-border" />
-            <div className="flex flex-wrap items-center gap-1.5">
-              <button
-                onClick={() => setShowCreateExt(true)}
-                className="inline-flex items-center gap-1 px-2 py-1 rounded-btn text-secondary hover:text-accent hover:bg-accent/8 text-xs transition-colors duration-150"
-              >
-                <Plus className="h-3.5 w-3.5" />
-                扩展数据
-              </button>
-              <button
-                onClick={() => setShowEndpointTest(true)}
-                className="inline-flex items-center gap-1 px-2 py-1 rounded-btn text-secondary hover:text-accent hover:bg-accent/8 text-xs transition-colors duration-150"
-              >
-                <Wifi className="h-3.5 w-3.5" />
-                测试端点
-              </button>
-              <button
-                onClick={() => setOpenSettings('page-settings')}
-                className="inline-flex items-center gap-1 px-2 py-1 rounded-btn text-secondary hover:text-accent hover:bg-accent/8 text-xs transition-colors duration-150"
-              >
-                <SlidersHorizontal className="h-3.5 w-3.5" />
-                页面设置
-              </button>
-              <div className="w-px h-4 bg-border" />
-              <Link
-                to="/settings?tab=data-sources&highlight=data-sources"
-                className="inline-flex items-center gap-1 px-2 py-1 rounded-btn text-secondary hover:text-accent hover:bg-accent/8 text-xs transition-colors duration-150"
-                title="切换数据源"
-              >
-                <Database className="h-3.5 w-3.5" />
-                <span className="text-foreground/80 max-w-[120px] truncate">{activeDataSourceName}</span>
-              </Link>
-              <button
-                onClick={() => setShowClearConfirm(true)}
-                disabled={collectionBusy}
-                className="inline-flex items-center gap-1 px-2 py-1 rounded-btn text-muted hover:text-danger hover:bg-danger/8 text-xs transition-colors duration-150 disabled:opacity-40 disabled:pointer-events-none"
-              >
-                <Trash2 className="h-3.5 w-3.5" />
-                清除数据
-              </button>
-            </div>
+            <details className="relative">
+              <summary className="cursor-pointer list-none rounded-btn border border-border px-3 py-1.5 text-xs text-secondary hover:text-foreground">高级维护</summary>
+              <div className="absolute right-0 top-full z-30 mt-2 flex w-64 flex-col gap-2 rounded-card border border-border bg-surface p-3 shadow-xl">
+                <button type="button" onClick={() => setOpenSettings('pipeline-scope')} className="inline-flex items-center gap-1 px-2 py-1 text-left text-xs text-secondary hover:text-accent"><CheckSquare className="h-3.5 w-3.5" />同步选项</button>
+                <button type="button" disabled={collectionBusy} onClick={() => pipelineConfirmation.run({ kind: 'classifications' }, () => syncClassifications.mutate())} className="px-2 py-1 text-left text-xs text-secondary hover:text-accent disabled:opacity-40">同步板块分类</button>
+                <button type="button" disabled={collectionBusy} onClick={() => syncEtfReference.mutate()} className="px-2 py-1 text-left text-xs text-secondary hover:text-accent disabled:opacity-40">更新持仓占比参考</button>
+                <button type="button" disabled={!hasData || collectionBusy} onClick={() => setOpenSettings('enriched')} className="px-2 py-1 text-left text-xs text-secondary hover:text-accent disabled:opacity-40">重算技术指标</button>
+                <button type="button" disabled={!hasData || collectionBusy} onClick={() => setOpenSettings('regime')} className="px-2 py-1 text-left text-xs text-secondary hover:text-accent disabled:opacity-40">重算市场环境</button>
+                <div className="h-px w-full bg-border" />
+                <div className="flex flex-col items-start gap-1.5">
+                  <button
+                    onClick={() => setShowCreateExt(true)}
+                    className="inline-flex items-center gap-1 px-2 py-1 rounded-btn text-secondary hover:text-accent hover:bg-accent/8 text-xs transition-colors duration-150"
+                  >
+                    <Plus className="h-3.5 w-3.5" />
+                    扩展数据
+                  </button>
+                  <button
+                    onClick={() => setShowEndpointTest(true)}
+                    className="inline-flex items-center gap-1 px-2 py-1 rounded-btn text-secondary hover:text-accent hover:bg-accent/8 text-xs transition-colors duration-150"
+                  >
+                    <Wifi className="h-3.5 w-3.5" />
+                    测试端点
+                  </button>
+                  <button
+                    onClick={() => setOpenSettings('page-settings')}
+                    className="inline-flex items-center gap-1 px-2 py-1 rounded-btn text-secondary hover:text-accent hover:bg-accent/8 text-xs transition-colors duration-150"
+                  >
+                    <SlidersHorizontal className="h-3.5 w-3.5" />
+                    页面设置
+                  </button>
+                  <div className="h-px w-full bg-border" />
+                  <Link
+                    to="/settings?tab=data-sources&highlight=data-sources"
+                    className="inline-flex items-center gap-1 px-2 py-1 rounded-btn text-secondary hover:text-accent hover:bg-accent/8 text-xs transition-colors duration-150"
+                    title="切换数据源"
+                  >
+                    <Database className="h-3.5 w-3.5" />
+                    <span className="text-foreground/80 max-w-[120px] truncate">{activeDataSourceName}</span>
+                  </Link>
+                  <button
+                    onClick={() => setShowClearConfirm(true)}
+                    disabled={collectionBusy}
+                    className="inline-flex items-center gap-1 px-2 py-1 rounded-btn text-muted hover:text-danger hover:bg-danger/8 text-xs transition-colors duration-150 disabled:opacity-40 disabled:pointer-events-none"
+                  >
+                    <Trash2 className="h-3.5 w-3.5" />
+                    清除数据
+                  </button>
+                </div>
+                {syncClassifications.error && <p role="alert" className="text-xs text-danger">{syncClassifications.error.message}</p>}
+                {syncEtfReference.error && <p role="alert" className="text-xs text-danger">{syncEtfReference.error.message}</p>}
+              </div>
+            </details>
           </div>
         }
       />
@@ -844,39 +839,42 @@ export function Data() {
         </div>}
 
         <div>
-          <SectionTitle icon={RefreshCw}>模块同步</SectionTitle>
-          <p className="mt-2 text-[11px] leading-relaxed text-muted">按业务模块更新本地数据，模块内各项由后台按依赖关系执行。配置和单项维护保留在设置中。</p>
+          <SectionTitle icon={RefreshCw}>更新数据</SectionTitle>
+          <p className="mt-2 text-[11px] leading-relaxed text-muted">选择要完成的事，系统自动采集并计算关联结果。日常更新不拉取分钟历史，单项操作放在高级维护中。</p>
           <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-4">
             {[
               {
-                title: '行情与基础数据',
-                description: '股票基础资料、日 K、复权与指标，以及范围内的指数、ETF 和盘后榜单。',
-                detail: minuteAuto ? `同时更新分钟 K：首次回溯 ${minuteHistoryDays} 自然日；已有数据回补最新数据日，并更新到现在` : '按已配置的数据范围更新',
-                available: !prefs.isLoading && !prefs.isError,
+                title: '日常数据',
+                label: '更新日常数据',
+                description: '更新股票行情、核心指数和板块分类，自动计算技术指标、市场环境、情绪周期与主线。',
+                detail: '用于看板、日 K 和市场分析；已收盘数据才生成正式历史分位。',
+                available: hasDailyBatchCap && hasAdjCap && !prefs.isLoading && !prefs.isError,
                 pending: startSync.isPending,
                 settings: 'pipeline-scope',
-                action: () => adjGate.guard(() => pipelineConfirmation.run({ kind: 'pipeline' }, () => startSync.mutate())),
+                action: () => pipelineConfirmation.run({ kind: 'pipeline' }, () => startSync.mutate()),
                 error: startSync.error?.message,
               },
               {
+                title: '历史数据',
+                label: '补齐历史',
+                description: '选择开始日期，统一补采股票与指数历史，并重算指标、市场环境和主线。',
+                detail: '用于首次准备长历史、修复缺口或雷达历史不足，无需再逐项重算。',
+                available: hasDailyBatchCap && hasAdjCap && !prefs.isLoading && !prefs.isError,
+                pending: false,
+                settings: null,
+                action: () => setShowRepair(true),
+                error: undefined,
+              },
+              {
                 title: '分钟历史数据',
+                label: '同步分钟历史数据',
                 description: `首次回溯 ${minuteHistoryDays} 自然日；已有数据回补最新数据日，并更新到现在，供本地分时图和研究使用。`,
-                detail: '可独立更新，不受随行情同步开关影响',
+                detail: '按需独立更新，供分时图与板块轮动使用',
                 available: hasMinuteCap && !prefs.isLoading && !prefs.isError,
                 pending: syncMinuteHistory.isPending,
                 settings: 'minute',
                 action: () => pipelineConfirmation.run({ kind: 'minute_batch', days: minuteHistoryDays }, () => syncMinuteHistory.mutate(minuteHistoryDays)),
                 error: syncMinuteHistory.error?.message,
-              },
-              {
-                title: '板块分类',
-                description: '统一更新概念和行业分类，供板块分析与成分查询读取。',
-                detail: '概念、行业合并为一个后台任务',
-                available: true,
-                pending: syncClassifications.isPending,
-                settings: null,
-                action: () => pipelineConfirmation.run({ kind: 'classifications' }, () => syncClassifications.mutate()),
-                error: syncClassifications.error?.message,
               },
             ].map(module => (
               <div key={module.title} className="rounded-card border border-border bg-surface p-4 flex flex-col">
@@ -892,7 +890,7 @@ export function Data() {
                 <button type="button" onClick={module.action} disabled={!module.available || collectionBusy}
                   className="mt-auto inline-flex items-center justify-center gap-1.5 px-3 py-2 rounded-btn bg-accent/15 text-accent text-xs font-medium hover:bg-accent/25 disabled:opacity-40 disabled:cursor-not-allowed transition-colors">
                   {module.pending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Play className="h-3.5 w-3.5" />}
-                  同步{module.title}
+                  {module.label}
                 </button>
                 {!module.available && !prefs.isLoading && <p className="mt-2 text-[10px] text-muted">当前数据源或配置暂不可用，请检查设置。</p>}
                 {module.error && <p role="alert" className="mt-2 text-xs text-danger">{module.error}</p>}
@@ -1032,7 +1030,7 @@ export function Data() {
                   </div>
                 )}
                 <p className="text-[10px] text-muted leading-relaxed">
-                  盘后数据通过上方模块同步入口按需更新。
+                  盘后数据通过上方“更新日常数据”按需更新。
                 </p>
               </div>
             )}
@@ -1218,23 +1216,11 @@ export function Data() {
       </AnimatePresence>
 
       <AnimatePresence>
-        {openSettings === 'daily' && (
-          <SettingsModal title="日 K · 向前扩展历史" onClose={() => setOpenSettings(null)}>
-            <ExtendHistoryPanel
-              hasCap={hasDailyBatchCap}
-              isRunning={collectionBusy}
-              earliestDate={s?.daily?.earliest_date ?? null}
-              onStart={(jobId) => { trackModuleJob({ job_id: jobId }); setOpenSettings(null) }}
-            />
-          </SettingsModal>
-        )}
-      </AnimatePresence>
-
-      <AnimatePresence>
         {showRepair && (
-          <SettingsModal title="日 K · 修正 / 补数据" onClose={() => setShowRepair(false)}>
+          <SettingsModal title="补齐历史" onClose={() => setShowRepair(false)}>
             <RepairDailyPanel
               hasCap={hasDailyBatchCap}
+              hasAdjCap={hasAdjCap}
               isRunning={collectionBusy}
               latestDate={s?.daily?.latest_date ?? null}
               onStart={(jobId) => { trackModuleJob({ job_id: jobId }); setShowRepair(false) }}
@@ -1280,7 +1266,7 @@ export function Data() {
 
       <AnimatePresence>
         {openSettings === 'pipeline-scope' && (
-          <SettingsModal title="盘后管道 · 拉取内容" onClose={() => setOpenSettings(null)}>
+          <SettingsModal title="日常更新 · 同步选项" onClose={() => setOpenSettings(null)}>
             <PipelineScopeConfig />
           </SettingsModal>
         )}
@@ -1484,7 +1470,6 @@ export function Data() {
 
       {/* 清除数据二次确认弹窗 */}
       <AnimatePresence>
-        {adjGate.dialog}
         {showClearConfirm && (
           <Modal
             ariaLabel="确认清除本地数据？"

@@ -682,11 +682,13 @@ def sync_adj_factor(symbols: list[str], repo: KlineRepository,
                     repo.store.data_dir / factor_dir / "all.parquet", new_data
                 )
                 return added, affected
-        if require_complete:
+        elif require_complete:
             raise RuntimeError(f"数据源 {provider_name} 未提供可用除权因子")
         # 自定义源未配置 adj_factor → 回退 TickFlow
 
     if not capset.has(Cap.ADJ_FACTOR):
+        if require_complete:
+            raise RuntimeError("除权因子能力不可用，不能生成当日复权指标")
         return 0, []
 
     tf = get_client()

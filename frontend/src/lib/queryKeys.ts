@@ -31,6 +31,8 @@ export const QK = {
   quoteInterval:  ['quote-interval'] as const,
   overviewMarket: (asOf?: string) => ['overview-market', asOf ?? 'latest'] as const,
   etfReference: (asOf?: string) => ['etf-reference', asOf ?? 'latest'] as const,
+  etfFlow: (date?: string, window = 60) => ['etf-flow', date ?? 'latest', window] as const,
+  etfFlowAll: ['etf-flow'] as const,
   indexQuotes:    ['index-quotes'] as const,
 
   // Watchlist
@@ -98,6 +100,7 @@ export const QK = {
                            ['kline', symbol, start, end, extColumns ?? ''] as const,
   earningsBreakout:      (symbol: string, start: string, end: string) => ['earnings-breakout', symbol, start, end] as const,
   klineGaps:             (symbol: string, end: string) => ['kline-gaps', symbol, end] as const,
+  klineBoxes:            (symbol: string, period: string, start: string, end: string) => ['kline-boxes', symbol, period, start, end] as const,
   klineLatest:          (symbol: string) => ['kline-latest', symbol] as const,
   stockLevels:          (symbol: string, days?: number) => ['stock-levels', symbol, days ?? 120] as const,
   klineMinute:          (symbol: string, date: string) =>
@@ -202,8 +205,9 @@ export const SSE_INVALIDATE_PREFIXES = [
 export const DATASET_QUERY_PREFIXES: Record<string, readonly string[]> = {
   evening_report: ['evening-report'],
   etf_reference: ['etf-reference'],
-  daily: ['sector-review', 'kline-gaps', 'earnings-breakout', 'kline', 'kline-latest', 'kline-batch', 'index-daily', 'index-quotes', 'screener-kline-batch', 'watchlist-enriched', 'overview-market', 'limit-ladder', 'market-snapshot', 'stock-levels', 'lots-kline', 'sector-rotation-index-daily', 'screener-cached', 'regime-history', 'regime-observations', 'regime-latest', 'regime-states', 'regime-coverage', 'regime-phases', 'regime-mainline', 'rps-rotation'],
-  minute: ['kline-minute', 'kline-minute-range', 'index-minute', 'minute-batch', 'sector-rotation', 'sector-rotation-index-minute', 'dimension-intraday'],
+  etf_flow: ['etf-flow'],
+  daily: ['sector-review', 'kline-boxes', 'kline-gaps', 'earnings-breakout', 'kline', 'kline-latest', 'kline-batch', 'index-daily', 'index-quotes', 'screener-kline-batch', 'watchlist-enriched', 'overview-market', 'limit-ladder', 'market-snapshot', 'stock-levels', 'lots-kline', 'sector-rotation-index-daily', 'screener-cached', 'regime-history', 'regime-observations', 'regime-latest', 'regime-states', 'regime-coverage', 'regime-phases', 'regime-mainline', 'rps-rotation'],
+  minute: ['kline-minute', 'kline-minute-range', 'index-minute', 'minute-batch', 'sector-rotation', 'sector-rotation-index-minute', 'dimension-intraday', 'etf-flow'],
   financials: ['financials', 'earnings-breakout'],
   regime: ['overview-market', 'regime-history', 'regime-observations', 'regime-latest', 'regime-states', 'regime-coverage', 'regime-phases', 'regime-mainline'],
   mainline: ['regime-mainline', 'regime-phases'],
@@ -211,9 +215,9 @@ export const DATASET_QUERY_PREFIXES: Record<string, readonly string[]> = {
   review: ['review-publication', 'review-reports'],
   dragon_tiger: ['dragon-tiger'],
   auction_benchmark: ['auction-benchmark', 'abnormal-overview'],
-  calendar: ['sector-review'],
-  index: ['sector-review'],
-  etf: ['sector-review'],
+  calendar: ['sector-review', 'kline-boxes', 'etf-flow'],
+  index: ['sector-review', 'kline-boxes'],
+  etf: ['sector-review', 'kline-boxes'],
   // ST/主线过滤配置先于重算发布；其他页面也必须立即重读口径有效性。
   config: ['overview-market', 'regime-history', 'regime-observations', 'regime-latest', 'regime-states', 'regime-coverage', 'regime-phases', 'regime-mainline', 'sector-review', 'preferences', 'settings', 'capabilities', 'capability-matrix', 'data-sources', 'quote-status', 'quote-interval', 'monitor-rules', 'monitor-rule-options', 'screener-strategies', 'screener-cached', 'strategy-detail', 'watchlist', 'watchlist-groups', 'watchlist-enriched', 'watchlist-quotes', 'factors-library', 'backtest-factor-columns'],
 }

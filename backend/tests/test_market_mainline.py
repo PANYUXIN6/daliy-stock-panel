@@ -113,6 +113,20 @@ class TestComputeMainline:
         assert not new.is_empty()
         assert set(new["date"].to_list()) == {d2}
 
+    def test_history_repair_replaces_old_results_including_days_without_mainlines(self, tmp_path, monkeypatch):
+        repo, d1, d2 = self._setup(tmp_path, monkeypatch)
+        cfg = {"min_members": 4, "max_members": 600, "blacklist": []}
+        original = market_mainline.compute_mainline_range(repo, tmp_path, d1, d2, kind="concept", filter_cfg=cfg)
+        other_kind = original.with_columns(pl.lit("industry").alias("kind"))
+        market_mainline.upsert_mainline_history(tmp_path, pl.concat([original, other_kind]))
+        # 修正后第二天不再有涨停主线，第一天及行业维度应保留。
+        _write_enriched(tmp_path, _mk_rows(d2, [("S1.SH", 0, 1e8), ("S2.SH", 0, 1e8)]))
+        result = market_mainline.compute_mainline_incremental(repo, tmp_path, today=d2, refresh_from=d2)
+        assert result.is_empty()
+        stored = market_mainline.load_mainline_history(tmp_path, "concept")
+        assert stored["date"].to_list() == original.filter(pl.col("date") == d1)["date"].to_list()
+        assert market_mainline.load_mainline_history(tmp_path, "industry").equals(other_kind)
+
     def test_industry_level_truncation(self, tmp_path, monkeypatch):
         d1 = date(2024, 1, 2)
         rows = _mk_rows(d1, [("S1.SH", 2, 5e8), ("S2.SH", 1, 1e8),

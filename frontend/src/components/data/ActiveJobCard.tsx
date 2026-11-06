@@ -30,6 +30,7 @@ export const STAGE_LABELS: Record<string, string> = {
   sync_minute: '同步分钟 K',
   financials: '同步财务数据',
   classifications: '同步板块分类',
+  etf_reference: '更新持仓占比参考',
   extend_history: '扩展日K历史',
   extend_minute: '扩展分钟K历史',
   rebuild_enriched: '全量计算',
@@ -151,6 +152,17 @@ export function ActiveJobCard({ job, onDismiss }: { job: PipelineJob; onDismiss?
       )}
 
       {updated && <div className="mb-3 text-[10px] text-muted">最后更新 {formatLogTime(updated)}{!isDone && updateAge != null ? ` · ${updateAge} 秒前` : ''}</div>}
+
+      {job.status === 'succeeded' && job.result?.analysis && <div className="mb-3 rounded-btn border border-border bg-base/40 p-3 text-xs leading-5">
+        <p className="text-foreground">行情与关联分析已更新 · {job.result.analysis.as_of}</p>
+        <p className="text-secondary">{!job.result.analysis.is_complete_day
+          ? '该日尚未确认正式收盘数据；原值可查看，正式历史分位暂不可用。'
+          : job.result.analysis.radar_ready
+            ? '情绪雷达六项历史已齐备，可回看板查看。'
+            : job.result.analysis.radar_history_min >= 500
+              ? '历史样本已齐，当前部分指标仍不可计算。请到看板查看各项缺失原因。'
+            : `情绪雷达仍需补齐历史：各项有效 ${job.result.analysis.radar_history_min}–${job.result.analysis.radar_history_max} / 500 日。可继续使用“补齐历史”，核对历史范围与缺失日期。`}</p>
+      </div>}
 
       {tasks.length > 0 && <ul aria-label="各项任务进度" className="mb-3 grid gap-2 sm:grid-cols-2">
         {tasks.map(([id, task]) => {

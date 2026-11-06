@@ -40,9 +40,13 @@ def collection_pool(repo) -> dict[str, list[str]]:
             for rule in monitor_rules.load_all(repo.store.data_dir):
                 if rule.get("enabled", True) and monitor_rules.runtime_rule_allowed(rule, user['role']):
                     symbols.update(rule.get("symbols", []))
+    from app.services.etf_flow import enabled_symbols
+
+    board_etfs = set(enabled_symbols(repo.store.data_dir))
     groups = {asset: [] for asset in MINUTE_TABLES}
-    for symbol in sorted(symbols):
+    for symbol in sorted(symbols - board_etfs):
         groups[repo.resolve_asset_type(symbol)].append(symbol)
+    groups["etf"] = sorted(set(groups["etf"]) | board_etfs)
     return groups
 
 

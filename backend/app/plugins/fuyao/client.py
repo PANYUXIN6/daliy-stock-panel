@@ -37,6 +37,10 @@ _REQUEST_INTERVAL_S = 0.5
 _REQUEST_SLOTS = threading.BoundedSemaphore(2)
 _request_lock = threading.Lock()
 _next_request_at = 0.0
+# 五年净值批次在0.5秒间隔下触发HTTP 429；净值单独降频，不影响实时行情。
+_FUND_NAV_REQUEST_INTERVAL_S = 2.0
+_fund_nav_request_lock = threading.Lock()
+_next_fund_nav_request_at = 0.0
 _FINANCIAL_REQUEST_INTERVAL_S = 2.0
 _financial_request_lock = threading.Lock()
 _next_financial_request_at = 0.0
@@ -90,14 +94,21 @@ class FuyaoClient:
             base_url=base_url,
             headers={"X-api-key": api_key},
             timeout=timeout,
+            trust_env=False,
         )
 
     def close(self) -> None:
         self._http.close()
 
     def fund_nav(self, symbol: str) -> dict:
+        global _next_fund_nav_request_at
+        with _fund_nav_request_lock:
+            delay = _next_fund_nav_request_at - time.monotonic()
+            if delay > 0:
+                time.sleep(delay)
+            _next_fund_nav_request_at = time.monotonic() + _FUND_NAV_REQUEST_INTERVAL_S
         return self._get("/api/fund/performance/nav", {
-            "thscode": symbol, "range": "twoyear", "nav_type": "unit",
+            "thscode": symbol, "range": "fyear", "nav_type": "unit",
         })
 
     # ---- 内部 ----

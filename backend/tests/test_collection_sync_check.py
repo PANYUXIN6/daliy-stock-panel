@@ -81,18 +81,18 @@ def test_minute_confirmation_describes_actual_window_units(local, kind, result_f
     assert path.read_bytes() == before
 
 
-def test_pipeline_disabled_optional_steps_are_not_failures(local, monkeypatch):
+def test_pipeline_minutes_are_optional_but_analysis_and_indices_are_required(local, monkeypatch):
     scope = CollectionSyncRequest(kind="pipeline")
     write_rows(local, "kline_daily/date=2026-10-09/part.parquet")
     write_rows(local, "kline_index_daily/date=2026-10-09/part.parquet")
     # 默认管道成功结果也包含这些跳过；不能令正常全量更新永远不提示重复。
-    result = {"daily_days": 1, "skipped_stages": ["sync_minute", "regime", "mainline"], "stage_errors": []}
+    result = {"daily_days": 1, "skipped_stages": ["sync_minute"], "stage_errors": []}
     assert check_collection_sync(scope, local, job_store=completed(local, scope, result))["requires_confirmation"]
-    monkeypatch.setattr(preferences, "load", lambda: {"pipeline_pull_index": False})
-    result["skipped_stages"].append("sync_index")
+    monkeypatch.setattr(preferences, "load", lambda: {"pipeline_pull_index": False, "minute_sync_enabled": True})
     assert check_collection_sync(scope, local, job_store=completed(local, scope, result))["requires_confirmation"]
-    monkeypatch.setattr(preferences, "load", lambda: {"minute_sync_enabled": True})
-    assert not check_collection_sync(scope, local, job_store=completed(local, scope, result))["requires_confirmation"]
+    for required in ("regime", "mainline", "sync_index"):
+        incomplete = {**result, "skipped_stages": ["sync_minute", required]}
+        assert not check_collection_sync(scope, local, job_store=completed(local, scope, incomplete))["requires_confirmation"]
 
 
 @pytest.mark.parametrize("condition", ["failed", "old_record", "source_changed", "scope_changed", "missing_partition", "skipped", "zero_rows", "before_close"])

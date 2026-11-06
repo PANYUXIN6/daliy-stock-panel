@@ -48,21 +48,13 @@ async def trigger_pipeline_job(repo, capset, quote_service=None, *, postmarket: 
     from app.market_time import cn_today
 
     day = cn_today()
-    options = {"postmarket": True, "target_date": day} if postmarket else {}
-    finalize = None
-    if postmarket:
-        def finalize():
-            # 自动任务的部分写入也必须通知读取方；任务终态仍由异常决定。
-            from app.services import preferences
-            from app.services.shared_runtime import publish_data_update, publish_quotes
+    options = {"postmarket": True, "target_date": day} if postmarket else {"with_analysis": True}
 
-            repo.refresh_cache()
-            if quote_service is not None:
-                publish_quotes(quote_service)
-            datasets = ["daily", "enriched", "regime", "mainline", "ext_data"]
-            if preferences.get_minute_sync_enabled():
-                datasets.append("minute")
-            publish_data_update(repo.store.data_dir, datasets)
+    def finalize():
+        from app.services import preferences
+
+        finalize_market_data(repo, quote_service,
+                             include_minute=postmarket and preferences.get_minute_sync_enabled())
 
     return await _submit_job(
         repo, quote_service,
@@ -70,6 +62,19 @@ async def trigger_pipeline_job(repo, capset, quote_service=None, *, postmarket: 
         request_key=f"postmarket:{day}" if postmarket else "pipeline",
         finalize=finalize,
     )
+
+
+def finalize_market_data(repo, quote_service=None, *, include_minute: bool = False) -> None:
+    """更新与历史补数共用退出刷新；部分写入也发布，任务终态仍由异常决定。"""
+    from app.services.shared_runtime import publish_data_update, publish_quotes
+
+    repo.refresh_cache()
+    if quote_service is not None:
+        publish_quotes(quote_service)
+    datasets = ["daily", "enriched", "regime", "mainline", "ext_data"]
+    if include_minute:
+        datasets.append("minute")
+    publish_data_update(repo.store.data_dir, datasets)
 
 
 async def _submit_job(repo, quote_service, make_run, *, request_key=None, datasets=None,

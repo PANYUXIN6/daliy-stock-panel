@@ -1,0 +1,1526 @@
+{
+  "schema_version": 1,
+  "source_type": "synthetic",
+  "purpose": "engine_regression_only",
+  "notes": "Current lifecycle implementation output (updated 2026-11-04), not independent structural ground truth. Daily confirmation uses 8 completed bars; breakout uses representative bounds plus 15% width and two consecutive closes. Historical revisits never revive ended boxes. Completed synthetic bars only; no exchange calendar asserted.",
+  "default_configs": {
+    "daily": {
+      "pivot_left": 2,
+      "pivot_right": 2,
+      "min_bars": 8,
+      "medium_bars": 30,
+      "long_bars": 60,
+      "touch_tolerance_ratio": 0.2,
+      "release_distance_ratio": 0.24,
+      "dedup_tolerance_ratio": 0.2,
+      "fine_pivot_window": 1,
+      "min_width_retention_ratio": 0.7,
+      "breakout_margin_ratio": 0.15,
+      "breakout_closes": 2
+    },
+    "weekly": {
+      "pivot_left": 1,
+      "pivot_right": 1,
+      "min_bars": 8,
+      "medium_bars": 13,
+      "long_bars": 26,
+      "touch_tolerance_ratio": 0.2,
+      "release_distance_ratio": 0.24,
+      "dedup_tolerance_ratio": 0.2,
+      "fine_pivot_window": null,
+      "min_width_retention_ratio": 0.7,
+      "breakout_margin_ratio": 0.15,
+      "breakout_closes": 2
+    },
+    "monthly": {
+      "pivot_left": 1,
+      "pivot_right": 1,
+      "min_bars": 6,
+      "medium_bars": 12,
+      "long_bars": 24,
+      "touch_tolerance_ratio": 0.2,
+      "release_distance_ratio": 0.24,
+      "dedup_tolerance_ratio": 0.2,
+      "fine_pivot_window": null,
+      "min_width_retention_ratio": 0.7,
+      "breakout_margin_ratio": 0.15,
+      "breakout_closes": 2
+    }
+  },
+  "cases": [
+    {
+      "id": "daily_candidate",
+      "period": "daily",
+      "description": "The fourth touch is present but not yet right-side confirmed.",
+      "bars": [
+        {"date": "2024-01-02", "open": 105.0, "high": 105.2, "low": 104.8, "close": 105.0, "volume": 1000.0},
+        {"date": "2024-01-03", "open": 107.5, "high": 107.7, "low": 107.3, "close": 107.5, "volume": 1000.0},
+        {"date": "2024-01-04", "open": 110.0, "high": 110.2, "low": 109.8, "close": 110.0, "volume": 1000.0},
+        {"date": "2024-01-05", "open": 107.5, "high": 107.7, "low": 107.3, "close": 107.5, "volume": 1000.0},
+        {"date": "2024-01-08", "open": 105.0, "high": 105.2, "low": 104.8, "close": 105.0, "volume": 1000.0},
+        {"date": "2024-01-09", "open": 102.5, "high": 102.7, "low": 102.3, "close": 102.5, "volume": 1000.0},
+        {"date": "2024-01-10", "open": 100.0, "high": 100.2, "low": 99.8, "close": 100.0, "volume": 1000.0},
+        {"date": "2024-01-11", "open": 102.5, "high": 102.7, "low": 102.3, "close": 102.5, "volume": 1000.0},
+        {"date": "2024-01-12", "open": 105.0, "high": 105.2, "low": 104.8, "close": 105.0, "volume": 1000.0},
+        {"date": "2024-01-15", "open": 107.5, "high": 107.7, "low": 107.3, "close": 107.5, "volume": 1000.0},
+        {"date": "2024-01-16", "open": 110.0, "high": 110.2, "low": 109.8, "close": 110.0, "volume": 1000.0},
+        {"date": "2024-01-17", "open": 107.5, "high": 107.7, "low": 107.3, "close": 107.5, "volume": 1000.0},
+        {"date": "2024-01-18", "open": 105.0, "high": 105.2, "low": 104.8, "close": 105.0, "volume": 1000.0},
+        {"date": "2024-01-19", "open": 102.5, "high": 102.7, "low": 102.3, "close": 102.5, "volume": 1000.0},
+        {"date": "2024-01-22", "open": 100.0, "high": 100.2, "low": 99.8, "close": 100.0, "volume": 1000.0}
+      ],
+      "expected_boxes": [
+        {
+          "id": "daily:2024-01-04:2024-01-10",
+          "period": "daily",
+          "level": "short",
+          "lower": 99.8,
+          "upper": 110.2,
+          "width": 10.400000000000006,
+          "lower_zone": [
+            97.72,
+            101.88
+          ],
+          "upper_zone": [
+            108.12,
+            112.28
+          ],
+          "width_pct": 10.42084168336674,
+          "start_date": "2024-01-04",
+          "end_date": "2024-01-22",
+          "observed_until": "2024-01-22",
+          "confirmed_date": null,
+          "duration_bars": 13,
+          "status": "candidate",
+          "upper_touches": [
+            {
+              "date": "2024-01-04",
+              "price": 110.2,
+              "confirmed_date": "2024-01-05"
+            },
+            {
+              "date": "2024-01-16",
+              "price": 110.2,
+              "confirmed_date": "2024-01-17"
+            }
+          ],
+          "lower_touches": [
+            {
+              "date": "2024-01-10",
+              "price": 99.8,
+              "confirmed_date": "2024-01-11"
+            },
+            {
+              "date": "2024-01-22",
+              "price": 99.8,
+              "confirmed_date": null
+            }
+          ],
+          "missing_conditions": [
+            "下沿不足两次已确认独立试探",
+            "不足四次已确认交替往返",
+            "最新触点尚待右侧K线确认"
+          ],
+          "parent_id": null,
+          "previous_box_id": null,
+          "breakout": {
+            "status": "none",
+            "direction": null,
+            "first_date": null,
+            "confirmed_date": null
+          },
+          "events": [],
+          "revisits": []
+        }
+      ]
+    },
+    {
+      "id": "daily_first_confirmation",
+      "period": "daily",
+      "description": "Causally confirmed fixed rectangle; first available day is also checked by prefix tests.",
+      "bars": [
+        {"date": "2024-01-02", "open": 105.0, "high": 105.2, "low": 104.8, "close": 105.0, "volume": 1000.0},
+        {"date": "2024-01-03", "open": 107.5, "high": 107.7, "low": 107.3, "close": 107.5, "volume": 1000.0},
+        {"date": "2024-01-04", "open": 110.0, "high": 110.2, "low": 109.8, "close": 110.0, "volume": 1000.0},
+        {"date": "2024-01-05", "open": 107.5, "high": 107.7, "low": 107.3, "close": 107.5, "volume": 1000.0},
+        {"date": "2024-01-08", "open": 105.0, "high": 105.2, "low": 104.8, "close": 105.0, "volume": 1000.0},
+        {"date": "2024-01-09", "open": 102.5, "high": 102.7, "low": 102.3, "close": 102.5, "volume": 1000.0},
+        {"date": "2024-01-10", "open": 100.0, "high": 100.2, "low": 99.8, "close": 100.0, "volume": 1000.0},
+        {"date": "2024-01-11", "open": 102.5, "high": 102.7, "low": 102.3, "close": 102.5, "volume": 1000.0},
+        {"date": "2024-01-12", "open": 105.0, "high": 105.2, "low": 104.8, "close": 105.0, "volume": 1000.0},
+        {"date": "2024-01-15", "open": 107.5, "high": 107.7, "low": 107.3, "close": 107.5, "volume": 1000.0},
+        {"date": "2024-01-16", "open": 110.0, "high": 110.2, "low": 109.8, "close": 110.0, "volume": 1000.0},
+        {"date": "2024-01-17", "open": 107.5, "high": 107.7, "low": 107.3, "close": 107.5, "volume": 1000.0},
+        {"date": "2024-01-18", "open": 105.0, "high": 105.2, "low": 104.8, "close": 105.0, "volume": 1000.0},
+        {"date": "2024-01-19", "open": 102.5, "high": 102.7, "low": 102.3, "close": 102.5, "volume": 1000.0},
+        {"date": "2024-01-22", "open": 100.0, "high": 100.2, "low": 99.8, "close": 100.0, "volume": 1000.0},
+        {"date": "2024-01-23", "open": 102.5, "high": 102.7, "low": 102.3, "close": 102.5, "volume": 1000.0},
+        {"date": "2024-01-24", "open": 105.0, "high": 105.2, "low": 104.8, "close": 105.0, "volume": 1000.0}
+      ],
+      "expected_boxes": [
+        {
+          "id": "daily:2024-01-04:2024-01-10",
+          "period": "daily",
+          "level": "short",
+          "lower": 99.8,
+          "upper": 110.2,
+          "width": 10.400000000000006,
+          "lower_zone": [
+            97.72,
+            101.88
+          ],
+          "upper_zone": [
+            108.12,
+            112.28
+          ],
+          "width_pct": 10.42084168336674,
+          "start_date": "2024-01-04",
+          "end_date": "2024-01-24",
+          "observed_until": "2024-01-24",
+          "confirmed_date": "2024-01-23",
+          "duration_bars": 15,
+          "status": "confirmed",
+          "upper_touches": [
+            {
+              "date": "2024-01-04",
+              "price": 110.2,
+              "confirmed_date": "2024-01-05"
+            },
+            {
+              "date": "2024-01-16",
+              "price": 110.2,
+              "confirmed_date": "2024-01-17"
+            }
+          ],
+          "lower_touches": [
+            {
+              "date": "2024-01-10",
+              "price": 99.8,
+              "confirmed_date": "2024-01-11"
+            },
+            {
+              "date": "2024-01-22",
+              "price": 99.8,
+              "confirmed_date": "2024-01-23"
+            }
+          ],
+          "missing_conditions": [],
+          "parent_id": null,
+          "previous_box_id": null,
+          "breakout": {
+            "status": "none",
+            "direction": null,
+            "first_date": null,
+            "confirmed_date": null
+          },
+          "events": [],
+          "revisits": []
+        },
+        {
+          "id": "daily:2024-01-24:2024-01-22",
+          "period": "daily",
+          "level": "short",
+          "lower": 99.8,
+          "upper": 105.2,
+          "width": 5.400000000000006,
+          "lower_zone": [
+            98.72,
+            100.88
+          ],
+          "upper_zone": [
+            104.12,
+            106.28
+          ],
+          "width_pct": 5.410821643286579,
+          "start_date": "2024-01-22",
+          "end_date": "2024-01-24",
+          "observed_until": "2024-01-24",
+          "confirmed_date": null,
+          "duration_bars": 3,
+          "status": "candidate",
+          "upper_touches": [
+            {
+              "date": "2024-01-24",
+              "price": 105.2,
+              "confirmed_date": null
+            }
+          ],
+          "lower_touches": [
+            {
+              "date": "2024-01-22",
+              "price": 99.8,
+              "confirmed_date": "2024-01-23"
+            }
+          ],
+          "missing_conditions": [
+            "有效K线不足8根",
+            "上沿不足两次已确认独立试探",
+            "下沿不足两次已确认独立试探",
+            "不足四次已确认交替往返",
+            "最新触点尚待右侧K线确认"
+          ],
+          "parent_id": "daily:2024-01-04:2024-01-10",
+          "previous_box_id": null,
+          "breakout": {
+            "status": "none",
+            "direction": null,
+            "first_date": null,
+            "confirmed_date": null
+          },
+          "events": [],
+          "revisits": []
+        }
+      ]
+    },
+    {
+      "id": "daily_time_level_transition",
+      "period": "daily",
+      "description": "The same identity reaches the medium duration level.",
+      "bars": [
+        {"date": "2024-01-02", "open": 105.0, "high": 105.2, "low": 104.8, "close": 105.0, "volume": 1000.0},
+        {"date": "2024-01-03", "open": 107.5, "high": 107.7, "low": 107.3, "close": 107.5, "volume": 1000.0},
+        {"date": "2024-01-04", "open": 110.0, "high": 110.2, "low": 109.8, "close": 110.0, "volume": 1000.0},
+        {"date": "2024-01-05", "open": 107.5, "high": 107.7, "low": 107.3, "close": 107.5, "volume": 1000.0},
+        {"date": "2024-01-08", "open": 105.0, "high": 105.2, "low": 104.8, "close": 105.0, "volume": 1000.0},
+        {"date": "2024-01-09", "open": 102.5, "high": 102.7, "low": 102.3, "close": 102.5, "volume": 1000.0},
+        {"date": "2024-01-10", "open": 100.0, "high": 100.2, "low": 99.8, "close": 100.0, "volume": 1000.0},
+        {"date": "2024-01-11", "open": 102.5, "high": 102.7, "low": 102.3, "close": 102.5, "volume": 1000.0},
+        {"date": "2024-01-12", "open": 105.0, "high": 105.2, "low": 104.8, "close": 105.0, "volume": 1000.0},
+        {"date": "2024-01-15", "open": 107.5, "high": 107.7, "low": 107.3, "close": 107.5, "volume": 1000.0},
+        {"date": "2024-01-16", "open": 110.0, "high": 110.2, "low": 109.8, "close": 110.0, "volume": 1000.0},
+        {"date": "2024-01-17", "open": 107.5, "high": 107.7, "low": 107.3, "close": 107.5, "volume": 1000.0},
+        {"date": "2024-01-18", "open": 105.0, "high": 105.2, "low": 104.8, "close": 105.0, "volume": 1000.0},
+        {"date": "2024-01-19", "open": 102.5, "high": 102.7, "low": 102.3, "close": 102.5, "volume": 1000.0},
+        {"date": "2024-01-22", "open": 100.0, "high": 100.2, "low": 99.8, "close": 100.0, "volume": 1000.0},
+        {"date": "2024-01-23", "open": 102.5, "high": 102.7, "low": 102.3, "close": 102.5, "volume": 1000.0},
+        {"date": "2024-01-24", "open": 105.0, "high": 105.2, "low": 104.8, "close": 105.0, "volume": 1000.0},
+        {"date": "2024-01-25", "open": 107.5, "high": 107.7, "low": 107.3, "close": 107.5, "volume": 1000.0},
+        {"date": "2024-01-26", "open": 110.0, "high": 110.2, "low": 109.8, "close": 110.0, "volume": 1000.0},
+        {"date": "2024-01-29", "open": 107.5, "high": 107.7, "low": 107.3, "close": 107.5, "volume": 1000.0},
+        {"date": "2024-01-30", "open": 105.0, "high": 105.2, "low": 104.8, "close": 105.0, "volume": 1000.0},
+        {"date": "2024-01-31", "open": 102.5, "high": 102.7, "low": 102.3, "close": 102.5, "volume": 1000.0},
+        {"date": "2024-02-01", "open": 100.0, "high": 100.2, "low": 99.8, "close": 100.0, "volume": 1000.0},
+        {"date": "2024-02-02", "open": 101.66666666666667, "high": 101.86666666666667, "low": 101.46666666666667, "close": 101.66666666666667, "volume": 1000.0},
+        {"date": "2024-02-05", "open": 103.33333333333333, "high": 103.53333333333333, "low": 103.13333333333333, "close": 103.33333333333333, "volume": 1000.0},
+        {"date": "2024-02-06", "open": 105.0, "high": 105.2, "low": 104.8, "close": 105.0, "volume": 1000.0},
+        {"date": "2024-02-07", "open": 105.0, "high": 105.2, "low": 104.8, "close": 105.0, "volume": 1000.0},
+        {"date": "2024-02-08", "open": 105.0, "high": 105.2, "low": 104.8, "close": 105.0, "volume": 1000.0},
+        {"date": "2024-02-09", "open": 105.0, "high": 105.2, "low": 104.8, "close": 105.0, "volume": 1000.0},
+        {"date": "2024-02-12", "open": 105.0, "high": 105.2, "low": 104.8, "close": 105.0, "volume": 1000.0},
+        {"date": "2024-02-13", "open": 105.0, "high": 105.2, "low": 104.8, "close": 105.0, "volume": 1000.0},
+        {"date": "2024-02-14", "open": 105.0, "high": 105.2, "low": 104.8, "close": 105.0, "volume": 1000.0}
+      ],
+      "expected_boxes": [
+        {
+          "id": "daily:2024-01-04:2024-01-10",
+          "period": "daily",
+          "level": "medium",
+          "lower": 99.8,
+          "upper": 110.2,
+          "width": 10.400000000000006,
+          "lower_zone": [
+            97.72,
+            101.88
+          ],
+          "upper_zone": [
+            108.12,
+            112.28
+          ],
+          "width_pct": 10.42084168336674,
+          "start_date": "2024-01-04",
+          "end_date": "2024-02-14",
+          "observed_until": "2024-02-14",
+          "confirmed_date": "2024-01-23",
+          "duration_bars": 30,
+          "status": "confirmed",
+          "upper_touches": [
+            {
+              "date": "2024-01-04",
+              "price": 110.2,
+              "confirmed_date": "2024-01-05"
+            },
+            {
+              "date": "2024-01-16",
+              "price": 110.2,
+              "confirmed_date": "2024-01-17"
+            },
+            {
+              "date": "2024-01-26",
+              "price": 110.2,
+              "confirmed_date": "2024-01-29"
+            }
+          ],
+          "lower_touches": [
+            {
+              "date": "2024-01-10",
+              "price": 99.8,
+              "confirmed_date": "2024-01-11"
+            },
+            {
+              "date": "2024-01-22",
+              "price": 99.8,
+              "confirmed_date": "2024-01-23"
+            },
+            {
+              "date": "2024-02-01",
+              "price": 99.8,
+              "confirmed_date": "2024-02-02"
+            }
+          ],
+          "missing_conditions": [],
+          "parent_id": null,
+          "previous_box_id": null,
+          "breakout": {
+            "status": "none",
+            "direction": null,
+            "first_date": null,
+            "confirmed_date": null
+          },
+          "events": [],
+          "revisits": []
+        }
+      ]
+    },
+    {
+      "id": "daily_pending_breakout",
+      "period": "daily",
+      "description": "One outside close is only a pending breakout.",
+      "bars": [
+        {"date": "2024-01-02", "open": 105.0, "high": 105.2, "low": 104.8, "close": 105.0, "volume": 1000.0},
+        {"date": "2024-01-03", "open": 107.5, "high": 107.7, "low": 107.3, "close": 107.5, "volume": 1000.0},
+        {"date": "2024-01-04", "open": 110.0, "high": 110.2, "low": 109.8, "close": 110.0, "volume": 1000.0},
+        {"date": "2024-01-05", "open": 107.5, "high": 107.7, "low": 107.3, "close": 107.5, "volume": 1000.0},
+        {"date": "2024-01-08", "open": 105.0, "high": 105.2, "low": 104.8, "close": 105.0, "volume": 1000.0},
+        {"date": "2024-01-09", "open": 102.5, "high": 102.7, "low": 102.3, "close": 102.5, "volume": 1000.0},
+        {"date": "2024-01-10", "open": 100.0, "high": 100.2, "low": 99.8, "close": 100.0, "volume": 1000.0},
+        {"date": "2024-01-11", "open": 102.5, "high": 102.7, "low": 102.3, "close": 102.5, "volume": 1000.0},
+        {"date": "2024-01-12", "open": 105.0, "high": 105.2, "low": 104.8, "close": 105.0, "volume": 1000.0},
+        {"date": "2024-01-15", "open": 107.5, "high": 107.7, "low": 107.3, "close": 107.5, "volume": 1000.0},
+        {"date": "2024-01-16", "open": 110.0, "high": 110.2, "low": 109.8, "close": 110.0, "volume": 1000.0},
+        {"date": "2024-01-17", "open": 107.5, "high": 107.7, "low": 107.3, "close": 107.5, "volume": 1000.0},
+        {"date": "2024-01-18", "open": 105.0, "high": 105.2, "low": 104.8, "close": 105.0, "volume": 1000.0},
+        {"date": "2024-01-19", "open": 102.5, "high": 102.7, "low": 102.3, "close": 102.5, "volume": 1000.0},
+        {"date": "2024-01-22", "open": 100.0, "high": 100.2, "low": 99.8, "close": 100.0, "volume": 1000.0},
+        {"date": "2024-01-23", "open": 102.5, "high": 102.7, "low": 102.3, "close": 102.5, "volume": 1000.0},
+        {"date": "2024-01-24", "open": 105.0, "high": 105.2, "low": 104.8, "close": 105.0, "volume": 1000.0},
+        {"date": "2024-01-25", "open": 107.5, "high": 107.7, "low": 107.3, "close": 107.5, "volume": 1000.0},
+        {"date": "2024-01-26", "open": 110.0, "high": 110.2, "low": 109.8, "close": 110.0, "volume": 1000.0},
+        {"date": "2024-01-29", "open": 107.5, "high": 107.7, "low": 107.3, "close": 107.5, "volume": 1000.0},
+        {"date": "2024-01-30", "open": 105.0, "high": 105.2, "low": 104.8, "close": 105.0, "volume": 1000.0},
+        {"date": "2024-01-31", "open": 102.5, "high": 102.7, "low": 102.3, "close": 102.5, "volume": 1000.0},
+        {"date": "2024-02-01", "open": 100.0, "high": 100.2, "low": 99.8, "close": 100.0, "volume": 1000.0},
+        {"date": "2024-02-02", "open": 101.66666666666667, "high": 101.86666666666667, "low": 101.46666666666667, "close": 101.66666666666667, "volume": 1000.0},
+        {"date": "2024-02-05", "open": 103.33333333333333, "high": 103.53333333333333, "low": 103.13333333333333, "close": 103.33333333333333, "volume": 1000.0},
+        {"date": "2024-02-06", "open": 105.0, "high": 105.2, "low": 104.8, "close": 105.0, "volume": 1000.0},
+        {"date": "2024-02-07", "open": 113.5, "high": 113.7, "low": 113.3, "close": 113.5, "volume": 1000.0}
+      ],
+      "expected_boxes": [
+        {
+          "id": "daily:2024-01-04:2024-01-10",
+          "period": "daily",
+          "level": "short",
+          "lower": 99.8,
+          "upper": 110.2,
+          "width": 10.400000000000006,
+          "lower_zone": [
+            97.72,
+            101.88
+          ],
+          "upper_zone": [
+            108.12,
+            112.28
+          ],
+          "width_pct": 10.42084168336674,
+          "start_date": "2024-01-04",
+          "end_date": "2024-02-07",
+          "observed_until": "2024-02-07",
+          "confirmed_date": "2024-01-23",
+          "duration_bars": 25,
+          "status": "confirmed",
+          "upper_touches": [
+            {
+              "date": "2024-01-04",
+              "price": 110.2,
+              "confirmed_date": "2024-01-05"
+            },
+            {
+              "date": "2024-01-16",
+              "price": 110.2,
+              "confirmed_date": "2024-01-17"
+            },
+            {
+              "date": "2024-01-26",
+              "price": 110.2,
+              "confirmed_date": "2024-01-29"
+            }
+          ],
+          "lower_touches": [
+            {
+              "date": "2024-01-10",
+              "price": 99.8,
+              "confirmed_date": "2024-01-11"
+            },
+            {
+              "date": "2024-01-22",
+              "price": 99.8,
+              "confirmed_date": "2024-01-23"
+            },
+            {
+              "date": "2024-02-01",
+              "price": 99.8,
+              "confirmed_date": "2024-02-02"
+            }
+          ],
+          "missing_conditions": [],
+          "parent_id": null,
+          "previous_box_id": null,
+          "breakout": {
+            "status": "pending",
+            "direction": "up",
+            "first_date": "2024-02-07",
+            "confirmed_date": null
+          },
+          "events": [
+            {
+              "type": "breakout_pending",
+              "date": "2024-02-07",
+              "direction": "up"
+            }
+          ],
+          "revisits": []
+        },
+        {
+          "id": "daily:2024-02-07:2024-01-10",
+          "period": "daily",
+          "level": "short",
+          "lower": 99.8,
+          "upper": 113.7,
+          "width": 13.900000000000006,
+          "lower_zone": [
+            97.02,
+            102.58
+          ],
+          "upper_zone": [
+            110.92,
+            116.48
+          ],
+          "width_pct": 13.92785571142285,
+          "start_date": "2024-01-10",
+          "end_date": "2024-02-07",
+          "observed_until": "2024-02-07",
+          "confirmed_date": null,
+          "duration_bars": 21,
+          "status": "candidate",
+          "upper_touches": [
+            {
+              "date": "2024-02-07",
+              "price": 113.7,
+              "confirmed_date": null
+            }
+          ],
+          "lower_touches": [
+            {
+              "date": "2024-01-10",
+              "price": 99.8,
+              "confirmed_date": "2024-01-11"
+            },
+            {
+              "date": "2024-01-22",
+              "price": 99.8,
+              "confirmed_date": "2024-01-23"
+            },
+            {
+              "date": "2024-02-01",
+              "price": 99.8,
+              "confirmed_date": "2024-02-02"
+            }
+          ],
+          "missing_conditions": [
+            "上沿不足两次已确认独立试探",
+            "不足四次已确认交替往返",
+            "最新触点尚待右侧K线确认"
+          ],
+          "parent_id": null,
+          "previous_box_id": null,
+          "breakout": {
+            "status": "none",
+            "direction": null,
+            "first_date": null,
+            "confirmed_date": null
+          },
+          "events": [],
+          "revisits": []
+        }
+      ]
+    },
+    {
+      "id": "daily_return_then_upward_breakout",
+      "period": "daily",
+      "description": "Pending excursion returns, then a separate upward breakout confirms.",
+      "bars": [
+        {"date": "2024-01-02", "open": 105.0, "high": 105.2, "low": 104.8, "close": 105.0, "volume": 1000.0},
+        {"date": "2024-01-03", "open": 107.5, "high": 107.7, "low": 107.3, "close": 107.5, "volume": 1000.0},
+        {"date": "2024-01-04", "open": 110.0, "high": 110.2, "low": 109.8, "close": 110.0, "volume": 1000.0},
+        {"date": "2024-01-05", "open": 107.5, "high": 107.7, "low": 107.3, "close": 107.5, "volume": 1000.0},
+        {"date": "2024-01-08", "open": 105.0, "high": 105.2, "low": 104.8, "close": 105.0, "volume": 1000.0},
+        {"date": "2024-01-09", "open": 102.5, "high": 102.7, "low": 102.3, "close": 102.5, "volume": 1000.0},
+        {"date": "2024-01-10", "open": 100.0, "high": 100.2, "low": 99.8, "close": 100.0, "volume": 1000.0},
+        {"date": "2024-01-11", "open": 102.5, "high": 102.7, "low": 102.3, "close": 102.5, "volume": 1000.0},
+        {"date": "2024-01-12", "open": 105.0, "high": 105.2, "low": 104.8, "close": 105.0, "volume": 1000.0},
+        {"date": "2024-01-15", "open": 107.5, "high": 107.7, "low": 107.3, "close": 107.5, "volume": 1000.0},
+        {"date": "2024-01-16", "open": 110.0, "high": 110.2, "low": 109.8, "close": 110.0, "volume": 1000.0},
+        {"date": "2024-01-17", "open": 107.5, "high": 107.7, "low": 107.3, "close": 107.5, "volume": 1000.0},
+        {"date": "2024-01-18", "open": 105.0, "high": 105.2, "low": 104.8, "close": 105.0, "volume": 1000.0},
+        {"date": "2024-01-19", "open": 102.5, "high": 102.7, "low": 102.3, "close": 102.5, "volume": 1000.0},
+        {"date": "2024-01-22", "open": 100.0, "high": 100.2, "low": 99.8, "close": 100.0, "volume": 1000.0},
+        {"date": "2024-01-23", "open": 102.5, "high": 102.7, "low": 102.3, "close": 102.5, "volume": 1000.0},
+        {"date": "2024-01-24", "open": 105.0, "high": 105.2, "low": 104.8, "close": 105.0, "volume": 1000.0},
+        {"date": "2024-01-25", "open": 107.5, "high": 107.7, "low": 107.3, "close": 107.5, "volume": 1000.0},
+        {"date": "2024-01-26", "open": 110.0, "high": 110.2, "low": 109.8, "close": 110.0, "volume": 1000.0},
+        {"date": "2024-01-29", "open": 107.5, "high": 107.7, "low": 107.3, "close": 107.5, "volume": 1000.0},
+        {"date": "2024-01-30", "open": 105.0, "high": 105.2, "low": 104.8, "close": 105.0, "volume": 1000.0},
+        {"date": "2024-01-31", "open": 102.5, "high": 102.7, "low": 102.3, "close": 102.5, "volume": 1000.0},
+        {"date": "2024-02-01", "open": 100.0, "high": 100.2, "low": 99.8, "close": 100.0, "volume": 1000.0},
+        {"date": "2024-02-02", "open": 101.66666666666667, "high": 101.86666666666667, "low": 101.46666666666667, "close": 101.66666666666667, "volume": 1000.0},
+        {"date": "2024-02-05", "open": 103.33333333333333, "high": 103.53333333333333, "low": 103.13333333333333, "close": 103.33333333333333, "volume": 1000.0},
+        {"date": "2024-02-06", "open": 105.0, "high": 105.2, "low": 104.8, "close": 105.0, "volume": 1000.0},
+        {"date": "2024-02-07", "open": 113.5, "high": 113.7, "low": 113.3, "close": 113.5, "volume": 1000.0},
+        {"date": "2024-02-08", "open": 105.0, "high": 105.2, "low": 104.8, "close": 105.0, "volume": 1000.0},
+        {"date": "2024-02-09", "open": 114.0, "high": 114.2, "low": 113.8, "close": 114.0, "volume": 1000.0},
+        {"date": "2024-02-12", "open": 114.5, "high": 114.7, "low": 114.3, "close": 114.5, "volume": 1000.0},
+        {"date": "2024-02-13", "open": 115.0, "high": 115.2, "low": 114.8, "close": 115.0, "volume": 1000.0}
+      ],
+      "expected_boxes": [
+        {
+          "id": "daily:2024-01-04:2024-01-10",
+          "period": "daily",
+          "level": "short",
+          "lower": 99.8,
+          "upper": 110.2,
+          "width": 10.400000000000006,
+          "lower_zone": [
+            97.72,
+            101.88
+          ],
+          "upper_zone": [
+            108.12,
+            112.28
+          ],
+          "width_pct": 10.42084168336674,
+          "start_date": "2024-01-04",
+          "end_date": "2024-02-09",
+          "observed_until": "2024-02-13",
+          "confirmed_date": "2024-01-23",
+          "duration_bars": 27,
+          "status": "broken",
+          "upper_touches": [
+            {
+              "date": "2024-01-04",
+              "price": 110.2,
+              "confirmed_date": "2024-01-05"
+            },
+            {
+              "date": "2024-01-16",
+              "price": 110.2,
+              "confirmed_date": "2024-01-17"
+            },
+            {
+              "date": "2024-01-26",
+              "price": 110.2,
+              "confirmed_date": "2024-01-29"
+            }
+          ],
+          "lower_touches": [
+            {
+              "date": "2024-01-10",
+              "price": 99.8,
+              "confirmed_date": "2024-01-11"
+            },
+            {
+              "date": "2024-01-22",
+              "price": 99.8,
+              "confirmed_date": "2024-01-23"
+            },
+            {
+              "date": "2024-02-01",
+              "price": 99.8,
+              "confirmed_date": "2024-02-02"
+            }
+          ],
+          "missing_conditions": [],
+          "parent_id": null,
+          "previous_box_id": null,
+          "breakout": {
+            "status": "confirmed",
+            "direction": "up",
+            "first_date": "2024-02-09",
+            "confirmed_date": "2024-02-12"
+          },
+          "events": [
+            {
+              "type": "breakout_pending",
+              "date": "2024-02-07",
+              "direction": "up"
+            },
+            {
+              "type": "returned",
+              "date": "2024-02-08",
+              "direction": "up"
+            },
+            {
+              "type": "breakout_pending",
+              "date": "2024-02-09",
+              "direction": "up"
+            },
+            {
+              "type": "breakout_confirmed",
+              "date": "2024-02-12",
+              "direction": "up"
+            }
+          ],
+          "revisits": []
+        },
+        {
+          "id": "daily:2024-02-07:2024-01-10",
+          "period": "daily",
+          "level": "short",
+          "lower": 99.8,
+          "upper": 113.7,
+          "width": 13.900000000000006,
+          "lower_zone": [
+            97.02,
+            102.58
+          ],
+          "upper_zone": [
+            110.92,
+            116.48
+          ],
+          "width_pct": 13.92785571142285,
+          "start_date": "2024-01-10",
+          "end_date": "2024-02-13",
+          "observed_until": "2024-02-13",
+          "confirmed_date": null,
+          "duration_bars": 25,
+          "status": "candidate",
+          "upper_touches": [
+            {
+              "date": "2024-02-07",
+              "price": 113.7,
+              "confirmed_date": "2024-02-08"
+            },
+            {
+              "date": "2024-02-13",
+              "price": 115.2,
+              "confirmed_date": null
+            }
+          ],
+          "lower_touches": [
+            {
+              "date": "2024-01-10",
+              "price": 99.8,
+              "confirmed_date": "2024-01-11"
+            },
+            {
+              "date": "2024-01-22",
+              "price": 99.8,
+              "confirmed_date": "2024-01-23"
+            },
+            {
+              "date": "2024-02-01",
+              "price": 99.8,
+              "confirmed_date": "2024-02-02"
+            }
+          ],
+          "missing_conditions": [
+            "上沿不足两次已确认独立试探",
+            "不足四次已确认交替往返",
+            "最新触点尚待右侧K线确认"
+          ],
+          "parent_id": null,
+          "previous_box_id": null,
+          "breakout": {
+            "status": "none",
+            "direction": null,
+            "first_date": null,
+            "confirmed_date": null
+          },
+          "events": [],
+          "revisits": []
+        },
+        {
+          "id": "daily:2024-02-07:2024-02-08",
+          "period": "daily",
+          "level": "short",
+          "lower": 104.8,
+          "upper": 113.7,
+          "width": 8.900000000000006,
+          "lower_zone": [
+            103.02,
+            106.58
+          ],
+          "upper_zone": [
+            111.92,
+            115.48
+          ],
+          "width_pct": 8.492366412213746,
+          "start_date": "2024-02-07",
+          "end_date": "2024-02-13",
+          "observed_until": "2024-02-13",
+          "confirmed_date": null,
+          "duration_bars": 5,
+          "status": "candidate",
+          "upper_touches": [
+            {
+              "date": "2024-02-07",
+              "price": 113.7,
+              "confirmed_date": "2024-02-08"
+            },
+            {
+              "date": "2024-02-13",
+              "price": 115.2,
+              "confirmed_date": null
+            }
+          ],
+          "lower_touches": [
+            {
+              "date": "2024-02-08",
+              "price": 104.8,
+              "confirmed_date": "2024-02-09"
+            }
+          ],
+          "missing_conditions": [
+            "有效K线不足8根",
+            "上沿不足两次已确认独立试探",
+            "下沿不足两次已确认独立试探",
+            "不足四次已确认交替往返",
+            "最新触点尚待右侧K线确认"
+          ],
+          "parent_id": null,
+          "previous_box_id": null,
+          "breakout": {
+            "status": "none",
+            "direction": null,
+            "first_date": null,
+            "confirmed_date": null
+          },
+          "events": [],
+          "revisits": []
+        }
+      ]
+    },
+    {
+      "id": "daily_downward_breakout",
+      "period": "daily",
+      "description": "The second downward outside close ends the structure.",
+      "bars": [
+        {"date": "2024-01-02", "open": 105.0, "high": 105.2, "low": 104.8, "close": 105.0, "volume": 1000.0},
+        {"date": "2024-01-03", "open": 107.5, "high": 107.7, "low": 107.3, "close": 107.5, "volume": 1000.0},
+        {"date": "2024-01-04", "open": 110.0, "high": 110.2, "low": 109.8, "close": 110.0, "volume": 1000.0},
+        {"date": "2024-01-05", "open": 107.5, "high": 107.7, "low": 107.3, "close": 107.5, "volume": 1000.0},
+        {"date": "2024-01-08", "open": 105.0, "high": 105.2, "low": 104.8, "close": 105.0, "volume": 1000.0},
+        {"date": "2024-01-09", "open": 102.5, "high": 102.7, "low": 102.3, "close": 102.5, "volume": 1000.0},
+        {"date": "2024-01-10", "open": 100.0, "high": 100.2, "low": 99.8, "close": 100.0, "volume": 1000.0},
+        {"date": "2024-01-11", "open": 102.5, "high": 102.7, "low": 102.3, "close": 102.5, "volume": 1000.0},
+        {"date": "2024-01-12", "open": 105.0, "high": 105.2, "low": 104.8, "close": 105.0, "volume": 1000.0},
+        {"date": "2024-01-15", "open": 107.5, "high": 107.7, "low": 107.3, "close": 107.5, "volume": 1000.0},
+        {"date": "2024-01-16", "open": 110.0, "high": 110.2, "low": 109.8, "close": 110.0, "volume": 1000.0},
+        {"date": "2024-01-17", "open": 107.5, "high": 107.7, "low": 107.3, "close": 107.5, "volume": 1000.0},
+        {"date": "2024-01-18", "open": 105.0, "high": 105.2, "low": 104.8, "close": 105.0, "volume": 1000.0},
+        {"date": "2024-01-19", "open": 102.5, "high": 102.7, "low": 102.3, "close": 102.5, "volume": 1000.0},
+        {"date": "2024-01-22", "open": 100.0, "high": 100.2, "low": 99.8, "close": 100.0, "volume": 1000.0},
+        {"date": "2024-01-23", "open": 102.5, "high": 102.7, "low": 102.3, "close": 102.5, "volume": 1000.0},
+        {"date": "2024-01-24", "open": 105.0, "high": 105.2, "low": 104.8, "close": 105.0, "volume": 1000.0},
+        {"date": "2024-01-25", "open": 107.5, "high": 107.7, "low": 107.3, "close": 107.5, "volume": 1000.0},
+        {"date": "2024-01-26", "open": 110.0, "high": 110.2, "low": 109.8, "close": 110.0, "volume": 1000.0},
+        {"date": "2024-01-29", "open": 107.5, "high": 107.7, "low": 107.3, "close": 107.5, "volume": 1000.0},
+        {"date": "2024-01-30", "open": 105.0, "high": 105.2, "low": 104.8, "close": 105.0, "volume": 1000.0},
+        {"date": "2024-01-31", "open": 102.5, "high": 102.7, "low": 102.3, "close": 102.5, "volume": 1000.0},
+        {"date": "2024-02-01", "open": 100.0, "high": 100.2, "low": 99.8, "close": 100.0, "volume": 1000.0},
+        {"date": "2024-02-02", "open": 101.66666666666667, "high": 101.86666666666667, "low": 101.46666666666667, "close": 101.66666666666667, "volume": 1000.0},
+        {"date": "2024-02-05", "open": 103.33333333333333, "high": 103.53333333333333, "low": 103.13333333333333, "close": 103.33333333333333, "volume": 1000.0},
+        {"date": "2024-02-06", "open": 105.0, "high": 105.2, "low": 104.8, "close": 105.0, "volume": 1000.0},
+        {"date": "2024-02-07", "open": 97.0, "high": 97.2, "low": 96.8, "close": 97.0, "volume": 1000.0},
+        {"date": "2024-02-08", "open": 96.0, "high": 96.2, "low": 95.8, "close": 96.0, "volume": 1000.0}
+      ],
+      "expected_boxes": [
+        {
+          "id": "daily:2024-01-04:2024-02-08",
+          "period": "daily",
+          "level": "short",
+          "lower": 95.8,
+          "upper": 110.2,
+          "width": 14.400000000000006,
+          "lower_zone": [
+            92.92,
+            98.67999999999999
+          ],
+          "upper_zone": [
+            107.32000000000001,
+            113.08
+          ],
+          "width_pct": 15.031315240083515,
+          "start_date": "2024-01-04",
+          "end_date": "2024-02-08",
+          "observed_until": "2024-02-08",
+          "confirmed_date": null,
+          "duration_bars": 26,
+          "status": "candidate",
+          "upper_touches": [
+            {
+              "date": "2024-01-04",
+              "price": 110.2,
+              "confirmed_date": "2024-01-05"
+            },
+            {
+              "date": "2024-01-16",
+              "price": 110.2,
+              "confirmed_date": "2024-01-17"
+            },
+            {
+              "date": "2024-01-26",
+              "price": 110.2,
+              "confirmed_date": "2024-01-29"
+            }
+          ],
+          "lower_touches": [
+            {
+              "date": "2024-02-08",
+              "price": 95.8,
+              "confirmed_date": null
+            }
+          ],
+          "missing_conditions": [
+            "下沿不足两次已确认独立试探",
+            "不足四次已确认交替往返",
+            "最新触点尚待右侧K线确认"
+          ],
+          "parent_id": null,
+          "previous_box_id": null,
+          "breakout": {
+            "status": "none",
+            "direction": null,
+            "first_date": null,
+            "confirmed_date": null
+          },
+          "events": [],
+          "revisits": []
+        },
+        {
+          "id": "daily:2024-01-04:2024-01-10",
+          "period": "daily",
+          "level": "short",
+          "lower": 99.8,
+          "upper": 110.2,
+          "width": 10.400000000000006,
+          "lower_zone": [
+            97.72,
+            101.88
+          ],
+          "upper_zone": [
+            108.12,
+            112.28
+          ],
+          "width_pct": 10.42084168336674,
+          "start_date": "2024-01-04",
+          "end_date": "2024-02-07",
+          "observed_until": "2024-02-08",
+          "confirmed_date": "2024-01-23",
+          "duration_bars": 25,
+          "status": "broken",
+          "upper_touches": [
+            {
+              "date": "2024-01-04",
+              "price": 110.2,
+              "confirmed_date": "2024-01-05"
+            },
+            {
+              "date": "2024-01-16",
+              "price": 110.2,
+              "confirmed_date": "2024-01-17"
+            },
+            {
+              "date": "2024-01-26",
+              "price": 110.2,
+              "confirmed_date": "2024-01-29"
+            }
+          ],
+          "lower_touches": [
+            {
+              "date": "2024-01-10",
+              "price": 99.8,
+              "confirmed_date": "2024-01-11"
+            },
+            {
+              "date": "2024-01-22",
+              "price": 99.8,
+              "confirmed_date": "2024-01-23"
+            },
+            {
+              "date": "2024-02-01",
+              "price": 99.8,
+              "confirmed_date": "2024-02-02"
+            }
+          ],
+          "missing_conditions": [],
+          "parent_id": null,
+          "previous_box_id": null,
+          "breakout": {
+            "status": "confirmed",
+            "direction": "down",
+            "first_date": "2024-02-07",
+            "confirmed_date": "2024-02-08"
+          },
+          "events": [
+            {
+              "type": "breakout_pending",
+              "date": "2024-02-07",
+              "direction": "down"
+            },
+            {
+              "type": "breakout_confirmed",
+              "date": "2024-02-08",
+              "direction": "down"
+            }
+          ],
+          "revisits": []
+        },
+        {
+          "id": "daily:2024-02-06:2024-02-08",
+          "period": "daily",
+          "level": "short",
+          "lower": 95.8,
+          "upper": 105.2,
+          "width": 9.400000000000006,
+          "lower_zone": [
+            93.92,
+            97.67999999999999
+          ],
+          "upper_zone": [
+            103.32000000000001,
+            107.08
+          ],
+          "width_pct": 9.812108559498963,
+          "start_date": "2024-02-06",
+          "end_date": "2024-02-08",
+          "observed_until": "2024-02-08",
+          "confirmed_date": null,
+          "duration_bars": 3,
+          "status": "candidate",
+          "upper_touches": [
+            {
+              "date": "2024-02-06",
+              "price": 105.2,
+              "confirmed_date": "2024-02-07"
+            }
+          ],
+          "lower_touches": [
+            {
+              "date": "2024-02-08",
+              "price": 95.8,
+              "confirmed_date": null
+            }
+          ],
+          "missing_conditions": [
+            "有效K线不足8根",
+            "上沿不足两次已确认独立试探",
+            "下沿不足两次已确认独立试探",
+            "不足四次已确认交替往返",
+            "最新触点尚待右侧K线确认"
+          ],
+          "parent_id": null,
+          "previous_box_id": null,
+          "breakout": {
+            "status": "none",
+            "direction": null,
+            "first_date": null,
+            "confirmed_date": null
+          },
+          "events": [],
+          "revisits": []
+        }
+      ]
+    },
+    {
+      "id": "daily_nested_inner_breakout",
+      "period": "daily",
+      "description": "A smaller nested structure breaks while the outer structure remains active.",
+      "bars": [
+        {"date": "2024-01-02", "open": 105.0, "high": 105.2, "low": 104.8, "close": 105.0, "volume": 1000.0},
+        {"date": "2024-01-03", "open": 107.5, "high": 107.7, "low": 107.3, "close": 107.5, "volume": 1000.0},
+        {"date": "2024-01-04", "open": 110.0, "high": 110.2, "low": 109.8, "close": 110.0, "volume": 1000.0},
+        {"date": "2024-01-05", "open": 107.5, "high": 107.7, "low": 107.3, "close": 107.5, "volume": 1000.0},
+        {"date": "2024-01-08", "open": 105.0, "high": 105.2, "low": 104.8, "close": 105.0, "volume": 1000.0},
+        {"date": "2024-01-09", "open": 102.5, "high": 102.7, "low": 102.3, "close": 102.5, "volume": 1000.0},
+        {"date": "2024-01-10", "open": 100.0, "high": 100.2, "low": 99.8, "close": 100.0, "volume": 1000.0},
+        {"date": "2024-01-11", "open": 102.5, "high": 102.7, "low": 102.3, "close": 102.5, "volume": 1000.0},
+        {"date": "2024-01-12", "open": 105.0, "high": 105.2, "low": 104.8, "close": 105.0, "volume": 1000.0},
+        {"date": "2024-01-15", "open": 107.5, "high": 107.7, "low": 107.3, "close": 107.5, "volume": 1000.0},
+        {"date": "2024-01-16", "open": 110.0, "high": 110.2, "low": 109.8, "close": 110.0, "volume": 1000.0},
+        {"date": "2024-01-17", "open": 107.5, "high": 107.7, "low": 107.3, "close": 107.5, "volume": 1000.0},
+        {"date": "2024-01-18", "open": 105.0, "high": 105.2, "low": 104.8, "close": 105.0, "volume": 1000.0},
+        {"date": "2024-01-19", "open": 102.5, "high": 102.7, "low": 102.3, "close": 102.5, "volume": 1000.0},
+        {"date": "2024-01-22", "open": 100.0, "high": 100.2, "low": 99.8, "close": 100.0, "volume": 1000.0},
+        {"date": "2024-01-23", "open": 101.25, "high": 101.45, "low": 101.05, "close": 101.25, "volume": 1000.0},
+        {"date": "2024-01-24", "open": 102.5, "high": 102.7, "low": 102.3, "close": 102.5, "volume": 1000.0},
+        {"date": "2024-01-25", "open": 103.75, "high": 103.95, "low": 103.55, "close": 103.75, "volume": 1000.0},
+        {"date": "2024-01-26", "open": 105.0, "high": 105.2, "low": 104.8, "close": 105.0, "volume": 1000.0},
+        {"date": "2024-01-29", "open": 105.66666666666667, "high": 105.86666666666667, "low": 105.46666666666667, "close": 105.66666666666667, "volume": 1000.0},
+        {"date": "2024-01-30", "open": 106.33333333333333, "high": 106.53333333333333, "low": 106.13333333333333, "close": 106.33333333333333, "volume": 1000.0},
+        {"date": "2024-01-31", "open": 107.0, "high": 107.2, "low": 106.8, "close": 107.0, "volume": 1000.0},
+        {"date": "2024-02-01", "open": 106.0, "high": 106.2, "low": 105.8, "close": 106.0, "volume": 1000.0},
+        {"date": "2024-02-02", "open": 105.0, "high": 105.2, "low": 104.8, "close": 105.0, "volume": 1000.0},
+        {"date": "2024-02-05", "open": 104.0, "high": 104.2, "low": 103.8, "close": 104.0, "volume": 1000.0},
+        {"date": "2024-02-06", "open": 103.0, "high": 103.2, "low": 102.8, "close": 103.0, "volume": 1000.0},
+        {"date": "2024-02-07", "open": 104.0, "high": 104.2, "low": 103.8, "close": 104.0, "volume": 1000.0},
+        {"date": "2024-02-08", "open": 105.0, "high": 105.2, "low": 104.8, "close": 105.0, "volume": 1000.0},
+        {"date": "2024-02-09", "open": 106.0, "high": 106.2, "low": 105.8, "close": 106.0, "volume": 1000.0},
+        {"date": "2024-02-12", "open": 107.0, "high": 107.2, "low": 106.8, "close": 107.0, "volume": 1000.0},
+        {"date": "2024-02-13", "open": 106.0, "high": 106.2, "low": 105.8, "close": 106.0, "volume": 1000.0},
+        {"date": "2024-02-14", "open": 105.0, "high": 105.2, "low": 104.8, "close": 105.0, "volume": 1000.0},
+        {"date": "2024-02-15", "open": 104.0, "high": 104.2, "low": 103.8, "close": 104.0, "volume": 1000.0},
+        {"date": "2024-02-16", "open": 103.0, "high": 103.2, "low": 102.8, "close": 103.0, "volume": 1000.0},
+        {"date": "2024-02-19", "open": 104.0, "high": 104.2, "low": 103.8, "close": 104.0, "volume": 1000.0},
+        {"date": "2024-02-20", "open": 105.0, "high": 105.2, "low": 104.8, "close": 105.0, "volume": 1000.0},
+        {"date": "2024-02-21", "open": 106.0, "high": 106.2, "low": 105.8, "close": 106.0, "volume": 1000.0},
+        {"date": "2024-02-22", "open": 107.0, "high": 107.2, "low": 106.8, "close": 107.0, "volume": 1000.0},
+        {"date": "2024-02-23", "open": 106.0, "high": 106.2, "low": 105.8, "close": 106.0, "volume": 1000.0},
+        {"date": "2024-02-26", "open": 105.0, "high": 105.2, "low": 104.8, "close": 105.0, "volume": 1000.0},
+        {"date": "2024-02-27", "open": 108.5, "high": 108.7, "low": 108.3, "close": 108.5, "volume": 1000.0},
+        {"date": "2024-02-28", "open": 108.7, "high": 108.9, "low": 108.5, "close": 108.7, "volume": 1000.0}
+      ],
+      "expected_boxes": [
+        {
+          "id": "daily:2024-01-04:2024-01-10",
+          "period": "daily",
+          "level": "medium",
+          "lower": 99.8,
+          "upper": 110.2,
+          "width": 10.400000000000006,
+          "lower_zone": [
+            97.72,
+            101.88
+          ],
+          "upper_zone": [
+            108.12,
+            112.28
+          ],
+          "width_pct": 10.42084168336674,
+          "start_date": "2024-01-04",
+          "end_date": "2024-02-28",
+          "observed_until": "2024-02-28",
+          "confirmed_date": "2024-01-23",
+          "duration_bars": 40,
+          "status": "confirmed",
+          "upper_touches": [
+            {
+              "date": "2024-01-04",
+              "price": 110.2,
+              "confirmed_date": "2024-01-05"
+            },
+            {
+              "date": "2024-01-16",
+              "price": 110.2,
+              "confirmed_date": "2024-01-17"
+            }
+          ],
+          "lower_touches": [
+            {
+              "date": "2024-01-10",
+              "price": 99.8,
+              "confirmed_date": "2024-01-11"
+            },
+            {
+              "date": "2024-01-22",
+              "price": 99.8,
+              "confirmed_date": "2024-01-23"
+            }
+          ],
+          "missing_conditions": [],
+          "parent_id": null,
+          "previous_box_id": null,
+          "breakout": {
+            "status": "none",
+            "direction": null,
+            "first_date": null,
+            "confirmed_date": null
+          },
+          "events": [],
+          "revisits": []
+        },
+        {
+          "id": "daily:2024-01-31:2024-02-06",
+          "period": "daily",
+          "level": "short",
+          "lower": 102.8,
+          "upper": 107.2,
+          "width": 4.400000000000006,
+          "lower_zone": [
+            101.92,
+            103.67999999999999
+          ],
+          "upper_zone": [
+            106.32000000000001,
+            108.08
+          ],
+          "width_pct": 4.2801556420233515,
+          "start_date": "2024-01-31",
+          "end_date": "2024-02-27",
+          "observed_until": "2024-02-28",
+          "confirmed_date": "2024-02-19",
+          "duration_bars": 20,
+          "status": "broken",
+          "upper_touches": [
+            {
+              "date": "2024-01-31",
+              "price": 107.2,
+              "confirmed_date": "2024-02-01"
+            },
+            {
+              "date": "2024-02-12",
+              "price": 107.2,
+              "confirmed_date": "2024-02-13"
+            },
+            {
+              "date": "2024-02-22",
+              "price": 107.2,
+              "confirmed_date": "2024-02-23"
+            }
+          ],
+          "lower_touches": [
+            {
+              "date": "2024-02-06",
+              "price": 102.8,
+              "confirmed_date": "2024-02-07"
+            },
+            {
+              "date": "2024-02-16",
+              "price": 102.8,
+              "confirmed_date": "2024-02-19"
+            }
+          ],
+          "missing_conditions": [],
+          "parent_id": "daily:2024-01-04:2024-01-10",
+          "previous_box_id": null,
+          "breakout": {
+            "status": "confirmed",
+            "direction": "up",
+            "first_date": "2024-02-27",
+            "confirmed_date": "2024-02-28"
+          },
+          "events": [
+            {
+              "type": "breakout_pending",
+              "date": "2024-02-27",
+              "direction": "up"
+            },
+            {
+              "type": "breakout_confirmed",
+              "date": "2024-02-28",
+              "direction": "up"
+            }
+          ],
+          "revisits": []
+        },
+        {
+          "id": "daily:2024-02-28:2024-02-06",
+          "period": "daily",
+          "level": "short",
+          "lower": 102.8,
+          "upper": 108.9,
+          "width": 6.1000000000000085,
+          "lower_zone": [
+            101.58,
+            104.02
+          ],
+          "upper_zone": [
+            107.68,
+            110.12
+          ],
+          "width_pct": 5.93385214007783,
+          "start_date": "2024-02-06",
+          "end_date": "2024-02-28",
+          "observed_until": "2024-02-28",
+          "confirmed_date": null,
+          "duration_bars": 17,
+          "status": "candidate",
+          "upper_touches": [
+            {
+              "date": "2024-02-28",
+              "price": 108.9,
+              "confirmed_date": null
+            }
+          ],
+          "lower_touches": [
+            {
+              "date": "2024-02-06",
+              "price": 102.8,
+              "confirmed_date": "2024-02-07"
+            },
+            {
+              "date": "2024-02-16",
+              "price": 102.8,
+              "confirmed_date": "2024-02-19"
+            }
+          ],
+          "missing_conditions": [
+            "上沿不足两次已确认独立试探",
+            "不足四次已确认交替往返",
+            "最新触点尚待右侧K线确认"
+          ],
+          "parent_id": "daily:2024-01-04:2024-01-10",
+          "previous_box_id": null,
+          "breakout": {
+            "status": "none",
+            "direction": null,
+            "first_date": null,
+            "confirmed_date": null
+          },
+          "events": [],
+          "revisits": []
+        },
+        {
+          "id": "daily:2024-02-28:2024-02-26",
+          "period": "daily",
+          "level": "short",
+          "lower": 104.8,
+          "upper": 108.9,
+          "width": 4.1000000000000085,
+          "lower_zone": [
+            103.97999999999999,
+            105.62
+          ],
+          "upper_zone": [
+            108.08,
+            109.72000000000001
+          ],
+          "width_pct": 3.9122137404580233,
+          "start_date": "2024-02-26",
+          "end_date": "2024-02-28",
+          "observed_until": "2024-02-28",
+          "confirmed_date": null,
+          "duration_bars": 3,
+          "status": "candidate",
+          "upper_touches": [
+            {
+              "date": "2024-02-28",
+              "price": 108.9,
+              "confirmed_date": null
+            }
+          ],
+          "lower_touches": [
+            {
+              "date": "2024-02-26",
+              "price": 104.8,
+              "confirmed_date": "2024-02-27"
+            }
+          ],
+          "missing_conditions": [
+            "有效K线不足8根",
+            "上沿不足两次已确认独立试探",
+            "下沿不足两次已确认独立试探",
+            "不足四次已确认交替往返",
+            "最新触点尚待右侧K线确认"
+          ],
+          "parent_id": "daily:2024-01-04:2024-01-10",
+          "previous_box_id": null,
+          "breakout": {
+            "status": "none",
+            "direction": null,
+            "first_date": null,
+            "confirmed_date": null
+          },
+          "events": [],
+          "revisits": []
+        }
+      ]
+    },
+    {
+      "id": "daily_monotone_trend",
+      "period": "daily",
+      "description": "Monotone prices currently produce no structures; this is not a human negative label.",
+      "bars": [
+        {"date": "2024-01-02", "open": 100.0, "high": 100.2, "low": 99.8, "close": 100.0, "volume": 1000.0},
+        {"date": "2024-01-03", "open": 100.1, "high": 100.3, "low": 99.89999999999999, "close": 100.1, "volume": 1000.0},
+        {"date": "2024-01-04", "open": 100.2, "high": 100.4, "low": 100.0, "close": 100.2, "volume": 1000.0},
+        {"date": "2024-01-05", "open": 100.3, "high": 100.5, "low": 100.1, "close": 100.3, "volume": 1000.0},
+        {"date": "2024-01-08", "open": 100.4, "high": 100.60000000000001, "low": 100.2, "close": 100.4, "volume": 1000.0},
+        {"date": "2024-01-09", "open": 100.5, "high": 100.7, "low": 100.3, "close": 100.5, "volume": 1000.0},
+        {"date": "2024-01-10", "open": 100.6, "high": 100.8, "low": 100.39999999999999, "close": 100.6, "volume": 1000.0},
+        {"date": "2024-01-11", "open": 100.7, "high": 100.9, "low": 100.5, "close": 100.7, "volume": 1000.0},
+        {"date": "2024-01-12", "open": 100.8, "high": 101.0, "low": 100.6, "close": 100.8, "volume": 1000.0},
+        {"date": "2024-01-15", "open": 100.9, "high": 101.10000000000001, "low": 100.7, "close": 100.9, "volume": 1000.0},
+        {"date": "2024-01-16", "open": 101.0, "high": 101.2, "low": 100.8, "close": 101.0, "volume": 1000.0},
+        {"date": "2024-01-17", "open": 101.1, "high": 101.3, "low": 100.89999999999999, "close": 101.1, "volume": 1000.0},
+        {"date": "2024-01-18", "open": 101.2, "high": 101.4, "low": 101.0, "close": 101.2, "volume": 1000.0},
+        {"date": "2024-01-19", "open": 101.3, "high": 101.5, "low": 101.1, "close": 101.3, "volume": 1000.0},
+        {"date": "2024-01-22", "open": 101.4, "high": 101.60000000000001, "low": 101.2, "close": 101.4, "volume": 1000.0},
+        {"date": "2024-01-23", "open": 101.5, "high": 101.7, "low": 101.3, "close": 101.5, "volume": 1000.0},
+        {"date": "2024-01-24", "open": 101.6, "high": 101.8, "low": 101.39999999999999, "close": 101.6, "volume": 1000.0},
+        {"date": "2024-01-25", "open": 101.7, "high": 101.9, "low": 101.5, "close": 101.7, "volume": 1000.0},
+        {"date": "2024-01-26", "open": 101.8, "high": 102.0, "low": 101.6, "close": 101.8, "volume": 1000.0},
+        {"date": "2024-01-29", "open": 101.9, "high": 102.10000000000001, "low": 101.7, "close": 101.9, "volume": 1000.0},
+        {"date": "2024-01-30", "open": 102.0, "high": 102.2, "low": 101.8, "close": 102.0, "volume": 1000.0},
+        {"date": "2024-01-31", "open": 102.1, "high": 102.3, "low": 101.89999999999999, "close": 102.1, "volume": 1000.0},
+        {"date": "2024-02-01", "open": 102.2, "high": 102.4, "low": 102.0, "close": 102.2, "volume": 1000.0},
+        {"date": "2024-02-02", "open": 102.3, "high": 102.5, "low": 102.1, "close": 102.3, "volume": 1000.0},
+        {"date": "2024-02-05", "open": 102.4, "high": 102.60000000000001, "low": 102.2, "close": 102.4, "volume": 1000.0},
+        {"date": "2024-02-06", "open": 102.5, "high": 102.7, "low": 102.3, "close": 102.5, "volume": 1000.0},
+        {"date": "2024-02-07", "open": 102.6, "high": 102.8, "low": 102.39999999999999, "close": 102.6, "volume": 1000.0},
+        {"date": "2024-02-08", "open": 102.7, "high": 102.9, "low": 102.5, "close": 102.7, "volume": 1000.0},
+        {"date": "2024-02-09", "open": 102.8, "high": 103.0, "low": 102.6, "close": 102.8, "volume": 1000.0},
+        {"date": "2024-02-12", "open": 102.9, "high": 103.10000000000001, "low": 102.7, "close": 102.9, "volume": 1000.0}
+      ],
+      "expected_boxes": []
+    },
+    {
+      "id": "weekly_first_confirmation",
+      "period": "weekly",
+      "description": "Direct synthetic completed weekly bars use weekly defaults.",
+      "bars": [
+        {"date": "2024-01-05", "open": 105.0, "high": 105.2, "low": 104.8, "close": 105.0, "volume": 1000.0},
+        {"date": "2024-01-12", "open": 110.0, "high": 110.2, "low": 109.8, "close": 110.0, "volume": 1000.0},
+        {"date": "2024-01-19", "open": 100.0, "high": 100.2, "low": 99.8, "close": 100.0, "volume": 1000.0},
+        {"date": "2024-01-26", "open": 110.0, "high": 110.2, "low": 109.8, "close": 110.0, "volume": 1000.0},
+        {"date": "2024-02-02", "open": 100.0, "high": 100.2, "low": 99.8, "close": 100.0, "volume": 1000.0},
+        {"date": "2024-02-09", "open": 105.0, "high": 105.2, "low": 104.8, "close": 105.0, "volume": 1000.0},
+        {"date": "2024-02-16", "open": 105.0, "high": 105.2, "low": 104.8, "close": 105.0, "volume": 1000.0},
+        {"date": "2024-02-23", "open": 105.0, "high": 105.2, "low": 104.8, "close": 105.0, "volume": 1000.0},
+        {"date": "2024-03-01", "open": 105.0, "high": 105.2, "low": 104.8, "close": 105.0, "volume": 1000.0}
+      ],
+      "expected_boxes": [
+        {
+          "id": "weekly:2024-01-12:2024-01-19",
+          "period": "weekly",
+          "level": "short",
+          "lower": 99.8,
+          "upper": 110.2,
+          "width": 10.400000000000006,
+          "lower_zone": [
+            97.72,
+            101.88
+          ],
+          "upper_zone": [
+            108.12,
+            112.28
+          ],
+          "width_pct": 10.42084168336674,
+          "start_date": "2024-01-12",
+          "end_date": "2024-03-01",
+          "observed_until": "2024-03-01",
+          "confirmed_date": "2024-03-01",
+          "duration_bars": 8,
+          "status": "confirmed",
+          "upper_touches": [
+            {
+              "date": "2024-01-12",
+              "price": 110.2,
+              "confirmed_date": "2024-01-19"
+            },
+            {
+              "date": "2024-01-26",
+              "price": 110.2,
+              "confirmed_date": "2024-02-02"
+            }
+          ],
+          "lower_touches": [
+            {
+              "date": "2024-01-19",
+              "price": 99.8,
+              "confirmed_date": "2024-01-26"
+            },
+            {
+              "date": "2024-02-02",
+              "price": 99.8,
+              "confirmed_date": "2024-02-09"
+            }
+          ],
+          "missing_conditions": [],
+          "parent_id": null,
+          "previous_box_id": null,
+          "breakout": {
+            "status": "none",
+            "direction": null,
+            "first_date": null,
+            "confirmed_date": null
+          },
+          "events": [],
+          "revisits": []
+        }
+      ]
+    },
+    {
+      "id": "monthly_first_confirmation",
+      "period": "monthly",
+      "description": "Direct synthetic completed monthly bars use monthly defaults.",
+      "bars": [
+        {"date": "2024-01-31", "open": 105.0, "high": 105.2, "low": 104.8, "close": 105.0, "volume": 1000.0},
+        {"date": "2024-02-29", "open": 110.0, "high": 110.2, "low": 109.8, "close": 110.0, "volume": 1000.0},
+        {"date": "2024-03-29", "open": 100.0, "high": 100.2, "low": 99.8, "close": 100.0, "volume": 1000.0},
+        {"date": "2024-04-30", "open": 110.0, "high": 110.2, "low": 109.8, "close": 110.0, "volume": 1000.0},
+        {"date": "2024-05-31", "open": 100.0, "high": 100.2, "low": 99.8, "close": 100.0, "volume": 1000.0},
+        {"date": "2024-06-28", "open": 105.0, "high": 105.2, "low": 104.8, "close": 105.0, "volume": 1000.0},
+        {"date": "2024-07-31", "open": 105.0, "high": 105.2, "low": 104.8, "close": 105.0, "volume": 1000.0}
+      ],
+      "expected_boxes": [
+        {
+          "id": "monthly:2024-02-29:2024-03-29",
+          "period": "monthly",
+          "level": "short",
+          "lower": 99.8,
+          "upper": 110.2,
+          "width": 10.400000000000006,
+          "lower_zone": [
+            97.72,
+            101.88
+          ],
+          "upper_zone": [
+            108.12,
+            112.28
+          ],
+          "width_pct": 10.42084168336674,
+          "start_date": "2024-02-29",
+          "end_date": "2024-07-31",
+          "observed_until": "2024-07-31",
+          "confirmed_date": "2024-07-31",
+          "duration_bars": 6,
+          "status": "confirmed",
+          "upper_touches": [
+            {
+              "date": "2024-02-29",
+              "price": 110.2,
+              "confirmed_date": "2024-03-29"
+            },
+            {
+              "date": "2024-04-30",
+              "price": 110.2,
+              "confirmed_date": "2024-05-31"
+            }
+          ],
+          "lower_touches": [
+            {
+              "date": "2024-03-29",
+              "price": 99.8,
+              "confirmed_date": "2024-04-30"
+            },
+            {
+              "date": "2024-05-31",
+              "price": 99.8,
+              "confirmed_date": "2024-06-28"
+            }
+          ],
+          "missing_conditions": [],
+          "parent_id": null,
+          "previous_box_id": null,
+          "breakout": {
+            "status": "none",
+            "direction": null,
+            "first_date": null,
+            "confirmed_date": null
+          },
+          "events": [],
+          "revisits": []
+        }
+      ]
+    }
+  ]
+}

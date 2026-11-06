@@ -135,8 +135,9 @@ async def quote_stream(request: Request):
     async def event_generator():
         if qs is None:
             # 无行情服务: 保持连接 (EventSourceResponse 自带 ping), 不推事件
-            while True:
-                await asyncio.sleep(30)
+            while owner.session_token and get_store(owner.data_dir).session(owner.session_token):
+                await asyncio.sleep(1)
+            return
 
         from app.services.shared_runtime import runtime_bus
         updates = runtime_bus.subscribe()

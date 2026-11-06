@@ -56,6 +56,12 @@ def _cache_path(data_dir: Path) -> Path:
     return private_path(data_dir, "user_data", _CACHE_FILENAME)
 
 
+def forget_user_cache(data_dir: Path, uid: str) -> None:
+    from app.services.user_context import user_data_dir
+    with _memo_lock:
+        _memo.pop(user_data_dir(data_dir, uid) / "user_data" / _CACHE_FILENAME, None)
+
+
 def _enriched_parquet_path(data_dir: Path, as_of: str) -> Path:
     """返回 enriched parquet 文件路径。"""
     return data_dir / "kline_daily_enriched" / f"date={as_of}" / "part.parquet"
@@ -85,14 +91,16 @@ def read_cache(data_dir: Path) -> dict | None:
 
 def clear_all_user_caches(data_dir: Path) -> None:
     """Shared configuration changes invalidate every persisted user's result."""
-    from app.services.auth import get_store
+    from contextlib import suppress
+
+    from app.services.auth import AuthError, get_store
     from app.services.user_context import UserContext, user_scope
     auth = get_store(data_dir)
     offset = 0
     while True:
         page = auth.list_users(limit=500, offset=offset)
         for row in page['users']:
-            with user_scope(UserContext(row['id'], row['role'], data_dir)):
+            with suppress(AuthError), user_scope(UserContext(row['id'], row['role'], data_dir)):
                 clear_cache(data_dir)
         offset += len(page['users'])
         if offset >= page['total'] or not page['users']:

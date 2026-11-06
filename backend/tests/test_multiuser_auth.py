@@ -32,8 +32,8 @@ def test_role_dates_last_admin_and_password_lifecycle(tmp_path):
     admin = store.bootstrap("admin", "initial-secret")
     with pytest.raises(AuthError):
         store.update_user(admin["id"], {"is_active": False})
-    with pytest.raises(AuthError):
-        store.create_user("pro", "temporary-secret", "pro", None)
+    permanent = store.create_user("permanent", "temporary-secret", "pro", None)
+    assert store.get_user(permanent["id"], now=datetime(2099, 1, 1, tzinfo=UTC).timestamp())["role"] == "pro"
     pro = store.create_user("pro", "temporary-secret", "pro", "2026-10-13")
     before = datetime(2026, 10, 13, 15, 59, 59, tzinfo=UTC).timestamp()
     assert store.get_user(pro["id"], now=before)["role"] == "pro"

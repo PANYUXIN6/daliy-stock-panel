@@ -135,7 +135,7 @@ def closing(tmp_path, monkeypatch):
     def commit_index(prepared, repo, *, coverage, **kwargs):
         return index(repo, None, coverage=coverage, symbols_override=list(CORE_INDEX_SYMBOLS))
 
-    async def prepare_classification(config_id, data_dir):
+    async def prepare_classification(config_id, data_dir, **kwargs):
         return SimpleNamespace(config=SimpleNamespace(id=config_id, label=config_id), observation={
             "id": config_id, "source": config_id, "obtained_at": "2026-10-16T16:00:00+08:00",
             "complete": True, "symbols": list(controls.symbols), "memberships": [],
@@ -256,12 +256,12 @@ def test_pure_index_and_classification_fetch_overlap_indicators_but_commit_on_ow
         assert calculating.wait(5)
         return prepare_index(*args, **kwargs)
 
-    async def classification_fetch(config_id, data_dir):
+    async def classification_fetch(config_id, data_dir, **kwargs):
         assert get_ident() != owner
         if config_id == "ext_gn_ths":
             fetching_concept.set()
         assert calculating.wait(5)
-        return await prepare_preset(config_id, data_dir)
+        return await prepare_preset(config_id, data_dir, **kwargs)
 
     def compute(**kwargs):
         calculating.set()
@@ -300,10 +300,10 @@ def test_classification_prefetch_failure_preserves_first_commit_but_blocks_publi
     repo, caps, steps, _ = closing
     prepare = ext_presets.prepare_preset
 
-    async def fetch(config_id, data_dir):
+    async def fetch(config_id, data_dir, **kwargs):
         if config_id == "ext_hy_ths":
             raise ValueError("行业取数失败")
-        return await prepare(config_id, data_dir)
+        return await prepare(config_id, data_dir, **kwargs)
 
     monkeypatch.setattr(ext_presets, "prepare_preset", fetch)
     with pytest.raises(ValueError, match="行业取数失败"):

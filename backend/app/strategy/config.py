@@ -29,6 +29,14 @@ def _invalidate_override_cache(path: Path) -> None:
     _override_cache_sig.pop(key, None)
 
 
+def forget_user_cache(data_dir: Path, uid: str) -> None:
+    from app.services.user_context import user_data_dir
+    directory = user_data_dir(data_dir, uid) / "user_data" / "strategy_overrides"
+    for key in list(_override_cache):
+        if Path(key).parent == directory:
+            _invalidate_override_cache(Path(key))
+
+
 def _overrides_dir(data_dir: Path) -> Path:
     d = private_path(data_dir, "user_data", "strategy_overrides")
     d.mkdir(parents=True, exist_ok=True)

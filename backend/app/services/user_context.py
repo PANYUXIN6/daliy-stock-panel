@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -30,12 +30,15 @@ def current_user(required: bool = True) -> UserContext | None:
 
 
 @contextmanager
-def user_scope(user: UserContext):
-    token = _current.set(user)
-    try:
-        yield user
-    finally:
-        _current.reset(token)
+def user_scope(user: UserContext | None):
+    from app.services.user_deletion import user_operation
+
+    with user_operation(user.data_dir, user.id) if user is not None else nullcontext():
+        token = _current.set(user)
+        try:
+            yield user
+        finally:
+            _current.reset(token)
 
 
 def user_data_dir(data_dir: Path | None = None, user_id: str | None = None) -> Path:

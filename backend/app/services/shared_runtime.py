@@ -257,6 +257,12 @@ async def bridge_events(app, collector_url: str) -> None:
                                     Cap(key): CapabilityLimits(**value)
                                     for key, value in payload['capabilities'].items()
                                 })
+                            elif event == 'user_deleted':
+                                from app.services.user_deletion import forget_user_caches
+                                await asyncio.to_thread(
+                                    forget_user_caches, state.repo.store.data_dir, payload['user_id'],
+                                    state.user_runtimes,
+                                )
                             elif event == 'public_event':
                                 bus.publish(payload['type'], payload['data'], payload['scope'])
                             else:

@@ -97,7 +97,7 @@ class CreditTask:
             incident = db.execute("SELECT reason FROM credit_incidents WHERE user_id=? AND period=?", (self.user_id, self.period)).fetchone()
             if incident:
                 raise CreditError(incident[0], 503, "AI_METERING_UNAVAILABLE")
-            if task["state"] != "pending":
+            if task is None or task["state"] != "pending":
                 raise CreditError("本次 AI 任务已结束，请重新发起", 409, "AI_TASK_FINISHED")
             row = db.execute(
                 "SELECT COUNT(*) AS calls, COALESCE(SUM(COALESCE(cost_micros,reserved_micros)),0) AS cost FROM credit_calls WHERE task_id=?",
@@ -238,6 +238,12 @@ class CreditStore:
             version, policy = self._policy(db)
             return {"policy_version": version, "policy": policy.model_dump(mode="json")}
 
+    def delete_user_data(self, uid: str) -> None:
+        with self._connection(True) as db:
+            db.execute("DELETE FROM credit_calls WHERE task_id IN (SELECT id FROM credit_tasks WHERE user_id=?)", (uid,))
+            db.execute("DELETE FROM credit_tasks WHERE user_id=?", (uid,))
+            db.execute("DELETE FROM credit_incidents WHERE user_id=?", (uid,))
+
     def update_policy(self, owner: UserContext, policy: CreditPolicy, expected_version: int) -> dict:
         if _actor(owner)["role"] != "admin":
             raise AuthError("仅管理员可修改 AI 点数规则", 403, "ADMIN_REQUIRED")
@@ -375,6 +381,7 @@ class CreditStore:
             raise CreditError("无效 AI 请求标识", 400, "AI_REQUEST_INVALID")
         period, _reset = _month(now)
         with self._connection(True) as db:
+            user = _actor(owner, now)  # Recheck under the ledger lock, including during account deletion.
             version, policy = self._policy(db)
             if expected_policy_version is not None and expected_policy_version != version:
                 raise CreditError("AI 点数规则已更新，请刷新额度后重试", 409, "AI_POLICY_CHANGED")

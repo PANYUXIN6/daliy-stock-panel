@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from app.backtest.worker import make_worker_task, run_worker_task
+from app.services.auth import AuthError
 from app.services.heavy_job_limiter import (
     HeavyJobCancelledError,
     shared_heavy_job_limiter,
@@ -180,10 +181,17 @@ class MiningJobManager:
             self._cancel_events.pop(run_id, None)
             raise
 
-    def _run_owned_job(self, owner, *args) -> None:
+    def _run_owned_job(self, owner, run_id, source, cancel_event) -> None:
         # 每次启动捕获本次会话；运行实例可能在启动恢复时以无会话上下文建立。
-        with user_scope(owner):
-            self._run_job(*args)
+        try:
+            with user_scope(owner):
+                self._run_job(run_id, source, cancel_event)
+        except AuthError:
+            # Deletion closed admission while this job was queued. Do not write a
+            # terminal manifest outside the owner's operation lease.
+            with self._lock:
+                self._futures.pop(run_id, None)
+                self._cancel_events.pop(run_id, None)
 
     def _run_job(
         self,

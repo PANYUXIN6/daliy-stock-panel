@@ -86,6 +86,15 @@ it('automatically shows industry groups when an earlier concept source has a sha
   await renderPage()
   expect(host.textContent).toContain('1 个行业')
   expect(host.textContent).toContain('最强行业银行')
+  expect(host.textContent).toContain('行业分类（无层级）')
+})
+
+it('keeps the selected hierarchy for saved legacy industry paths', async () => {
+  fixtures.rows.ext_hy_ths.rows[0]['所属行业'] = '金融-银行-股份制银行'
+  fixtures.config = { hierarchyLevel: 2 }
+  await renderPage()
+  expect(host.textContent).toContain('2级行业')
+  expect(host.textContent).toContain('最强行业银行')
 })
 
 it('keeps an explicitly selected custom source and dimension field', async () => {

@@ -67,14 +67,14 @@ def _role(role: str, expires: str | None) -> tuple[str, str | None]:
         raise AuthError("管理员账号唯一，不可新增或授予管理员权限", 409)
     if role not in ("pro", "guest"):
         raise AuthError("无效角色")
-    if role != "pro":
+    if role != "pro" or expires is None:
         return role, None
     try:
         parsed = date.fromisoformat(expires or "")
         if parsed.isoformat() != expires:
             raise ValueError
     except ValueError:
-        raise AuthError("Pro 账号必须设置有效到期日（YYYY-MM-DD）") from None
+        raise AuthError("Pro 到期日须为 YYYY-MM-DD，永久 Pro 请使用空值") from None
     return role, expires
 
 
@@ -93,13 +93,16 @@ def _public(row, now: float | None = None) -> dict:
             "last_login_at",
             "last_login_ip",
             "login_count",
+            "deletion_pending",
         )
     }
     user["is_active"] = bool(user["is_active"])
     user["is_initial_admin"] = bool(user["is_initial_admin"])
     user["must_change_password"] = bool(user["must_change_password"])
+    user["deletion_pending"] = bool(user["deletion_pending"])
     today = datetime.fromtimestamp(time.time() if now is None else now, _BEIJING).date()
-    if user["role"] == "pro" and date.fromisoformat(user["pro_expires_on"]) < today:
+    if (user["role"] == "pro" and user["pro_expires_on"] is not None
+            and date.fromisoformat(user["pro_expires_on"]) < today):
         user["role"] = "guest"
     return user
 
@@ -134,6 +137,10 @@ class AuthStore:
                 );
                 CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
             """)
+            db.execute("BEGIN IMMEDIATE")
+            columns = {row["name"] for row in db.execute("PRAGMA table_info(users)")}
+            if "deletion_pending" not in columns:
+                db.execute("ALTER TABLE users ADD COLUMN deletion_pending INTEGER NOT NULL DEFAULT 0")
         if os.name != "nt":
             self.path.chmod(0o600)
 
@@ -167,13 +174,41 @@ class AuthStore:
             raise AuthError("仅管理员可管理账号", 403)
 
     @staticmethod
-    def _managed_user(db, uid):
+    def _managed_user(db, uid, *, allow_deleting=False):
         row = db.execute("SELECT * FROM users WHERE id=?", (uid,)).fetchone()
         if not row:
             raise AuthError("账号不存在", 404)
         if row["role"] == "admin":
-            raise AuthError("管理员账号受保护，不可修改权限、禁用、重置密码或强制下线", 409)
+            raise AuthError("管理员账号受保护，不可修改权限、禁用、删除、重置密码或强制下线", 409)
+        if row["deletion_pending"] and not allow_deleting:
+            raise AuthError("账号正在删除，请重试彻底删除以完成清理", 409)
         return row
+
+    def prepare_user_deletion(self, uid: str, *, actor_id: str) -> dict:
+        """Persist intent before draining writers; failed cleanup remains retryable."""
+        from app.services.user_context import user_data_dir
+
+        with self._connection(True) as db:
+            self._admin(db, actor_id)
+            row = self._managed_user(db, uid, allow_deleting=True)
+            user_data_dir(self.data_dir, uid)  # Validate the deletion boundary before changing state.
+            db.execute("UPDATE users SET is_active=0,deletion_pending=1 WHERE id=?", (uid,))
+            db.execute("DELETE FROM sessions WHERE user_id=?", (uid,))
+            return _public(row)
+
+    def finish_user_deletion(self, uid: str, *, actor_id: str) -> None:
+        """Called only after personal files and the AI ledger have been removed."""
+        with self._connection(True) as db:
+            self._admin(db, actor_id)
+            row = self._managed_user(db, uid, allow_deleting=True)
+            if not row["deletion_pending"]:
+                raise AuthError("账号尚未进入删除流程", 409)
+            db.execute("DELETE FROM sessions WHERE user_id=?", (uid,))
+            db.execute(
+                "DELETE FROM login_events WHERE user_id=? OR (user_id IS NULL AND trim(username)=? COLLATE NOCASE)",
+                (uid, row["username"]),
+            )
+            db.execute("DELETE FROM users WHERE id=?", (uid,))
 
     def bootstrap(self, username: str, password: str) -> dict | None:
         with self._connection() as db:

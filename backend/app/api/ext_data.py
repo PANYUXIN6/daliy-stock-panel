@@ -1129,6 +1129,12 @@ async def test_pull(request: Request, config_id: str):
 
     pull = config.pull
     try:
+        from app.services.ext_presets import is_builtin_classification_pull, prepare_preset
+
+        if is_builtin_classification_pull(config):
+            prepared = await prepare_preset(config.id, _data_dir(request))
+            return {"status": "ok", "total_rows": len(prepared.rows),
+                    "preview": prepared.rows[:5], "has_symbol": True}
         data = await _request_json(pull, config.id)
         rows = _extract_rows(data, pull.response_path)
         preview = _apply_field_map(rows[:5], pull.field_map)

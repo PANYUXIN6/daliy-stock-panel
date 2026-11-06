@@ -403,7 +403,8 @@ export function IndustryAnalysis() {
     )
   }
 
-  const industryLevelLabel = `${industryLevel}级行业`
+  const hasHierarchy = resolved.groups.some(group => group.key.includes('-'))
+  const industryLevelLabel = hasHierarchy ? `${industryLevel}级行业` : '行业分类（无层级）'
 
   return (
     <>

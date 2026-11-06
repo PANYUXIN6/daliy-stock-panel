@@ -1,17 +1,8 @@
-"""内置扩展数据预设 — 概念/行业启动时只创建配置, 等待用户手动获取 (#199)。
+"""内置概念/行业：fuyao 批量反查当前股票分类，保留扩展表字段契约。
 
-设计原则:
-  - 扩展数据通用逻辑零改动 (ExtConfig / fetch_and_ingest / API / 前端均不动)
-  - 仅在本模块做「接口结构 → 本地 schema」的转换
-  - 「已存在则跳过」: 绝不覆盖用户已有数据, 老用户零影响
-  - 拉取失败只记 warning, 不阻断启动 (保持「没数据也能跑」)
-
-种子数据来源 (概念/行业各自独立配置):
-  - 概念: https://shy313.com/api/plugins/market_flow/exports/ths-concepts
-  - 行业: https://shy313.com/api/plugins/market_flow/exports/ths-industries
-作者更新数据只需改接口上的 JSON, 用户下次拉取自动同步, 无需发版。
-
-接入点: app.main.lifespan → ensure_builtin_presets(store.data_dir)
+启动只建配置和迁移退役的出厂 URL，不联网、不改用户开关和自定义源。
+同步按本地股票维表查询；每张表完整取数后原子替换快照，缺组/失败不写入。
+行业为接口原始名称，不拼造已不提供的父子层级；旧层级表仍可正常读取。
 """
 from __future__ import annotations
 
@@ -19,10 +10,15 @@ import asyncio
 import logging
 import math
 from collections.abc import Callable
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
+from threading import Event
+
+import polars as pl
 
 from app.market_time import cn_today
+from app.plugins.fuyao.client import BASE_URL, CLASSIFICATIONS_PATH
 from app.services.ext_data import (
     ExtConfig,
     ExtConfigStore,
@@ -33,9 +29,12 @@ from app.services.ext_data import (
 
 logger = logging.getLogger(__name__)
 
-# 种子数据源 (概念/行业各自独立配置, 作者维护)
-_CONCEPT_DATA_URL = "https://shy313.com/api/plugins/market_flow/exports/ths-concepts"
-_INDUSTRY_DATA_URL = "https://shy313.com/api/plugins/market_flow/exports/ths-industries"
+_CONCEPT_DATA_URL = f"{BASE_URL}{CLASSIFICATIONS_PATH}?type=cn_concept"
+_INDUSTRY_DATA_URL = f"{BASE_URL}{CLASSIFICATIONS_PATH}?type=industry"
+_RETIRED_URLS = {
+    "ext_gn_ths": "https://shy313.com/api/plugins/market_flow/exports/ths-concepts",
+    "ext_hy_ths": "https://shy313.com/api/plugins/market_flow/exports/ths-industries",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -59,7 +58,7 @@ def _concept_preset() -> ExtConfig:
             ExtField("股票简称", "string", "股票简称"),
             ExtField("所属概念", "string", "所属概念"),
         ],
-        description="同花顺概念分类 (启动仅创建配置, 在数据页手动获取)",
+        description="同花顺概念分类 (fuyao 批量反查，复用数据源设置中的 API Key)",
         symbol_map={"type": "mapped", "col": "股票代码"},
         code_map={"type": "computed", "from": "symbol", "method": "strip_exchange"},
         pull=PullConfig(
@@ -76,8 +75,8 @@ def _concept_preset() -> ExtConfig:
 def _industry_preset() -> ExtConfig:
     """扩展行业 (ext_hy_ths)。
 
-    接口结构: [{symbol, name, industries: [一级行业, 二级行业, 三级行业]}]
-    本地 schema: 股票代码 / 股票简称 / 所属同花顺行业(横杠拼接) / symbol / code
+    fuyao 提供独立行业名称；多个行业以分号分隔，不解释为父子层级。
+    本地 schema: 股票代码 / 股票简称 / 所属同花顺行业 / symbol / code
     """
     return ExtConfig(
         id="ext_hy_ths",
@@ -90,7 +89,7 @@ def _industry_preset() -> ExtConfig:
             ExtField("股票简称", "string", "股票简称"),
             ExtField("所属同花顺行业", "string", "所属同花顺行业"),
         ],
-        description="同花顺行业分类 (启动仅创建配置, 在数据页手动获取)",
+        description="同花顺行业分类 (fuyao 原始行业名称，无父子层级；复用数据源 API Key)",
         symbol_map={"type": "mapped", "col": "股票代码"},
         code_map={"type": "computed", "from": "symbol", "method": "strip_exchange"},
         pull=PullConfig(
@@ -146,8 +145,8 @@ def _flatten_concept_rows(raw_rows: list[dict]) -> list[dict]:
     return out
 
 
-def _flatten_industry_rows(raw_rows: list[dict]) -> list[dict]:
-    """行业: industries 数组 → 横杠拼接成「所属同花顺行业」字符串。
+def _flatten_industry_rows(raw_rows: list[dict], *, hierarchical: bool = True) -> list[dict]:
+    """旧层级按横杠拼接；平行行业名称按分号拼接，不伪造层级。
 
     [{symbol, name, industries:[...]}] → [{股票代码, 股票简称, 所属同花顺行业, symbol, code}]
     """
@@ -161,7 +160,7 @@ def _flatten_industry_rows(raw_rows: list[dict]) -> list[dict]:
         out.append({
             "股票代码": sym,
             "股票简称": r.get("name") or "",
-            "所属同花顺行业": "-".join(labels),
+            "所属同花顺行业": ("-" if hierarchical else ";").join(labels),
             "symbol": sym,
             "code": _symbol_to_code(sym),
         })
@@ -169,49 +168,57 @@ def _flatten_industry_rows(raw_rows: list[dict]) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
-# 拉取执行 (复用 httpx, 不依赖 fetch_and_ingest 的 PullConfig 路径)
+# 拉取执行：供应商认证、限频和协议转换由 fuyao provider 负责
 # ---------------------------------------------------------------------------
 
-# 部分网络环境 (CDN/WAF/网关) 会把数组包成 {data: [...]}/{list: [...]}/{rows: [...]} 信封。
-# 这里做一次兼容解包, 避免误判为「接口返回不是数组」。
-_ENVELOPE_KEYS = ("data", "list", "rows", "result", "results")
+def _classification_instruments(data_dir: Path) -> pl.DataFrame:
+    path = data_dir / "instruments" / "instruments.parquet"
+    if not path.exists():
+        raise ValueError("请先同步股票维表，再获取板块分类")
+    frame = pl.read_parquet(path)
+    for column, value in (("type", "stock"), ("security_type", "a_share"), ("is_current", True)):
+        if column in frame.columns:
+            frame = frame.filter(pl.col(column).is_null() | (pl.col(column) == value))
+    if "listing_date" in frame.columns:
+        listed = pl.col("listing_date").cast(pl.String).str.slice(0, 10).str.to_date(strict=False)
+        frame = frame.filter(listed.is_null() | (listed <= cn_today()))
+    if frame.is_empty() or "symbol" not in frame.columns:
+        raise ValueError("股票维表为空，无法确认分类查询范围")
+    if frame["symbol"].null_count() or frame["symbol"].n_unique() != len(frame):
+        raise ValueError("股票维表包含缺失或重复证券，请先修复维表")
+    return frame
 
 
-async def _fetch_json(url: str) -> list[dict]:
-    """请求 JSON 接口, 返回行数组。超时 30s, 失败抛异常由调用方兜底。
+async def _fetch_classification_rows(
+    config_id: str, data_dir: Path, on_progress: Callable[[int, int], None] | None = None,
+) -> list[dict]:
+    from app.plugins.fuyao.provider import FuyaoProvider
 
-    兼容两种上游返回形态:
-      - 直接是数组: [{...}, ...]          → 原样返回
-      - 信封包裹: {data: [{...}]} 等       → 自动解包
-    """
-    import httpx
+    stopped = Event()
 
-    # 延迟导入避免与 ext_pull 循环依赖; 出站请求带 tsp 标识头
-    from app.services.ext_pull import outbound_headers
+    def fetch() -> list[dict]:
+        instruments = _classification_instruments(data_dir)
+        names = dict(zip(instruments["symbol"], instruments["name"], strict=True)) if "name" in instruments.columns else {}
+        provider = FuyaoProvider()
+        try:
+            rows = provider.get_classifications(
+                instruments["symbol"].to_list(), "concept" if config_id == "ext_gn_ths" else "industry",
+                on_progress=on_progress,
+                cancel_event=stopped,
+            )
+            return [{**row, "name": names.get(row["symbol"]) or ""} for row in rows]
+        finally:
+            provider.close()
 
-    async with httpx.AsyncClient(timeout=30) as client:
-        resp = await client.get(url, headers=outbound_headers())
-        resp.raise_for_status()
-        data = resp.json()
-
-    if isinstance(data, list):
-        return data
-
-    # 信封解包: 在常见键里找第一个值为数组的
-    if isinstance(data, dict):
-        for key in _ENVELOPE_KEYS:
-            inner = data.get(key)
-            if isinstance(inner, list):
-                return inner
-        # 兜底: 遍历所有值, 取第一个数组
-        for v in data.values():
-            if isinstance(v, list):
-                return v
-
-    raise ValueError(
-        f"接口返回不是数组 (type={type(data).__name__}), "
-        f"响应预览: {str(data)[:200]}"
-    )
+    task = asyncio.create_task(asyncio.to_thread(fetch))
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        stopped.set()
+        # 调度器取消时也等待在途请求结束，不能把后台线程留到下一轮。
+        with suppress(Exception):
+            await task
+        raise
 
 
 @dataclass(frozen=True)
@@ -233,6 +240,14 @@ def get_preset(config_id: str) -> ExtConfig | None:
     return None
 
 
+def is_builtin_classification_pull(config: ExtConfig) -> bool:
+    """只接管内置快照的已知出厂配方，用户自定义 URL 仍走通用拉取。"""
+    preset = get_preset(config.id)
+    return bool(preset and config.mode == "snapshot" and config.pull
+                and config.pull.method.upper() == "GET"
+                and config.pull.url in {preset.pull.url, _RETIRED_URLS[config.id]})
+
+
 async def ensure_builtin_presets(data_dir: Path) -> None:
     """启动时: 为缺失的预设创建 config.json (含 pull 配置), 但【不拉取数据】。
 
@@ -240,17 +255,19 @@ async def ensure_builtin_presets(data_dir: Path) -> None:
     网络请求阻塞, 也避免「自动拉取」与「用户自主控制」的预期冲突。
 
     安全保证:
-      - 已存在则完全跳过 (绝不覆盖用户数据)
+      - 已存在只迁移退役的出厂 URL，保留自定义地址、字段及调度开关
       - 只写 config.json, 失败只记 warning 不阻断启动
     """
     store = ExtConfigStore(data_dir)
 
     for config in _presets():
         existing = store.get(config.id)
-        if existing is not None:
-            # 用户已有此表 (老用户 / 自己重建过) → 一律不动
-            continue
         try:
+            if existing is not None:
+                if is_builtin_classification_pull(existing) and existing.pull.url == _RETIRED_URLS[config.id]:
+                    existing.pull.url = config.pull.url
+                    store.upsert(existing)
+                continue
             store.upsert(config)
             logger.info("内置扩展表 %s 配置已就绪 (待用户手动获取数据)", config.id)
         except Exception as e:  # noqa: BLE001 — 内置扩展配置的单项准备失败不阻断其他预设及应用启动
@@ -267,16 +284,17 @@ async def fetch_preset(config_id: str, data_dir: Path) -> int:
     return commit_prepared_preset(await prepare_preset(config_id, data_dir), data_dir)
 
 
-async def prepare_preset(config_id: str, data_dir: Path) -> PreparedPreset:
+async def prepare_preset(
+    config_id: str, data_dir: Path, *, on_progress: Callable[[int, int], None] | None = None,
+) -> PreparedPreset:
     """只请求和转换单表，不修改共享配置或文件，供管道的网络预取使用。"""
     config = get_preset(config_id)
     if config is None:
         raise ValueError(f"未知的内置预设: {config_id}")
 
-    flatten = _flatten_concept_rows if config_id == "ext_gn_ths" else _flatten_industry_rows
-
-    raw = await _fetch_json(config.pull.url)
-    rows = flatten(raw)
+    raw = await _fetch_classification_rows(config_id, data_dir, on_progress)
+    rows = (_flatten_concept_rows(raw) if config_id == "ext_gn_ths"
+            else _flatten_industry_rows(raw, hierarchical=False))
     if not rows:
         raise ValueError(f"接口返回 0 行: {config.pull.url}")
     from uuid import uuid4
@@ -294,25 +312,27 @@ async def prepare_preset(config_id: str, data_dir: Path) -> PreparedPreset:
         labels = [_dimension_label(value) for value in labels]
         if any(not value for value in labels):
             raise ValueError("分类完整响应存在无效标签")
-        selected = labels if config_id == "ext_gn_ths" else labels[1:2]
-        for label in selected:
-            memberships.append({"symbol": row["symbol"], "sector_id": label if config_id == "ext_gn_ths" else "-".join(labels[:2]), "sector_name": label,
+        for label in sorted(set(labels)):
+            memberships.append({"symbol": row["symbol"], "sector_id": label, "sector_name": label,
                                 "source": "concept" if config_id == "ext_gn_ths" else "industry"})
     observation = {"id": uuid4().hex, "source": config.pull.url,
                    "obtained_at": cn_now().isoformat(), "source_effective_date": None,
                    "source_published_at": None, "source_version": None,
-                   "complete": True, "completeness_basis": "完整端点响应，证券标识唯一且分类列表有效",
+                   "complete": True, "completeness_basis": "本地当前股票维表逐批反查，每只证券均有唯一响应分组及有效分类列表",
+                   "membership_semantics": "fuyao-flat-v1",
+                   "limitation": "当前关系快照，无历史生效日；行业保留接口原始名称，不提供父子层级",
                    "symbols": symbols, "memberships": memberships}
     return PreparedPreset(config, rows, observation)
 
 
-def commit_prepared_preset(prepared: PreparedPreset, data_dir: Path) -> int:
+def commit_prepared_preset(prepared: PreparedPreset, data_dir: Path, *, keep_strategy_cache: bool = False) -> int:
     """由所属任务线程提交单表；保留用户已保存的配置。"""
     config = prepared.config
     store = ExtConfigStore(data_dir)
     if store.get(config.id) is None:
         store.upsert(config)
-    n = rows_to_parquet(prepared.rows, config, data_dir, snapshot_date=cn_today())
+    n = rows_to_parquet(prepared.rows, config, data_dir, snapshot_date=cn_today(),
+                        replace_snapshot=True, keep_strategy_cache=keep_strategy_cache)
     logger.info("内置扩展表 %s 拉取并提交成功: %d 行", config.id, n)
     return n
 
@@ -326,7 +346,9 @@ async def sync_classifications(
     presets = _presets()
     on_progress("classifications", 0, "并行获取概念与行业分类…")
     prepared = await asyncio.gather(
-        *(prepare_preset(config.id, data_dir) for config in presets), return_exceptions=True,
+        *(prepare_preset(config.id, data_dir, on_progress=lambda done, total, label=config.label:
+                         on_progress("classifications", int(80 * done / total), f"{label}：{done}/{total} 只"))
+          for config in presets), return_exceptions=True,
     )
     for index, config in enumerate(presets):
         on_progress("classifications", int(index * 95 / len(presets)), f"同步{config.label}…")

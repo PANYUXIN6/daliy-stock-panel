@@ -205,9 +205,13 @@ def _prepare_postmarket_inputs(prefetch, repo, capset, today: _date,
         ("ext_gn_ths", "prefetch_concept", "预取概念分类"),
         ("ext_hy_ths", "prefetch_industry", "预取行业分类"),
     ):
-        prefetch.submit(task_id, label, lambda config_id=config_id: asyncio.run(
-            ext_presets.prepare_preset(config_id, repo.store.data_dir),
-        ))
+        def prepare_classification(config_id=config_id, task_id=task_id, label=label):
+            def progress(done, total):
+                prefetch.check_cancelled()
+                prefetch.progress.task(task_id, label, "running", int(100 * done / total),
+                                       f"{label}：{done}/{total} 只")
+            return asyncio.run(ext_presets.prepare_preset(config_id, repo.store.data_dir, on_progress=progress))
+        prefetch.submit(task_id, label, prepare_classification)
     prefetch.submit("prefetch_auction", "预取竞价风向标", lambda:
                     auction_benchmark.prepare_auction_benchmark(repo.store.data_dir, today))
     prefetch.submit("prefetch_dragon_tiger", "预取龙虎榜", lambda:

@@ -108,15 +108,15 @@ def test_environment_maintenance_notifies_existing_readers(maintenance, monkeypa
 
 @pytest.mark.parametrize("preset,field,source_field,labels,expected", [
     ("ext_gn_ths", "所属概念", "concepts", ["机器人", "人工智能"], "机器人;人工智能"),
-    ("ext_hy_ths", "所属同花顺行业", "industries", ["制造", "设备"], "制造-设备"),
+    ("ext_hy_ths", "所属同花顺行业", "industries", ["设备"], "设备"),
 ])
 def test_preset_fetch_keeps_conversion_and_notifies_consumers(maintenance, monkeypatch, preset, field, source_field, labels, expected):
     client, web, subscription, _ = maintenance
 
-    async def fetch(url):
+    async def fetch(config_id, data_dir, on_progress=None):
         return [{"symbol": "600000.SH", "name": "示例", source_field: labels}]
 
-    monkeypatch.setattr(ext_presets, "_fetch_json", fetch)
+    monkeypatch.setattr(ext_presets, "_fetch_classification_rows", fetch)
     response = client.post(f"/api/ext-data/presets/{preset}/fetch")
     assert response.json() == {"status": "ok", "rows": 1}
     assert _consume_update(web, subscription) == ["enriched", "ext_data"]
@@ -129,10 +129,10 @@ def test_preset_fetch_keeps_conversion_and_notifies_consumers(maintenance, monke
 def test_existing_dimension_minute_query_updates_without_waiting_for_ttl(maintenance, monkeypatch):
     client, web, _, root = maintenance
 
-    async def fetch(url):
+    async def fetch(config_id, data_dir, on_progress=None):
         return [{"symbol": "600000.SH", "name": "示例", "concepts": ["机器人"]}]
 
-    monkeypatch.setattr(ext_presets, "_fetch_json", fetch)
+    monkeypatch.setattr(ext_presets, "_fetch_classification_rows", fetch)
     assert client.post("/api/ext-data/presets/ext_gn_ths/fetch").status_code == 200
     query = "/api/ext-data/ext_gn_ths/dimension-intraday"
     params = {"field": "所属概念", "value": "机器人", "date": "2026-10-09"}
@@ -147,10 +147,10 @@ def test_existing_dimension_minute_query_updates_without_waiting_for_ttl(mainten
     assert result["status"] == "ok"
     assert result["member_count"] == 1 and result["points"][0]["time"] == "10:00"
 
-    async def updated_members(url):
+    async def updated_members(config_id, data_dir, on_progress=None):
         return [{"symbol": "600000.SH", "name": "示例", "concepts": ["新概念"]}]
 
-    monkeypatch.setattr(ext_presets, "_fetch_json", updated_members)
+    monkeypatch.setattr(ext_presets, "_fetch_classification_rows", updated_members)
     assert client.post("/api/ext-data/presets/ext_gn_ths/fetch").status_code == 200
     changed = client.get(query, params=params).json()
     assert changed["status"] == "empty" and changed["reason"] == "no_members"
@@ -175,10 +175,10 @@ def test_existing_json_ingest_publishes_through_shared_maintenance(maintenance):
 def test_failed_preset_fetch_publishes_no_success(maintenance, monkeypatch):
     client, _, subscription, _ = maintenance
 
-    async def fail(url):
+    async def fail(config_id, data_dir, on_progress=None):
         raise RuntimeError("测试供应商不可用")
 
-    monkeypatch.setattr(ext_presets, "_fetch_json", fail)
+    monkeypatch.setattr(ext_presets, "_fetch_classification_rows", fail)
     response = client.post("/api/ext-data/presets/ext_gn_ths/fetch")
     assert response.status_code == 400
     assert subscription.empty()
@@ -189,9 +189,9 @@ def test_classification_update_refreshes_cached_rotation_membership(maintenance,
 
     client, web, subscription, _ = maintenance
     concept = ["机器人"]
-    async def fetch(url):
+    async def fetch(config_id, data_dir, on_progress=None):
         return [{"symbol": "600000.SH", "name": "示例", "concepts": concept}]
-    monkeypatch.setattr(ext_presets, "_fetch_json", fetch)
+    monkeypatch.setattr(ext_presets, "_fetch_classification_rows", fetch)
     invalidate_cache()
     try:
         assert client.post("/api/ext-data/presets/ext_gn_ths/fetch").status_code == 200

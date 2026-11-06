@@ -733,7 +733,7 @@ export function Layout() {
         )}
 
         <div className="border-t border-border px-3 py-2 text-xs text-muted">
-          {!railMode && <div className="mb-1 truncate" title={user?.username}>{user?.username} · {user?.role}{user?.role === 'pro' && <div>有效至 {user.pro_expires_on}</div>}</div>}
+          {!railMode && <div className="mb-1 truncate" title={user?.username}>{user?.username} · {user?.role}{user?.role === 'pro' && <div>{user.pro_expires_on === null ? '永久 Pro' : `有效至 ${user.pro_expires_on}`}</div>}</div>}
           <button className="text-secondary hover:text-foreground" title="退出登录" onClick={async () => { await api.authLogout(); announceSessionChange(); lockSession(); window.location.reload() }}>退出</button>
         </div>
         <div className={cn('border-t border-border py-3 shrink-0', railMode ? 'px-2 flex flex-col items-center gap-1' : 'px-2')}>

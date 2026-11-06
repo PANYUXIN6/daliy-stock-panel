@@ -559,6 +559,13 @@ def definition_fingerprint():
 _names_cache: dict[Path, tuple[object, dict[str, str]]] = {}
 
 
+def forget_user_cache(data_dir: Path, uid: str) -> None:
+    from app.services.user_context import user_data_dir
+    directory = user_data_dir(data_dir, uid) / "user_data" / "custom_signals"
+    _intraday_cache.pop(directory, None)
+    _names_cache.pop(directory, None)
+
+
 def signal_names(data_dir: Path) -> dict[str, str]:
     """自定义信号列名 (csg_/csgi_) → 用户命名的映射, 带目录指纹缓存。
 

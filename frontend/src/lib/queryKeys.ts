@@ -26,6 +26,7 @@ export const QK = {
   version:        ['version'] as const,
   preferences:    ['preferences'] as const,
   dataSources:    ['data-sources'] as const,
+  dataIntegrity:  ['data-integrity'] as const,
   capabilityMatrix: ['capability-matrix'] as const,
   quoteStatus:    ['quote-status'] as const,
   quoteInterval:  ['quote-interval'] as const,
@@ -114,6 +115,8 @@ export const QK = {
 
   // Schema
   extDataSchemaAll:     ['ext-data-schema-all'] as const,
+  extSeriesAll:         ['ext-series'] as const,
+  extSeries:            (columns: string, date?: string | null, symbols?: string) => ['ext-series', columns, date ?? '', symbols ?? ''] as const,
   tableSchema:          (table: string) => ['table-schema', table] as const,
 
   // Custom Signals
@@ -203,6 +206,7 @@ export const SSE_INVALIDATE_PREFIXES = [
 
 // 后台落盘事件不受实时行情显示开关影响；仅失效受影响的数据集。
 export const DATASET_QUERY_PREFIXES: Record<string, readonly string[]> = {
+  daily_integrity: ['data-integrity'],
   evening_report: ['evening-report'],
   etf_reference: ['etf-reference'],
   etf_flow: ['etf-flow'],
@@ -211,7 +215,7 @@ export const DATASET_QUERY_PREFIXES: Record<string, readonly string[]> = {
   financials: ['financials', 'earnings-breakout'],
   regime: ['overview-market', 'regime-history', 'regime-observations', 'regime-latest', 'regime-states', 'regime-coverage', 'regime-phases', 'regime-mainline'],
   mainline: ['regime-mainline', 'regime-phases'],
-  ext_data: ['sector-review', 'ext-data', 'ext-data-rows', 'ext-data-schema-all', 'ext-schema-all', 'dimension-members', 'dimension-intraday', 'market-snapshot', 'watchlist-enriched', 'kline', 'kline-latest', 'kline-batch', 'screener-kline-batch', 'screener-cached', 'rps-rotation', 'sector-rotation'],
+  ext_data: ['ext-series', 'sector-review', 'ext-data', 'ext-data-rows', 'ext-data-schema-all', 'ext-schema-all', 'dimension-members', 'dimension-intraday', 'market-snapshot', 'watchlist-enriched', 'kline', 'kline-latest', 'kline-batch', 'screener-kline-batch', 'screener-cached', 'rps-rotation', 'sector-rotation'],
   review: ['review-publication', 'review-reports'],
   dragon_tiger: ['dragon-tiger'],
   auction_benchmark: ['auction-benchmark', 'abnormal-overview'],

@@ -127,3 +127,15 @@ it('listing day without prevClose anchors y-axis with scale, not zero', async ()
   expect(axis.max).toBeUndefined()
   expect(axis.scale).toBe(true)
 })
+
+it('ETF分时价格轴和读数保留千分位，涨幅轴保持百分比口径', async () => {
+  Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true })
+  vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} })
+  const host = document.createElement('div')
+  const root = createRoot(host)
+  cleanup = async () => { await act(async () => root.unmount()) }
+  await act(async () => root.render(<EChartsIntraday assetType="etf" prevClose={0.800} date="2026-11-05"
+    data={[{ datetime: '2026-11-05 09:30:00', open: 0.827, high: 0.829, low: 0.826, close: 0.828, volume: 100, amount: 8280 }]} />))
+  expect(lastYAxis().axisLabel.formatter(0.827)).toBe('0.827')
+  expect(host.textContent).toContain('0.828')
+})

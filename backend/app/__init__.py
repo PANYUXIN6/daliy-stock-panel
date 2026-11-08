@@ -7,7 +7,7 @@ from pathlib import Path
 
 # 版本号从 frontend/package.json 加载，与页面版本徽标同源。
 # 缺少元数据时回退硬编码值，版本读取不得阻塞服务启动。
-_FALLBACK_VERSION = "0.3.8"
+_FALLBACK_VERSION = "0.3.31"
 
 
 def _load_version() -> str:

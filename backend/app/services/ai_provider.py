@@ -1,6 +1,7 @@
 """AI provider adapter for OpenAI-compatible APIs."""
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from collections.abc import AsyncIterator, Callable, Sequence
@@ -103,6 +104,33 @@ def current_ai_model() -> str:
     return current_openai_model()
 
 
+def current_reasoning_context_key(
+    *, model: str | None = None, base_url: str | None = None, protocol: str = "chat_completions",
+) -> str:
+    """推理只属于产生它的供应商、协议、端点和模型；不向浏览器暴露端点。"""
+    identity = [current_ai_provider(), protocol, model if model is not None else current_ai_model(),
+                normalize_openai_base_url(base_url if base_url is not None else
+                    secrets_store.get_ai_config("ai_base_url", settings.ai_base_url))]
+    return hashlib.sha256(json.dumps(identity).encode()).hexdigest()
+
+
+def prepare_tool_messages(messages: Sequence[dict], *, model: str, base_url: str) -> list[dict]:
+    """去除私有归属标记和其他模型的推理，兼容未保存推理的旧 DeepSeek 会话。"""
+    prepared = []
+    context_key = current_reasoning_context_key(model=model, base_url=base_url)
+    deepseek = (urlsplit(base_url).hostname == "api.deepseek.com"
+                or model.lower().rsplit("/", 1)[-1].startswith("deepseek"))
+    for source in messages:
+        message = dict(source)
+        origin = message.pop("reasoning_context", None)
+        if origin is not None and origin != context_key:
+            message.pop("reasoning_content", None)
+        if deepseek and message.get("role") == "assistant" and message.get("reasoning_content") is None:
+            message["reasoning_content"] = ""
+        prepared.append(message)
+    return prepared
+
+
 def current_openai_reasoning_effort() -> str:
     stored = secrets_store.load()
     if "ai_reasoning_effort" not in stored:
@@ -141,7 +169,7 @@ def _estimate_input_tokens(messages: Sequence[Message]) -> int:
     """粗略估算输入 token 数: 中文按 1 字 1 token, 其余按 4 字符 1 token。"""
     total = 0
     for m in messages:
-        text = str(m.get("content") or "")
+        text = str(m.get("content") or "") + str(m.get("reasoning_content") or "")
         cjk = sum(1 for ch in text if "一" <= ch <= "鿿")
         total += cjk + (len(text) - cjk) // 4 + 1
     return max(1, total)
@@ -297,7 +325,12 @@ async def generate_ai_text_with_tools(
     tool_schemas = list(tools)
 
     for _ in range(max_rounds):
-        _check_input_budget(req_messages, max_tokens=max_tokens)
+        prepared_messages = prepare_tool_messages(
+            req_messages, model=current_ai_model(),
+            base_url=secrets_store.get_ai_config("ai_base_url", settings.ai_base_url),
+        )
+        _check_input_budget(prepared_messages, max_tokens=max_tokens)
+        reasoning_context = current_reasoning_context_key()
         message = await _run_openai_message_once(
             req_messages,
             temperature=temperature,
@@ -311,7 +344,12 @@ async def generate_ai_text_with_tools(
         tool_calls = getattr(message, "tool_calls", None) or []
         if not tool_calls:
             # 模型不再请求工具, 产出最终文本, 结束循环。
-            req_messages.append({"role": "assistant", "content": message.content or ""})
+            assistant = {"role": "assistant", "content": message.content or ""}
+            reasoning = getattr(message, "reasoning_content", None)
+            if reasoning is not None:
+                assistant["reasoning_content"] = reasoning
+                assistant["reasoning_context"] = reasoning_context
+            req_messages.append(assistant)
             return req_messages
 
         assistant = {
@@ -320,6 +358,10 @@ async def generate_ai_text_with_tools(
         }
         if message.content:
             assistant["content"] = message.content
+        reasoning = getattr(message, "reasoning_content", None)
+        if reasoning is not None:
+            assistant["reasoning_content"] = reasoning
+            assistant["reasoning_context"] = reasoning_context
         req_messages.append(assistant)
 
         for tc in tool_calls:
@@ -434,7 +476,7 @@ async def _run_openai_message_once(
 
     model = current_ai_model()
     base_url = secrets_store.get_ai_config("ai_base_url", settings.ai_base_url)
-    req_messages = list(messages)
+    req_messages = prepare_tool_messages(messages, model=model, base_url=base_url)
     kwargs = _openai_kwargs(temperature=temperature, max_tokens=max_tokens, tools=tools)
     transport_retries = 0
     while True:

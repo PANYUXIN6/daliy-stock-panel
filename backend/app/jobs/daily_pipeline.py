@@ -321,7 +321,7 @@ def _run_now(
     from app.services.daily_coverage import DailyCoverage, DailyCoverageError
 
     today = cn_today()
-    if with_analysis and not capset.has(Cap.KLINE_DAILY_BATCH):
+    if with_analysis and not index_sync.daily_source_available(capset):
         raise DailyCoverageError("日线批量能力不可用，无法更新股票与核心指数，请先配置数据源")
     if postmarket and target_date is not None and target_date != today:
         raise DailyCoverageError("盘后任务已跨日期，取消本次排队执行")
@@ -334,6 +334,10 @@ def _run_now(
         EveningReportStore(repo.store.data_dir).save_readiness(today.isoformat(), {
             "date": today.isoformat(), "complete": False, "reason": "新一轮盘后输入正在验收",
         })
+
+    # 显式或定时管道已持有唯一写入槽，先续修此前自检确认的历史问题。
+    from app.services.integrity_check import repair_known_data
+    repair_known_data(repo, capset, on_progress=emit)
 
     # 自动盘后与显式修正都需要完整当前 A 股名单，不能使用可能只返回部分行情的池。
     require_full_universe = postmarket or with_analysis or override_start_date is not None
@@ -696,7 +700,7 @@ def _run_now(
     pull_index = postmarket or with_analysis or _prefs.get_pipeline_pull_index()
     pull_etf = _prefs.get_pipeline_pull_etf()
 
-    if capset.has(Cap.KLINE_DAILY_BATCH) and (pull_index or pull_etf):
+    if index_sync.daily_source_available(capset) and (pull_index or pull_etf):
         _types = []
         if pull_index:
             _types.append("指数")

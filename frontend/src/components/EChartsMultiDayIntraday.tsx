@@ -1,3 +1,4 @@
+import { pricePrecision } from '@/lib/format'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import * as echarts from 'echarts'
 import type { ECharts, EChartsOption } from 'echarts'
@@ -16,6 +17,7 @@ const COLORS = {
 }
 
 interface Props {
+  assetType?: 'stock' | 'etf' | 'index'
   sessions: MinuteKlineSession[]
   height?: number
   onPriceDoubleClick?: (price: number, currentPrice: number) => void
@@ -143,11 +145,13 @@ function buildModel(sessions: MinuteKlineSession[]) {
 }
 
 export function EChartsMultiDayIntraday({
+  assetType,
   sessions,
   height = 420,
   onPriceDoubleClick,
   priceLines = [],
 }: Props) {
+  const digits = pricePrecision(assetType)
   const containerRef = useRef<HTMLDivElement>(null)
   const chartRef = useRef<ECharts | null>(null)
   const resizeObserverRef = useRef<ResizeObserver | null>(null)
@@ -356,7 +360,7 @@ export function EChartsMultiDayIntraday({
             color: theme.text,
             fontFamily: 'JetBrains Mono, monospace',
             fontSize: 10,
-            formatter: (value: number) => value.toFixed(2),
+            formatter: (value: number) => value.toFixed(digits),
           },
         },
         {
@@ -390,7 +394,7 @@ export function EChartsMultiDayIntraday({
       ],
     }
     chart.setOption(option, true)
-  }, [height, model, priceLines, theme])
+  }, [height, model, priceLines, theme, digits])
 
   useEffect(() => () => {
     chartRef.current?.off('updateAxisPointer')
@@ -416,14 +420,14 @@ export function EChartsMultiDayIntraday({
           {info ? (
             <>
               <span className="text-muted">{info.date} {formatMinuteTime(info.row.datetime)}</span>
-              <span className="text-muted">开</span><span style={{ color: infoColor }}>{info.row.open != null ? info.row.open.toFixed(2) : '—'}</span>
-              <span className="text-muted">高</span><span style={{ color: infoColor }}>{info.row.high.toFixed(2)}</span>
-              <span className="text-muted">低</span><span style={{ color: infoColor }}>{info.row.low.toFixed(2)}</span>
-              <span className="text-muted">收</span><span className="font-semibold" style={{ color: infoColor }}>{info.row.close.toFixed(2)}</span>
+              <span className="text-muted">开</span><span style={{ color: infoColor }}>{info.row.open != null ? info.row.open.toFixed(digits) : '—'}</span>
+              <span className="text-muted">高</span><span style={{ color: infoColor }}>{info.row.high.toFixed(digits)}</span>
+              <span className="text-muted">低</span><span style={{ color: infoColor }}>{info.row.low.toFixed(digits)}</span>
+              <span className="text-muted">收</span><span className="font-semibold" style={{ color: infoColor }}>{info.row.close.toFixed(digits)}</span>
               {changePct != null && (
                 <span style={{ color: infoColor }}>{changePct >= 0 ? '+' : ''}{changePct.toFixed(2)}%</span>
               )}
-              <span className="text-muted">均价</span><span style={{ color: COLORS.average }}>{info.average != null ? info.average.toFixed(2) : '—'}</span>
+              <span className="text-muted">均价</span><span style={{ color: COLORS.average }}>{info.average != null ? info.average.toFixed(digits) : '—'}</span>
               <span className="text-muted">量</span><span className="text-secondary">{info.row.volume.toFixed(0)}</span>
               <span className="text-muted">额</span><span className="text-secondary">{formatAmount(info.row.amount)}</span>
             </>

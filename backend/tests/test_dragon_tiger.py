@@ -156,3 +156,38 @@ def test_build_recap_context_contains_summary(data_dir, monkeypatch):
 def test_build_recap_context_empty_without_source(data_dir, monkeypatch):
     monkeypatch.setattr(dt, "_provider", lambda: None)
     assert dt.build_recap_context(data_dir) == ""
+
+
+def test_new_and_cached_boards_normalize_null_codes_without_read_side_writes(data_dir, monkeypatch):
+    import json
+
+    class NullableProvider(_FakeProvider):
+        def dragon_tiger(self, board_type, date):
+            result = super().dragon_tiger(board_type, date)
+            result["stock_items"] = [
+                {"thscode": None, "ticker": "002731", "name": "示例深股"},
+                {"thscode": None, "ticker": "900901", "name": "沪B"},
+                {"thscode": "", "ticker": "200001", "name": "深B"},
+                {"thscode": None, "ticker": "920001", "name": "北交所"},
+                {"thscode": "600519.sh", "ticker": "600519", "name": "贵州茅台"},
+                {"thscode": None, "ticker": None, "name": "无代码"},
+            ]
+            result["hot_money_items"][0]["rows"] = [result["stock_items"][0]]
+            return result
+
+    provider = _use_provider(monkeypatch, NullableProvider())
+    result = dt.sync_dragon_tiger(data_dir, date(2026, 8, 28))
+    expected = ["002731.SZ", "900901.SH", "200001.SZ", "920001.BJ", "600519.SH"]
+    assert [r["thscode"] for r in result["all"]["stock_items"]] == expected
+    assert result["hot_money"]["hot_money_items"][0]["rows"][0]["thscode"] == "002731.SZ"
+    # 历史缓存也在响应边界归一化，不重抓、不改旧文件。
+    path = data_dir / "dragon_tiger/date=2026-08-27.json"
+    old = {"state": "ok", "all": provider.dragon_tiger("all", "2026-08-27"),
+           "hot_money": provider.dragon_tiger("hot_money", "2026-08-27")}
+    path.write_text(json.dumps(old), encoding="utf-8")
+    original = path.read_bytes()
+    provider.calls.clear()
+    cached = dt.get_dragon_tiger(data_dir, date(2026, 8, 27))
+    assert [r["thscode"] for r in cached["all"]["stock_items"]] == expected
+    assert cached["hot_money"]["hot_money_items"][0]["rows"][0]["thscode"] == "002731.SZ"
+    assert path.read_bytes() == original and provider.calls == []

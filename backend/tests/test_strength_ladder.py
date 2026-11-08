@@ -102,7 +102,7 @@ def _historical_repo(tmp_path):
     latest = compute_signals(compute_indicators(pl.concat(frames))).filter(pl.col("date") == days[-1])
     repo = SimpleNamespace(
         store=SimpleNamespace(data_dir=tmp_path), enriched_latest_date=lambda: days[-1],
-        get_enriched_latest_asset=lambda asset: (latest, days[-1]), get_enriched_history=lambda *args: None,
+        get_enriched_latest_asset=lambda asset, *, end=None: (latest, days[-1]), get_enriched_history=lambda *args: None,
         get_instruments_asset=lambda asset: pl.DataFrame(), get_historical_shares=lambda: pl.DataFrame(),
     )
     return repo, days

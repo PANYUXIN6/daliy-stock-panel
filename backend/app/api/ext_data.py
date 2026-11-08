@@ -14,10 +14,12 @@ from pathlib import Path
 from typing import Annotated, Literal
 
 import polars as pl
-from fastapi import APIRouter, File, HTTPException, Query, Request, UploadFile
+from fastapi import APIRouter, File, Form, HTTPException, Query, Request, UploadFile
+from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
 from app.market_time import CN_TZ, cn_today
+from app.services import ext_config_transfer
 from app.services.ext_data import (
     ExtConfig,
     ExtConfigStore,
@@ -33,6 +35,8 @@ from app.services.ext_data import (
     rows_to_parquet,
     write_ext_parquet,
 )
+from app.services.ext_data_schema import CreateExtReq, FieldDef, PullConfigReq
+from app.services.ext_data_schema import PullAuthReq as PullAuthReq
 from app.services.ext_pull import _request_json, fetch_and_ingest, pull_scheduler
 
 logger = logging.getLogger(__name__)
@@ -42,23 +46,6 @@ router = APIRouter(prefix="/api/ext-data", tags=["ext-data"])
 # ---------------------------------------------------------------------------
 # Pydantic 模型
 # ---------------------------------------------------------------------------
-
-class FieldDef(BaseModel):
-    name: str
-    dtype: str = "string"        # string | int | float | bool
-    label: str = ""
-
-
-class CreateExtReq(BaseModel):
-    id: str = Field(..., min_length=1, max_length=64, pattern=r"^[a-zA-Z0-9_]+$")
-    label: str = Field(..., min_length=1, max_length=64)
-    mode: Literal["snapshot", "timeseries"]
-    fields: list[FieldDef] = Field(..., min_length=1)
-    description: str = ""
-    symbol_map: dict = {}   # {"type": "mapped", "col": "..."} 或 {"type": "computed", "from": "code", "method": "append_exchange"}
-    code_map: dict = {}     # {"type": "mapped", "col": "..."} 或 {"type": "computed", "from": "symbol", "method": "strip_exchange"}
-    market_level: bool = False  # 市场级表: 行=全市场每日一条, 无 symbol 列 (如择时状态序列)
-
 
 class UpdateExtReq(BaseModel):
     label: str | None = None
@@ -73,41 +60,6 @@ class IngestReq(BaseModel):
     """JSON 批量写入请求。"""
     date: str | None = None          # YYYY-MM-DD，不传默认今天
     rows: list[dict] = Field(..., min_length=1)
-
-
-class PullAuthReq(BaseModel):
-    """拉取接口鉴权方式 (与自定义行情源 AuthConfig 同口径)。
-
-    Key 本体存 secrets_store (secrets.json), 不写入 config.json。
-    """
-    type: Literal["none", "bearer", "header", "query"] = "none"
-    header: str = Field("Authorization", min_length=1, max_length=64)  # bearer/header 用
-    param: str = Field("token", min_length=1, max_length=64)          # query 用
-
-
-class PullConfigReq(BaseModel):
-    """定时拉取配置请求。"""
-    url: str = Field(..., min_length=1)
-    method: str = "GET"
-    headers: dict[str, str] | None = None
-    body: str | None = None
-    response_path: str = ""          # dot-path to rows array
-    field_map: dict[str, str] | None = None  # external → internal field name
-    schedule_minutes: int = Field(1440, ge=1)
-    enabled: bool = False
-    time_window_start: str | None = None   # "HH:MM", None=不限
-    time_window_end: str | None = None     # "HH:MM", None=不限
-    # 接口按日查询的参数名 (如 "date"): 配置后支持历史回补, 且当日拉取也带日期参数
-    date_param: str | None = Field(None, min_length=1, max_length=16, pattern=r"^[A-Za-z_][A-Za-z0-9_]*$")
-    # 日期参数值的格式: iso/compact/ts_s/ts_ms (时间戳=该交易日北京时间 00:00:00), 缺省 iso
-    date_format: str = "iso"
-    # 日内序列表时间列名 (字段映射后的列名, 如 "ts"): 配置后同 symbol 允许多行,
-    # 按 [symbol, time_field] 去重; 留空 = 每日快照表 (按 symbol 去重)
-    time_field: str | None = Field(None, max_length=32)
-    # 鉴权方式; 请求中缺省 (None) = 保留现有配置, {"type":"none"} = 关闭鉴权
-    auth: PullAuthReq | None = None
-    # 单次拉取请求超时 (秒), 默认 30 与历史行为一致; 大响应接口可调高
-    timeout_seconds: int = Field(30, ge=5, le=300)
 
 
 class ApiKeyReq(BaseModel):
@@ -138,6 +90,58 @@ def _store(request: Request) -> ExtConfigStore:
 
 def _data_dir(request: Request) -> Path:
     return request.app.state.repo.store.data_dir
+
+
+_CONFIG_FILE = File(...)
+_CONFIG_ID = Form(None)
+
+
+async def _read_config_package(file: UploadFile) -> bytes:
+    data = await file.read(ext_config_transfer.MAX_UPLOAD + 1)
+    if not data or len(data) > ext_config_transfer.MAX_UPLOAD:
+        raise HTTPException(400, "请选择不超过 4 MiB 的扩展配置 ZIP")
+    return data
+
+
+@router.get("/{config_id}/config/export")
+async def export_config(request: Request, config_id: str):
+    try:
+        data, filename = await asyncio.to_thread(ext_config_transfer.export_config, _data_dir(request), config_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(404, "扩展数据配置不存在") from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return Response(data, media_type="application/zip", headers={
+        "Content-Disposition": f'attachment; filename="{filename}"',
+    })
+
+
+@router.post("/config/inspect")
+async def inspect_config_package(request: Request, file: UploadFile = _CONFIG_FILE):
+    data = await _read_config_package(file)
+    try:
+        return await asyncio.to_thread(ext_config_transfer.inspect_config, _data_dir(request), data)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@router.post("/config/import")
+async def import_config_package(
+    request: Request, file: UploadFile = _CONFIG_FILE, config_id: str | None = _CONFIG_ID,
+):
+    data = await _read_config_package(file)
+    try:
+        config = await asyncio.to_thread(
+            ext_config_transfer.import_config, _data_dir(request), data, config_id=config_id,
+        )
+    except FileExistsError as exc:
+        raise HTTPException(409, "该标识已存在，请修改导入标识；现有配置、数据和 Key 均保留") from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    await asyncio.to_thread(_refresh_views, request)
+    # Imported tables are new and disabled; scheduling begins only when the
+    # recipient explicitly saves an enabled pull configuration.
+    return config
 
 
 # ---------------------------------------------------------------------------
@@ -469,7 +473,10 @@ def create_config(request: Request, body: CreateExtReq):
         code_map=body.code_map,
         market_level=body.market_level,
     )
-    store.upsert(config)
+    try:
+        store.create(config)
+    except FileExistsError as exc:
+        raise HTTPException(400, f"配置 '{body.id}' 已存在") from exc
     _refresh_views(request)
     return config.to_dict()
 
@@ -1045,23 +1052,13 @@ def configure_pull(request: Request, config_id: str, body: PullConfigReq):
         raise HTTPException(404, f"配置 '{config_id}' 不存在")
 
     # 保留历史状态字段; auth 缺省时沿用现有配置 (关闭鉴权需显式传 {"type":"none"})
+    if body.since_param and config.mode != "timeseries":
+        raise HTTPException(400, "增量拉取仅支持时序表")
     old_pull = config.pull
     config.pull = PullConfig(
-        url=body.url,
-        method=body.method,
-        headers=body.headers,
-        body=body.body,
-        response_path=body.response_path,
-        field_map=body.field_map,
-        schedule_minutes=body.schedule_minutes,
-        enabled=body.enabled,
-        time_window_start=body.time_window_start,
-        time_window_end=body.time_window_end,
-        date_param=body.date_param,
-        date_format=body.date_format,
-        time_field=body.time_field,
+        **body.model_dump(exclude={"auth", "granularity"}),
+        granularity=body.granularity or (old_pull.granularity if old_pull else "auto"),
         auth=body.auth.model_dump() if body.auth else (old_pull.auth if old_pull else None),
-        timeout_seconds=body.timeout_seconds,
         last_run=old_pull.last_run if old_pull else None,
         last_status=old_pull.last_status if old_pull else None,
         last_message=old_pull.last_message if old_pull else None,
@@ -1238,6 +1235,36 @@ def fix_symbol(request: Request, config_id: str):
 # ---------------------------------------------------------------------------
 
 
+@router.get("/{config_id}/series")
+def ext_series(
+    request: Request,
+    config_id: str,
+    field: str = Query(..., min_length=1),
+    date: str | None = Query(None, description="日内分区日期或日级窗口截止日"),
+    symbols: str | None = Query(None, description="逗号分隔的可见标的"),
+    days: int = Query(10, ge=1, le=120),
+    granularity: Literal["auto", "intraday", "daily"] = "auto",
+):
+    """按列批量读取迷你图序列；只读本地数据，不触发采集。"""
+    from app.services.ext_series import read_ext_series
+
+    config = _store(request).get(config_id)
+    if not config:
+        raise HTTPException(404, f"配置 '{config_id}' 不存在")
+    day = _partition_date(date) if date else None
+    wanted = [symbol.strip() for symbol in symbols.split(",") if symbol.strip()] if symbols is not None else None
+    try:
+        return read_ext_series(
+            config, _data_dir(request), field, end_date=day,
+            symbols=wanted, days=days, granularity=granularity,
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except (OSError, pl.exceptions.PolarsError) as exc:
+        logger.exception("extension series read failed: %s", config_id)
+        raise HTTPException(500, "扩展序列读取失败，请检查数据文件") from exc
+
+
 @router.post("/detect-fields")
 async def detect_fields(
     request: Request,
@@ -1373,6 +1400,16 @@ async def detect_url(body: DetectUrlReq):
     }
 
 
+def _describe_parquet_columns(glob: str) -> list[tuple[str, str]]:
+    import duckdb
+
+    # relation 元数据不依赖 DESCRIBE 的版本相关输出列名，也不会拼接 SQL 路径。
+    # date= 分区仅用于定位，不能把它伪装成原表的一列。
+    with duckdb.connect() as connection:
+        relation = connection.read_parquet(glob, union_by_name=True, hive_partitioning=False)
+        return [(name, str(dtype)) for name, dtype in zip(relation.columns, relation.types, strict=True)]
+
+
 @router.get("/schema/{config_id}")
 def discover_schema(request: Request, config_id: str):
     """发现扩展数据的实际 Parquet schema（基于已有数据）。"""
@@ -1384,20 +1421,19 @@ def discover_schema(request: Request, config_id: str):
     glob = _parquet_glob(config, data_dir)
 
     try:
-        import duckdb
-        rows = duckdb.query(
-            f"SELECT column_name, data_type FROM (DESCRIBE SELECT * FROM read_parquet('{glob}', union_by_name=true))"
-        ).fetchall()
+        rows = _describe_parquet_columns(glob)
         return {"columns": [{"name": r[0], "type": r[1]} for r in rows]}
     except Exception:
         logger.exception("extension schema discovery failed")
         # 无数据时返回配置中定义的字段
-        return {"columns": [f.to_dict() for f in config.fields]}
+        return {"columns": [{"name": f.name, "type": f.dtype, "label": f.label} for f in config.fields]}
 
 
 @router.get("/schema-all")
 def discover_all_schemas(request: Request):
     """发现所有扩展表的 schema（用于前端动态列选择）。"""
+    from app.services.ext_series import effective_granularity
+
     configs = _store(request).load_all()
     result = []
     for config in configs:
@@ -1405,20 +1441,19 @@ def discover_all_schemas(request: Request):
         glob = _parquet_glob(config, data_dir)
 
         try:
-            import duckdb
-            cols = duckdb.query(
-                f"SELECT column_name, data_type FROM (DESCRIBE SELECT * FROM read_parquet('{glob}', union_by_name=true))"
-            ).fetchall()
+            cols = _describe_parquet_columns(glob)
             field_labels = {f.name: f.label for f in config.fields}
             columns = [{"name": r[0], "type": r[1], "label": field_labels.get(r[0], r[0])} for r in cols]
         except Exception:
             logger.exception("extension schema discovery failed: %s", config.id)
-            columns = [f.to_dict() for f in config.fields]
+            columns = [{"name": f.name, "type": f.dtype, "label": f.label} for f in config.fields]
 
         result.append({
             "id": config.id,
             "label": config.label,
             "mode": config.mode,
+            "time_field": config.pull.time_field if config.pull else None,
+            "granularity": effective_granularity(config, data_dir),
             "columns": columns,
         })
     return {"items": result}

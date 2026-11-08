@@ -6,6 +6,7 @@ import copy
 import json
 import logging
 import re
+from contextlib import suppress
 from datetime import date, datetime
 from pathlib import Path
 from typing import Literal
@@ -47,11 +48,37 @@ PULL_DATE_FORMATS = ("iso", "compact", "ts_s", "ts_ms")
 class PullConfig:
     """定时拉取配置。"""
     __slots__ = (
-        "auth", "body", "date_format", "date_param", "enabled",
-        "field_map", "headers", "last_message", "last_rows", "last_run",
-        "last_status", "max_pages", "method", "next_run", "page_param",
-        "page_size", "page_size_param", "page_start", "response_path", "schedule_minutes",
-        "time_field", "time_window_end", "time_window_start", "timeout_seconds", "url",
+        "auth",
+        "body",
+        "date_format",
+        "date_param",
+        "enabled",
+        "field_map",
+        "granularity",
+        "headers",
+        "last_message",
+        "last_rows",
+        "last_run",
+        "last_status",
+        "max_pages",
+        "method",
+        "next_run",
+        "page_param",
+        "page_size",
+        "page_size_param",
+        "page_start",
+        "response_path",
+        "schedule_day",
+        "schedule_minutes",
+        "schedule_period",
+        "schedule_time",
+        "schedule_trading_only",
+        "since_param",
+        "time_field",
+        "time_window_end",
+        "time_window_start",
+        "timeout_seconds",
+        "url",
     )
 
     def __init__(
@@ -81,6 +108,12 @@ class PullConfig:
         page_size: int = 0,
         page_start: int = 1,
         max_pages: int = 20,
+        granularity: str = "auto",
+        schedule_time: str | None = None,
+        schedule_period: str = "daily",
+        schedule_day: int = 1,
+        schedule_trading_only: bool = False,
+        since_param: str | None = None,
     ) -> None:
         self.url = url
         self.method = method              # GET | POST
@@ -89,6 +122,11 @@ class PullConfig:
         self.response_path = response_path  # dot-path to rows array, e.g. "data.list"
         self.field_map = field_map or {}    # external_name → config_field_name
         self.schedule_minutes = schedule_minutes
+        self.schedule_time = schedule_time if isinstance(schedule_time, str) and re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", schedule_time) else None
+        self.schedule_period = schedule_period if schedule_period in ("daily", "weekly", "monthly") else "daily"
+        day_limit = 7 if self.schedule_period == "weekly" else 31
+        self.schedule_day = schedule_day if isinstance(schedule_day, int) and 1 <= schedule_day <= day_limit else 1
+        self.schedule_trading_only = bool(schedule_trading_only)
         self.enabled = enabled
         self.last_run = last_run
         self.last_status = last_status      # "success" | "error"
@@ -106,6 +144,8 @@ class PullConfig:
         # symbol 允许多行 (按 [symbol, time_field] 去重), 用于集合竞价等日内多盘
         # 数据; None = 每日快照表 (按 symbol 去重, 默认)
         self.time_field = (time_field or "").strip() or None
+        self.since_param = (since_param or "").strip() or None if self.time_field else None
+        self.granularity = granularity if granularity in ("auto", "intraday", "daily") else "auto"
         # 拉取接口鉴权方式 {"type": "none|bearer|header|query", "header": ..., "param": ...},
         # 与自定义行情源 AuthConfig 同口径; Key 本体存 secrets_store, 不落 config.json
         self.auth = auth
@@ -144,6 +184,10 @@ class PullConfig:
             "response_path": self.response_path,
             "field_map": self.field_map,
             "schedule_minutes": self.schedule_minutes,
+            "schedule_time": self.schedule_time,
+            "schedule_period": self.schedule_period,
+            "schedule_day": self.schedule_day,
+            "schedule_trading_only": self.schedule_trading_only,
             "enabled": self.enabled,
             "last_run": self.last_run,
             "last_status": self.last_status,
@@ -155,6 +199,8 @@ class PullConfig:
             "date_param": self.date_param,
             "date_format": self.date_format,
             "time_field": self.time_field,
+            "since_param": self.since_param,
+            "granularity": self.granularity,
             "auth": self.auth,
             "timeout_seconds": self.timeout_seconds,
             "page_param": self.page_param,
@@ -176,6 +222,10 @@ class PullConfig:
             response_path=d.get("response_path", ""),
             field_map=d.get("field_map"),
             schedule_minutes=d.get("schedule_minutes", 1440),
+            schedule_time=d.get("schedule_time"),
+            schedule_period=d.get("schedule_period", "daily"),
+            schedule_day=d.get("schedule_day", 1),
+            schedule_trading_only=d.get("schedule_trading_only", False),
             enabled=d.get("enabled", False),
             last_run=d.get("last_run"),
             last_status=d.get("last_status"),
@@ -187,6 +237,8 @@ class PullConfig:
             date_param=d.get("date_param"),
             date_format=d.get("date_format", "iso"),
             time_field=d.get("time_field"),
+            since_param=d.get("since_param"),
+            granularity=d.get("granularity", "auto"),
             auth=d.get("auth"),
             timeout_seconds=d.get("timeout_seconds", 30),
             page_param=d.get("page_param"),
@@ -378,6 +430,26 @@ class ExtConfigStore:
         except (OSError, UnicodeError, ValueError, TypeError, KeyError, AttributeError):
             logger.debug("扩展表配置读取失败: %s", config_id, exc_info=True)
             return None
+
+    def create(self, config: ExtConfig) -> None:
+        """Reserve a new table directory before publication; never replace data."""
+        directory = self._config_path(config.id).parent
+        if directory.parent.is_symlink():
+            raise ValueError("扩展数据目录不能使用符号链接")
+        directory.parent.mkdir(parents=True, exist_ok=True)
+        directory.mkdir(exist_ok=False)
+        try:
+            self.upsert(config)
+        except BaseException:
+            # Clean up our unpublished temporary file so a failed import can be
+            # retried, while retaining any committed configuration or data.
+            path = self._config_path(config.id)
+            if not path.exists():
+                with suppress(OSError):
+                    path.with_suffix(path.suffix + ".tmp").unlink(missing_ok=True)
+                with suppress(OSError):
+                    directory.rmdir()
+            raise
 
     def upsert(self, config: ExtConfig, *, keep_strategy_cache: bool = False) -> None:
         config.updated_at = datetime.now().isoformat()

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -261,7 +261,23 @@ def _parse_rows_payload(config: ExtConfig, pull: PullConfig, data: Any) -> list[
     return _apply_field_map(rows, pull.field_map)
 
 
-async def fetch_rows_for_date(config: ExtConfig, target_date: date) -> list[dict]:
+def since_cursor(data_dir: Path, config: ExtConfig, day: date) -> str | None:
+    """只从目标日的已落盘时间列取游标；新交易日和不可读分区仍全量拉取。"""
+    pull = config.pull
+    if config.mode != "timeseries" or not pull or not pull.since_param or not pull.time_field:
+        return None
+    import polars as pl
+
+    try:
+        value = pl.read_parquet(_day_partition(data_dir, config.id, day), columns=[pull.time_field])[pull.time_field].max()
+    except (OSError, pl.exceptions.PolarsError):
+        return None
+    return (str(value).strip() or None) if value is not None else None
+
+
+async def fetch_rows_for_date(
+    config: ExtConfig, target_date: date, *, cursor: str | None = None,
+) -> list[dict]:
     """按日期请求外部 API 并解析为行 (不写盘)。空数据返回 []。
 
     与 fetch_and_ingest 共用同一解析链 (response_path/预设转换/字段映射/
@@ -271,12 +287,13 @@ async def fetch_rows_for_date(config: ExtConfig, target_date: date) -> list[dict
     pull = config.pull
     if not pull or not pull.url:
         raise ValueError("拉取未配置或 URL 为空")
+    since_extra = {pull.since_param: cursor} if pull.since_param and cursor is not None else None
 
     if pull.page_param and pull.method.upper() == "GET":
         collected: list[dict] = []
         page = pull.page_start
         for _ in range(pull.max_pages):
-            extra: dict[str, str] = {pull.page_param: str(page)}
+            extra: dict[str, str] = {**(since_extra or {}), pull.page_param: str(page)}
             if pull.page_size_param and pull.page_size > 0:
                 extra[pull.page_size_param] = str(pull.page_size)
             data = await _request_json(pull, config.id, day=target_date, extra_params=extra)
@@ -295,7 +312,7 @@ async def fetch_rows_for_date(config: ExtConfig, target_date: date) -> list[dict
             )
         rows = collected
     else:
-        data = await _request_json(pull, config.id, day=target_date)
+        data = await _request_json(pull, config.id, day=target_date, extra_params=since_extra)
         rows = _parse_rows_payload(config, pull, data)
 
     # 校验可关联标的的字段：直接 symbol/code，或配置里声明的映射源列。
@@ -343,8 +360,11 @@ async def fetch_and_ingest(
             raise ValueError("板块分类接口仅提供当前快照，不能回补历史分类")
         prepared = await prepare_preset(config.id, Path(data_dir))
         return commit_prepared_preset(prepared, Path(data_dir), keep_strategy_cache=keep_strategy_cache), day.isoformat()
-    rows = await fetch_rows_for_date(config, day)
+    cursor = since_cursor(Path(data_dir), config, day)
+    rows = await fetch_rows_for_date(config, day, cursor=cursor) if cursor is not None else await fetch_rows_for_date(config, day)
     if not rows:
+        if cursor is not None:
+            return 0, day.isoformat()  # 已有分区，源确认没有新增；保留原文件
         raise ValueError("提取到的行数为 0")
     n = rows_to_parquet(
         rows, config, data_dir, snapshot_date=day,
@@ -468,6 +488,59 @@ async def backfill_history(
 # 调度器
 # ---------------------------------------------------------------------------
 
+# 每日固定时刻模式的等待分片: 长睡到明天会让「中途改配置/停用」最长等一整天
+# 才生效, 分片轮询让变更在一分钟内被外层重读
+_DAILY_POLL_SECONDS = 60
+
+
+def _today_target(now: datetime, hhmm: str) -> datetime:
+    """北京时间 now 当天的固定时刻 (保持 now 的时区信息)。"""
+    return now.replace(hour=int(hhmm[:2]), minute=int(hhmm[3:5]), second=0, microsecond=0)
+
+
+def _ran_at_or_after(pull: PullConfig, target: datetime) -> bool:
+    """上次执行 (last_run, UTC ISO) 是否已不早于 target — 重启后不重复拉当天。
+
+    解析失败按「未拉过」处理: 拉取本身幂等 (同日分区去重覆盖), 宁可重拉一次
+    也不要因为状态字段脏了而整天静默跳过。
+    """
+    raw = pull.last_run if pull.last_status not in {"skipped", "waiting"} else None
+    if not raw:
+        return False
+    try:
+        dt = datetime.fromisoformat(str(raw))
+    except ValueError:
+        return False
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=UTC)
+    return dt.astimezone(CN_TZ) >= target
+
+
+def _is_scheduled_day(now: datetime, pull: PullConfig, calendar: dict | None = None) -> bool | None:
+    """周期先匹配；仅交易日时使用本地日历，未知日期等待采集日历更新。"""
+    if pull.schedule_period == "weekly" and now.isoweekday() != pull.schedule_day:
+        return False
+    if pull.schedule_period == "monthly" and now.day != pull.schedule_day:
+        return False
+    if not pull.schedule_trading_only:
+        return True
+    day = now.date().isoformat()
+    if not calendar or not (calendar["start"] <= day <= calendar["end"]):
+        return None
+    return day in calendar["days"]
+
+
+def _next_scheduled_target(
+    now: datetime, hhmm: str, pull: PullConfig, calendar: dict | None = None,
+) -> datetime | None:
+    """预告下次已确定的计划时刻；短月跳过不存在的日期，日历未知不猜测。"""
+    for offset in range(400):
+        target = _today_target(now + timedelta(days=offset), hhmm)
+        if target > now and _is_scheduled_day(target, pull, calendar) is True:
+            return target
+    return None
+
+
 class PullScheduler:
     """后台调度器：为每个启用了 pull 的 ExtConfig 维护定时任务。
 
@@ -551,12 +624,109 @@ class PullScheduler:
 
         self._submit(_apply)
 
+    async def _execute_pull(self, fresh: ExtConfig, store: ExtConfigStore) -> bool:
+        """共享写入槽空闲时执行；忙时下轮重试，不把本次计划标记成已执行。"""
+        from app.services.pipeline_jobs import release_run_slot, try_acquire_run_slot
+        from app.services.shared_runtime import publish_data_update
+
+        owner = f"ext-pull:{fresh.id}"
+        if not try_acquire_run_slot(owner):
+            return False
+        try:
+            try:
+                n, d = await fetch_and_ingest(fresh, self._data_dir, keep_strategy_cache=True)
+                status, message, rows = "success", f"{n} rows @ {d}", n
+                publish_data_update(Path(self._data_dir), ["ext_data"])
+            except Exception as exc:  # noqa: BLE001 — 单个可选源失败不停止其它调度
+                status, message, rows = "error", str(exc)[:200], None
+                logger.warning("PullScheduler: %s error", fresh.id, exc_info=True)
+            latest = store.get(fresh.id)
+            if latest and latest.pull:
+                latest.pull.last_run = cn_now().astimezone(UTC).isoformat()
+                latest.pull.last_status = status
+                latest.pull.last_message = message
+                if rows is not None:
+                    latest.pull.last_rows = rows
+                store.upsert(latest, keep_strategy_cache=True)
+            return True
+        finally:
+            release_run_slot(owner)
+
+    async def _run_daily_at(self, config_id: str, store: ExtConfigStore, hhmm: str) -> None:
+        """固定时刻 (北京时间) 周期性拉取: 每天 / 每周 / 每月 / 仅交易日。
+
+        间隔制 (schedule_minutes) 锁相在启用时刻 —— 表达不了「每天 09:30 拉一次」;
+        这里按墙钟对齐: 今天是计划日且当前时刻已过当日目标、上次执行早于它
+        (重启安全) 就拉, 否则分片睡到下一个计划日的目标时刻。启用即对齐: 若
+        启用时已过当日时刻、当日是计划日且未拉过, 立即补拉一次 (与间隔制
+        「启用即拉取」同语义, 拉取本身幂等)。周期/交易日中途修改在一分钟内
+        被下轮 fresh 重读生效。本模式忽略时间窗口与调度间隔 (固定时刻本身
+        就是完整日程)。
+        """
+        while self._running:
+            fresh = store.get(config_id)
+            if (
+                not fresh or not fresh.pull or not fresh.pull.enabled
+                or fresh.pull.schedule_time != hhmm
+            ):
+                return  # 停用 / 改时刻 / 切回间隔制 → 外层循环重读
+            now = cn_now()
+            from app.services.trading_day import calendar_status
+
+            calendar = calendar_status(Path(self._data_dir)) if fresh.pull.schedule_trading_only else None
+            scheduled = _is_scheduled_day(now, fresh.pull, calendar)
+            target = _today_target(now, hhmm)
+            if (
+                scheduled is True
+                and now >= target and not _ran_at_or_after(fresh.pull, target)
+            ):
+                if not await self._execute_pull(fresh, store):
+                    await asyncio.sleep(_DAILY_POLL_SECONDS)
+                continue
+            nxt = _next_scheduled_target(now, hhmm, fresh.pull, calendar)
+            # 预告下次运行时间 (UTC ISO, 与间隔制同口径), 供前端展示
+            nxt_iso = nxt.astimezone(UTC).isoformat() if nxt else None
+            latest = store.get(config_id)
+            if latest and latest.pull:
+                changed = latest.pull.next_run != nxt_iso
+                latest.pull.next_run = nxt_iso
+                if scheduled is None and latest.pull.last_status != "waiting":
+                    latest.pull.last_status = "waiting"
+                    latest.pull.last_message = "等待本地交易日历覆盖今日后执行"
+                    changed = True
+                if changed:
+                    store.upsert(latest, keep_strategy_cache=True)
+            await asyncio.sleep(
+                min(_DAILY_POLL_SECONDS, max((nxt - now).total_seconds(), 1.0)) if nxt else _DAILY_POLL_SECONDS
+            )
+
+    async def _sleep_interval_reloading(
+        self, config_id: str, store: ExtConfigStore, interval: float,
+    ) -> None:
+        """间隔制睡眠, 但每 60s 重读配置。
+
+        用户把间隔制改成固定时刻 (或改间隔/停用) 时, 旧实现要等整段间隔睡完
+        才生效 —— 24h 间隔意味着新时刻要推迟一天。这里分片睡眠, 让配置改动
+        在一分钟内生效。
+        """
+        remaining = float(interval)
+        while remaining > 0 and self._running:
+            chunk = min(_DAILY_POLL_SECONDS, remaining)
+            await asyncio.sleep(chunk)
+            remaining -= chunk
+            fresh = store.get(config_id)
+            if not fresh or not fresh.pull or not fresh.pull.enabled:
+                return
+            if fresh.pull.schedule_time or max(fresh.pull.schedule_minutes * 60, 60) != interval:
+                return  # 调度形态或间隔变了 → 回外层重读并重新安排
+
     async def _run_loop(self, config: ExtConfig) -> None:
         """单个配置的定时拉取循环。
 
         策略: 启用后立即执行一次, 之后按 interval 循环。
         每次循环重读最新配置 (fresh), interval 取自 fresh.pull.schedule_minutes,
         这样用户中途修改间隔也能立即生效 (无需重启)。
+        配置了 schedule_time (每日固定时刻) 时走 _run_daily_at 墙钟对齐。
         """
         try:
             while self._running:
@@ -567,43 +737,30 @@ class PullScheduler:
                     break
                 pull = fresh.pull
 
+                if pull.schedule_time:
+                    await self._run_daily_at(config.id, store, pull.schedule_time)
+                    continue
+
                 # 时间窗口检查: 不在窗口内则跳过本次拉取
                 if not _in_time_window(pull.time_window_start, pull.time_window_end):
-                    fresh.pull.last_run = datetime.now(UTC).isoformat()
+                    fresh.pull.last_run = cn_now().astimezone(UTC).isoformat()
                     fresh.pull.last_status = "skipped"
                     fresh.pull.last_message = "不在拉取时间窗口内"
                     store.upsert(fresh, keep_strategy_cache=True)
                     logger.info("PullScheduler: %s skipped (outside time window)", config.id)
                     interval = max(pull.schedule_minutes * 60, 60)
-                    await asyncio.sleep(interval)
+                    await self._sleep_interval_reloading(config.id, store, interval)
                     continue
 
                 # 先执行一次 (启用即拉取, 让用户立刻看到生效)
-                try:
-                    # 例行定时刷新: 不清策略结果缓存 (见 invalidate_ext_caches),
-                    # 否则策略页每轮拉取后整页空白, 直到下次全量重算完成。
-                    n, d = await fetch_and_ingest(
-                        fresh, self._data_dir, keep_strategy_cache=True
-                    )
-                    fresh.pull.last_run = datetime.now(UTC).isoformat()
-                    fresh.pull.last_status = "success"
-                    fresh.pull.last_message = f"{n} rows @ {d}"
-                    fresh.pull.last_rows = n
-                    store.upsert(fresh, keep_strategy_cache=True)
-                    logger.info("PullScheduler: %s success, %d rows", config.id, n)
-                except Exception as e:  # noqa: BLE001 — 每个可选定时源独立记录错误状态，继续后续轮次
-                    fresh2 = store.get(config.id)
-                    if fresh2 and fresh2.pull:
-                        fresh2.pull.last_run = datetime.now(UTC).isoformat()
-                        fresh2.pull.last_status = "error"
-                        fresh2.pull.last_message = str(e)[:200]
-                        store.upsert(fresh2, keep_strategy_cache=True)
-                    logger.warning("PullScheduler: %s error: %s", config.id, e, exc_info=True)
+                if not await self._execute_pull(fresh, store):
+                    await asyncio.sleep(_DAILY_POLL_SECONDS)
+                    continue
 
                 # 间隔取自最新配置 (每次重新读取, 修复改间隔不生效)
                 interval = max(pull.schedule_minutes * 60, 60)  # 至少 60s
                 # 预告下次运行时间, 供前端展示
-                next_dt = datetime.now(UTC).timestamp() + interval
+                next_dt = cn_now().timestamp() + interval
                 latest = store.get(config.id)
                 if latest and latest.pull:
                     latest.pull.next_run = datetime.fromtimestamp(
@@ -611,7 +768,7 @@ class PullScheduler:
                     ).isoformat()
                     store.upsert(latest, keep_strategy_cache=True)
 
-                await asyncio.sleep(interval)
+                await self._sleep_interval_reloading(config.id, store, interval)
                 if not self._running:
                     break
         except asyncio.CancelledError:

@@ -1771,7 +1771,9 @@ class StrategyEngine:
             from app.strategy import custom_signals
             from app.strategy.intraday_features import build_feature_frame
 
-            definitions = custom_signals.load_intraday_all(data_dir)
+            definitions = getattr(self, "frozen_intraday_signal_definitions", None)
+            if definitions is None:
+                definitions = custom_signals.load_intraday_all(data_dir)
             if not definitions:
                 return minute_df
             exprs = custom_signals.build_intraday_expressions(definitions)

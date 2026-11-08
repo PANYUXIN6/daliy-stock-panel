@@ -195,3 +195,28 @@ def test_worker_strategy_dirs_includes_composite(tmp_path, private_owner):
         tmp_path / "strategies" / "templates",
         tmp_path / "users" / private_owner.id / "strategies" / "composite",
     }
+
+
+def test_composite_evidence_captures_children_and_preserves_trades(composite_setup, tmp_path):
+    from types import SimpleNamespace
+
+    from app.backtest.evidence import load_evidence
+
+    service, _ = composite_setup
+    service.engine.repo.store = SimpleNamespace(data_dir=tmp_path)
+    config = StrategyBacktestConfig(
+        strategy_id="custom_e2e_blend", symbols=None,
+        start=date(2025, 2, 1), end=date(2025, 5, 1),
+        mode="position", max_positions=5, holding_days=10,
+        overrides={"basic_filter": {"enabled": False}},
+    )
+    ordinary = service.run(config)
+    checked = service.run_with_evidence(config)
+    assert checked.error is None
+    assert checked.trades == ordinary.trades
+    assert checked.equity_curve == ordinary.equity_curve
+    assert checked.evidence["lookahead"]["status"] == "passed"
+    assert {child["id"] for child in checked.evidence["strategy"]["children"]} == {
+        "ma_golden_cross", "macd_golden",
+    }
+    assert load_evidence(tmp_path, checked.run_id) == checked.evidence

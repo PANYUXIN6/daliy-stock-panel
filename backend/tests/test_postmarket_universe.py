@@ -235,6 +235,8 @@ def test_manual_repair_requests_complete_current_members(
         monkeypatch.setattr(preferences, "get_daily_data_provider", lambda: provider_name)
         monkeypatch.setattr(custom_sources, "is_custom_provider", lambda name: name == provider_name)
         monkeypatch.setattr(custom_sources, "get_provider", lambda _: provider)
+        monkeypatch.setattr(custom_sources, "provider_has_dataset",
+                            lambda name, dataset: name == provider_name and dataset == "daily")
         monkeypatch.setattr(instrument_sync, "get_client", Mock(
             side_effect=AssertionError("自定义维表不应访问 TickFlow"),
         ))

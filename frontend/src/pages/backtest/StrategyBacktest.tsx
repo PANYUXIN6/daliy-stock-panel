@@ -1,3 +1,4 @@
+import { BacktestEvidencePanel } from './components/BacktestEvidencePanel'
 import { OverlayFilterEditor } from '@/components/signals/OverlayFilterEditor'
 import { useState, useMemo, useEffect, useRef, useCallback, memo, type ReactNode } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
@@ -1305,6 +1306,14 @@ export function StrategyBacktest({ loadCandidate, onLoadConsumed }: {
       if (v != null) lines.push(`${label},${key.includes('return') || key === 'win_rate' || key === 'max_drawdown' ? pct(v) : num(v)}`)
     }
 
+    if (result.evidence) {
+      lines.push('', '# 检查与版本记录')
+      lines.push(`数据版本,${result.evidence.data.sha256}`)
+      lines.push(`策略版本,${result.evidence.strategy.sha256}`)
+      lines.push(`参数版本,${result.evidence.config_sha256}`)
+      lines.push(`时间检查状态,${result.evidence.lookahead.status}`)
+    }
+
     const ddMap = new Map((result.drawdown_curve ?? []).map(r => [r.date, r.value]))
     const benchMap = new Map((result.benchmark_curve ?? []).map(r => [r.date, r.close ?? r.value]))
     lines.push('', '# 净值曲线', 'date,equity,cash,positions,exposure,drawdown,benchmark')
@@ -1503,6 +1512,13 @@ export function StrategyBacktest({ loadCandidate, onLoadConsumed }: {
   const minuteExitTriggerSupported = effectiveExitSignals.length > 0 && unsupportedMinuteExitSignals.length === 0
   // 分钟策略: 入场在盘中触发分钟成交, 日线专属的成交口径选项不适用
   const isMinuteStrategy = detail?.execution_backend === 'minute_filter'
+  const integrityVersion = useQuery({
+    queryKey: QK.dataIntegrity,
+    queryFn: api.dataIntegrity,
+    enabled: !!result?.evidence,
+    staleTime: 30_000,
+  })
+
   const { data: minuteDataStatus } = useQuery({
     queryKey: QK.dataStatus,
     queryFn: api.dataStatus,
@@ -2109,6 +2125,10 @@ export function StrategyBacktest({ loadCandidate, onLoadConsumed }: {
             )}
           </div>
         )}
+
+        {result && <BacktestEvidencePanel key={result.run_id} evidence={result.evidence}
+          currentRevision={integrityVersion.data?.data_revisions?.[result.evidence?.data.asset_type as 'stock' | 'etf' | 'index']}
+          versionCheckFailed={integrityVersion.isError} />}
 
         {!result && !isPending && (
           <EmptyState

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef } from 'react'
+import { lazy, Suspense, useEffect, useMemo, useRef } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { RefreshCw } from 'lucide-react'
 import { type MinuteKlineRow } from '@/lib/api'
@@ -9,7 +9,11 @@ import { EChartsIntraday } from '@/components/EChartsIntraday'
 import { MinuteCollectionButton } from '@/components/MinuteCollectionButton'
 import type { DailySummary } from '@/lib/intraday-chart'
 
+import type { ChartRenderer } from '@/lib/chart-types'
+const LightweightIntraday = lazy(() => import('./charts/LightweightIntraday').then(m => ({ default: m.LightweightIntraday })))
+
 interface Props {
+  renderer?: ChartRenderer
   symbol: string
   date: string | null
   height?: number
@@ -26,6 +30,7 @@ interface Props {
 
 export function StockIntradayChart({
   symbol,
+  renderer = 'echarts',
   date,
   height = 520,
   prevClose,
@@ -38,6 +43,7 @@ export function StockIntradayChart({
   refetchIntervalMs,
 }: Props) {
   const qc = useQueryClient()
+  const Chart = renderer === 'lightweight' ? LightweightIntraday : EChartsIntraday
   const minute = useQuery({
     // 读取后台保存的最新数据，轮询不会触发供应商请求。
     ...klineMinuteQueryOptions(symbol, date ?? undefined, refetchIntervalMs != null),
@@ -92,7 +98,10 @@ export function StockIntradayChart({
         </div>
       )}
       {minuteRows.length > 0 && (
-        <EChartsIntraday
+        <Suspense fallback={<div className="text-xs text-muted py-4">正在加载图表…</div>}>
+        <Chart
+          assetType={minute.data?.asset_type}
+          symbol={symbol}
           data={minuteRows}
           height={height}
           prevClose={minute.data?.prev_close ?? prevClose}
@@ -104,6 +113,7 @@ export function StockIntradayChart({
           currentPrice={currentPrice}
           priceLines={priceLines}
         />
+        </Suspense>
       )}
     </div>
   )

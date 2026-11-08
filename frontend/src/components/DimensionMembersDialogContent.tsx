@@ -3,6 +3,7 @@ import { useQuery } from '@tanstack/react-query'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import {
   createChart,
+  LineSeries,
   LineStyle,
   type IChartApi,
   type ISeriesApi,
@@ -447,7 +448,7 @@ function IntradayChart({ points, kind }: { points: DimensionIntradayPoint[]; kin
       handleScroll: false,
       handleScale: false,
     })
-    const sector = chart.addLineSeries({
+    const sector = chart.addSeries(LineSeries, {
       color: INTRADAY_SECTOR_COLOR[kind],
       lineWidth: 2,
       priceLineVisible: false,
@@ -455,7 +456,7 @@ function IntradayChart({ points, kind }: { points: DimensionIntradayPoint[]; kin
       priceFormat: { type: 'custom', formatter: (v: number) => `${(v * 100).toFixed(2)}%`, minMove: 0.0001 },
       crosshairMarkerRadius: 3,
     })
-    const market = chart.addLineSeries({
+    const market = chart.addSeries(LineSeries, {
       color: INTRADAY_MARKET_COLOR,
       lineWidth: 1,
       lineStyle: LineStyle.Dashed,

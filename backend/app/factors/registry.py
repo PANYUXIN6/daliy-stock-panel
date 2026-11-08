@@ -11,6 +11,8 @@
 from __future__ import annotations
 
 import threading
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import Literal
 
@@ -302,6 +304,18 @@ _USER_FINGERPRINTS: dict[str, tuple] = {}
 _USER_REVISIONS: dict[str, int] = {}
 _USER_LOADING: set[str] = set()
 _USER_LOCK = threading.RLock()
+_ISOLATED_REGISTRY: ContextVar[dict[str, FactorSpec] | None] = ContextVar("isolated_factor_registry", default=None)
+
+
+@contextmanager
+def isolated_registry():
+    """包预览使用当前可见因子的副本；任务/线程继承上下文，退出恢复原视图。"""
+    snapshot = {spec.id: spec for spec in all_factors()}
+    token = _ISOLATED_REGISTRY.set(snapshot)
+    try:
+        yield snapshot
+    finally:
+        _ISOLATED_REGISTRY.reset(token)
 
 
 def forget_user_cache(data_dir, uid: str) -> None:
@@ -319,6 +333,8 @@ def _owner_key() -> str | None:
 
 
 def _ensure_private_factors() -> None:
+    if _ISOLATED_REGISTRY.get() is not None:
+        return
     from app.services.user_context import current_user
     owner = current_user(required=False)
     if owner is None:
@@ -351,6 +367,9 @@ def private_registry_revision() -> tuple[str | None, int]:
 
 
 def _registry(fid: str = "") -> dict[str, FactorSpec]:
+    isolated = _ISOLATED_REGISTRY.get()
+    if isolated is not None:
+        return isolated
     from app.services.user_context import current_user
     if fid.startswith(("uf_", "cf_")):
         owner = current_user()
@@ -371,7 +390,7 @@ def register_factor(spec: FactorSpec) -> None:
     if existing is not None and existing.version >= spec.version:
         raise ValueError(f"factor id 已注册且版本未提升: {spec.id}")
     _registry(spec.id)[spec.id] = spec
-    if spec.id.startswith(("uf_", "cf_")):
+    if spec.id.startswith(("uf_", "cf_")) and _ISOLATED_REGISTRY.get() is None:
         key = _owner_key()
         _USER_REVISIONS[key] = _USER_REVISIONS.get(key, 0) + 1
 
@@ -391,13 +410,16 @@ def unregister_factor(fid: str) -> FactorSpec | None:
     if any(spec.id == fid for spec in _CATALOG):
         raise ValueError(f"内置因子不可注销: {fid}")
     removed = _registry(fid).pop(fid, None)
-    if removed is not None and fid.startswith(("uf_", "cf_")):
+    if removed is not None and fid.startswith(("uf_", "cf_")) and _ISOLATED_REGISTRY.get() is None:
         key = _owner_key()
         _USER_REVISIONS[key] = _USER_REVISIONS.get(key, 0) + 1
     return removed
 
 
 def _ordered_specs() -> list[FactorSpec]:
+    isolated = _ISOLATED_REGISTRY.get()
+    if isolated is not None:
+        return list(isolated.values())
     """内置目录顺序在前, 动态注册因子 (custom/composite) 按注册顺序追加。"""
     _ensure_private_factors()
     ordered: list[FactorSpec] = list(_CATALOG)
@@ -411,6 +433,8 @@ def _ordered_specs() -> list[FactorSpec]:
 
 
 def _ensure_ext_factors() -> None:
+    if _ISOLATED_REGISTRY.get() is not None:
+        return
     """扩展表字段惰性同步 (配置目录签名幂等); 失败不阻断注册表读取。"""
     try:
         from app.factors.ext_factors import ensure_synced

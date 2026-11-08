@@ -89,7 +89,7 @@ def _scope_metadata(item: dict, ext: dict) -> dict:
             "metadata_basis": basis, "is_st_source": st_source}
 
 
-def _flatten_instruments(items: list[dict], *, source: str = "unknown") -> list[dict]:
+def _flatten_instruments(items: list[dict], *, source: str = "unknown", current_limits: bool = True) -> list[dict]:
     """把 SDK 返回的 Instrument 列表 flatten 成扁平行。"""
     rows = []
     observed_at = cn_now().isoformat()
@@ -114,8 +114,8 @@ def _flatten_instruments(items: list[dict], *, source: str = "unknown") -> list[
         row["total_shares"] = ext.get("total_shares")
         row["float_shares"] = ext.get("float_shares")
         row["tick_size"] = ext.get("tick_size")
-        row["limit_up"] = ext.get("limit_up")
-        row["limit_down"] = ext.get("limit_down")
+        row["limit_up"] = ext.get("limit_up") if current_limits else None
+        row["limit_down"] = ext.get("limit_down") if current_limits else None
         rows.append(row)
     return rows
 
@@ -181,13 +181,16 @@ def sync_instruments(data_dir: Path, *, require_complete: bool = False) -> int:
                 if require_complete else _fetch_instruments_via_provider())
     if all_rows is None:
         # 未命中非 tickflow provider → 走 tickflow 直连
+        from app.tickflow import client as tf_client
         tf = get_client()
+        # 免费元数据含历史价格；同步时间不能证明限价属于当天。
+        current_limits = tf_client.current_mode() == "api_key"
         all_rows = []
         for ex in _EXCHANGES:
             try:
                 items = tf.exchanges.get_instruments(ex, instrument_type="stock")
                 if items:
-                    all_rows.extend(_flatten_instruments(items, source="tickflow"))
+                    all_rows.extend(_flatten_instruments(items, source="tickflow", current_limits=current_limits))
                     logger.info("instruments %s: %d stocks", ex, len(items))
                 elif require_complete:
                     raise RuntimeError(f"{ex} 股票维表为空")

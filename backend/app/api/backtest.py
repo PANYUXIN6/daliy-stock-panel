@@ -437,12 +437,33 @@ def strategy_run(req: StrategyBacktestRequest, request: Request):
 
 # ── SSE 流式回测 (实时进度 + 可取消 + 支持重连) ───────────────────
 
+@router.get("/strategy/runs/{run_id}/evidence")
+def strategy_run_evidence(run_id: str):
+    from app.backtest.evidence import load_evidence
+
+    try:
+        owner = current_user()
+        return load_evidence(owner.data_dir, run_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(404, detail="该回测没有版本记录，旧结果可重新回测生成") from exc
+    except ValueError as exc:
+        raise HTTPException(400, detail=str(exc)) from exc
+    except OSError as exc:
+        raise HTTPException(503, detail="暂时无法读取回测版本记录") from exc
+
+
 class _BacktestJob:
     """单个回测任务的状态, 存模块级供重连使用。"""
-    __slots__ = ("cancel_event", "done", "error", "finish_ts", "future", "key", "owner_id", "progress", "result")
+    __slots__ = ("asset_type", "cancel_event", "daily_revision", "data_dir", "done", "error", "finish_ts", "future", "key", "owner_id", "progress", "result")
 
-    def __init__(self, key: str):
-        self.owner_id = current_user().id
+    def __init__(self, key: str, asset_type: str = "stock"):
+        from app.services.daily_health import revision
+
+        owner = current_user()
+        self.owner_id = owner.id
+        self.data_dir = owner.data_dir
+        self.asset_type = asset_type
+        self.daily_revision = revision(self.data_dir, asset_type)
         self.key = key
         self.cancel_event = threading.Event()
         self.progress: list[dict] = []   # 进度历史 (新连接可回放)
@@ -460,10 +481,13 @@ _JOB_TTL = 300  # 完成后保留 5 分钟
 
 
 def _cleanup_stale_jobs():
-    """清理过期任务 (完成超过 TTL 的)。全程持 _jobs_lock: 迭代+pop 与其他访问互斥。"""
+    """完成任务的短期重连缓存随 TTL 或历史日K修订失效；不删除持久结果。"""
+    from app.services.daily_health import revision
     now = time.time()
     with _jobs_lock:
-        stale = [k for k, j in _running_jobs.items() if j.done and now - j.finish_ts > _JOB_TTL]
+        stale = [k for k, j in _running_jobs.items() if j.done and (
+            now - j.finish_ts > _JOB_TTL or revision(j.data_dir, j.asset_type) != j.daily_revision
+        )]
         for k in stale:
             _running_jobs.pop(k, None)
 
@@ -600,7 +624,7 @@ async def strategy_stream(
     with _jobs_lock:
         job = _running_jobs.get(job_key)
         if job is None:
-            job = _BacktestJob(job_key)
+            job = _BacktestJob(job_key, asset_type=asset_type)
             _running_jobs[job_key] = job
             is_new = True
         else:

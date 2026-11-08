@@ -77,7 +77,7 @@ export function Lots() {
 
   const dailyQuery = useQuery({
     queryKey: QK.lotsKline(allSymbols.join(',')),
-    queryFn: () => api.klineDailyBatch(allSymbols, 5),
+    queryFn: ({ signal }) => api.klineDailyBatch(allSymbols, 5, signal),
     enabled: allSymbols.length > 0,
     staleTime: 60000,
   })

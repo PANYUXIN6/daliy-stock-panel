@@ -30,6 +30,12 @@ export interface ExtColumnDisplayConfig {
   unitConvert?: 'none' | 'wan' | 'yi' | 'auto'
   /** 单位换算后保留小数位(仅 number 类型 + unitConvert≠none 有效), 默认 2 */
   unitDecimals?: number
+  /** 时序列：文字、近 N 日或当日逐盘的迷你图。 */
+  snapshotRender?: 'text' | 'bar' | 'line'
+  seriesGranularity?: 'daily' | 'intraday'
+  chartWidth?: number
+  chartHeight?: number
+  chartDays?: number
 }
 
 /** 日k列渲染配置（builtin: candle 列专用） */

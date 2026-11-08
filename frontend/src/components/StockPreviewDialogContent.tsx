@@ -8,7 +8,7 @@ import { QK } from '@/lib/queryKeys'
 import { cn } from '@/lib/cn'
 import { cnSignal } from '@/lib/signals'
 import { useCustomSignalNames } from '@/lib/useCustomSignalNames'
-import { fmtPct, cnDateFromUtc } from '@/lib/format'
+import { fmtPct, cnDateFromUtc, fmtAssetPrice } from '@/lib/format'
 import { StockPanel, getDefaultRange } from '@/components/StockPanel'
 import { NavPager, NavWrapToast } from '@/components/NavPager'
 import { WatchlistAddMenu } from '@/components/WatchlistAddMenu'
@@ -23,6 +23,8 @@ import { useDialogBackdrop } from '@/lib/useDialogBackdrop'
 import { storage } from '@/lib/storage'
 import { navItemKey, type NavItem } from '@/lib/listNav'
 import { useListNav } from '@/lib/useListNav'
+import type { ChartRenderer } from '@/lib/chart-types'
+import { klineDailyQueryOptions } from '@/lib/kline'
 import { DEFAULT_INTRADAY_DAYS } from '@/lib/kline'
 import { ExtensionSlot } from '@/extensions/ExtensionSlot'
 
@@ -93,6 +95,7 @@ function fmtAbnormalCalcTime(asofSec: number): string {
 export function StockPreviewDialogContent({ symbol, name, onClose, triggerInfo, navList: navListSource, onNavigate }: Props) {
   const isAdmin = useCurrentUser()?.role === 'admin'
   const [view, setView] = useState<PreviewView>('daily')
+  const [renderer, setRenderer] = useState<ChartRenderer>('lightweight')
   const [intradayDays, setIntradayDays] = useState<number | null>(loadIntradayDays)
   const [dateRange, setDateRange] = useState(getDefaultRange)
   const [showMonitorEditor, setShowMonitorEditor] = useState(false)
@@ -102,6 +105,8 @@ export function StockPreviewDialogContent({ symbol, name, onClose, triggerInfo, 
   const qc = useQueryClient()
   const backdrop = useDialogBackdrop(onClose)
 
+  const assetInfo = useQuery({ ...klineDailyQueryOptions(symbol ?? '', dateRange), enabled: !!symbol })
+  const assetType = assetInfo.data?.asset_type
   const watchlist = useQuery({
     queryKey: QK.watchlist,
     queryFn: api.watchlistList,
@@ -464,7 +469,7 @@ export function StockPreviewDialogContent({ symbol, name, onClose, triggerInfo, 
                 {/* 中: 价格 + 涨跌幅 */}
                 <div className="flex items-center gap-2 shrink-0">
                   {triggerInfo.price != null && (
-                    <span className="text-[11px] font-mono text-foreground/80">{triggerInfo.price.toFixed(2)}</span>
+                    <span className="text-[11px] font-mono text-foreground/80">{fmtAssetPrice(triggerInfo.price, assetType)}</span>
                   )}
                   {triggerInfo.changePct != null && (
                     <span className={`text-[11px] font-mono font-medium ${triggerInfo.changePct >= 0 ? 'text-danger' : 'text-bear'}`}>
@@ -535,8 +540,16 @@ export function StockPreviewDialogContent({ symbol, name, onClose, triggerInfo, 
             {/* 图表内容 — 内衬卡片容器, 图表区与弹窗背景分层 (纯样式) */}
             <div className="flex-1 overflow-auto p-3 sm:p-4">
               <div className="rounded border border-border/50 bg-base/30 p-3">
+              <div className="mb-2 flex justify-end">
+                <label className="flex items-center gap-2 text-[11px] text-muted">图表
+                  <select aria-label="图表渲染方式" value={renderer} onChange={event => setRenderer(event.target.value as ChartRenderer)} className="rounded border border-border bg-base px-2 py-1 text-secondary">
+                    <option value="lightweight">轻量图表</option><option value="echarts">兼容图表</option>
+                  </select>
+                </label>
+              </div>
               {view === 'daily' ? (
                 <StockPanel
+                  renderer={renderer}
                   symbol={symbol}
                   height={420}
                   showIntraday
@@ -552,6 +565,7 @@ export function StockPreviewDialogContent({ symbol, name, onClose, triggerInfo, 
               ) : (
                 <div className="flex flex-col gap-3">
                 <StockPanel
+                  renderer={renderer}
                   symbol={symbol}
                   dateRange={dateRange}
                   infoBarOnly
@@ -560,6 +574,7 @@ export function StockPreviewDialogContent({ symbol, name, onClose, triggerInfo, 
                   addedDate={addedDate}
                 />
                 <StockMultiDayIntradayChart
+                  renderer={renderer}
                   symbol={symbol}
                   days={effectiveIntradayDays}
                   height={480}
@@ -615,6 +630,7 @@ export function StockPreviewDialogContent({ symbol, name, onClose, triggerInfo, 
       )}
       {symbol && priceAlertDraft && (
         <PriceAlertDialog
+          assetType={assetType}
           key={`${symbol}-${priceAlertDraft.id}`}
           symbol={symbol}
           name={name ?? ''}

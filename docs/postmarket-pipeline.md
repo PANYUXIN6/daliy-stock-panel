@@ -47,6 +47,16 @@
 
 上述“当日数据齐全”专指支撑环境分析的正式股票行情、核心指数和股票指标。不能用一个当日分区、全局最大日期、实时快照或固定覆盖百分比替代验收。
 
+## 历史日 K 自检与精准修补
+
+数据页高级维护提供管理员显式自检与修补，分别调用 `POST /api/data/integrity/scan` 和 `/repair`。GET 只读上次报告；自检使用本地交易日历和各资产现有分区，不联网。未知开市日期列为待核实，不把工作日近似当作修补依据；当天数据不参与历史检查。历史实时快照在 15:30 前仍需正式日线覆盖，本地环境统计的连续竞价收盘口径和 16:00 管道正式验收保持独立。
+
+自检按股票、ETF、指数和日期定位缺失、损坏文件、异常数值及未定版快照；能识别标的时只回补对应标的。全部目标先取数并暂存校验，之后备份原分区，按日替换范围内记录；数据源空返回不推断停牌，只有本地明确零成交、上市前或旧日残留证据才可清理，其他行保留。路径包含链接时拒绝修补，备份位于数据目录 `integrity_backups/`。
+
+修补复用 collector 的 JobStore、唯一写入槽、重任务容量、行情暂停和取消。原始日 K 校验后，用完整本地原始历史及既有因子、公告股本重算受影响标的从最早异常日起的指标，再按范围替换已有环境、情绪与主线。失败和取消保留待重算状态，下次只继续必要取数或重算；重算发现更早的坏行会加入报告。原始数据、基础指标和共享统计全部完成后才清除异常。精准修补只接管同类未完成发布，其他未完成发布仍要求原任务恢复。
+
+显式日常更新、补齐历史和自动盘后管道在步骤 0 之前先续修已登记的历史异常；无已知异常时不增加自检扫描。失败沿既有盘后重试与取消规则处理。修补的退出刷新同时发布行情与 `daily_integrity` 更新，取消或部分失败也发布已保存数据。仓库、筛选历史和每个用户的策略／实时矩阵缓存同步失效；回测保留运行时日 K 修订版本，旧结果需重新运行验证。每日晚报原发布和个人研究归档保持既有不可变语义，不随修补回写。
+
 ## 停牌、数据源与缓存契约
 
 - 当前成员名单中的停牌股继续纳入股票池，不能按名称含“退”、ST 标记或末次交易日期猜测是否排除。历史标的仍保留在完整维表，供历史查询使用；`is_current` 仅表达本轮来源的成员状态，不用于历史回测筛选。普通盘前同步不额外请求名单、不继承上轮标记；自动任务每次均重新取得本轮成员证据。自定义维表可通过 `ext.is_current` 声明状态，缺列或空值保持原有兼容验收，只排除明确的 `false`。
@@ -91,6 +101,7 @@
 
 - 调度与验收：`backend/app/services/postmarket.py`、`daily_coverage.py`；独立状态适配：`backend/app/data_providers/trading_status.py`。
 - 顺序编排：`backend/app/jobs/daily_pipeline.py::run_now(postmarket=True)`。
+- 历史自检与修补：`services/data_integrity.py`、`daily_health.py`、`integrity_check.py`、`repair_daily.py`；`test_data_integrity_api.py`、`test_precise_daily_repair.py`、`test_daily_repair_history_discovery.py`。
 - 有界预取：`backend/app/services/pipeline_prefetch.py`；纯取数与顺序提交分别由 `index_sync.py`、`ext_presets.py`、`auction_benchmark.py`、`dragon_tiger.py` 提供。
 - 每日晚报：`services/evening_report_inputs.py`、`evening_report_jobs.py`、`evening_report_store.py`、`api/evening_report.py`；计算规则由`evening_report_engine.py`／`evening_report_rules.py`负责。
 - 共享任务边界：`backend/app/api/pipeline.py::trigger_pipeline_job`、`pipeline_jobs.py`。

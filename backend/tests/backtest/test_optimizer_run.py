@@ -73,12 +73,21 @@ class _FakeService:
         cancel_event=None,
         prepared=None,
         result_policy=None,
+        prepared_panel=None,
     ):
         with self._lock:
             self.calls.append(dict(config.params or {}))
-            self.prepared_values.append(prepared)
+            self.prepared_values.append(prepared if prepared is not None else prepared_panel)
             self.result_policies.append(result_policy)
         return self.score_fn(config.params or {})
+
+    def prepare_panel_optimization(self, configs):
+        from types import SimpleNamespace
+
+        import polars as pl
+
+        self.prepared_calls.append(configs)
+        return SimpleNamespace(panel=pl.DataFrame({"close": [1.0]}))
 
 
 PARAMS_META = [
@@ -234,7 +243,9 @@ def test_progress_callback_reports_done_total():
     def cb(msg):
         seen.append(msg)
     _optimizer(score).optimize(_cfg(), progress_cb=cb)
-    assert len(seen) == 4
+    assert [message["type"] for message in seen] == [
+        "optimizer_prepare", "optimizer_progress", "optimizer_progress", "optimizer_progress", "optimizer_finalize",
+    ]
     assert seen[-1]["type"] == "optimizer_finalize"
     assert seen[-1]["done"] == 3
     assert all(m["total"] == 3 for m in seen)

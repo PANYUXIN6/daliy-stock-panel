@@ -47,6 +47,7 @@ import { SectionTitle, HistoryRow } from '@/components/data/SectionTitle'
 import { SettingsModal } from '@/components/data/SettingsModal'
 import { ScheduleEditor } from '@/components/data/ScheduleEditor'
 import { RepairDailyPanel } from '@/components/data/RepairDailyPanel'
+import { DataIntegrityPanel } from '@/components/data/DataIntegrityPanel'
 import { EnrichedRebuildPanel } from '@/components/data/EnrichedRebuildPanel'
 import { FinancialSyncPanel } from '@/components/data/FinancialSyncPanel'
 import { MinuteSyncConfig } from '@/components/data/MinuteSyncConfig'
@@ -60,6 +61,7 @@ import { useCollectionSyncConfirmation } from '@/lib/useCollectionSyncConfirmati
 import { EnrichedSchemaModal } from '@/components/data/SchemaModal'
 import { Skeleton } from '@/components/data/Skeleton'
 import { ExtDataStatCard } from '@/components/ext-data/ExtDataStatCard'
+import { ExtConfigImportDialog } from '@/components/ext-data/ExtConfigTransfer'
 import { CreateExtDialog } from '@/components/ext-data/CreateExtDialog'
 import { EditExtDialog } from '@/components/ext-data/EditExtDialog'
 
@@ -176,6 +178,7 @@ export function Data() {
   const [schemaTable, setSchemaTable] = useState<string | null>(null)
   const [showEndpointTest, setShowEndpointTest] = useState(false)
   const [showCreateExt, setShowCreateExt] = useState(false)
+  const [showImportExt, setShowImportExt] = useState(false)
   const [showRepair, setShowRepair] = useState(false)
   const [editingExt, setEditingExt] = useState<ExtDataConfig | null>(null)
   const [indexBatchInput, setIndexBatchInput] = useState('100')
@@ -342,10 +345,12 @@ export function Data() {
       qc.invalidateQueries({ queryKey: QK.pipelineJobs })
       // 同步任务结束后 regime 覆盖范围可能变化, 一并刷新画像
       qc.invalidateQueries({ queryKey: QK.regimeCoverage })
+      qc.invalidateQueries({ queryKey: QK.dataIntegrity })
       const requestKey = job.data.request_key ?? ''
       const moduleDataset = requestKey.startsWith('financial:') ? 'financials'
         : requestKey.startsWith('minute_batch:') || requestKey.startsWith('minute:') ? 'minute'
         : requestKey === 'classifications' ? 'ext_data'
+        : requestKey.startsWith('daily_integrity_') ? 'daily_integrity'
         : requestKey === 'etf_reference' ? 'etf_reference' : null
       if (moduleDataset) {
         // 失败或取消前可能已有分块落盘，终态也要刷新本地画像与消费方。
@@ -708,6 +713,7 @@ export function Data() {
               <summary className="cursor-pointer list-none rounded-btn border border-border px-3 py-1.5 text-xs text-secondary hover:text-foreground">高级维护</summary>
               <div className="absolute right-0 top-full z-30 mt-2 flex w-64 flex-col gap-2 rounded-card border border-border bg-surface p-3 shadow-xl">
                 <button type="button" onClick={() => setOpenSettings('pipeline-scope')} className="inline-flex items-center gap-1 px-2 py-1 text-left text-xs text-secondary hover:text-accent"><CheckSquare className="h-3.5 w-3.5" />同步选项</button>
+                <button type="button" onClick={() => setOpenSettings('integrity')} className="px-2 py-1 text-left text-xs text-secondary hover:text-accent">日K自检与精准修补</button>
                 <button type="button" disabled={collectionBusy} onClick={() => pipelineConfirmation.run({ kind: 'classifications' }, () => syncClassifications.mutate())} className="px-2 py-1 text-left text-xs text-secondary hover:text-accent disabled:opacity-40">同步板块分类</button>
                 <button type="button" disabled={collectionBusy} onClick={() => syncEtfReference.mutate()} className="px-2 py-1 text-left text-xs text-secondary hover:text-accent disabled:opacity-40">更新持仓占比参考</button>
                 <button type="button" disabled={!hasData || collectionBusy} onClick={() => setOpenSettings('enriched')} className="px-2 py-1 text-left text-xs text-secondary hover:text-accent disabled:opacity-40">重算技术指标</button>
@@ -721,6 +727,7 @@ export function Data() {
                     <Plus className="h-3.5 w-3.5" />
                     扩展数据
                   </button>
+                  <button type="button" onClick={() => setShowImportExt(true)} className="px-2 py-1 text-left text-xs text-secondary hover:text-accent">导入扩展配置</button>
                   <button
                     onClick={() => setShowEndpointTest(true)}
                     className="inline-flex items-center gap-1 px-2 py-1 rounded-btn text-secondary hover:text-accent hover:bg-accent/8 text-xs transition-colors duration-150"
@@ -1207,6 +1214,7 @@ export function Data() {
       )}
 
       <AnimatePresence>
+        {showImportExt && <ExtConfigImportDialog onClose={() => setShowImportExt(false)} />}
         {showCreateExt && (
           <CreateExtDialog onClose={() => setShowCreateExt(false)} />
         )}
@@ -1225,6 +1233,16 @@ export function Data() {
               latestDate={s?.daily?.latest_date ?? null}
               onStart={(jobId) => { trackModuleJob({ job_id: jobId }); setShowRepair(false) }}
             />
+          </SettingsModal>
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {openSettings === 'integrity' && (
+          <SettingsModal title="日K自检与精准修补" width="max-w-3xl" onClose={() => setOpenSettings(null)}>
+            <DataIntegrityPanel hasCap={hasDailyBatchCap} isRunning={collectionBusy}
+              job={job.data} defaultAssets={['stock', 'etf', 'index']}
+              onStart={(jobId) => trackModuleJob({ job_id: jobId })} />
           </SettingsModal>
         )}
       </AnimatePresence>

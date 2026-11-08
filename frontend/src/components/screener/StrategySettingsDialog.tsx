@@ -380,13 +380,14 @@ export function StrategySettingsDialog({ strategyId, onClose, onSaved, onDeleted
   }
 
   const handleDownload = async () => {
-    if (!strategyId || !detail || (detail.source !== 'ai' && detail.source !== 'custom')) return
-    const src = await api.strategyGetSource(strategyId)
-    const blob = new Blob([src.code], { type: 'text/x-python;charset=utf-8' })
+    if (!strategyId || !detail) return
+    let blob: Blob
+    try { blob = await api.strategyExportBundle(strategyId) }
+    catch (error) { setSaveError(error instanceof Error ? error.message : '策略包导出失败'); return }
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
     a.href = url
-    a.download = `${strategyId}.py`
+    a.download = `tsp-strategy-${strategyId}.zip`
     document.body.appendChild(a)
     a.click()
     a.remove()
@@ -689,6 +690,7 @@ export function StrategySettingsDialog({ strategyId, onClose, onSaved, onDeleted
           {/* 底部按钮 */}
           <div className="flex items-center justify-between px-5 py-3 border-t border-border/50 bg-surface/50">
             <div className="flex items-center gap-2">
+              <button onClick={() => void handleDownload()} className="inline-flex items-center gap-1 text-xs text-accent"><Download className="h-3.5 w-3.5" />导出策略包</button>
               <button onClick={handleReset} disabled={resetting}
                 className="inline-flex items-center gap-1.5 h-8 px-3 rounded-lg border border-border bg-surface text-xs text-secondary hover:text-danger hover:border-danger/30 transition-colors cursor-pointer disabled:opacity-50">
                 <RotateCcw className="h-3.5 w-3.5" />{resetting ? '重置中…' : '重置默认'}

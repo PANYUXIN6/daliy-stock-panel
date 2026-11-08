@@ -29,6 +29,8 @@ from app.services.ai_provider import (
 class HistoryMessage(BaseModel):
     role: Literal["user", "assistant"]
     content: str = Field(min_length=1, max_length=20000)
+    reasoning_content: str | None = None
+    reasoning_context: str | None = Field(default=None, max_length=64)
 
 
 class AssistantContext(BaseModel):

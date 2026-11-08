@@ -118,3 +118,27 @@ def test_stuck_position_at_window_end_is_recorded():
     assert trade.exit_reason == "signal"
     assert trade.blocked_exit_days >= 1
     assert trade.exit_price == 9.27  # 末日(封板)收盘价
+
+
+def test_portfolio_close_exit_waits_until_limit_down_unlocks():
+    panel = _panel(_normal_panel(5, sealed={2: {"o": 10.0, "h": 10.1, "l": 9.0, "c": 9.0}}))
+    result = BacktestEngine(repo=None).simulate_portfolio(
+        panel, pl.Series([True, False, False, False, False]),
+        pl.Series([False, False, True, False, False]),
+        MatcherConfig(matching="close_t", fees_pct=0, slippage_bps=0),
+    )
+    assert len(result.trades) == 1
+    assert result.trades[0].exit_date == "2024-01-04"
+    assert result.trades[0].blocked_exit_days == 1
+
+
+def test_portfolio_keeps_valuation_when_window_ends_at_limit_down():
+    panel = _panel(_normal_panel(3, sealed={2: {"o": 10.0, "h": 10.1, "l": 9.0, "c": 9.0}}))
+    result = BacktestEngine(repo=None).simulate_portfolio(
+        panel, pl.Series([True, False, False]), pl.Series([False, False, True]),
+        MatcherConfig(matching="close_t", fees_pct=0, slippage_bps=0),
+    )
+    assert not result.trades
+    assert result.stats["pending_exit_positions"] == 1
+    assert result.equity_curve[-1]["positions"] == 1
+    assert result.equity_curve[-1]["value"] < 1_000_000.0

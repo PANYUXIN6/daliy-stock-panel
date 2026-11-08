@@ -298,3 +298,12 @@ it('周月 K 候选保持虚线和未确认触点，切换或关闭箱体会移�
   await render([])
   expect((chart.setOption.mock.calls.at(-1)?.[0] as any).series.some((series: any) => series.name === '箱体区域')).toBe(false)
 })
+
+it('ETF日K读数、主价格轴与多空线使用三位精度，日期轴仍为日期', async () => {
+  await act(async () => root.render(<EChartsCandlestick assetType="etf" data={[{ date: '2026-11-05', open: 0.827, high: 0.829, low: 0.826, close: 0.828, ma5: 0.827, bull_bear_line: 0.827 }]} activeIndicators={['bull_bear_line']} />))
+  const option = chart.setOption.mock.calls.at(-1)?.[0] as any
+  expect(option.yAxis[0].axisLabel.formatter(0.827)).toBe('0.827')
+  expect(option.xAxis[0].data).toEqual(['2026-11-05'])
+  expect(host.textContent).toContain('0.828')
+  expect(host.textContent).toContain('0.827')
+})

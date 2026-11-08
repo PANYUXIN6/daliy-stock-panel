@@ -87,8 +87,10 @@ def required_scope(method: str, path: str) -> str | None:
     """
     for m, prefix, scope in _RULES:
         if (m == "*" or m == method) and (path == prefix or path.startswith(prefix.rstrip("/") + "/")):
-            # read:ext 域内的拉取 Key 状态子路径属管理面 (脱敏也不外露)
-            if scope == "read:ext" and path.endswith("/api-key"):
+            # 配置分享和图表序列沿用网页会话；不能由前缀规则自动扩大稳定开放面。
+            if scope == "read:ext" and path.endswith(("/api-key", "/config/export", "/series")):
+                return None
+            if scope == "read:analysis" and path.startswith("/api/strategies/") and path.endswith("/bundle"):
                 return None
             return scope
     if path.startswith("/api/ext-data/"):

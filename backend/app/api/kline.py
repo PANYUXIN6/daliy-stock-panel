@@ -301,7 +301,7 @@ def _get_price_limit_info(
         instruments = repo.get_instruments_asset(asset_type)
         available = [
             column
-            for column in ("symbol", "limit_up", "limit_down", "listing_date")
+            for column in ("symbol", "limit_up", "limit_down", "listing_date", "as_of")
             if column in instruments.columns
         ]
         if "symbol" in available and len(available) > 1:
@@ -323,7 +323,7 @@ def _get_price_limit_info(
     if trade_date != cn_today():
         return info
 
-    if row is None:
+    if row is None or parse_listing_date(row.get("as_of")) != trade_date:
         return info
 
     has_authoritative_price = False
@@ -410,6 +410,7 @@ def get_daily(
 
     asset_type = repo.resolve_asset_type(symbol)
     stock_info = _get_stock_info(repo, symbol) if asset_type == "stock" else _get_asset_info(repo, symbol, asset_type)
+    stock_info = {**stock_info, "asset_type": asset_type}
     stock_name = stock_info.get("name")
 
     # 从 enriched 表读取 (已含前复权 OHLCV + 技术指标 + 信号); ETF/指数走独立存储
@@ -418,7 +419,7 @@ def get_daily(
     if df.is_empty():
         return _gzip_payload(
             request,
-            _attach_ext({"symbol": symbol, "name": stock_name, "stock_info": stock_info,
+            _attach_ext({"symbol": symbol, "name": stock_name, "asset_type": asset_type, "stock_info": stock_info,
                          "rows": [], "source": "none"}, repo, symbol, ext_columns),
             pref_key="daily_batch_compress",
         )
@@ -428,7 +429,8 @@ def get_daily(
     # 追加/覆盖今日实时蜡烛
     rows = _maybe_inject_live_candle(request, symbol, rows, asset_type, start=start, end=end)
 
-    resp = {"symbol": symbol, "name": stock_name, "stock_info": stock_info, "rows": rows, "source": "enriched"}
+    resp = {"symbol": symbol, "name": stock_name, "asset_type": asset_type,
+            "stock_info": stock_info, "rows": rows, "source": "enriched"}
     return _gzip_payload(
         request,
         _attach_ext(resp, repo, symbol, ext_columns),

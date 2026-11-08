@@ -47,7 +47,7 @@ class Repo:
     def enriched_latest_date(self):
         return DAY
 
-    def get_enriched_latest_asset(self, asset_type="stock", refresh=True):
+    def get_enriched_latest_asset(self, asset_type="stock", refresh=True, *, end=None):
         return self.prices.filter(pl.col("date") == DAY), DAY
 
     def get_instruments_asset(self, asset_type):

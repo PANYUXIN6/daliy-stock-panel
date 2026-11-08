@@ -54,6 +54,8 @@ datasets:
 
 统一代码带交易所后缀，例如 `600519.SH`、`000001.SZ`；`volume` 为手，成交额 `amount` 为元。供应商按股返回的成交量必须显式换算，不能直接透传。
 
+指数与 ETF 日K也使用所选 `daily` 路由，分别传入 `asset_type="index"` / `"etf"`，并写入独立原始与 enriched 分区。未配置 TickFlow 不会阻止可用自定义源；所选源缺能力、返回空数据或异常时明确失败，不自动改用另一数据源。流式结果完整取完后才提交，ETF 继续使用本地完整历史和除权因子重算前复权。
+
 重点ETF资金看板复用 `daily`、`minute`、`fund_nav` 路由；分钟成交额需要有效的原始 `amount`，不能用成交量或价格近似补出。基金份额和分类目录使用固定公开交易所适配器，不混入股票主力资金流。具体单位、日期对齐与缺失处理见 [ETF看板契约](etf-flow-board.md)。
 
 - `adj_factor` 可提供 `dividend`、`bonus`、`allot`、`allot_price`、`prev_close`，用于等差显示投影和全精度因子链重建，缺省为空。

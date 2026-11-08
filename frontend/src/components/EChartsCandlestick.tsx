@@ -1,6 +1,6 @@
 import { useEffect, useRef, useCallback, useMemo } from 'react'
 import { chartTheme, getTheme, useTheme } from '@/lib/theme'
-import { fmtPct } from '@/lib/format'
+import { fmtPct, pricePrecision } from '@/lib/format'
 import * as echarts from 'echarts'
 import type { ECharts, EChartsOption } from 'echarts'
 import type { BoxOscillation, PriceGap } from '@/lib/api'
@@ -325,6 +325,7 @@ export const OVERLAY_INDICATORS: { key: string; label: string }[] = [
 ]
 
 interface Props {
+  assetType?: 'stock' | 'etf' | 'index'
   data: OHLC[]
   markers?: ChartMarker[]
   ranges?: ChartRange[]
@@ -373,11 +374,11 @@ const COMPACT_THRESHOLD = 60
 /** 加入自选日竖线颜色 (蓝色虚线, 与同花顺的标注观感一致) */
 const ADDED_DATE_COLOR = '#3B82F6'
 
-function bullBearInfoHTML(data: OHLC[], index: number): string {
+function bullBearInfoHTML(data: OHLC[], index: number, digits = 2): string {
   const value = data[index]?.bull_bear_line
   const previous = data[index - 1]?.bull_bear_line
   const color = value != null && previous != null && value < previous ? BULL_BEAR_DOWN : BULL_BEAR_UP
-  const label = value != null && Number.isFinite(value) ? value.toFixed(2) : '—'
+  const label = value != null && Number.isFinite(value) ? value.toFixed(digits) : '—'
   return `<span style="color:${color}">多空线:${label}</span>`
 }
 
@@ -656,6 +657,7 @@ function buildOption(
   addedDate: string | null | undefined,
   priceGaps: PriceGap[] | undefined,
   boxes: BoxOscillation[] | undefined,
+  digits = 2,
 ): EChartsOption {
   const candleData = data.map(d => [d.open, d.close, d.low, d.high])
 
@@ -772,7 +774,8 @@ function buildOption(
     splitArea: { show: false },
     axisLine: { show: false }, axisTick: { show: false },
     splitLine: { lineStyle: { color: CT().grid } },
-    axisLabel: { color: CT().text, fontSize: 10, fontFamily: 'JetBrains Mono, monospace' },
+    axisLabel: { color: CT().text, fontSize: 10, fontFamily: 'JetBrains Mono, monospace', formatter: (value: number) => value.toFixed(digits) },
+    axisPointer: { label: { precision: digits } },
   })
   xAxisIndices.push(0)
 
@@ -835,7 +838,7 @@ function buildOption(
       lineStyle: { color: '#3B82F6', type: 'dashed', width: 1, opacity: 0.7 },
       label: {
         show: true,
-        formatter: linkedPrice.toFixed(2),
+        formatter: linkedPrice.toFixed(digits),
         position: 'insideEndTop',
         color: '#3B82F6',
         fontSize: 10,
@@ -1075,6 +1078,7 @@ function buildOption(
 
 
 export function EChartsCandlestick({
+  assetType,
   data,
   markers,
   ranges,
@@ -1096,6 +1100,7 @@ export function EChartsCandlestick({
   volumeCompare = { enabled: true, days: 1 },
   addedDate,
 }: Props) {
+  const digits = pricePrecision(assetType)
   const hoverSurfaceRef = useRef<HTMLDivElement>(null)
   const containerRef = useRef<HTMLDivElement>(null)
   const chartRef = useRef<ECharts | null>(null)
@@ -1202,13 +1207,13 @@ export function EChartsCandlestick({
     let html = `<div style="display:flex;align-items:center;gap:6px;padding:0 8px;font:11px 'JetBrains Mono',monospace;select:none;min-height:20px;flex-wrap:wrap">`
     html += `<span style="color:${CT().text}">${d.date}</span>`
     html += `<span style="color:${CT().text}">开</span>`
-    html += `<span style="color:${d.open >= d.close ? THEME.bear : THEME.bull}">${d.open.toFixed(2)}</span>`
+    html += `<span style="color:${d.open >= d.close ? THEME.bear : THEME.bull}">${d.open.toFixed(digits)}</span>`
     html += `<span style="color:${CT().text}">高</span>`
-    html += `<span style="color:${THEME.bull}">${d.high.toFixed(2)}</span>`
+    html += `<span style="color:${THEME.bull}">${d.high.toFixed(digits)}</span>`
     html += `<span style="color:${CT().text}">低</span>`
-    html += `<span style="color:${THEME.bear}">${d.low.toFixed(2)}</span>`
+    html += `<span style="color:${THEME.bear}">${d.low.toFixed(digits)}</span>`
     html += `<span style="color:${CT().text}">收</span>`
-    html += `<span style="color:${clr};font-weight:600">${d.close.toFixed(2)}</span>`
+    html += `<span style="color:${clr};font-weight:600">${d.close.toFixed(digits)}</span>`
     // 涨跌幅 (收盘后, 换手前; 和收间隔一些距离)
     if (prev) {
       const chgPct = (chg / prev.close * 100)
@@ -1238,20 +1243,20 @@ export function EChartsCandlestick({
     if (showMA || activeIndicators.includes('bull_bear_line')) {
       html += `<div style="display:flex;align-items:center;gap:10px;padding:0 8px;font:11px 'JetBrains Mono',monospace;select:none;min-height:20px;flex-wrap:wrap">`
       if (showMA) {
-        if (d.ma5 != null) html += `<span style="color:${THEME.ma5}">MA5:${Number(d.ma5).toFixed(2)}</span>`
-        if (d.ma10 != null) html += `<span style="color:${THEME.ma10}">MA10:${Number(d.ma10).toFixed(2)}</span>`
-        if (d.ma20 != null) html += `<span style="color:${THEME.ma20}">MA20:${Number(d.ma20).toFixed(2)}</span>`
-        if (d.ma60 != null) html += `<span style="color:${THEME.ma60}">MA60:${Number(d.ma60).toFixed(2)}</span>`
+        if (d.ma5 != null) html += `<span style="color:${THEME.ma5}">MA5:${Number(d.ma5).toFixed(digits)}</span>`
+        if (d.ma10 != null) html += `<span style="color:${THEME.ma10}">MA10:${Number(d.ma10).toFixed(digits)}</span>`
+        if (d.ma20 != null) html += `<span style="color:${THEME.ma20}">MA20:${Number(d.ma20).toFixed(digits)}</span>`
+        if (d.ma60 != null) html += `<span style="color:${THEME.ma60}">MA60:${Number(d.ma60).toFixed(digits)}</span>`
         if (d.boll_upper != null && activeIndicators.includes('boll')) {
-          html += `<span style="color:#E879F9">BOLL:${Number(d.boll_upper).toFixed(2)}/${Number(d.ma20).toFixed(2)}/${Number(d.boll_lower).toFixed(2)}</span>`
+          html += `<span style="color:#E879F9">BOLL:${Number(d.boll_upper).toFixed(digits)}/${Number(d.ma20).toFixed(digits)}/${Number(d.boll_lower).toFixed(digits)}</span>`
         }
       }
-      if (activeIndicators.includes('bull_bear_line')) html += bullBearInfoHTML(data, idx)
+      if (activeIndicators.includes('bull_bear_line')) html += bullBearInfoHTML(data, idx, digits)
       html += `</div>`
     }
 
     return html
-  }, [data, stockInfo, showMA, activeIndicators])
+  }, [data, stockInfo, showMA, activeIndicators, digits])
   getInfoBarHTMLRef.current = getInfoBarHTML
 
   // data/symbol 变化时重置 infoIdx:
@@ -1469,6 +1474,7 @@ export function EChartsCandlestick({
       addedDate,
       priceGaps,
       boxes,
+      digits,
     )
 
     chart.setOption(option, true)
@@ -1486,7 +1492,7 @@ export function EChartsCandlestick({
     if (infoEl) {
       infoEl.innerHTML = getInfoBarHTML()
     }
-  }, [data, markers, ranges, priceLines, priceGaps, boxes, linkedPrice, showMA, showMarkersProp, activeIndicators, volumeCompare, addedDate, chartHeight, dates, dateIndexMap, initialZoom, getInfoBarHTML, theme])
+  }, [data, markers, ranges, priceLines, priceGaps, boxes, linkedPrice, showMA, showMarkersProp, activeIndicators, volumeCompare, addedDate, chartHeight, dates, dateIndexMap, initialZoom, getInfoBarHTML, theme, digits])
 
   // 渲染信息栏容器 (内容由 JS 直接写入)
   const initialHTML = useMemo(() => {
@@ -1498,15 +1504,15 @@ export function EChartsCandlestick({
     let html = `<div style="display:flex;align-items:center;gap:6px;padding:0 8px;font:11px 'JetBrains Mono',monospace;min-height:20px;flex-wrap:wrap">`
     html += `<span style="color:${CT().text}">${d.date}</span>`
     html += `<span style="color:${CT().text}">开</span>`
-    html += `<span style="color:${d.open >= d.close ? THEME.bear : THEME.bull}">${d.open.toFixed(2)}</span>`
+    html += `<span style="color:${d.open >= d.close ? THEME.bear : THEME.bull}">${d.open.toFixed(digits)}</span>`
     html += `<span style="color:${CT().text}">高</span>`
-    html += `<span style="color:${THEME.bull}">${d.high.toFixed(2)}</span>`
+    html += `<span style="color:${THEME.bull}">${d.high.toFixed(digits)}</span>`
     html += `<span style="color:${CT().text}">低</span>`
-    html += `<span style="color:${THEME.bear}">${d.low.toFixed(2)}</span>`
+    html += `<span style="color:${THEME.bear}">${d.low.toFixed(digits)}</span>`
     html += `<span style="color:${CT().text}">收</span>`
     const prevClose0 = data[idx-1]?.close ?? d.close
     const clr0 = d.close >= prevClose0 ? THEME.bull : THEME.bear
-    html += `<span style="color:${clr0};font-weight:600">${d.close.toFixed(2)}</span>`
+    html += `<span style="color:${clr0};font-weight:600">${d.close.toFixed(digits)}</span>`
     // 涨跌幅 (收盘后, 换手前; 和收间隔一些距离)
     if (idx > 0) {
       const chgPct0 = ((d.close - prevClose0) / prevClose0 * 100)
@@ -1520,15 +1526,15 @@ export function EChartsCandlestick({
     if (showMA || activeIndicators.includes('bull_bear_line')) {
       html += `<div style="display:flex;align-items:center;gap:10px;padding:0 8px;font:11px 'JetBrains Mono',monospace;min-height:20px;flex-wrap:wrap">`
       if (showMA) {
-        if (d.ma5 != null) html += `<span style="color:${THEME.ma5}">MA5:${Number(d.ma5).toFixed(2)}</span>`
-        if (d.ma10 != null) html += `<span style="color:${THEME.ma10}">MA10:${Number(d.ma10).toFixed(2)}</span>`
-        if (d.ma20 != null) html += `<span style="color:${THEME.ma20}">MA20:${Number(d.ma20).toFixed(2)}</span>`
-        if (d.ma60 != null) html += `<span style="color:${THEME.ma60}">MA60:${Number(d.ma60).toFixed(2)}</span>`
+        if (d.ma5 != null) html += `<span style="color:${THEME.ma5}">MA5:${Number(d.ma5).toFixed(digits)}</span>`
+        if (d.ma10 != null) html += `<span style="color:${THEME.ma10}">MA10:${Number(d.ma10).toFixed(digits)}</span>`
+        if (d.ma20 != null) html += `<span style="color:${THEME.ma20}">MA20:${Number(d.ma20).toFixed(digits)}</span>`
+        if (d.ma60 != null) html += `<span style="color:${THEME.ma60}">MA60:${Number(d.ma60).toFixed(digits)}</span>`
         if (d.boll_upper != null && activeIndicators.includes('boll')) {
-          html += `<span style="color:#E879F9">BOLL:${Number(d.boll_upper).toFixed(2)}/${Number(d.ma20).toFixed(2)}/${Number(d.boll_lower).toFixed(2)}</span>`
+          html += `<span style="color:#E879F9">BOLL:${Number(d.boll_upper).toFixed(digits)}/${Number(d.ma20).toFixed(digits)}/${Number(d.boll_lower).toFixed(digits)}</span>`
         }
       }
-      if (activeIndicators.includes('bull_bear_line')) html += bullBearInfoHTML(data, idx)
+      if (activeIndicators.includes('bull_bear_line')) html += bullBearInfoHTML(data, idx, digits)
       html += `</div>`
     }
     return html

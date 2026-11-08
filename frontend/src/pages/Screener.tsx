@@ -1,3 +1,4 @@
+import { useExtSeries } from '@/lib/useExtSeries'
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import { useCurrentUser } from '@/lib/auth'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
@@ -528,7 +529,7 @@ export function Screener() {
   const resultSymbolsKey = dailyKSymbols.join(',')
   const klineBatch = useQuery({
     queryKey: QK.screenerKlineBatch(`${resultSymbolsKey}|${candleDays}`),
-    queryFn: () => api.klineDailyBatch(dailyKSymbols, candleDays),
+    queryFn: ({ signal }) => api.klineDailyBatch(dailyKSymbols, candleDays, signal),
     enabled: dailyKVisible && dailyKSymbols.length > 0,
     staleTime: 5 * 60_000,
     placeholderData: previousData => previousData,
@@ -712,6 +713,8 @@ export function Screener() {
       minuteRunDateRef.current = null
     },
   })
+
+  const extSeries = useExtSeries(columns, displayRows.map((row: { symbol: string }) => row.symbol), asOf)
 
   // 策略监控: 查询规则, 建立 assetType:strategyId → ruleId 映射 (只看 type=strategy 且 enabled)
   const monitorRules = useQuery({ queryKey: QK.monitorRules, queryFn: api.monitorRulesList, enabled: isAdmin })
@@ -1163,6 +1166,10 @@ export function Screener() {
               ) : (
                 <>
                   <ScreenerTable
+                    extSeriesData={extSeries.data}
+                    extSeriesLoading={extSeries.isLoading}
+                    extSeriesError={extSeries.isError}
+                    assetType={assetType}
                     rows={displayRows}
                     columns={columns}
                     strategyIdToName={strategyIdToName}

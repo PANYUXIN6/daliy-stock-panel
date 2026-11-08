@@ -11,6 +11,7 @@ import { usePreferences, useVersion } from '@/lib/useSharedQueries'
 import { api } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { PageHeader } from '@/components/PageHeader'
+import { BacktestMemorySettings } from '@/components/settings/BacktestMemorySettings'
 import { refreshAlertToastConfig } from '@/components/AlertToast'
 import { SOUND_OPTIONS, previewSound } from '@/lib/notificationSound'
 import {
@@ -21,7 +22,8 @@ import { ZOOM_MIN, ZOOM_MAX, ZOOM_STEP, getPageZoom, setPageZoom } from '@/lib/p
 
 export function SettingsSystemPanel() {
   const qc = useQueryClient()
-  const { data: prefs } = usePreferences()
+  const prefsQuery = usePreferences()
+  const prefs = prefsQuery.data
   const { data: versionData } = useVersion()
   const [saving, setSaving] = useState(false)
 
@@ -128,6 +130,14 @@ export function SettingsSystemPanel() {
           onChange={(v) => save({ screener_auto_run: v })}
         />
       </section>
+
+      {prefs ? <BacktestMemorySettings value={prefs.backtest_worker_rss_limit_gib} /> : (
+        <div className="rounded-card border border-border bg-surface p-5 mt-6 text-sm text-muted">
+          {prefsQuery.isError ? <div role="alert">内存设置读取失败。
+            <button onClick={() => void prefsQuery.refetch()} className="ml-2 text-accent">重试</button>
+          </div> : <p role="status">正在读取内存设置…</p>}
+        </div>
+      )}
 
       <section className="rounded-card border border-border bg-surface p-5 mt-6">
         <div className="flex items-center gap-2 mb-4">

@@ -40,7 +40,7 @@ export interface ToolCallRecord {
 
 export type ChatMessage =
   | { id: string; role: 'user'; content: string; ts: number }
-  | { id: string; role: 'assistant'; content: string; ts: number; streaming: boolean }
+  | { id: string; role: 'assistant'; content: string; ts: number; streaming: boolean; reasoningContent?: string; reasoningContext?: string }
   | { id: string; role: 'footprint'; calls: ToolCallRecord[]; ts: number }
   | { id: string; role: 'error'; kind: string; message: string; hint?: string; ts: number }
   | { id: string; role: 'notice'; content: string; ts: number }
@@ -152,7 +152,14 @@ function isTextMessage(m: ChatMessage): m is Extract<ChatMessage, { role: 'user'
 function buildHistory(messages: ChatMessage[]): ChatHistoryMessage[] {
   return messages
     .filter(isTextMessage)
-    .map(m => ({ role: m.role, content: m.content }))
+    .map(m => {
+      const message: ChatHistoryMessage = { role: m.role, content: m.content }
+      if (m.role === 'assistant' && m.reasoningContent !== undefined) {
+        message.reasoning_content = m.reasoningContent
+        message.reasoning_context = m.reasoningContext
+      }
+      return message
+    })
 }
 
 /** 一轮生成的完整编排: 建占位 → 流事件落库 → 终态收敛。 */
@@ -190,6 +197,15 @@ async function runGeneration() {
 
 function applyEvent(event: AssistantEvent, footprintId: string, assistantId: string) {
   switch (event.type) {
+    case 'assistant_context':
+      patchActiveSession(session => ({
+        ...session,
+        messages: session.messages.map(m => m.id === assistantId && m.role === 'assistant'
+          ? { ...m, reasoningContent: event.reasoning_content ?? undefined,
+              reasoningContext: event.reasoning_content == null ? undefined : event.reasoning_context }
+          : m),
+      }))
+      break
     case 'tool_call':
       patchActiveSession(session => ({
         ...session,

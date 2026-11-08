@@ -423,6 +423,7 @@ def get_preferences() -> dict:
         "watchlist_groups_in_nav": preferences.get_watchlist_groups_in_nav(),
         "minute_sync_enabled": preferences.get_minute_sync_enabled(),
         "ordinary_minute_enabled": preferences.get_ordinary_minute_enabled(),
+        "backtest_worker_rss_limit_gib": preferences.get_backtest_worker_rss_limit_gib(),
         "minute_sync_days": preferences.get_minute_sync_days(),
         "minute_sync_segment_days": preferences.get_minute_sync_segment_days(),
         "minute_refresh_enabled": preferences.get_minute_refresh_enabled(),
@@ -1907,3 +1908,13 @@ def api_tokens_revoke(token_id: str, request: Request) -> dict:
     if not svc.revoke_token(request.app.state.repo.store.data_dir, token_id):
         raise HTTPException(status_code=404, detail=f"Token '{token_id}' 不存在")
     return {"status": "revoked", "id": token_id}
+
+
+class BacktestWorkerRssLimitIn(BaseModel):
+    gib: int = Field(ge=0, le=64, strict=True)
+
+
+@router.put("/preferences/backtest-worker-rss-limit")
+def update_backtest_worker_rss_limit(req: BacktestWorkerRssLimitIn) -> dict:
+    from app.services import preferences
+    return {"backtest_worker_rss_limit_gib": preferences.set_backtest_worker_rss_limit_gib(req.gib)}

@@ -3,6 +3,7 @@ import { motion, AnimatePresence, Reorder } from 'framer-motion'
 import { X, Plus, GripVertical, Trash2, ListPlus } from 'lucide-react'
 import { api, type StrategyDetail } from '@/lib/api'
 import { useDialogBackdrop } from '@/lib/useDialogBackdrop'
+import { StrategyBundleDialog } from './StrategyBundleDialog'
 
 interface Props {
   pool: string[]
@@ -45,6 +46,7 @@ export function StrategyPoolDialog({ pool, onConfirm, onClose }: Props) {
   const [allStrategies, setAllStrategies] = useState<StrategyDetail[]>([])
   const [loading, setLoading] = useState(true)
   const [activeTab, setActiveTab] = useState<SourceTab>('all')
+  const [showBundle, setShowBundle] = useState(false)
   const loadStrategies = useCallback(async () => {
     setLoading(true)
     try {
@@ -125,7 +127,7 @@ export function StrategyPoolDialog({ pool, onConfirm, onClose }: Props) {
     })
   }, [filteredAvailable])
 
-  return (
+  return (<>
     <AnimatePresence>
       <motion.div
         initial={{ opacity: 0 }}
@@ -148,6 +150,7 @@ export function StrategyPoolDialog({ pool, onConfirm, onClose }: Props) {
               {invalidPoolCount > 0 && <span className="ml-2 text-[10px] text-danger">{invalidPoolCount} 个失效</span>}
             </span>
             <div className="flex items-center gap-2">
+              <button onClick={() => setShowBundle(true)} className="text-xs text-accent">策略包</button>
               <span className="text-[10px] text-muted">Python 策略仅服务器部署</span>
               <button onClick={onClose} className="p-1 rounded hover:bg-elevated transition-colors cursor-pointer">
                 <X className="h-4 w-4 text-muted" />
@@ -344,5 +347,7 @@ export function StrategyPoolDialog({ pool, onConfirm, onClose }: Props) {
         </motion.div>
       </motion.div>
     </AnimatePresence>
-  )
+    {showBundle && <StrategyBundleDialog strategies={allStrategies} onClose={() => setShowBundle(false)}
+      onImported={id => { handleAdd(id); void loadStrategies() }} />}
+  </>)
 }

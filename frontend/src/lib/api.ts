@@ -11,9 +11,10 @@ import { toast } from '@/components/Toast'
 const BASE = ''
 
 type RequestOptions = RequestInit & {
+  responseType?: 'json' | 'blob'
   /** 为 true 时不弹错误 toast（由调用方自行汇总提示，如多图串行队列） */
   quiet?: boolean
-  /** 请求超时毫秒数; null 关闭。默认 30s — 后端依赖 polars, 偶发挂起时无超时
+  /** 请求超时毫秒数; null 关闭。显式设置时与调用方 signal 同时生效。默认 30s — 后端依赖 polars, 偶发挂起时无超时
    *  会占满浏览器同源连接池, 拖垮整页所有请求 (表现为全部排队"已停止")。 */
   timeoutMs?: number | null
 }
@@ -50,14 +51,19 @@ const COMPUTE_REQUEST_TIMEOUT_MS = 300_000
 const extPullTimeoutMs = (timeoutSeconds?: number) => (timeoutSeconds ?? 30) * 1000 + 10_000
 
 async function request<T>(path: string, init?: RequestOptions): Promise<T> {
-  const { quiet, timeoutMs = DEFAULT_REQUEST_TIMEOUT_MS, ...fetchInit } = init ?? {}
+  const { quiet, responseType = 'json', timeoutMs = DEFAULT_REQUEST_TIMEOUT_MS, ...fetchInit } = init ?? {}
   const isFormData = fetchInit.body instanceof FormData
   const headers: Record<string, string> = {}
   if (!isFormData) headers['Content-Type'] = 'application/json'
   // 合并调用方传入的 headers (此前会被整体覆盖丢弃)
   Object.assign(headers, fetchInit.headers as Record<string, string> | undefined)
-  // 自带 signal 的调用方 (上传/串行队列) 由其自行控制中止; 其余走默认超时。
-  const ctl = timeoutMs == null || fetchInit.signal ? undefined : new AbortController()
+  // 自带 signal 时默认沿用调用方控制；显式指定 timeoutMs 则同时保留超时。
+  const ctl = timeoutMs == null || (fetchInit.signal && init?.timeoutMs === undefined) ? undefined : new AbortController()
+  const forwardAbort = () => ctl?.abort(fetchInit.signal?.reason)
+  if (ctl && fetchInit.signal) {
+    if (fetchInit.signal.aborted) forwardAbort()
+    else fetchInit.signal.addEventListener('abort', forwardAbort, { once: true })
+  }
   const timeoutSeconds = Math.round((timeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS) / 1000)
   let timer: number | undefined
   if (ctl && timeoutMs != null) timer = window.setTimeout(() => ctl.abort(), timeoutMs)
@@ -69,7 +75,7 @@ async function request<T>(path: string, init?: RequestOptions): Promise<T> {
       ...(ctl ? { signal: ctl.signal } : {}),
     })
   } catch (err) {
-    if (ctl && err instanceof DOMException && err.name === 'AbortError') {
+    if (ctl && !fetchInit.signal?.aborted && err instanceof DOMException && err.name === 'AbortError') {
       const msg = `请求超时（${timeoutSeconds}s）· ${path.split('?')[0]}`
       if (!quiet) toast(msg, 'error')
       throw new ApiError(msg, 0)
@@ -77,6 +83,7 @@ async function request<T>(path: string, init?: RequestOptions): Promise<T> {
     throw err
   } finally {
     if (timer !== undefined) window.clearTimeout(timer)
+    fetchInit.signal?.removeEventListener('abort', forwardAbort)
   }
   if (!res.ok) {
     let detail = ''
@@ -97,7 +104,31 @@ async function request<T>(path: string, init?: RequestOptions): Promise<T> {
     if (res.status !== 401 && !quiet) toast(msg, 'error')
     throw new ApiError(msg, res.status)
   }
-  return res.json() as Promise<T>
+  return (responseType === 'blob' ? res.blob() : res.json()) as Promise<T>
+}
+
+interface KlineBatchResponse<T> {
+  data: Record<string, T[]>
+  full_minute_local?: boolean
+  incremental?: boolean
+}
+
+/** 日线与分钟共享有界串行请求；任一块失败时保留查询层上一份完整结果。 */
+async function requestKlineBatch<T>(path: string, symbols: string[], body: object, signal?: AbortSignal): Promise<KlineBatchResponse<T>> {
+  const unique = [...new Set(symbols)]
+  const result: KlineBatchResponse<T> = { data: {} }
+  for (let i = 0; i < unique.length; i += 400) {
+    if (signal?.aborted) throw new DOMException('请求已取消', 'AbortError')
+    const part = await request<KlineBatchResponse<T>>(path, {
+      method: 'POST', body: JSON.stringify({ ...body, symbols: unique.slice(i, i + 400) }), signal,
+      timeoutMs: DEFAULT_REQUEST_TIMEOUT_MS,
+    })
+    Object.assign(result.data, part.data)
+    for (const key of ['full_minute_local', 'incremental'] as const) {
+      if (part[key] !== undefined) result[key] = (result[key] ?? true) && part[key]
+    }
+  }
+  return result
 }
 
 // ===== Capabilities =====
@@ -410,8 +441,9 @@ export interface EarningsBreakoutResponse {
 
 export interface KlineDailyResponse {
   symbol: string
+  asset_type?: 'stock' | 'etf' | 'index'
   name?: string
-  stock_info?: { name?: string; total_shares?: number; float_shares?: number; ext?: Record<string, unknown> }
+  stock_info?: { name?: string; asset_type?: 'stock' | 'etf' | 'index'; total_shares?: number; float_shares?: number; ext?: Record<string, unknown> }
   rows: KlineRow[]
   source?: string
 }
@@ -998,6 +1030,16 @@ export interface CompositeChildInfo {
   weight: number
 }
 
+export interface StrategyBundlePreview {
+  strategy_id: string
+  label: string
+  counts: Record<string, number>
+  warnings: string[]
+  missing_deps: string[]
+  can_apply: boolean
+  entries: { path: string; kind: string; id: string; action: 'create' | 'reuse' | 'conflict'; bytes: number }[]
+}
+
 export interface StrategyDetail {
   overlay_filter?: CustomSignalCondition[]
   id: string
@@ -1076,7 +1118,7 @@ export interface AiIterateResult {
 export interface CustomSignalCondition {
   left: string     // 字段名
   op: string       // > >= < <= == !=
-  right: string    // "field:xxx" 或数字字符串
+  right: string | number    // "field:xxx"、数字字符串或数值常量
   leftDays?: number   // 左字段取几日前 (0=当日, 默认)
   rightDays?: number  // 右字段取几日前 (仅 right 为字段时有意义)
 }
@@ -2016,6 +2058,57 @@ export interface StrategyBacktestTrade {
   exit_signal_id?: string | null
 }
 
+export interface BacktestEvidenceCheck {
+  kind: string
+  cutoff: string
+  status: 'completed' | 'error'
+  differences: number
+  compared_values: number
+  error?: string
+  examples: {
+    date: string; symbol: string; field: string; cutoff: string
+    baseline: number | string | boolean | null
+    recomputed: number | string | boolean | null
+  }[]
+}
+
+export interface BacktestEvidence {
+  schema_version: number
+  run_id: string
+  created_at: string
+  runtime: { application: string; python: string; polars: string; numpy: string; code_sha256: string }
+  config: Record<string, unknown>
+  config_sha256: string
+  strategy: { id: string; backend: string; sha256: string; changed_during_run: boolean }
+  data: {
+    sha256: string
+    origin: string
+    asset_type: string
+    daily_price_basis: string
+    daily_revision?: string
+    datasets: Record<string, {
+      sha256: string; fields: Record<string, string>; rows: number; symbols: number | null
+      start: string | null; end: string | null
+    }>
+  }
+  reproducibility_sha256: string
+  lookahead: {
+    status: 'passed' | 'failed' | 'partial' | 'error' | 'insufficient' | 'cancelled'
+    sampled: boolean
+    differences: number
+    checks: BacktestEvidenceCheck[]
+    reports: { scope: string; status: string; checks: BacktestEvidenceCheck[]; differences: number }[]
+  }
+  persistence: { status: 'saved' | 'error'; error?: string }
+  execution_timing?: {
+    status: 'passed' | 'failed' | 'insufficient'
+    compared_values: number
+    differences: number
+    examples: { symbol: string; side: string; signal_date: string; fill_date: string }[]
+  }
+  limitations: string[]
+}
+
 export interface StrategyBacktestResult {
   run_id: string
   config: Record<string, any>
@@ -2059,6 +2152,7 @@ export interface StrategyBacktestResult {
   }
   elapsed_ms: number
   error: string | null
+  evidence?: BacktestEvidence | null
 }
 
 // ===== Settings =====
@@ -2348,6 +2442,7 @@ export interface EtfFlowBoard {
 }
 
 export interface Preferences {
+  backtest_worker_rss_limit_gib?: number
   realtime_quotes_enabled: boolean
   ordinary_minute_enabled: boolean
   watchlist_groups_in_nav: boolean
@@ -2801,6 +2896,10 @@ export const api = {
   sponsorModels: () =>
     request<{ models: string[] }>('/api/settings/ai/sponsor-models'),
 
+  updateBacktestWorkerRssLimit: (gib: number) =>
+    request<{ backtest_worker_rss_limit_gib: number }>('/api/settings/preferences/backtest-worker-rss-limit', {
+      method: 'PUT', body: JSON.stringify({ gib }),
+    }),
   preferences: () => request<Preferences>('/api/settings/preferences'),
   updateOrdinaryMinute: (enabled: boolean) =>
     request<{ ordinary_minute_enabled: boolean }>('/api/settings/preferences/ordinary-minute', {
@@ -3168,16 +3267,11 @@ export const api = {
     request<KlineDailyLatestResponse>(
       `/api/kline/daily/latest?symbol=${encodeURIComponent(symbol)}`,
     ),
-  klineDailyBatch: (symbols: string[], days = 12) =>
-    request<{ data: Record<string, KlineRow[]> }>('/api/kline/daily-batch', {
-      method: 'POST',
-      body: JSON.stringify({ symbols, days }),
-    }),
-  klineMinuteBatch: (symbols: string[], date?: string, preferLocal?: boolean, since?: string) =>
-    request<{ data: Record<string, MinuteKlineRow[]>; full_minute_local?: boolean; incremental?: boolean }>('/api/kline/minute-batch', {
-      method: 'POST',
-      body: JSON.stringify({ symbols, date, ...(preferLocal ? { prefer_local: true } : {}), ...(since ? { since } : {}) }),
-    }),
+  klineDailyBatch: (symbols: string[], days = 12, signal?: AbortSignal) =>
+    requestKlineBatch<KlineRow>('/api/kline/daily-batch', symbols, { days }, signal),
+  klineMinuteBatch: (symbols: string[], date?: string, preferLocal?: boolean, since?: string, signal?: AbortSignal) =>
+    requestKlineBatch<MinuteKlineRow>('/api/kline/minute-batch', symbols,
+      { date, ...(preferLocal ? { prefer_local: true } : {}), ...(since ? { since } : {}) }, signal),
   instrumentSearch: (q: string, limit = 20, assetTypes?: string) =>
     request<{ results: { symbol: string; name: string; code: string; asset_type?: string }[] }>(
       `/api/kline/instruments/search?q=${encodeURIComponent(q)}&limit=${limit}${assetTypes ? `&asset_types=${encodeURIComponent(assetTypes)}` : ''}`,
@@ -3734,6 +3828,9 @@ export const api = {
       method: 'DELETE',
     }),
 
+  strategyBacktestEvidence: (runId: string) =>
+    request<BacktestEvidence>(`/api/backtest/strategy/runs/${encodeURIComponent(runId)}/evidence`),
+
   strategyBacktestRun: (payload: {
     strategy_id: string
     symbols?: string[] | null
@@ -3778,6 +3875,19 @@ export const api = {
   dataStatus: () => request<DataStatus>('/api/data/status'),
   collectionSyncCheck: (input: CollectionSyncRequest) =>
     request<CollectionSyncCheck>('/api/data/sync-check', { method: 'POST', body: JSON.stringify(input) }),
+  dataIntegrity: () => request<{
+    report: IntegrityReport | null
+    blocking_assets?: IntegrityAsset[]
+    data_revisions?: DailyDataRevisions
+  }>('/api/data/integrity'),
+  scanDataIntegrity: (lookbackDays: number, assetTypes: IntegrityAsset[]) =>
+    request<{ job_id: string }>('/api/data/integrity/scan', {
+      method: 'POST', body: JSON.stringify({ lookback_days: lookbackDays, asset_types: assetTypes }),
+    }),
+  repairDataIntegrity: (reportId: string) =>
+    request<{ job_id: string }>('/api/data/integrity/repair', {
+      method: 'POST', body: JSON.stringify({ report_id: reportId }),
+    }),
   dataClear: () => request<{ deleted_files: number }>('/api/data/clear', { method: 'POST' }),
   refreshCache: () => request<{ ok: boolean }>('/api/data/refresh-cache', { method: 'POST' }),
   enrichedSchema: (table: string) => request<EnrichedField[]>(`/api/data/schema/${table}`),
@@ -3901,6 +4011,22 @@ export const api = {
   extDataDelete: (id: string) =>
     request<{ status: string }>(`/api/ext-data/${id}`, { method: 'DELETE' }),
 
+  extDataConfigExport: (id: string) =>
+    request<Blob>(`/api/ext-data/${encodeURIComponent(id)}/config/export`, { responseType: 'blob', quiet: true }),
+
+  extDataConfigInspect: (file: File) => {
+    const body = new FormData()
+    body.append('file', file)
+    return request<ExtDataConfigPreview>('/api/ext-data/config/inspect', { method: 'POST', body, quiet: true })
+  },
+
+  extDataConfigImport: (file: File, id: string) => {
+    const body = new FormData()
+    body.append('file', file)
+    body.append('config_id', id)
+    return request<ExtDataConfig>('/api/ext-data/config/import', { method: 'POST', body, quiet: true })
+  },
+
   extDataUpload: (id: string, file: File, snapshotDate?: string) => {
     const fd = new FormData()
     fd.append('file', file)
@@ -3917,15 +4043,32 @@ export const api = {
     ),
 
   extDataSchemaAll: () =>
-    request<{ items: { id: string; label: string; mode: string; columns: { name: string; type: string; label: string }[] }[] }>('/api/ext-data/schema-all'),
+    request<{ items: { id: string; label: string; mode: string; time_field?: string | null; granularity?: 'intraday' | 'daily' | null; columns: { name: string; type: string; label: string }[] }[] }>('/api/ext-data/schema-all'),
+
+  /** 列表扩展序列: 按日 / 按日内读取, 不指定显示周期时跟随数据表。 */
+  extDataSeries: (configId: string, field: string, date?: string | null, symbols?: string[], days?: number, granularity?: 'daily' | 'intraday') =>
+    request<{ config_id: string; field: string; date: string | null; granularity?: 'intraday' | 'daily'; days?: number; items: Record<string, [string, number][]> }>(
+      `/api/ext-data/${configId}/series?field=${encodeURIComponent(field)}`
+        + (date ? `&date=${date}` : '')
+        + (symbols?.length ? `&symbols=${encodeURIComponent(symbols.join(','))}` : '')
+        + (days ? `&days=${days}` : '')
+        + (granularity ? `&granularity=${granularity}` : ''),
+    ),
 
   extDataPullConfig: (id: string, body: {
     url: string; method?: string; headers?: Record<string, string>; body?: string;
     response_path?: string; field_map?: Record<string, string>;
     schedule_minutes?: number; enabled?: boolean;
+    schedule_time?: string | null;
+    schedule_period?: 'daily' | 'weekly' | 'monthly';
+    schedule_day?: number;
+    schedule_trading_only?: boolean;
     time_window_start?: string | null; time_window_end?: string | null;
     date_param?: string | null;
+    date_format?: string;
     time_field?: string | null;
+    since_param?: string | null;
+    granularity?: 'auto' | 'intraday' | 'daily';
     auth?: ExtPullAuth;
     timeout_seconds?: number;
     page_param?: string | null;
@@ -4604,6 +4747,22 @@ export const api = {
   /** 获取策略源文件内容 */
   strategyGetSource: (id: string) =>
     request<{ code: string; source: string }>(`/api/strategies/${id}/source`),
+  /** 个人声明式策略包，不包含Python源码。 */
+  strategyExportBundle: (id: string) =>
+    request<Blob>(`/api/strategies/${encodeURIComponent(id)}/bundle`, { responseType: 'blob', quiet: true }),
+  strategyInspectBundle: (file: File) => {
+    const body = new FormData()
+    body.append('file', file)
+    return request<StrategyBundlePreview>('/api/strategies/bundle/inspect', { method: 'POST', body, quiet: true })
+  },
+  strategyApplyBundle: (file: File) => {
+    const body = new FormData()
+    body.append('file', file)
+    body.append('allow_overwrite', 'false')
+    return request<{ imported: number; skipped: number; failed: number; strategy_id: string }>(
+      '/api/strategies/bundle/apply', { method: 'POST', body, quiet: true, timeoutMs: COMPUTE_REQUEST_TIMEOUT_MS },
+    )
+  },
   /** 创建/更新叠加策略(composite): 声明式引用多个子策略 */
   strategySaveComposite: (payload: {
     strategy_id: string
@@ -4680,6 +4839,37 @@ export interface PipelineJob {
 export type PipelineJobSummary = Omit<PipelineJob, 'log'>
 
 // ===== Data status =====
+export type IntegrityAsset = 'stock' | 'etf' | 'index'
+export type DailyDataRevisions = Partial<Record<IntegrityAsset, string>>
+
+export interface IntegrityReport {
+  version: 1
+  id: string
+  checked_at: string
+  start_date: string
+  end_date: string
+  lookback_days: number
+  asset_types: IntegrityAsset[]
+  status: 'clean' | 'issues' | 'uncertain' | 'empty'
+  repairable_count: number
+  uncertain_count: number
+  no_data_assets: IntegrityAsset[]
+  backup_dir?: string
+  repair_error?: string
+  data_revisions?: DailyDataRevisions
+  issues: {
+    asset_type: IntegrityAsset
+    asset_label: string
+    date: string
+    kind: string
+    kind_label: string
+    reason: string
+    repairable: boolean
+    symbols: string[]
+    symbol_count: number
+  }[]
+}
+
 interface TableStats {
   rows: number
   earliest_date: string | null
@@ -4775,6 +4965,10 @@ export interface PullConfig {
   response_path: string
   field_map?: Record<string, string>
   schedule_minutes: number
+  schedule_time?: string | null
+  schedule_period?: 'daily' | 'weekly' | 'monthly'
+  schedule_day?: number
+  schedule_trading_only?: boolean
   enabled: boolean
   last_run?: string | null
   last_status?: string | null
@@ -4789,6 +4983,8 @@ export interface PullConfig {
   date_format?: string
   /** 日内序列表时间列名 (如 "ts"): 配置后同 symbol 允许多行 (按 symbol+时间列去重), 用于集合竞价等多盘数据 */
   time_field?: string | null
+  since_param?: string | null
+  granularity?: 'auto' | 'intraday' | 'daily'
   auth?: ExtPullAuth | null
   /** 单次拉取请求超时 (秒), 默认 30 */
   timeout_seconds?: number
@@ -4849,6 +5045,20 @@ export interface ExtDataConfig {
   latest_sync_date?: string | null
   date_range?: string[] | null
   pull?: PullConfig | null
+}
+
+export interface ExtDataConfigPreview {
+  id: string
+  label: string
+  mode: 'snapshot' | 'timeseries'
+  fields: ExtDataField[]
+  field_count: number
+  conflict: boolean
+  requires_key: boolean
+  has_pull: boolean
+  pull_url?: string | null
+  pull_method?: string | null
+  warnings: string[]
 }
 
 export interface ExtDataRowsResult {

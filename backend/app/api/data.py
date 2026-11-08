@@ -9,9 +9,10 @@ from collections.abc import Callable
 from contextlib import suppress
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, HTTPException, Request
+from pydantic import BaseModel, Field
 
 from app.enriched_generation import EnrichedPublication
 from app.indicators.pipeline import ENRICHED_COLUMNS
@@ -20,6 +21,81 @@ from app.services.collection_status import CollectionSyncRequest, check_collecti
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/data", tags=["data"])
+
+class IntegrityScanIn(BaseModel):
+    lookback_days: int = Field(default=30, ge=1, le=366)
+    asset_types: list[Literal["stock", "etf", "index"]] | None = Field(default=None, min_length=1, max_length=3)
+
+
+class IntegrityRepairIn(BaseModel):
+    report_id: str = Field(pattern=r"^[a-f0-9]{32}$")
+
+
+async def _start_integrity_job(request: Request, operation: Callable, *, repair: bool) -> dict:
+    from app.api.pipeline import _submit_job, finalize_market_data
+    from app.services.shared_runtime import publish_data_update
+
+    repo = request.app.state.repo
+    qs = getattr(request.app.state, "quote_service", None)
+
+    def finalize():
+        if repair:
+            finalize_market_data(repo, qs)
+        publish_data_update(repo.store.data_dir, ["daily_integrity"])
+
+    return await _submit_job(
+        repo, qs, lambda progress: lambda: {"integrity_report": operation(progress)},
+        request_key="daily_integrity_repair" if repair else "daily_integrity_scan",
+        finalize=finalize, pause_quotes=repair,
+    )
+
+
+@router.get("/integrity")
+def get_integrity_report(request: Request) -> dict:
+    from app.services import daily_health
+    from app.services.integrity_check import latest_report
+
+    root = request.app.state.repo.store.data_dir
+    return {"report": latest_report(root), "blocking_assets": sorted({
+        e["asset_type"] for e in daily_health.snapshot(root)["entries"]
+    }), "data_revisions": {
+        asset: daily_health.revision(root, asset) for asset in daily_health.ASSET_LABELS
+    }}
+
+
+@router.post("/integrity/scan")
+async def scan_integrity(body: IntegrityScanIn, request: Request) -> dict:
+    from app.services.integrity_check import run_check
+
+    root = request.app.state.repo.store.data_dir
+    return await _start_integrity_job(request, lambda progress: run_check(
+        root, lookback_days=body.lookback_days, asset_types=body.asset_types, on_progress=progress,
+    ), repair=False)
+
+
+@router.post("/integrity/repair")
+async def repair_integrity(body: IntegrityRepairIn, request: Request) -> dict:
+    from app.data_providers import custom
+    from app.services import preferences
+    from app.services.integrity_check import latest_report, run_repair
+    from app.tickflow.capabilities import Cap
+
+    state = request.app.state
+    report = latest_report(state.repo.store.data_dir)
+    if report is None or report.get("id") != body.report_id:
+        raise HTTPException(status_code=409, detail="自检报告已变化, 请重新自检后再修补")
+    if not report.get("repairable_count"):
+        raise HTTPException(status_code=400, detail="当前没有可自动修补的问题")
+    provider = preferences.get_daily_data_provider()
+    custom_daily = provider != "tickflow" and custom.provider_has_dataset(provider, "daily")
+    needs_fetch = any(item.get("repairable") and item.get("kind") != "recompute" for item in report.get("issues", []))
+    source_unavailable = ((provider != "tickflow" and not custom_daily)
+                          or (provider == "tickflow" and not state.capabilities.has(Cap.KLINE_DAILY_BATCH)))
+    if needs_fetch and source_unavailable:
+        raise HTTPException(status_code=403, detail="当前日K数据源不可用, 请先检查数据源配置")
+    return await _start_integrity_job(request, lambda progress: run_repair(
+        state.repo, state.capabilities, body.report_id, on_progress=progress,
+    ), repair=True)
 
 # ===== 缓存:storage(文件扫描) + 每张表 aggregate 各自缓存 =====
 # 同步期间前端 2s 轮一次 status,每张表 aggregate 全表 count + min/max + distinct
@@ -679,6 +755,10 @@ def clear_data(request: Request):
             if publication is not None:
                 publication.abandon()
             raise
+
+    from app.services.daily_health import clear_assets
+    clear_assets(data_dir, {"stock", "etf", "index"})
+    (data_dir / "user_data" / "integrity_report.json").unlink(missing_ok=True)
 
     # 清除同步历史（内存 + 磁盘 job_store/ 文件夹）
     from app.services.pipeline_jobs import job_store

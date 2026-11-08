@@ -309,11 +309,13 @@ class EnrichedPublication:
         *,
         recover: bool = False,
         full_rebuild: bool = False,
+        purpose: str | None = None,
     ) -> None:
         self.data_dir = Path(data_dir)
         self.asset_type = asset_type
         self.recover = recover
         self.full_rebuild = full_rebuild
+        self.purpose = purpose
         self._publishing = False
         self._changed = False
         self._base_generation: str | None = None
@@ -435,6 +437,8 @@ class EnrichedPublication:
                 raise EnrichedGenerationUnavailableError(
                     "another enriched publication is active"
                 )
+            if self.purpose == "daily_repair" and current.get("purpose") != self.purpose:
+                raise EnrichedGenerationUnavailableError("存在其他未完成的指标发布, 请先完成原任务或全量重算")
             if not self.recover:
                 raise EnrichedGenerationUnavailableError(
                     "another enriched publication is incomplete"
@@ -456,6 +460,7 @@ class EnrichedPublication:
                 "state": "publishing",
                 "generation": generation,
                 "publication_id": self._publication_id,
+                "purpose": self.purpose,
                 "owner_pid": os.getpid(),
                 "updated_at_ns": time.time_ns(),
                 "lease": True,

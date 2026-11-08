@@ -28,6 +28,7 @@ from app.services.ai_provider import (
     ai_configured,
     current_ai_context_window,
     current_ai_max_output_tokens,
+    current_reasoning_context_key,
     is_codex_cli_provider,
 )
 
@@ -75,13 +76,21 @@ def _classify_exception(exc: Exception) -> dict[str, str]:
     return _error_event("model", text or exc.__class__.__name__)
 
 
-def _truncate_history(history: list[dict[str, str]]) -> tuple[list[dict[str, str]], bool]:
+def _truncate_history(
+    history: list[dict[str, str]], *, reasoning_context: str | None = None,
+) -> tuple[list[dict[str, str]], bool]:
     """保留最近 N 条消息; 返回 (截断后历史, 是否发生了截断)。"""
-    clean = [
-        {"role": item["role"], "content": str(item.get("content") or "")}
-        for item in history
-        if item.get("role") in {"user", "assistant"} and str(item.get("content") or "").strip()
-    ]
+    clean = []
+    for item in history:
+        if item.get("role") not in {"user", "assistant"} or not str(item.get("content") or "").strip():
+            continue
+        message = {"role": item["role"], "content": str(item["content"])}
+        # 旧会话无推理也可继续；无法确认来源的推理不跨供应商回传。
+        if (item["role"] == "assistant" and isinstance(item.get("reasoning_content"), str)
+                and reasoning_context is not None and item.get("reasoning_context") == reasoning_context):
+            message["reasoning_content"] = item["reasoning_content"]
+            message["reasoning_context"] = reasoning_context
+        clean.append(message)
     if len(clean) <= _MAX_HISTORY_MESSAGES:
         return clean, False
     start = len(clean) - _MAX_HISTORY_MESSAGES
@@ -97,7 +106,7 @@ def _estimate_input_tokens(messages: list[dict[str, Any]]) -> int:
     """与核心 ai_provider 相同口径的粗估: 中文 1 字 1 token, 其余 4 字符 1 token。"""
     total = 0
     for message in messages:
-        text = str(message.get("content") or "")
+        text = str(message.get("content") or "") + str(message.get("reasoning_content") or "")
         cjk = sum(1 for ch in text if "一" <= ch <= "鿿")
         total += cjk + (len(text) - cjk) // 4 + 1
     return max(1, total)
@@ -174,7 +183,8 @@ async def chat_stream(
         yield _line({"type": "done"})
         return
 
-    truncated, was_truncated = _truncate_history(history)
+    reasoning_context = current_reasoning_context_key()
+    truncated, was_truncated = _truncate_history(history, reasoning_context=reasoning_context)
     if not truncated:
         yield _line(_error_event("model", "对话历史为空, 请先输入问题。"))
         yield _line({"type": "done"})
@@ -289,6 +299,8 @@ async def chat_stream(
                 _guard_input_budget(req_messages)
                 round_text: list[str] = []
                 tool_calls: list[dict[str, Any]] = []
+                reasoning_content: str | None = None
+                round_context = current_reasoning_context_key()
                 async for event in stream_openai_round(req_messages, schemas, temperature=0.3, timeout=240.0):
                     require_current_session()
                     if event["type"] == "text":
@@ -296,8 +308,14 @@ async def chat_stream(
                         await queue.put({"type": "delta", "content": event["delta"]})
                     elif event["type"] == "round_end":
                         tool_calls = event.get("tool_calls") or []
+                        reasoning_content = event.get("reasoning_content")
+                        round_context = event.get("reasoning_context") or round_context
 
                 if not tool_calls:
+                    # 浏览器的一个占位消息承载整次生成，只保存最终答复的推理。
+                    if reasoning_content is not None:
+                        await queue.put({"type": "assistant_context", "reasoning_content": reasoning_content,
+                                         "reasoning_context": round_context})
                     if not round_text and not text_seen:
                         await queue.put(_error_event("model", "本轮未产出回答, 请重试。"))
                     return
@@ -341,6 +359,9 @@ async def chat_stream(
                 if round_text:
                     assistant_message["content"] = "".join(round_text)
                     text_seen = True
+                if reasoning_content is not None:
+                    assistant_message["reasoning_content"] = reasoning_content
+                    assistant_message["reasoning_context"] = round_context
                 req_messages.append(assistant_message)
 
                 for call in tool_calls:

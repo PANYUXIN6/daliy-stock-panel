@@ -1,3 +1,5 @@
+import type { ExtSeriesData } from '@/lib/useExtSeries'
+import { ExtSparkChart } from './ExtSparkChart'
 /**
  * 策略结果表格。
  *
@@ -26,6 +28,10 @@ import { toNavItems, type NavItem } from '@/lib/listNav'
 import { cn } from '@/lib/cn'
 
 interface ScreenerTableProps {
+  extSeriesData?: ExtSeriesData
+  extSeriesLoading?: boolean
+  extSeriesError?: boolean
+  assetType?: 'stock' | 'etf'
   rows: any[]
   columns: ColumnConfig[]
   strategyIdToName: Record<string, string>
@@ -159,6 +165,8 @@ function renderExtValue(
 }
 
 export function ScreenerTable({
+  extSeriesData = {}, extSeriesLoading = false, extSeriesError = false,
+  assetType,
   rows, columns, strategyIdToName, symbolStrategyMap, activeStrategy,
   watchlistSet, onPreview, onAddToWatchlist, onRemoveFromWatchlist, watchlistPending, klineData = {},
   dailyKChartVisible = true, onToggleDailyKChart,
@@ -210,6 +218,12 @@ export function ScreenerTable({
     // ext 列
     if (col.source.type === 'ext') {
       const { configId, fieldName } = col.source
+      if (col.extDisplay?.snapshotRender === 'line' || col.extDisplay?.snapshotRender === 'bar') {
+        return <td key={col.id} className="px-3 py-2">
+          {extSeriesLoading ? <span className="text-xs text-muted">加载中…</span> : extSeriesError ? <span className="text-xs text-danger">读取失败</span>
+            : <ExtSparkChart points={extSeriesData[col.id]?.[r.symbol] ?? []} kind={col.extDisplay.snapshotRender} width={col.extDisplay.chartWidth} height={col.extDisplay.chartHeight} />}
+        </td>
+      }
       const val = r[`${configId}__${fieldName}`]
       const cellKey = `${r.symbol}::${col.id}`
       const expanded = expandedCells.has(cellKey)
@@ -383,7 +397,7 @@ export function ScreenerTable({
       }
       default:
         // 纯数据列 → 共享原语
-        return renderBuiltinDataCell(r, col)
+        return renderBuiltinDataCell(r, col, r.asset_type ?? assetType)
     }
   }
 

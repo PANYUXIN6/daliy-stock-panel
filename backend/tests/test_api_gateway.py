@@ -56,6 +56,9 @@ def test_required_scope_mapping():
     assert f("POST", "/api/kline/daily-batch") is None          # 管理面
     assert f("GET", "/api/ext-data/ext_fuyao_hot/rows") == "read:ext"
     assert f("GET", "/api/ext-data/ext_fuyao_hot/api-key") is None  # Key 状态不外露
+    assert f("GET", "/api/ext-data/ext_fuyao_hot/config/export") is None
+    assert f("GET", "/api/ext-data/ext_fuyao_hot/series") is None
+    assert f("GET", "/api/strategies/composite_test/bundle") is None
     assert f("POST", "/api/ext-data/ext_fuyao_hot/ingest") == "write:ext"  # 程序化写入
     assert f("POST", "/api/ext-data/ext_fuyao_hot/upload") is None   # 文件上传仍属管理面
     assert f("POST", "/api/ext-data/ext_fuyao_hot/pull/test") is None

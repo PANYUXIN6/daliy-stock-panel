@@ -1,11 +1,15 @@
-import { useMemo } from 'react'
+import { lazy, Suspense, useMemo } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Loader2, RefreshCw } from 'lucide-react'
 import { type MinuteKlineSession } from '@/lib/api'
 import { klineMinuteQueryOptions, klineMinuteRangeQueryOptions, minuteRefetchInterval } from '@/lib/kline'
 import { EChartsMultiDayIntraday } from '@/components/EChartsMultiDayIntraday'
 
+import type { ChartRenderer } from '@/lib/chart-types'
+const LightweightIntraday = lazy(() => import('./charts/LightweightIntraday').then(m => ({ default: m.LightweightIntraday })))
+
 interface Props {
+  renderer?: ChartRenderer
   symbol: string
   days: number
   height?: number
@@ -20,12 +24,14 @@ function errorMessage(error: unknown): string {
 
 export function StockMultiDayIntradayChart({
   symbol,
+  renderer = 'echarts',
   days,
   height = 420,
   refetchIntervalMs,
   onPriceDoubleClick,
   priceLines,
 }: Props) {
+  const Chart = renderer === 'lightweight' ? LightweightIntraday : EChartsMultiDayIntraday
   const history = useQuery({
     ...klineMinuteRangeQueryOptions(symbol, days),
     enabled: !!symbol,
@@ -114,12 +120,16 @@ export function StockMultiDayIntradayChart({
           </button>
         </div>
       )}
-      <EChartsMultiDayIntraday
+<Suspense fallback={<div className="text-xs text-muted py-4">正在加载图表…</div>}>
+      <Chart
+        symbol={symbol}
+        assetType={latest.data?.asset_type ?? history.data?.asset_type}
         sessions={sessions}
         height={chartHeight}
         onPriceDoubleClick={onPriceDoubleClick}
         priceLines={priceLines}
       />
+      </Suspense>
 
     </div>
   )

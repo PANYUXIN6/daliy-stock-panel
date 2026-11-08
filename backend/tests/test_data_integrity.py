@@ -1,7 +1,7 @@
 """数据完整性检测 (停机缺口/盘中快照) 单元测试。
 
 判据核心: quote_ts 仅实时 flush 写入真实毫秒时间戳 (batch 拉取/盘后计算为
-null); 历史交易日的 quote_ts 时刻 < 15:00 即盘中快照 → 坏。
+null); 历史交易日的 quote_ts 时刻 < 15:30 即盘中快照 → 坏。
 """
 from __future__ import annotations
 
@@ -57,7 +57,7 @@ def _write_daily_partition(root, table: str, day: date, quote_ts: int | None, sy
 
 def test_snapshot_predicate():
     noon = _ts_ms(FRIDAY, time(11, 58))
-    after_close = _ts_ms(FRIDAY, time(15, 0, 30))
+    after_close = _ts_ms(FRIDAY, time(15, 30))
     assert _is_snapshot(FRIDAY, noon) is True
     assert _is_snapshot(FRIDAY, after_close) is False
     assert _is_snapshot(FRIDAY, None) is False  # batch 历史 → 权威
@@ -103,10 +103,10 @@ def test_midday_snapshot_partition_is_flagged(tmp_path):
     ]
 
 
-def test_final_snapshot_after_close_is_clean(tmp_path):
+def test_close_final_snapshot_still_requires_formal_daily(tmp_path):
     _write_daily_partition(tmp_path, "kline_daily", FRIDAY, _ts_ms(FRIDAY, time(15, 1)))
     _write_daily_partition(tmp_path, "kline_daily", TODAY, _ts_ms(TODAY, time(10, 0)))
-    assert scan_recent_integrity(tmp_path, today=TODAY) == []
+    assert [(i.day, i.kind) for i in scan_recent_integrity(tmp_path, today=TODAY)] == [(FRIDAY, "snapshot")]
 
 
 def test_zero_volume_live_residue_amid_batch_rows_is_clean(tmp_path):
@@ -337,8 +337,8 @@ def test_branch4_start_without_stale_day_uses_latest():
 
 
 def test_timezone_conversion_is_cn():
-    # quote_ts 是毫秒 Unix 时间戳, 必须按 UTC+8 折算 — 15:00 边界用例
-    ts = int(datetime(2026, 8, 21, 7, 0, tzinfo=UTC).timestamp() * 1000)  # 北京 15:00
+    # quote_ts 是毫秒 Unix 时间戳, 必须按 UTC+8 折算 — 15:30 边界用例
+    ts = int(datetime(2026, 8, 21, 7, 30, tzinfo=UTC).timestamp() * 1000)  # 北京 15:30
     assert _is_snapshot(FRIDAY, ts) is False
     ts_morning = int(datetime(2026, 8, 21, 3, 58, tzinfo=UTC).timestamp() * 1000)  # 北京 11:58
     assert _is_snapshot(FRIDAY, ts_morning) is True

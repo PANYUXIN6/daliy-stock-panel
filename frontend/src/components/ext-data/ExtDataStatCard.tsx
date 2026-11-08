@@ -5,6 +5,7 @@ import { Settings, Tag, Upload, Code, RefreshCw, CheckCircle2, Loader2, Pencil, 
 import { api, type ExtDataConfig } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { SettingsModal } from '@/components/data/SettingsModal'
+import { ExtConfigExportButton } from './ExtConfigTransfer'
 import { ExtDataPullPanel } from './ExtDataPullPanel'
 import { ExtDataApiPanel } from './ExtDataApiPanel'
 import { useCollectionSyncConfirmation } from '@/lib/useCollectionSyncConfirmation'
@@ -162,6 +163,7 @@ export function ExtDataStatCard({ config, onDelete, deleting, onEdit, disabled =
         {settingsOpen && (
           <SettingsModal title={`${config.label} · 设置`} onClose={() => setSettingsOpen(false)} width="max-w-2xl">
             <div className="space-y-3">
+              <ExtConfigExportButton id={config.id} label={config.label} />
               {onEdit && (
                 <button
                   onClick={() => { setSettingsOpen(false); onEdit() }}

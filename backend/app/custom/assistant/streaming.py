@@ -13,6 +13,7 @@ tool_calls 分片, 流结束时统一返回本轮结果, 由 chat_service 决定
   本轮结束; tool_calls 非空表示模型请求工具, 元素形如
   {"id", "name", "arguments"(JSON 字符串)}, 上游附带 extra_content 时
   (如 Gemini 的 thought_signature) 另有 "extra_content" 键, 需原样回传。
+  上游提供 reasoning_content 时保留完整分片（包括显式空串）及请求身份，工具轮和最终轮相同。
 """
 from __future__ import annotations
 
@@ -36,7 +37,9 @@ from app.services.ai_provider import (
     current_ai_model,
     current_ai_provider,
     current_openai_reasoning_effort,
+    current_reasoning_context_key,
     normalize_openai_base_url,
+    prepare_tool_messages,
 )
 
 # 部分推理型模型把整段预算花在 reasoning_content 上, 以 200 + length 结束。
@@ -101,6 +104,8 @@ async def stream_openai_round(
     """执行一轮流式补全: yield 文本 delta, 最后 yield 一个 round_end 事件。"""
     model = current_ai_model()
     base_url = secrets_store.get_ai_config("ai_base_url", settings.ai_base_url)
+    req_messages = prepare_tool_messages(messages, model=model, base_url=base_url)
+    reasoning_context = current_reasoning_context_key(model=model, base_url=base_url)
     kwargs = _build_kwargs(temperature)
     if tools:
         kwargs["tools"] = list(tools)
@@ -109,7 +114,7 @@ async def stream_openai_round(
     transport_retries = 0
     while True:
         permit = prepare_metered_call(
-            model=model, base_url=base_url, messages=messages, tools=tools,
+            model=model, base_url=base_url, messages=req_messages, tools=tools,
             max_tokens=kwargs.get("max_tokens"),
         )
         request_kwargs = permit.request_kwargs(kwargs, stream=True, include_usage=include_usage) if permit else kwargs
@@ -117,7 +122,7 @@ async def stream_openai_round(
             client = _client(timeout, base_url=base_url) if permit else _client(timeout)
             stream = await client.chat.completions.create(
                 model=model,
-                messages=[dict(m) for m in messages],
+                messages=req_messages,
                 stream=True,
                 **request_kwargs,
             )
@@ -138,6 +143,8 @@ async def stream_openai_round(
 
     content_seen = False
     reasoning_seen = False
+    reasoning_parts: list[str] = []
+    reasoning_field_seen = False
     finish_reason = ""
     calls: dict[int, dict[str, Any]] = {}
     ordered: list[dict[str, Any]] = []
@@ -157,8 +164,12 @@ async def stream_openai_round(
             delta = getattr(choice, "delta", None)
             if delta is None:
                 continue
-            if getattr(delta, "reasoning_content", None):
+            reasoning = getattr(delta, "reasoning_content", None)
+            if reasoning is not None:
+                reasoning_field_seen = True
+            if reasoning:
                 reasoning_seen = True
+                reasoning_parts.append(str(reasoning))
 
             text = getattr(delta, "content", None)
             if text:
@@ -210,4 +221,8 @@ async def stream_openai_round(
             if permit:
                 permit.settle(success=success)
 
-    yield {"type": "round_end", "tool_calls": ordered, "finish_reason": finish_reason}
+    end = {"type": "round_end", "tool_calls": ordered, "finish_reason": finish_reason}
+    if reasoning_field_seen:
+        end["reasoning_content"] = "".join(reasoning_parts)
+        end["reasoning_context"] = reasoning_context
+    yield end

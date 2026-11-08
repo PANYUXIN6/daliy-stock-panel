@@ -454,6 +454,33 @@ export function ListColumnCustomizerInner({
         {/* 数字格式化配置: 千分位 + 单位换算 + 小数位(仅 number 类型字段) */}
         {col.source.type === 'ext' && isNumericFieldType(col.source.fieldType) && (
           <>
+            <div className="border-t border-border/40 pt-2 mt-1 text-[10px] text-muted">序列图表</div>
+            <label className="flex items-center gap-2 text-xs">
+              <span className="text-secondary w-16 shrink-0">展示形态</span>
+              <select aria-label="扩展列展示形态" value={col.extDisplay?.snapshotRender ?? 'text'}
+                onChange={event => updateExtDisplay(col.id, { snapshotRender: event.target.value as 'text' | 'bar' | 'line' })}
+                className="flex-1 h-7 rounded bg-elevated border border-border text-foreground px-2">
+                <option value="text">文字</option><option value="line">折线图</option><option value="bar">柱状图</option>
+              </select>
+            </label>
+            {col.extDisplay?.snapshotRender && col.extDisplay.snapshotRender !== 'text' && <>
+              <label className="flex items-center gap-2 text-xs">
+                <span className="text-secondary w-16 shrink-0">显示周期</span>
+                <select aria-label="扩展列显示周期" value={col.extDisplay?.seriesGranularity ?? ''}
+                  onChange={event => updateExtDisplay(col.id, { seriesGranularity: event.target.value ? event.target.value as 'daily' | 'intraday' : undefined })}
+                  className="flex-1 h-7 rounded bg-elevated border border-border text-foreground px-2">
+                  <option value="">跟随数据表</option><option value="daily">近 N 日日值</option><option value="intraday">当日逐盘</option>
+                </select>
+              </label>
+              <div className="flex flex-wrap gap-3 text-xs text-secondary">
+                {([['chartDays', '天数', 10, 1, 120], ['chartWidth', '宽度', 110, 60, 300], ['chartHeight', '高度', 36, 24, 120]] as const).map(([field, label, fallback, min, max]) => <label key={field}>
+                  {label} <input aria-label={`扩展图表${label}`} type="number" min={min} max={max} value={col.extDisplay?.[field] ?? fallback}
+                    onChange={event => updateExtDisplay(col.id, { [field]: Math.max(min, Math.min(max, Number(event.target.value) || fallback)) })}
+                    className="w-14 h-7 rounded bg-elevated border border-border px-1 text-center" />
+                </label>)}
+              </div>
+              <p className="text-[10px] text-muted">需有已保存的时序数据；当日逐盘只显示当日记录。</p>
+            </>}
             <div className="border-t border-border/40 pt-2 mt-1 text-[10px] text-muted">数字格式</div>
             <label className="flex items-center gap-2 text-xs">
               <span className="text-secondary w-16 shrink-0">千分位</span>

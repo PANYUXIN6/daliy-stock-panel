@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { Loader2, Search, Check, Clock, Zap, Settings2, AlertCircle, CheckCircle2, Calendar, History, KeyRound } from 'lucide-react'
-import { api, type ExtDataBackfillResult, type ExtDataConfig, type ExtPullAuth } from '@/lib/api'
+import { api, type ExtDataBackfillResult, type ExtDataConfig, type ExtPullAuth, type PullConfig } from '@/lib/api'
 import { toast } from '@/components/Toast'
 import { useCollectionSyncConfirmation } from '@/lib/useCollectionSyncConfirmation'
 
@@ -27,17 +27,24 @@ export function ExtDataPullPanel({ config, onSaved }: {
     pull?.field_map ? JSON.stringify(pull.field_map, null, 2) : ''
   )
   const [schedule, setSchedule] = useState(pull?.schedule_minutes ?? 1440)
+  const [scheduleTime, setScheduleTime] = useState(pull?.schedule_time ?? '')
+  const [schedulePeriod, setSchedulePeriod] = useState<NonNullable<PullConfig['schedule_period']>>(pull?.schedule_period ?? 'daily')
+  const [scheduleDay, setScheduleDay] = useState(pull?.schedule_day ?? 1)
+  const [tradingOnly, setTradingOnly] = useState(pull?.schedule_trading_only ?? false)
   const [timeWindowStart, setTimeWindowStart] = useState(pull?.time_window_start ?? '')
   const [timeWindowEnd, setTimeWindowEnd] = useState(pull?.time_window_end ?? '')
   const [dateParam, setDateParam] = useState(pull?.date_param ?? '')
   const [dateFormat, setDateFormat] = useState(pull?.date_format ?? 'iso')
   const [timeField, setTimeField] = useState(pull?.time_field ?? '')
+  const [sinceParam, setSinceParam] = useState(pull?.since_param ?? '')
+  const [granularity, setGranularity] = useState<NonNullable<PullConfig['granularity']>>(pull?.granularity ?? 'auto')
   const [timeoutSec, setTimeoutSec] = useState(pull?.timeout_seconds ?? 30)
   // 分页协议 (仅 GET): 页码参数名配置后按页循环拉取
   const [pageParam, setPageParam] = useState(pull?.page_param ?? '')
   const [pageSizeParam, setPageSizeParam] = useState(pull?.page_size_param ?? '')
   const [pageSize, setPageSize] = useState(pull?.page_size ?? 0)
   const [maxPages, setMaxPages] = useState(pull?.max_pages ?? 20)
+  const [pageStart, setPageStart] = useState(pull?.page_start ?? 1)
   const [enabled, setEnabled] = useState(pull?.enabled ?? false)
 
   // 接口鉴权: 方式入 pull 配置; Key 本体只存后端 secrets.json
@@ -80,6 +87,7 @@ export function ExtDataPullPanel({ config, onSaved }: {
     config.id, config.pull, url, method, headerStr, body, responsePath, fieldMapStr, schedule,
     timeWindowStart, timeWindowEnd, dateParam, dateFormat, timeField, timeoutSec,
     pageParam, pageSizeParam, pageSize, maxPages, enabled, authType, authHeader, authParam,
+    scheduleTime, schedulePeriod, scheduleDay, tradingOnly, sinceParam, granularity, pageStart,
   ]))
 
   // 构建保存 payload (复用当前编辑态), enabledOverride 用于开关自动保存
@@ -97,16 +105,22 @@ export function ExtDataPullPanel({ config, onSaved }: {
       url, method, headers, body: body || undefined,
       response_path: responsePath, field_map, auth,
       schedule_minutes: schedule, enabled: enabledOverride ?? enabled,
+      schedule_time: scheduleTime || null,
+      schedule_period: schedulePeriod,
+      schedule_day: scheduleDay,
+      schedule_trading_only: tradingOnly,
       time_window_start: timeWindowStart || null,
       time_window_end: timeWindowEnd || null,
       date_param: dateParam.trim() || null,
       date_format: dateFormat,
       time_field: timeField.trim() || null,
+      since_param: config.mode === 'timeseries' && timeField.trim() ? sinceParam.trim() || null : null,
+      granularity,
       timeout_seconds: effTimeoutSec,
       page_param: pageParam.trim() || null,
       page_size_param: pageSizeParam.trim() || null,
       page_size: pageSize > 0 ? pageSize : 0,
-      page_start: pull?.page_start ?? 1,   // UI 不暴露, 保留已有值 (从 0 计数的接口手改 config.json)
+      page_start: pageStart,
       max_pages: maxPages >= 1 && maxPages <= 200 ? maxPages : 20,
     }
   }
@@ -179,7 +193,7 @@ export function ExtDataPullPanel({ config, onSaved }: {
       .finally(() => setBfRunning(false))
   }
 
-  // 开关 toggle: 自动保存全量配置 (切换 enabled), 后端 refresh 后立即首次拉取
+  // 开关自动保存完整配置；固定日程按计划时刻执行。
   const [toggling, setToggling] = useState(false)
   const handleToggle = (next: boolean) => {
     if (toggling) return
@@ -194,7 +208,7 @@ export function ExtDataPullPanel({ config, onSaved }: {
       .then(() => api.extDataPullConfig(config.id, payload))
       .then(() => {
         onSaved()
-        toast(next ? '定时拉取已启用 · 立即执行首次拉取' : '定时拉取已关闭', 'success')
+        toast(next ? (scheduleTime ? '定时拉取已启用 · 按计划时刻执行' : '定时拉取已启用 · 立即执行首次拉取') : '定时拉取已关闭', 'success')
       })
       .catch(e => {
         setEnabled(!next)  // 回滚
@@ -338,9 +352,43 @@ export function ExtDataPullPanel({ config, onSaved }: {
             <div className="text-[10px] text-muted mb-1">调度间隔 (分钟)</div>
             <input
               type="number" min={1} value={schedule} onChange={e => setSchedule(Number(e.target.value))}
+              disabled={!!scheduleTime}
               className="w-full rounded-btn border border-border bg-elevated px-2 py-1.5 text-[10px] font-mono text-foreground"
             />
           </div>
+        </div>
+
+        <div className="space-y-2 rounded-btn border border-border/60 p-2">
+          <label className="block text-[10px] text-muted">
+            固定拉取时刻（北京时间，留空使用间隔）
+            <input aria-label="固定拉取时刻" type="time" value={scheduleTime}
+              onChange={e => setScheduleTime(e.target.value)}
+              className="mt-1 w-full rounded-btn border border-border bg-elevated px-2 py-1.5 text-[11px] text-foreground" />
+          </label>
+          {scheduleTime && <>
+            <div className="flex gap-2">
+              <select aria-label="重复周期" value={schedulePeriod} onChange={e => {
+                setSchedulePeriod(e.target.value as typeof schedulePeriod)
+                setScheduleDay(1)
+              }} className="min-w-0 flex-1 rounded-btn border border-border bg-elevated px-2 py-1.5 text-[11px] text-foreground">
+                <option value="daily">每天</option><option value="weekly">每周</option><option value="monthly">每月</option>
+              </select>
+              {schedulePeriod === 'weekly' && <select aria-label="每周执行日" value={scheduleDay}
+                onChange={e => setScheduleDay(Number(e.target.value))}
+                className="min-w-0 flex-1 rounded-btn border border-border bg-elevated px-2 py-1.5 text-[11px] text-foreground">
+                {['一', '二', '三', '四', '五', '六', '日'].map((label, i) => <option key={i} value={i + 1}>周{label}</option>)}
+              </select>}
+              {schedulePeriod === 'monthly' && <label className="flex items-center gap-1 text-[10px] text-muted">
+                每月 <input aria-label="每月执行日" type="number" min={1} max={31} value={scheduleDay}
+                  onChange={e => setScheduleDay(Number(e.target.value))}
+                  className="w-14 rounded-btn border border-border bg-elevated px-2 py-1.5 text-[11px] text-foreground" /> 日
+              </label>}
+            </div>
+            <label className="flex items-center gap-1.5 text-[10px] text-secondary">
+              <input type="checkbox" checked={tradingOnly} onChange={e => setTradingOnly(e.target.checked)} /> 仅交易日执行
+            </label>
+            <p className="text-[10px] leading-relaxed text-muted">按固定时刻执行，忽略下方时间窗口。短月没有所选日期时跳过该月；仅交易日以本地日历为准，日历未覆盖时等待更新。</p>
+          </>}
         </div>
 
         <div className="grid grid-cols-2 gap-2">
@@ -348,6 +396,7 @@ export function ExtDataPullPanel({ config, onSaved }: {
             <div className="text-[10px] text-muted mb-1">拉取起始时间 (留空=不限)</div>
             <input
               type="time" value={timeWindowStart} onChange={e => setTimeWindowStart(e.target.value)}
+              disabled={!!scheduleTime}
               className="w-full rounded-btn border border-border bg-elevated px-2 py-1.5 text-[10px] font-mono text-foreground"
             />
           </div>
@@ -355,6 +404,7 @@ export function ExtDataPullPanel({ config, onSaved }: {
             <div className="text-[10px] text-muted mb-1">拉取结束时间 (留空=不限)</div>
             <input
               type="time" value={timeWindowEnd} onChange={e => setTimeWindowEnd(e.target.value)}
+              disabled={!!scheduleTime}
               className="w-full rounded-btn border border-border bg-elevated px-2 py-1.5 text-[10px] font-mono text-foreground"
             />
           </div>
@@ -392,6 +442,21 @@ export function ExtDataPullPanel({ config, onSaved }: {
             className="w-full rounded-btn border border-border bg-elevated px-2.5 py-1.5 text-[10px] font-mono text-foreground placeholder:text-muted/40"
           />
         </div>
+
+        <div className="grid grid-cols-2 gap-2">
+          <label className="text-[10px] text-muted">序列粒度
+            <select aria-label="序列粒度" value={granularity} onChange={e => setGranularity(e.target.value as typeof granularity)}
+              className="mt-1 w-full rounded-btn border border-border bg-elevated px-2 py-1.5 text-[11px] text-foreground">
+              <option value="auto">自动判断</option><option value="intraday">日内多盘</option><option value="daily">日级</option>
+            </select>
+          </label>
+          <label className="text-[10px] text-muted">增量参数名
+            <input aria-label="增量参数名" value={sinceParam} onChange={e => setSinceParam(e.target.value)}
+              disabled={config.mode !== 'timeseries' || !timeField.trim()} placeholder="since · 留空全量"
+              className="mt-1 w-full rounded-btn border border-border bg-elevated px-2 py-1.5 text-[10px] font-mono text-foreground disabled:opacity-40" />
+          </label>
+        </div>
+        {sinceParam && timeField.trim() && <p className="text-[10px] text-muted">按目标日已保存的最大时间值续传；首拉和新交易日全量获取。源无新增时保留已有数据。</p>}
 
         <div>
           <div className="text-[10px] text-muted mb-1">拉取超时 (秒 · 大响应接口可调高)</div>
@@ -437,6 +502,12 @@ export function ExtDataPullPanel({ config, onSaved }: {
               title="安全上限, 防止接口永远返回数据拖死拉取循环"
               className="rounded-btn border border-border bg-elevated px-2 py-1.5 text-[10px] font-mono text-foreground placeholder:text-muted/40"
             />
+            <label className="col-span-2 flex items-center gap-2 text-[10px] text-muted">
+              起始页码
+              <input aria-label="起始页码" type="number" min={0} value={pageStart}
+                onChange={e => setPageStart(Number(e.target.value))}
+                className="w-20 rounded-btn border border-border bg-elevated px-2 py-1.5 text-[10px] text-foreground" />
+            </label>
           </div>
         </div>
 
@@ -484,7 +555,9 @@ export function ExtDataPullPanel({ config, onSaved }: {
             <div className="space-y-0.5">
               <div className="flex items-center gap-1 text-accent">
                 <span className="h-1 w-1 rounded-full bg-accent animate-pulse" />
-                <span>已启用 · 每 {schedule} 分钟</span>
+                <span>已启用 · {scheduleTime
+                  ? `${schedulePeriod === 'weekly' ? `每周${'一二三四五六日'[scheduleDay - 1]}` : schedulePeriod === 'monthly' ? `每月 ${scheduleDay} 日` : '每天'} ${scheduleTime}${tradingOnly ? ' · 仅交易日' : ''}`
+                  : `每 ${schedule} 分钟`}</span>
               </div>
               {pull?.next_run && fmtTime(pull.next_run) && (
                 <div className="flex items-center gap-1 text-muted">
@@ -492,6 +565,7 @@ export function ExtDataPullPanel({ config, onSaved }: {
                   <span>下次：{fmtTime(pull.next_run)}</span>
                 </div>
               )}
+              {pull?.last_status === 'waiting' && <div className="text-warning">{pull.last_message}</div>}
             </div>
           ) : (
             <div className="text-muted">未启用 · 仅手动执行</div>

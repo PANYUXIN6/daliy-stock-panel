@@ -2,20 +2,23 @@
 
 标的列表优先用免费的 exchanges.get_instruments(type=index/etf) 拉取
 (None/Free 档均可用,无需 quote.pool 权限);付费档可额外用
-quotes.get_by_universes 作为补充来源。日K统一走 klines.batch。
+quotes.get_by_universes 作为补充来源。日K按已配置的数据源与资产类型路由，写入仍使用各资产独立仓库。
 """
 from __future__ import annotations
 
 import gc
 import logging
+import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
+from pathlib import Path
 
 import polars as pl
 
 from app.enriched_generation import EnrichedPublication, enriched_publication_incomplete
 from app.indicators.pipeline import ENRICHED_STORAGE_COLS, compute_enriched
+from app.market_time import cn_now
 from app.services import kline_sync, preferences
 from app.services.daily_coverage import DailyCoverage
 from app.tickflow.capabilities import Cap, CapabilitySet
@@ -31,6 +34,53 @@ _EXCHANGES = ["SH", "SZ", "BJ"]
 # 只预取短窗口的少量核心指数，首次历史回填继续逐批取数、加工和落盘。
 INDEX_PREFETCH_MAX_DAYS = 14
 INDEX_PREFETCH_MAX_SYMBOLS = 4
+
+
+def daily_source_available(capset: CapabilitySet) -> bool:
+    """所选日线源的能力；自定义源不受 TickFlow 档位限制。"""
+    name = preferences.get_daily_data_provider()
+    if name == "tickflow":
+        return capset.has(Cap.KLINE_DAILY_BATCH)
+    from app.data_providers import custom
+    return custom.provider_has_dataset(name, "daily")
+
+
+def _custom_daily_frames(symbols, capset, *, asset_type, start_time, end_time, on_chunk_done=None):
+    found = False
+    for raw in kline_sync.iter_daily_frames(
+        symbols, capset, asset_type=asset_type, start_time=start_time,
+        end_time=end_time, on_chunk_done=on_chunk_done,
+    ):
+        if raw.is_empty():
+            continue
+        if "symbol" not in raw.columns or set(raw["symbol"].drop_nulls().to_list()) - set(symbols):
+            raise ValueError("日线数据源返回了请求范围之外的标的")
+        found = True
+        yield raw
+    if not found:
+        label = "指数" if asset_type == "index" else "ETF"
+        raise kline_sync.DailySourceUnavailableError(
+            f"所选日线数据源未返回{label}日K，请确认该源支持此资产与时间范围")
+
+
+def _persist_custom_daily(frames, repo, persist_frame, on_chunk_done=None) -> int:
+    """有界暂存整条流；取数失败时正式数据保持原样。按原批次保留指标窗口。"""
+    with tempfile.TemporaryDirectory(prefix=".asset-daily-", dir=repo.store.data_dir) as temp:
+        paths = []
+        for index, raw in enumerate(frames):
+            path = Path(temp) / f"{index}.parquet"
+            raw.write_parquet(path)
+            paths.append(path)
+        total_rows = 0
+        for index, path in enumerate(paths):
+            if on_chunk_done:
+                on_chunk_done(index, len(paths))
+            raw = pl.read_parquet(path)
+            total_rows += persist_frame(raw)
+        if on_chunk_done:
+            on_chunk_done(len(paths), len(paths))
+        repo.refresh_index_views()
+        return total_rows
 
 
 @dataclass(frozen=True)
@@ -55,7 +105,18 @@ def prepare_index_daily(
     if len(symbols) > INDEX_PREFETCH_MAX_SYMBOLS:
         raise ValueError("指数预取最多包含 4 个核心指数")
     coverage = DailyCoverage(coverage_day) if coverage_day is not None else None
-    if not symbols or not capset.has(Cap.KLINE_DAILY_BATCH):
+    if not symbols:
+        return PreparedIndexDaily((), coverage)
+    if preferences.get_daily_data_provider() != "tickflow":
+        frames = tuple(_custom_daily_frames(
+            symbols, capset, asset_type="index", start_time=start_date,
+            end_time=end_date, on_chunk_done=on_chunk_done,
+        ))
+        if coverage is not None:
+            for raw in frames:
+                coverage.observe(raw)
+        return PreparedIndexDaily(frames, coverage)
+    if not capset.has(Cap.KLINE_DAILY_BATCH):
         return PreparedIndexDaily((), coverage)
     limit = resolve_limit(capset, Cap.KLINE_DAILY_BATCH)
     chunks = chunked(symbols, min_batch(preferences.get_index_daily_batch_size(), limit))
@@ -282,7 +343,7 @@ def sync_and_persist_index_daily(
     否则取 index_instruments 表全量(指数+ETF 合并存储)。
     on_chunk_done(current, total) 每个批次完成后回调。
     """
-    if not capset.has(Cap.KLINE_DAILY_BATCH):
+    if preferences.get_daily_data_provider() == "tickflow" and not capset.has(Cap.KLINE_DAILY_BATCH):
         return 0
 
     if symbols_override:
@@ -299,11 +360,21 @@ def sync_and_persist_index_daily(
         if instruments.is_empty() or "symbol" not in instruments.columns:
             return 0
         symbols = sorted(set(instruments["symbol"].to_list()))
+    end_time = end_date or cn_now()
+    start_time = start_date or (end_time - timedelta(days=365))
+    if preferences.get_daily_data_provider() != "tickflow":
+        def commit(raw):
+            if coverage is not None:
+                coverage.observe(raw)
+            return _commit_index_daily_batch(raw, repo)
+        return _persist_custom_daily(_custom_daily_frames(
+            symbols, capset, asset_type="index", start_time=start_time,
+            end_time=end_time, on_chunk_done=on_chunk_done,
+        ), repo, commit, on_chunk_done)
+
     limit = resolve_limit(capset, Cap.KLINE_DAILY_BATCH)
     batch_size = min_batch(preferences.get_index_daily_batch_size(), limit)
 
-    end_time = end_date or datetime.now()
-    start_time = start_date or (end_time - timedelta(days=365))
 
     total_rows = 0
     chunks = chunked(symbols, batch_size)
@@ -490,7 +561,7 @@ def sync_and_persist_etf_daily(
     """同步 ETF 日K到独立 kline_etf_* parquet,并计算 ETF enriched。
     on_chunk_done(current, total) 每个批次完成后回调。
     """
-    if not capset.has(Cap.KLINE_DAILY_BATCH):
+    if preferences.get_daily_data_provider() == "tickflow" and not capset.has(Cap.KLINE_DAILY_BATCH):
         return 0
 
     _recover_etf_enriched(repo, on_chunk_done=on_chunk_done)
@@ -508,11 +579,21 @@ def sync_and_persist_etf_daily(
     if not symbols:
         return 0
 
+    end_time = end_date or cn_now()
+    start_time = start_date or (end_time - timedelta(days=365))
+    if preferences.get_daily_data_provider() != "tickflow":
+        factors = _load_etf_factors(repo)
+        def commit(raw):
+            persist_etf_daily(raw, repo, factors=factors)
+            return raw.height
+        return _persist_custom_daily(_custom_daily_frames(
+            symbols, capset, asset_type="etf", start_time=start_time,
+            end_time=end_time, on_chunk_done=on_chunk_done,
+        ), repo, commit, on_chunk_done)
+
     limit = resolve_limit(capset, Cap.KLINE_DAILY_BATCH)
     batch_size = min_batch(preferences.get_index_daily_batch_size(), limit)
 
-    end_time = end_date or datetime.now()
-    start_time = start_date or (end_time - timedelta(days=365))
 
     total_rows = 0
     chunks = chunked(symbols, batch_size)

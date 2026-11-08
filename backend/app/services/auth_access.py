@@ -65,7 +65,7 @@ def admin_required(path: str, method: str) -> bool:
                 "/api/settings/preferences/screener-result-columns",
                 "/api/settings/preferences/quote-interval",
             }
-        return path.startswith("/api/ext-data/") and path.endswith("/api-key")
+        return path.startswith("/api/ext-data/") and path.endswith(("/api-key", "/config/export"))
     if path == "/api/backtest/mining/config":
         return True
     # 详情空态只允许显式补采单标的、单日期；批量维护仍限管理员。

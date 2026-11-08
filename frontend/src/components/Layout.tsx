@@ -1,3 +1,4 @@
+import { StockPreviewHost } from './StockPreviewHost'
 import { canAccessPage, useCurrentUser } from '@/lib/auth'
 import { announceSessionChange, lockSession } from '@/lib/sessionRuntime'
 import { accountStorage } from '@/lib/sessionRuntime'
@@ -797,6 +798,7 @@ export function Layout() {
             </div>
           }
         >
+          <StockPreviewHost />
           <Outlet />
         </Suspense>
       </motion.main>

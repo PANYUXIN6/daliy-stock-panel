@@ -1,3 +1,5 @@
+import { useExtSeries, type ExtSeriesData } from '@/lib/useExtSeries'
+import { ExtSparkChart } from '@/components/screener/ExtSparkChart'
 import React, { useState, useCallback, useRef, useEffect, useMemo } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
@@ -9,7 +11,7 @@ import { fetchMinuteBatchIncremental } from '@/lib/minuteBatchIncremental'
 import { extendMinuteTail } from '@/lib/minuteTailExtend'
 import { QK } from '@/lib/queryKeys'
 import { storage } from '@/lib/storage'
-import { fmtPrice, fmtPct, fmtBigNum, priceColorClass, formatExtNumber } from '@/lib/format'
+import { fmtPrice, pricePrecision, fmtPct, fmtBigNum, priceColorClass, formatExtNumber } from '@/lib/format'
 import { cn } from '@/lib/cn'
 import { computeGroupPcts, loadGroupStatsConfig, type GroupStatsConfigPatch } from '@/lib/watchlistGroupStats'
 import { PageHeader } from '@/components/PageHeader'
@@ -190,9 +192,18 @@ function renderExtCell(
   expandedCells: Set<string>,
   onToggleExpand: (key: string) => void,
   onDimensionClick: (target: DimensionMembersTarget) => void,
+  series: ExtSeriesData,
+  seriesLoading: boolean,
+  seriesError: boolean,
 ): React.ReactNode {
   if (col.source.type !== 'ext') return null
   const { configId, fieldName } = col.source
+  if (col.extDisplay?.snapshotRender === 'line' || col.extDisplay?.snapshotRender === 'bar') {
+    return <td className="px-2 py-1.5" title={seriesError ? '序列读取失败' : undefined}>
+      {seriesLoading ? <span className="text-xs text-muted">加载中…</span> : seriesError ? <span className="text-xs text-danger">读取失败</span>
+        : <ExtSparkChart points={series[col.id]?.[r.symbol] ?? []} kind={col.extDisplay.snapshotRender} width={col.extDisplay.chartWidth} height={col.extDisplay.chartHeight} />}
+    </td>
+  }
   const val = r[`${configId}__${fieldName}`]
   const cellKey = `${r.symbol}::${col.id}`
   const expanded = expandedCells.has(cellKey)
@@ -585,7 +596,7 @@ const StockCard = React.memo(function StockCard({
         {/* 第二行: 大价格 + 涨跌幅胶囊 */}
         <div className="flex items-end justify-between gap-2 mb-2">
           <span className={`text-xl tabular-nums tracking-tighter leading-none ${priceColorClass(pct)}`}>
-            {fmtPrice(price)}
+            {fmtPrice(price, pricePrecision(r.asset_type))}
           </span>
           {pct != null && (
             <span className={`shrink-0 inline-flex items-center px-1.5 py-[2px] rounded text-[11px] tabular-nums ${pctBg}`}>
@@ -820,13 +831,10 @@ export function Watchlist() {
   // 且 filter×find 为 O(n²), 实时行情每 tick 重渲染时放大为每秒全量比较。
   // 指数无本地分钟K数据, 分时批量请求剔除指数 symbol (省请求, 避免逐只 404)
   const enrichedRows = enriched.data?.rows
-  const { symbols, symbolsKey, minuteSymbols, minuteSymbolsKey } = useMemo(() => {
+  const { minuteSymbols, minuteSymbolsKey } = useMemo(() => {
     const rows = enrichedRows ?? []
-    const syms = rows.map((r: any) => r.symbol)
     const nonIndex = rows.filter((r: any) => r.asset_type !== 'index').map((r: any) => r.symbol)
     return {
-      symbols: syms,
-      symbolsKey: syms.join(','),
       minuteSymbols: nonIndex,
       minuteSymbolsKey: nonIndex.join(','),
     }
@@ -836,43 +844,7 @@ export function Watchlist() {
   const quoteStatus = useQuoteStatus()
   const realtimeRunning = quoteStatus.data?.running ?? false
 
-  // 批量日k数据 (天数由列配置决定; 分组卡片视图不展示蜡烛, 挂起请求)
-  const klineBatch = useQuery({
-    queryKey: QK.watchlistKlineBatch(`${symbolsKey}|${candleDays}`),
-    queryFn: () => api.klineDailyBatch(symbols, candleDays),
-    enabled: dailyKVisible && symbols.length > 0 && !groupCardsOpen,
-    staleTime: 5 * 60_000,  // 5 分钟内不重请求
-    // 改蜡烛天数/增删自选时沿用上一份批量数据 (按 symbol 查表渲染, 旧键不会被读到),
-    // 避免整列蜡烛闪空 — 与 Screener 批量查询同款
-    placeholderData: (prev: any) => prev,
-  })
 
-  // 当日蜡烛实时修补: 历史 K 线按 staleTime 周期拉取 (见 queryKeys 注释), 最后一根
-  // 蜡烛用每 tick 刷新的 enriched 当日 OHLC 前端覆盖/追加, 蜡烛随实时行情跳动, 零额外请求。
-  const klineData = useMemo(() => {
-    const base = dailyKVisible ? (klineBatch.data?.data ?? {}) : {}
-    const liveRows = enriched.data?.rows
-    const asOf = enriched.data?.as_of
-    if (!dailyKVisible || !liveRows?.length || !asOf) return base
-    const liveBySymbol = new Map<string, any>(liveRows.map((r: any) => [r.symbol, r]))
-    const patched: Record<string, KlineRow[]> = {}
-    for (const sym of Object.keys(base)) {
-      const arr = base[sym]
-      if (!Array.isArray(arr) || arr.length === 0) { patched[sym] = arr; continue }
-      const live = liveBySymbol.get(sym)
-      const { open, high, low, close } = live ?? {}
-      if (open == null || high == null || low == null || close == null) { patched[sym] = arr; continue }
-      const last = arr[arr.length - 1]
-      if (last.date === asOf) {
-        patched[sym] = [...arr.slice(0, -1), { ...last, open, high, low, close }]
-      } else if (last.date < asOf) {
-        patched[sym] = [...arr, { date: asOf, open, high, low, close }]
-      } else {
-        patched[sym] = arr
-      }
-    }
-    return patched
-  }, [dailyKVisible, klineBatch.data, enriched.data])
 
   // 批量分时数据 (有分钟K批量能力时, 列可见才拉)
   // 刷新策略: 仅当实时行情运行 且 用户在实时监控设置里开启 minute_intraday_refresh 时
@@ -1229,6 +1201,8 @@ export function Watchlist() {
     [filteredRows, sortRows, columns],
   )
 
+  const extSeries = useExtSeries(columns, sortedRows.map(row => row.symbol))
+
   // 切股导航列表: 按列表当前展示顺序 (与 sortedRows 一致, 排序/筛选后行序随之变化)。
   // 弹窗未打开时跳过构建 — sortedRows 随行情 tick 重建, 避免无谓分配。
   const previewNavItems = useMemo(
@@ -1271,6 +1245,50 @@ export function Watchlist() {
     }
     return out.length ? out : null
   })()
+  // 大卡片列表仅取虚拟器当前渲染范围（含预加载缓冲）；表格取当前筛选列表。
+  const dailyKSymbols = virtualizeCards
+    ? cardRowVirtualizer.getVirtualItems().flatMap(item =>
+      sortedRows.slice(item.index * cardColumns, (item.index + 1) * cardColumns).map(row => row.symbol as string))
+    : sortedRows.map(row => row.symbol as string)
+  const dailyKSymbolsKey = dailyKSymbols.join(',')
+  // 批量日k数据 (天数由列配置决定; 分组卡片视图不展示蜡烛, 挂起请求)
+  const klineBatch = useQuery({
+    queryKey: QK.watchlistKlineBatch(`${dailyKSymbolsKey}|${candleDays}`),
+    queryFn: ({ signal }) => api.klineDailyBatch(dailyKSymbols, candleDays, signal),
+    enabled: dailyKVisible && dailyKSymbols.length > 0 && !groupCardsOpen,
+    staleTime: 5 * 60_000,  // 5 分钟内不重请求
+    // 改蜡烛天数/增删自选时沿用上一份批量数据 (按 symbol 查表渲染, 旧键不会被读到),
+    // 避免整列蜡烛闪空 — 与 Screener 批量查询同款
+    placeholderData: (prev: any) => prev,
+  })
+
+  // 当日蜡烛实时修补: 历史 K 线按 staleTime 周期拉取 (见 queryKeys 注释), 最后一根
+  // 蜡烛用每 tick 刷新的 enriched 当日 OHLC 前端覆盖/追加, 蜡烛随实时行情跳动, 零额外请求。
+  const klineData = useMemo(() => {
+    const base = dailyKVisible ? (klineBatch.data?.data ?? {}) : {}
+    const liveRows = enriched.data?.rows
+    const asOf = enriched.data?.as_of
+    if (!dailyKVisible || !liveRows?.length || !asOf) return base
+    const liveBySymbol = new Map<string, any>(liveRows.map((r: any) => [r.symbol, r]))
+    const patched: Record<string, KlineRow[]> = {}
+    for (const sym of Object.keys(base)) {
+      const arr = base[sym]
+      if (!Array.isArray(arr) || arr.length === 0) { patched[sym] = arr; continue }
+      const live = liveBySymbol.get(sym)
+      const { open, high, low, close } = live ?? {}
+      if (open == null || high == null || low == null || close == null) { patched[sym] = arr; continue }
+      const last = arr[arr.length - 1]
+      if (last.date === asOf) {
+        patched[sym] = [...arr.slice(0, -1), { ...last, open, high, low, close }]
+      } else if (last.date < asOf) {
+        patched[sym] = [...arr, { date: asOf, open, high, low, close }]
+      } else {
+        patched[sym] = arr
+      }
+    }
+    return patched
+  }, [dailyKVisible, klineBatch.data, enriched.data])
+
   const minuteVisibleKey = visibleCardSymbols?.join(',') ?? ''
   const lastVisibleKeyRef = useRef<string | null>(null)
   useEffect(() => {
@@ -1709,7 +1727,7 @@ export function Watchlist() {
               renderCell={(r: any, col: ColumnConfig) => {
                 // ext 列
                 if (col.source.type === 'ext') {
-                  return renderExtCell(r, col, expandedCells, handleToggleExpand, setDimensionTarget)
+                  return renderExtCell(r, col, expandedCells, handleToggleExpand, setDimensionTarget, extSeries.data ?? {}, extSeries.isLoading, extSeries.isError)
                 }
                 const key = col.source.key
                 const price = r.rt_price ?? r.close
@@ -1805,7 +1823,7 @@ export function Watchlist() {
                 // 实时行情列：price/pct/amount 使用 rt_ 回退（自选页有实时推送）
                 const numCls = 'px-2 py-1.5 text-right num tabular-nums'
                 if (key === 'price') {
-                  return <td className={`${numCls} ${priceColorClass(pct)}`}>{fmtPrice(price)}</td>
+                  return <td className={`${numCls} ${priceColorClass(pct)}`}>{fmtPrice(price, pricePrecision(r.asset_type))}</td>
                 }
                 if (key === 'pct') {
                   return <td className={`${numCls} ${priceColorClass(pct)}`}>{fmtPct(pct)}</td>

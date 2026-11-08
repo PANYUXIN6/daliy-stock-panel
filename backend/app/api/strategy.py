@@ -15,9 +15,10 @@ from datetime import date
 from pathlib import Path
 from typing import Any, Literal
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
+from starlette.concurrency import run_in_threadpool
 
 from app.backtest.minute_trigger import MINUTE_EXIT_TRIGGER_SIGNALS
 from app.services.ndjson_heartbeat import with_heartbeat
@@ -877,6 +878,75 @@ def get_strategy_source(strategy_id: str, request: Request):
         raise HTTPException(status_code=404, detail="策略源文件不存在")
 
     return {"code": path.read_text(encoding="utf-8"), "source": s.source}
+
+
+# 包只承载个人声明/配置，任意Python源码包由服务层明确拒绝。
+_BUNDLE_FILE = File(...)
+
+
+@router.get("/{strategy_id}/bundle")
+def export_strategy_bundle(strategy_id: str, request: Request):
+    import io
+
+    from app.services import strategy_bundle
+
+    engine = _get_engine(request)
+    _get_public_strategy(engine, strategy_id)
+    try:
+        payload, filename, _ = strategy_bundle.build_bundle(_data_dir(request), engine, strategy_id)
+    except strategy_bundle.StrategyBundlePermissionError as exc:
+        raise HTTPException(403, str(exc)) from exc
+    except strategy_bundle.StrategyBundleError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return StreamingResponse(io.BytesIO(payload), media_type="application/zip",
+                             headers={"Content-Disposition": f'attachment; filename="{filename}"'})
+
+
+async def _read_strategy_bundle(file: UploadFile) -> bytes:
+    from app.services.package_archive import MAX_ARCHIVE_BYTES
+
+    try:
+        payload = await file.read(MAX_ARCHIVE_BYTES + 1)
+    finally:
+        await file.close()
+    if len(payload) > MAX_ARCHIVE_BYTES:
+        raise HTTPException(413, "策略包超过8MB上限")
+    return payload
+
+
+def _strategy_bundle_action(request: Request, payload: bytes, *, apply: bool, allow_overwrite=False):
+    from app.api.factors import _trial_nonempty
+    from app.services import strategy_bundle
+    from app.services.auth import AuthError, require_current_session
+
+    require_current_session()
+    try:
+        if not apply:
+            return strategy_bundle.inspect_bundle(payload, _data_dir(request), _get_engine(request))
+        return strategy_bundle.apply_bundle(
+            payload, _data_dir(request), _get_engine(request), allow_overwrite=allow_overwrite,
+            authorize=require_current_session, refresh=lambda: _invalidate_strategy_runtime(request),
+            validate_factor=lambda definition: _trial_nonempty(request, definition["formula"])
+            if definition.get("kind", "custom") == "custom" else None,
+        )
+    except AuthError:
+        raise
+    except strategy_bundle.StrategyBundlePermissionError as exc:
+        raise HTTPException(403, str(exc)) from exc
+    except (ValueError, TypeError, KeyError, OSError, RecursionError) as exc:
+        raise HTTPException(400, getattr(exc, "detail", None) or str(exc)) from exc
+
+
+@router.post("/bundle/inspect")
+async def inspect_strategy_bundle(request: Request, file: UploadFile = _BUNDLE_FILE):
+    payload = await _read_strategy_bundle(file)
+    return await run_in_threadpool(_strategy_bundle_action, request, payload, apply=False)
+
+
+@router.post("/bundle/apply")
+async def apply_strategy_bundle(request: Request, file: UploadFile = _BUNDLE_FILE, allow_overwrite: bool = Form(False)):
+    payload = await _read_strategy_bundle(file)
+    return await run_in_threadpool(_strategy_bundle_action, request, payload, apply=True, allow_overwrite=allow_overwrite)
 
 
 @router.post("/ai/test")

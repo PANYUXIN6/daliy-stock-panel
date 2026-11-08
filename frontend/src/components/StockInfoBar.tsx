@@ -1,7 +1,7 @@
 import { useState, type ReactNode } from 'react'
 import { Settings2, RadioTower, Star, ExternalLink } from 'lucide-react'
 import type { KlineRow, FinancialMetricRecord } from '@/lib/api'
-import { fmtPrice, fmtBigNum, fmtVolume } from '@/lib/format'
+import { fmtPrice, fmtBigNum, fmtVolume, pricePrecision } from '@/lib/format'
 import { ListColumnCustomizer } from '@/components/ListColumnCustomizer'
 import { WatchlistAddMenu } from '@/components/WatchlistAddMenu'
 import { INFO_GROUPS, type ColumnConfig } from '@/lib/stock-info-fields'
@@ -11,6 +11,7 @@ const BULL = '#C74040'
 const BEAR = '#2D9B65'
 
 interface Props {
+  assetType?: 'stock' | 'etf' | 'index'
   symbol: string
   name?: string
   stockInfo?: { name?: string; total_shares?: number; float_shares?: number; ext?: Record<string, unknown> }
@@ -99,6 +100,7 @@ function renderExtInline(
 
 export function StockInfoBar({
   symbol,
+  assetType,
   name,
   stockInfo,
   rows,
@@ -112,6 +114,7 @@ export function StockInfoBar({
   watchlistPending,
   addedDate,
 }: Props) {
+  const digits = pricePrecision(assetType)
   // 弹窗开关：纯本地状态，与数据/配置无关，放早期 return 之前
   const [customizerOpen, setCustomizerOpen] = useState(false)
   // ext 标签展开状态：按 symbol::colId，切股/切字段时互不干扰
@@ -187,9 +190,9 @@ export function StockInfoBar({
         const lo = Number(latest.low)
         return `${((hi - lo) / prevClose * 100).toFixed(2)}%`
       }
-      case 'open': return fmtPrice(Number(latest.open))
-      case 'high': return fmtPrice(Number(latest.high))
-      case 'low':  return fmtPrice(Number(latest.low))
+      case 'open': return fmtPrice(Number(latest.open), digits)
+      case 'high': return fmtPrice(Number(latest.high), digits)
+      case 'low':  return fmtPrice(Number(latest.low), digits)
       // 财务指标：百分比字段存储为百分点(12.3 表示 12.3%)，直接 toFixed(2) + %
       case 'eps':         return financialMetrics?.eps_basic != null ? fmtPrice(financialMetrics.eps_basic) : null
       case 'bps':         return financialMetrics?.bps != null ? fmtPrice(financialMetrics.bps) : null
@@ -248,10 +251,10 @@ export function StockInfoBar({
         <span className="text-foreground font-bold text-sm tracking-wide">{symbol}</span>
         <span className="text-secondary font-medium">{displayName}</span>
         <span style={{ color: clr }} className="text-lg font-bold tabular-nums">
-          {fmtPrice(close)}
+          {fmtPrice(close, digits)}
         </span>
         <span style={{ color: clr }} className="tabular-nums">
-          {isUp ? '+' : ''}{fmtPrice(chg)}
+          {isUp ? '+' : ''}{fmtPrice(chg, digits)}
         </span>
         <span style={{ color: clr }} className="tabular-nums">
           {isUp ? '+' : ''}{fmtPrice(chgPct)}%

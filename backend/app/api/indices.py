@@ -10,7 +10,6 @@ from fastapi import APIRouter, HTTPException, Query, Request
 
 from app.market_time import cn_today
 from app.services import index_sync, trading_day
-from app.tickflow.capabilities import Cap
 
 logger = logging.getLogger(__name__)
 
@@ -125,7 +124,7 @@ async def sync_index_daily(request: Request, days: int = Query(365, ge=30, le=50
     from app.market_time import cn_now
     repo = request.app.state.repo
     capset = request.app.state.capabilities
-    if not capset.has(Cap.KLINE_DAILY_BATCH):
+    if not index_sync.daily_source_available(capset):
         raise HTTPException(status_code=403, detail="指数日线能力不可用")
 
     def make_run(progress):

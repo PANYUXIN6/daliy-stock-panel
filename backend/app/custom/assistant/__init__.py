@@ -14,6 +14,8 @@ docs/secondary-development.md 的扩展契约。
                                                             前端按钮 POST /actions/{call_id}/decision
                                                             {approve:bool}, 超时视为拒绝
     {"type":"delta","content":"..."}                        最终正文(M1 整段一次)
+    {"type":"assistant_context","reasoning_content","reasoning_context"}
+                                                            最终答复的供应商推理(含空串)，仅按账号存档/回传，不渲染
     {"type":"error","kind","message","hint?"}               no_key/provider/input_too_long/rounds/model
     {"type":"done"}                                         本轮结束(含失败)
     {"type":"ping"}                                         心跳保活(空闲 >15s)

@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useState } from 'react'
+import { lazy, Suspense, useCallback, useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { api, type KlineRow } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
@@ -18,6 +18,9 @@ import {
   type VolumeCompareConfig,
 } from '@/components/EChartsCandlestick'
 
+import type { ChartRenderer } from '@/lib/chart-types'
+const LightweightDaily = lazy(() => import('./charts/LightweightDaily').then(m => ({ default: m.LightweightDaily })))
+
 const SUB_INFO_H = 16
 const SUB_GAP = 4
 const DEFAULT_VOLUME_COMPARE: VolumeCompareConfig = { enabled: true, days: 1 }
@@ -30,6 +33,7 @@ function normalizeVolumeCompare(config: VolumeCompareConfig): VolumeCompareConfi
 }
 
 interface Props {
+  renderer?: ChartRenderer
   symbol: string
   height?: number
   className?: string
@@ -134,6 +138,7 @@ function ChartPill({
 
 export function StockDailyKChart({
   symbol,
+  renderer = 'echarts',
   height = 520,
   className,
   dateRange: externalDateRange,
@@ -224,6 +229,12 @@ export function StockDailyKChart({
   activeSubDefs.forEach(def => { subExtraH += SUB_INFO_H + def.height })
   if (activeSubDefs.length > 0) subExtraH += activeSubDefs.length * SUB_GAP + 14
   const chartHeight = height + subExtraH
+
+  // 专属图层含交互说明和历史边界；尚未在轻量引擎中实现时沿用完整渲染。
+  const localLayersActive = showEarnings || boxView.boxes.length > 0 || (isDaily && (gapReport?.gaps.length ?? 0) > 0)
+    || activeIndicators.includes('bull_bear_line')
+  const useLightweight = renderer === 'lightweight' && !localLayersActive
+  const Chart = useLightweight ? LightweightDaily : EChartsCandlestick
 
   if (!symbol) return null
 
@@ -329,6 +340,9 @@ export function StockDailyKChart({
         {gapsQuery.isError && <span className="text-danger">缺口区域读取失败</span>}
         {gapReport && <span>{gapReport.status === 'no_prices' ? '缺少历史日K' : `未回补 ${gapReport.gaps.length} 个 · 已存日线 ${gapReport.history_start} 起 · 截止 ${gapReport.as_of}`}</span>}
       </div>}
+      {renderer === 'lightweight' && localLayersActive && <div className="px-1 py-1 text-[10px] text-muted" role="status">
+        当前专属图层使用兼容图表（多空线、箱体、缺口或业绩断层）
+      </div>}
       {chartQuery.isLoading && <div className="text-sm text-muted py-4">加载中…</div>}
       {chartQuery.isError && <div className="text-sm text-danger py-2">{KLINE_PERIOD_LABELS[boxView.period]}加载失败</div>}
       {!chartQuery.isLoading && !chartQuery.isError && (currentRows?.length ?? 0) > 0 && rows.length === 0 && (
@@ -336,7 +350,9 @@ export function StockDailyKChart({
       )}
       {!chartQuery.isLoading && !chartQuery.isError && (currentRows?.length ?? 0) === 0 && <div className="text-sm text-muted py-4">暂无本地{KLINE_PERIOD_LABELS[boxView.period]}数据</div>}
       {rows.length > 0 && (
-        <EChartsCandlestick
+        <Suspense fallback={<div className="text-xs text-muted py-4">正在加载图表…</div>}>
+        <Chart
+          assetType={kline.data?.asset_type ?? boxView.report?.asset_type}
           key={`${symbol}:${boxView.period}`}
           data={rows}
           markers={allMarkers}
@@ -358,6 +374,7 @@ export function StockDailyKChart({
           volumeCompare={volumeCompare}
           addedDate={isDaily && showAddedMark ? addedDate : null}
         />
+        </Suspense>
       )}
     </div>
   )

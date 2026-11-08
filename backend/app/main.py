@@ -288,6 +288,7 @@ async def _application_lifespan(app: FastAPI):
 
     def _refresh_done():
         from app.services.shared_runtime import publish_data_update, publish_quotes
+        app.state.user_runtimes.invalidate_shared_strategy_state()
         repo.get_enriched_latest_asset('etf')
         repo.get_enriched_latest_asset('index')
         publish_quotes(qs)
@@ -450,6 +451,12 @@ def create_app(role: str | None = None) -> FastAPI:
     )
 
     from fastapi.responses import JSONResponse
+
+    from app.services.daily_health import DailyIntegrityError
+
+    @app.exception_handler(DailyIntegrityError)
+    async def daily_integrity_error(request: Request, exc: DailyIntegrityError):
+        return JSONResponse(status_code=409, content={"detail": str(exc)})
 
     from app.services.task_scheduler import JobQueueFullError
 

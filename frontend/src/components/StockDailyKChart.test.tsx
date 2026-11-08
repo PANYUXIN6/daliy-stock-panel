@@ -8,6 +8,7 @@ import { StockDailyKChart } from './StockDailyKChart'
 
 const mocks = vi.hoisted(() => ({ daily: vi.fn(), earnings: vi.fn(), gaps: vi.fn(), boxes: vi.fn() }))
 vi.mock('@/lib/api', () => ({ api: { klineDaily: mocks.daily, klineEarningsBreakout: mocks.earnings, klineGaps: mocks.gaps, klineBoxes: mocks.boxes } }))
+vi.mock('./charts/LightweightDaily', () => ({ LightweightDaily: ({ assetType }: any) => <div data-lightweight>{assetType}</div> }))
 vi.mock('@/components/EChartsCandlestick', async importOriginal => ({
   ...await importOriginal<typeof import('./EChartsCandlestick')>(),
   EChartsCandlestick: ({ data, activeIndicators, markers, showMarkers, priceGaps, boxes, ranges, priceLines }: any) => <div data-chart data-rows={JSON.stringify(data)} data-ranges={ranges?.length ?? 0} data-lines={priceLines?.length ?? 0}>
@@ -313,4 +314,17 @@ it('当前箱体和候选同样按距离筛选，包含上下沿附近并随完�
   const showDistant = [...host.querySelectorAll('label')].find(label => label.textContent?.includes('显示全部箱体'))!.querySelector('input')!
   await act(async () => showDistant.click())
   expect(host.querySelector('[data-boxes]')?.textContent).toBe('near-upper,far-current,near-lower,far-candidate')
+})
+
+it('轻量渲染优先保留本地专属图层，关闭多空线后可切换且保留ETF元数据', async () => {
+  mocks.daily.mockResolvedValue({ ...response('159558.SZ', 0.827), asset_type: 'etf' })
+  await act(async () => root.render(<QueryClientProvider client={client}>
+    <StockDailyKChart symbol="159558.SZ" dateRange={range} renderer="lightweight" />
+  </QueryClientProvider>))
+  await settle()
+  expect(host.querySelector('[data-chart]')).not.toBeNull()
+  expect(host.textContent).toContain('当前专属图层使用兼容图表')
+  await toggle(); await settle()
+  expect(host.querySelector('[data-lightweight]')?.textContent).toBe('etf')
+  expect(host.querySelector('[data-chart]')).toBeNull()
 })

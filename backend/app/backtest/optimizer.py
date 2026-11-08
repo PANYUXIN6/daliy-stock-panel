@@ -219,7 +219,11 @@ class StrategyOptimizer:
         rss_sampler: PhaseRssSampler | None = None,
         prepared_market_data=None,
     ) -> dict:
-        from app.backtest.strategy import BacktestResultPolicy, StrategyBacktestConfig
+        from app.backtest.strategy import (
+            BacktestResultPolicy,
+            StrategyBacktestConfig,
+            _panel_backend,
+        )
 
         t0 = time.perf_counter()
         if cfg.objective not in VALID_OBJECTIVES:
@@ -249,6 +253,7 @@ class StrategyOptimizer:
         ]
 
         prepared = None
+        prepared_panel = None
         prepare_ms = 0.0
         trials_ms = 0.0
         final_backtest_ms = 0.0
@@ -263,7 +268,10 @@ class StrategyOptimizer:
                 return None
             # 单组异常必须隔离: 一组失败不能丢弃全部已完成结果。
             try:
-                if prepared is None:
+                if prepared_panel is not None:
+                    res = self.service.run(bt_cfg, cancel_event=cancel_event,
+                                           prepared_panel=prepared_panel, result_policy=trial_policy)
+                elif prepared is None:
                     res = self.service.run(
                         bt_cfg,
                         cancel_event=cancel_event,
@@ -333,6 +341,25 @@ class StrategyOptimizer:
                         "elapsed_ms": prepare_ms,
                     })
 
+            elif (
+                _panel_backend(getattr(s, "execution_backend", "polars_expr"))
+                and not cancelled_before_prepare
+            ):
+                # P2a: 默认后端同样 prepare-once — 全组依赖计划取并集, 载一次
+                # 共享特征面板, 每组只跑过滤/评分/模拟。
+                prepare_started = time.perf_counter()
+                prepared_panel = self.service.prepare_panel_optimization(backtest_configs)
+                prepare_ms = round((time.perf_counter() - prepare_started) * 1000, 1)
+                if progress_cb is not None:
+                    progress_cb({
+                        "type": "optimizer_prepare",
+                        "done": 0,
+                        "total": n_total,
+                        "best_score": None,
+                        "shared_panel_bytes": prepared_panel.panel.estimated_size(),
+                        "elapsed_ms": prepare_ms,
+                    })
+
             trials_started = time.perf_counter()
             if rss_sampler is not None:
                 rss_sampler.reset_phase()
@@ -389,6 +416,7 @@ class StrategyOptimizer:
                     best_config,
                     cancel_event=cancel_event,
                     prepared=prepared,
+                    **({"prepared_panel": prepared_panel} if prepared_panel is not None else {}),
                 )
                 final_backtest_ms = round((time.perf_counter() - final_started) * 1000, 1)
                 if rss_sampler is not None:
@@ -411,6 +439,8 @@ class StrategyOptimizer:
                 "results": ranked,
                 "requested_max_workers": int(cfg.max_workers),
                 "effective_workers": 1,
+                "shared_feature_panel": prepared_panel is not None,
+                "shared_feature_panel_bytes": prepared_panel.panel.estimated_size() if prepared_panel is not None else 0,
                 "shared_market_data": prepared is not None,
                 "shared_market_data_bytes": prepared.market_data.nbytes if prepared is not None else 0,
                 "prepare_ms": prepare_ms,

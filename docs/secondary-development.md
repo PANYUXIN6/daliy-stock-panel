@@ -36,6 +36,25 @@
 
 请求与缓存继续使用 `frontend/src/lib/api.ts`、`queryKeys.ts` 和已有共享查询。新增页面沿用现有认证和账号缓存隔离。
 
+### 从扩展页打开个股详情
+
+源码扩展可从 [`stockPreview.ts`](../frontend/src/extensions/stockPreview.ts) 导入 `openStockPreview`、`closeStockPreview`；独立页面包通过宿主的 `window.__TSP_EXT__.ui` 调用同名方法。两者共用 `Layout` 中的唯一详情宿主，不在页面包中复制详情组件或缓存状态。
+
+```ts
+import { openStockPreview } from '@/extensions/stockPreview'
+
+openStockPreview({
+  symbol: '000001.SZ',
+  name: '平安银行',
+  navList: [
+    { symbol: '000001.SZ', name: '平安银行' },
+    { symbol: '600036.SH', name: '招商银行' },
+  ],
+})
+```
+
+`symbol` 必须是带 `.SH`、`.SZ` 或 `.BJ` 后缀的完整代码。方法会去掉首尾空格并统一大写；非法请求返回 `false`，保留当前详情；宿主未挂载也返回 `false`。`navList` 可省略，会过滤非法项并去重；当前标的在至少两项的列表中时支持前后切股。调用成功返回 `true`，再次调用替换当前详情。路由离开、宿主卸载及 `closeStockPreview()` 会关闭详情；仍沿用原详情的查询、显式采集按钮、工具栏与 `stock-preview.footer` 插槽。
+
 ## 后端注册
 
 [`loader.py`](../backend/app/extensions/loader.py) 扫描 `app.custom` 下的直接子模块和包，跳过下划线开头的名字。模块需提供：

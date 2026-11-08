@@ -1,3 +1,4 @@
+import type { ChartRenderer } from '@/lib/chart-types'
 import { useEffect, useState, useCallback, useRef, useMemo } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { X } from 'lucide-react'
@@ -18,6 +19,7 @@ import {
 } from '@/lib/stock-info-fields'
 
 interface Props {
+  renderer?: ChartRenderer
   symbol: string
   height?: number
   showIntraday?: boolean
@@ -59,6 +61,7 @@ export { getDefaultRange }
 
 export function StockPanel({
   symbol,
+  renderer = 'echarts',
   height = 520,
   showIntraday = true,
   className,
@@ -209,6 +212,7 @@ export function StockPanel({
         symbol={symbol}
         name={name}
         stockInfo={stockInfo}
+        assetType={kline.data?.asset_type}
         rows={rawRows}
         fields={fields}
         onFieldsChange={handleFieldsChange}
@@ -224,6 +228,7 @@ export function StockPanel({
       {infoBarOnly ? null : (
       <div className="flex gap-3 items-start">
         <StockDailyKChart
+          renderer={renderer}
           symbol={symbol}
           height={height}
           className={`${dailyKlineFlex} min-w-0`}
@@ -252,6 +257,7 @@ export function StockPanel({
               <X className="h-3 w-3" />
             </button>
             <StockIntradayChart
+              renderer={renderer}
               symbol={symbol}
               date={selectedDate}
               height={height}

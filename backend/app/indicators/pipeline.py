@@ -16,6 +16,7 @@ import shutil
 import time
 import uuid
 from collections.abc import Callable
+from datetime import date
 from datetime import timedelta as _timedelta
 from pathlib import Path
 
@@ -587,7 +588,10 @@ def get_signal_dependencies() -> dict[str, frozenset[str]]:
         **custom_signals.expression_dependencies(_get_custom_signal_exprs()),
     }
 
-def compute_signals(df: pl.DataFrame, needed: set[str] | None = None) -> pl.DataFrame:
+def compute_signals(
+    df: pl.DataFrame, needed: set[str] | None = None, *,
+    attach_extensions: bool = True,
+) -> pl.DataFrame:
     """从已有指标列计算原子信号布尔列。
 
     输入必须包含 compute_indicators() 产出的指标列。
@@ -644,7 +648,8 @@ def compute_signals(df: pl.DataFrame, needed: set[str] | None = None) -> pl.Data
     # 都按列存在性解析。历史多日帧仅注入时序模式 —— 快照代表"最新值",
     # 历史回看注入会引入未来数据 (CONTRIBUTING §5.3)。
     from app.factors import ext_factors
-    df = ext_factors.attach_ext_columns(df, include_snapshot=False)
+    if attach_extensions:
+        df = ext_factors.attach_ext_columns(df, include_snapshot=False)
     # 条件引用的注册表因子列先复用评分物化管线补算 (虚拟/自定义/复合均可)。
     from app.strategy import custom_signals
     exprs = _get_custom_signal_exprs()
@@ -773,7 +778,7 @@ def compute_limit_signals(
         df = df.with_columns(pl.lit(None).cast(pl.Float64).alias("turnover_rate"))
 
     # 前一日参考收盘价（交易所涨跌停基准价）
-    # 仅在 adj_factor 发生变化（除权除息 XD/DR）时使用前复权昨收作为交易所参考价;
+    # 除权除息时把前复权昨收按当日比例还原为交易所参考价;
     # 否则使用原始 raw_close.shift(1) 以避免浮点精度误差。
     if not need_price_limits:
         cleanup = [c for c in ("name", "float_shares", "limit_up", "limit_down", "listing_date") if c in df.columns]
@@ -784,7 +789,7 @@ def compute_limit_signals(
     _adj_changed = (_adj_today - _adj_yesterday).abs() > 1e-6
     df = df.with_columns(
         pl.when(_adj_changed)
-        .then(pl.col("close").shift(1).over("symbol"))   # 除权: 使用前复权昨收
+        .then(pl.col("close").shift(1).over("symbol") / _adj_today)  # 除权参考价
         .otherwise(pl.col("raw_close").shift(1).over("symbol"))  # 正常: 使用原始昨收
         .alias("_prev_raw_close")
     )
@@ -1411,7 +1416,8 @@ def _total_ram_bytes() -> int | None:
 
 def _adaptive_sym_batch(default_batch: int, rows_per_symbol: int) -> int:
     """小内存机器按单批目标行数收缩批次; 大内存机器保持原值 (#208)。"""
-    if (_total_ram_bytes() or 0) >= _RAM_LARGE_BYTES:
+    from app.services.memory_budget import memory_budget
+    if min(_total_ram_bytes() or 0, memory_budget().total_bytes) >= _RAM_LARGE_BYTES:
         return default_batch
     return max(
         _BATCH_MIN_SYMBOLS,
@@ -1515,6 +1521,69 @@ def _compute_storage_batches(
     if not parts:
         return _select_storage_cols(raw.head(0))
     return pl.concat(parts, how="diagonal_relaxed", rechunk=False)
+
+
+def recompute_daily_symbols(
+    repo, asset_type: str, *, start: date, symbols: list[str] | None,
+    on_batch_done: Callable[[int, int], None] | None = None,
+) -> int:
+    """修补后按股票重算: 输入使用完整本地原始历史, 只发布 start 起的受影响行。
+
+    复用正式的复权、历史股本、停牌及连板计算, 不用已有 enriched 作原始价格前缀。
+    均线/MACD 等宽指标由现有读取链按新版本重新计算。
+    """
+    from app.services import daily_health, data_integrity, preferences
+    from app.tickflow.repository import daily_dirname
+
+    root = Path(repo.store.data_dir)
+    files = repo.daily_repair_files(asset_type)
+    if not files:
+        raise ValueError("没有可用于重算的原始日K")
+    raw_scan = scan_daily_parquet(files, cast_options=pl.ScanCastOptions(integer_cast="allow-float"))
+    selected = sorted(set(symbols)) if symbols is not None else raw_scan.select("symbol").unique().collect()["symbol"].to_list()
+    if not selected:
+        raise ValueError("没有可用于重算的股票")
+    factors = _load_factors(root / ("adj_factor_etf" if asset_type == "etf" else "adj_factor") / "all.parquet") if asset_type != "index" else pl.DataFrame()
+    instruments = repo.get_instruments_asset("stock") if asset_type == "stock" else pl.DataFrame()
+    shares = load_share_history(root) if asset_type == "stock" else pl.DataFrame()
+    batch_size = max(1, min(preferences.get_enriched_batch_size(), 200))
+    publication = EnrichedPublication(root, asset_type, recover=True, purpose="daily_repair")
+    written = 0
+    total = (len(selected) + batch_size - 1) // batch_size
+    try:
+        for offset in range(0, len(selected), batch_size):
+            batch = selected[offset:offset + batch_size]
+            raw = raw_scan.filter(pl.col("symbol").is_in(batch)).sort(["symbol", "date"]).collect(engine="streaming")
+            bad = data_integrity.invalid_daily_rows(raw)
+            if not bad.is_empty():
+                issues = data_integrity.inspect_invalid_history(root, daily_dirname(asset_type), files, bad)
+                daily_health.record_issues(root, issues)
+                if issues:
+                    first = issues[0]
+                    codes = "、".join(first.symbols[:5]) or "无法定位具体标的"
+                    raise ValueError(
+                        f"{daily_health.ASSET_LABELS[asset_type]}在 {first.day} 的原始历史日K仍异常"
+                        f"（{codes}：{first.reason}）, 未发布指标。"
+                        "已加入自检报告，请到 数据→自检/修补 处理后重试"
+                    )
+                raise ValueError("原始日K未通过校验或在检查期间发生变化，请重新自检或完成当日日K同步后重试，未发布指标")
+            enriched = compute_enriched(
+                raw,
+                factors=factors.filter(pl.col("symbol").is_in(batch)) if not factors.is_empty() else factors,
+                instruments=instruments.filter(pl.col("symbol").is_in(batch)) if not instruments.is_empty() else instruments,
+                historical_shares=shares.filter(pl.col("symbol").is_in(batch)) if not shares.is_empty() else shares,
+            )
+            output = _select_storage_cols(enriched.filter(pl.col("date") >= start))
+            written += repo.replace_enriched_rows(asset_type, output, start=start, symbols=batch, publication=publication)
+            if on_batch_done:
+                on_batch_done(offset // batch_size + 1, total)
+        publication.commit()
+    except BaseException:
+        publication.abandon()
+        raise
+    repo.rebuild_views()
+    repo.invalidate_enriched_asset(asset_type)
+    return written
 
 
 def run_pipeline(data_dir: Path | None = None,

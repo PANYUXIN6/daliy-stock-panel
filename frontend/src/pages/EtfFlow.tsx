@@ -7,6 +7,7 @@ import { QK } from '@/lib/queryKeys'
 import { useCurrentUser } from '@/lib/auth'
 import { useCollectorJob } from '@/lib/useCollectorJob'
 import { useCapabilityMatrix } from '@/lib/useSharedQueries'
+import { MethodHelp } from '@/components/MethodHelp'
 import { FlowChart, type FlowSeries } from './etfFlow/FlowChart'
 
 const COLORS = ['#d7a658', '#55a5e8', '#e87676', '#42baa0', '#a38bd4', '#d7bd6f', '#6fa4ac', '#df9470', '#96b776', '#7890d4', '#b58e9e', '#839496']
@@ -27,9 +28,9 @@ function cumulative(rows: EtfFlowDay[], category: string) {
   })
 }
 
-function SectionTitle({ id, number, title, detail }: { id: string; number: string; title: string; detail?: string }) {
+function SectionTitle({ id, number, title, detail, help }: { id: string; number: string; title: string; detail?: string; help?: string }) {
   return <div id={id} className="flex scroll-mt-5 flex-wrap items-baseline gap-x-3 gap-y-1 border-b border-border pb-3 pt-5">
-    <span className="font-mono text-sm text-accent">{number}</span><h2 className="text-lg font-semibold tracking-tight">{title}</h2>
+    <span className="font-mono text-sm text-accent">{number}</span><div className="flex items-center gap-1"><h2 className="text-lg font-semibold tracking-tight">{title}</h2>{help && <MethodHelp label={`${title}口径`}><p>{help}</p></MethodHelp>}</div>
     {detail && <p className="text-xs text-muted">{detail}</p>}
   </div>
 }
@@ -74,9 +75,9 @@ function BoardCharts({ data }: { data: EtfFlowBoard }) {
       <FlowChart title="最近放量案例 · 累计成交额" labels={charts.minutes} series={charts.cases} empty="暂无放量案例" />
     </div>
     <section className="overflow-hidden rounded-card border border-border bg-surface" aria-label="单只ETF表现">
-      <div className="flex flex-wrap items-center justify-between gap-2 px-4 py-3"><h3 className="text-sm font-semibold">单只ETF表现</h3><span className="text-xs text-muted">按成交额排序</span></div>
+      <div className="flex items-center gap-1 px-4 py-3"><h3 className="text-sm font-semibold">单只ETF表现</h3><MethodHelp label="单只ETF表现口径"><p>按成交额降序。条形背景表示成交额相对最大值的比例，涨跌幅按未复权价格计算。</p></MethodHelp></div>
       <div className="overflow-x-auto"><table className="w-full min-w-[650px] text-xs">
-        <thead className="border-y border-border bg-elevated/60 text-muted"><tr><th className="px-4 py-2 text-left">代码 / 名称</th><th className="px-3 py-2 text-left">类别</th><th className="px-3 py-2 text-right">成交额（亿）</th><th className="px-3 py-2 text-right">占比</th><th className="px-3 py-2 text-right" title="按未复权价格计算">涨跌幅</th></tr></thead>
+        <thead className="border-y border-border bg-elevated/60 text-muted"><tr><th className="px-4 py-2 text-left">代码 / 名称</th><th className="px-3 py-2 text-left">类别</th><th className="px-3 py-2 text-right">成交额（亿）</th><th className="px-3 py-2 text-right">占比</th><th className="px-3 py-2 text-right">涨跌幅</th></tr></thead>
         <tbody>{data.intraday.ranking.map(row => <tr key={row.symbol} className="border-b border-border/60 last:border-0 hover:bg-elevated/50">
           <td className="px-4 py-2.5"><span className="mr-3 font-mono text-muted">{row.symbol.split('.')[0]}</span><span>{row.name}</span></td>
           <td className="px-3 py-2 text-muted">{row.category}</td>
@@ -87,20 +88,20 @@ function BoardCharts({ data }: { data: EtfFlowBoard }) {
       </table></div>
     </section>
 
-    <SectionTitle id="etf-signals" number="02" title="放量信号对比" detail="放量日：净申购估算 > 100亿元" />
+    <SectionTitle id="etf-signals" number="02" title="放量信号对比" help="放量日指单日净流入超过100亿元（申赎口径）。" />
     <div className="grid gap-4 xl:grid-cols-2">
       <FlowChart title="放量日与近期成交额" labels={charts.signal.map(p => p.date)} series={charts.signalAmount} zoom />
       <FlowChart title="净申购与100亿元观察线" labels={charts.signal.map(p => p.date)} series={charts.signalFlow} zoom />
     </div>
 
-    <SectionTitle id="etf-daily" number="03" title="日度资金全景" />
+    <SectionTitle id="etf-daily" number="03" title="日度资金全景" help="净流入按申赎口径估算：（当日份额 − 上一交易日份额）× 当日单位净值。" />
     <FlowChart title="重点ETF成交额、净申购与指数" labels={charts.days} series={charts.panorama} zoom />
     <div className="grid gap-4 xl:grid-cols-2">
       <FlowChart title="已识别宽基ETF · 分类净申购" labels={charts.days} series={charts.categories} zoom />
-      <FlowChart title="已识别宽基ETF · 区间累计净申购" labels={charts.days} series={charts.cumulative} zoom />
+      <FlowChart title="已识别宽基ETF · 区间累计净申购" labels={charts.days} series={charts.cumulative} help="统计已识别宽基ETF。累计从当前显示区间首日开始。" zoom />
     </div>
     <section className="overflow-hidden rounded-card border border-border bg-surface" aria-label="宽基净申购热力表">
-      <div className="px-4 py-3"><h3 className="text-sm font-semibold">最近22个交易日 · 分类净申购（亿元）</h3></div>
+      <div className="flex items-center gap-1 px-4 py-3"><h3 className="text-sm font-semibold">最近22个交易日 · 分类净申购（亿元）</h3><MethodHelp label="宽基净申购热力表口径"><p>合计为已识别类别之和。红色表示净申购，绿色表示净赎回，颜色深浅按各列的相对大小显示。</p></MethodHelp></div>
       <div className="overflow-x-auto"><table className="w-full min-w-[1180px] text-xs">
         <thead className="bg-elevated text-muted"><tr><th className="sticky left-0 z-10 bg-elevated px-3 py-2 text-left">交易日</th><th className="whitespace-nowrap px-2 py-2 text-right">已识别类别合计</th>{data.categories.map(c => <th key={c} className="whitespace-nowrap px-2 py-2 text-right">{c}</th>)}</tr></thead>
         <tbody>{heatRows.map(row => <tr key={row.date} className="border-t border-border/50"><th className="sticky left-0 z-10 whitespace-nowrap bg-surface px-3 py-2 text-left font-mono font-normal">{row.date}</th><td className={`px-2 py-2 text-right font-mono ${flowColor(row.broad?.net_flow_yuan)}`}>{money(row.broad?.net_flow_yuan)}</td>{data.categories.map(category => {
@@ -164,9 +165,9 @@ export function EtfFlow() {
         {[
           { label: '盘中累计成交额', value: money(data.intraday.amount_yuan), unit: '亿元', sub: `${data.selected_date} ${data.intraday.as_of ?? ''}`, color: '' },
           { label: '较前20日同刻均值', value: pct(relative), unit: '', sub: '', color: flowColor(relative) },
-          { label: '最新净申购估算', value: money(latestFlow?.net_flow_yuan), unit: '亿元', sub: latestFlow?.date ?? '', title: '（当日份额 − 上一交易日份额）× 当日单位净值', color: flowColor(latestFlow?.net_flow_yuan) },
+          { label: '最新净申购估算', value: money(latestFlow?.net_flow_yuan), unit: '亿元', sub: latestFlow?.date ?? '', color: flowColor(latestFlow?.net_flow_yuan) },
           { label: '区间放量日', value: data.coverage.flow_days ? String(data.daily.filter(row => row.signal).length) : '—', unit: '日', sub: '', color: '' },
-        ].map(item => <div key={item.label} className="bg-surface p-4 sm:p-5"><p className="text-[11px] text-muted" title={item.title}>{item.label}</p><p className={`my-2 font-mono text-xl font-medium sm:text-2xl ${item.color}`}>{item.value}<span className="ml-2 font-sans text-[10px] font-normal text-muted">{item.unit}</span></p>{item.sub && <p className="text-[10px] leading-relaxed text-muted">{item.sub}</p>}</div>)}
+        ].map(item => <div key={item.label} className="bg-surface p-4 sm:p-5"><p className="text-[11px] text-muted">{item.label}</p><p className={`my-2 font-mono text-xl font-medium sm:text-2xl ${item.color}`}>{item.value}<span className="ml-2 font-sans text-[10px] font-normal text-muted">{item.unit}</span></p>{item.sub && <p className="text-[10px] leading-relaxed text-muted">{item.sub}</p>}</div>)}
       </div>
       <BoardCharts data={data} />
     </>}

@@ -191,7 +191,9 @@ it('日周月独立读取，保留历史截止且不把日线标记、缺口和�
   await clickPill('周K')
   expect(host.querySelector('[data-chart]')).toBeNull()
   expect(mocks.boxes).toHaveBeenCalledWith('600000.SH', 'weekly', { start: '2021-01-31', end: range.end })
-  await act(async () => resolveWeekly({ symbol: '600000.SH', period: 'weekly', status: 'ready', boxes: [], diagnostics: ['当前周K尚未完成'],
+  const unfinishedRule = '未完成的日／周／月 K 线仅供展示，不参与触点、箱体或突破确认。'
+  const calendarNote = '本地交易日历未覆盖全部历史，按已存有效交易记录计数，不补齐缺失 K 线。'
+  await act(async () => resolveWeekly({ symbol: '600000.SH', period: 'weekly', status: 'ready', boxes: [], diagnostics: [calendarNote, unfinishedRule],
     rows: [{ date: '2026-01-30', open: 10, high: 15, low: 8, close: 14, bull_bear_line: 12, is_complete: false }] }))
   await settle()
   expect(host.querySelector('[data-chart]')?.getAttribute('data-rows')).toContain('2026-01-30')
@@ -199,7 +201,18 @@ it('日周月独立读取，保留历史截止且不把日线标记、缺口和�
   expect(host.querySelector('[data-gaps]')?.textContent).toBe('')
   expect(host.querySelector('[data-chart]')?.getAttribute('data-ranges')).toBe('0')
   expect(host.querySelector('[data-chart]')?.getAttribute('data-lines')).toBe('0')
-  expect(host.textContent).toContain('当前周K尚未完成')
+  expect(host.textContent).not.toContain(calendarNote)
+  expect(document.querySelector('[role="tooltip"]')).toBeNull()
+  const help = host.querySelector<HTMLButtonElement>('[aria-label="箱体识别说明"]')!
+  const pointerOver = Object.assign(new MouseEvent('pointerover', { bubbles: true }), { pointerType: 'mouse' })
+  await act(async () => help.dispatchEvent(pointerOver))
+  const tooltip = document.querySelector('[role="tooltip"]')!
+  expect(tooltip.textContent).toContain(calendarNote)
+  expect([...tooltip.children].filter(child => child.textContent === unfinishedRule)).toHaveLength(1)
+  await act(async () => help.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })))
+  expect(document.querySelector('[role="tooltip"]')).toBeNull()
+  await act(async () => help.focus())
+  expect(document.querySelector('[role="tooltip"]')?.textContent).toContain(calendarNote)
   await clickPill('月K')
   expect(mocks.boxes).toHaveBeenCalledWith('600000.SH', 'monthly', { start: '2011-01-31', end: range.end })
   expect(host.textContent).toContain('暂无本地月K数据')

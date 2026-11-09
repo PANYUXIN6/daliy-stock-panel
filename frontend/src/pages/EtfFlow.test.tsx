@@ -79,6 +79,10 @@ it('preserves gaps in table and cumulative data, and hides collection from viewe
   const ranking = host.querySelector('[aria-label="单只ETF表现"]')!
   expect(ranking.textContent).toContain('—')
   expect(ranking.textContent).not.toContain('0.00')
+  expect(ranking.textContent).not.toContain('按成交额降序')
+  const help = ranking.querySelector<HTMLButtonElement>('button[aria-label="单只ETF表现口径"]')!
+  await act(async () => help.click())
+  expect(document.getElementById(help.getAttribute('aria-describedby')!)?.textContent).toContain('按成交额降序')
   const chart = host.querySelector('[aria-label="已识别宽基ETF · 区间累计净申购"] pre')!
   expect(JSON.parse(chart.textContent!)[0].data).toEqual([1, null])
   expect(host.textContent).not.toContain('同步数据')

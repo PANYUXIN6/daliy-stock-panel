@@ -45,7 +45,10 @@ it('独立显示并行子任务状态、批次消息和耗时，不把预取成�
   expect(host.textContent).not.toContain('prefetch_index')
   expect(rows[1].textContent).toContain('耗时 2s')
   expect(rows[2].textContent).toContain('等待中')
-  expect(host.textContent).toContain('总体进度按阶段推进，不代表剩余时间')
+  const help = host.querySelector<HTMLButtonElement>('button[aria-label="总体进度口径"]')!
+  expect(host.textContent).not.toContain('总体进度按阶段推进')
+  await act(async () => help.click())
+  expect(document.getElementById(help.getAttribute('aria-describedby')!)?.textContent).toContain('总体进度按阶段推进，不代表剩余时间')
   expect(host.textContent).toContain('5 秒前')
   await act(async () => vi.advanceTimersByTime(2000))
   expect(host.textContent).toContain('7 秒前')

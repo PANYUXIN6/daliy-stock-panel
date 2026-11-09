@@ -1,3 +1,4 @@
+import { MethodHelp } from '@/components/MethodHelp'
 import { useEffect, useMemo, useRef } from 'react'
 import * as echarts from 'echarts/core'
 import { LineChart, BarChart } from 'echarts/charts'
@@ -18,8 +19,8 @@ export interface FlowSeries {
   stack?: string
 }
 
-export function FlowChart({ title, labels, series, zoom = false, empty = '暂无数据' }: {
-  title: string; labels: string[]; series: FlowSeries[]; zoom?: boolean; empty?: string
+export function FlowChart({ title, labels, series, zoom = false, empty = '暂无数据', help }: {
+  title: string; labels: string[]; series: FlowSeries[]; zoom?: boolean; empty?: string; help?: string
 }) {
   const container = useRef<HTMLDivElement>(null)
   const instance = useRef<echarts.ECharts | null>(null)
@@ -68,7 +69,7 @@ export function FlowChart({ title, labels, series, zoom = false, empty = '暂无
   useEffect(() => { instance.current?.setOption(option, true) }, [option, hasData])
 
   return <section className="min-w-0 rounded-card border border-border bg-surface p-4" aria-label={title}>
-    <h3 className="text-sm font-semibold text-foreground">{title}</h3>
+    <div className="flex items-center gap-1"><h3 className="text-sm font-semibold text-foreground">{title}</h3>{help && <MethodHelp label={`${title}口径`}><p>{help}</p></MethodHelp>}</div>
     {hasData ? <div key="chart" ref={container} className="mt-3 h-[290px] w-full sm:h-[320px]" role="img" aria-label={`${title}，${labels[0] ?? ''}至${labels.at(-1) ?? ''}`} />
       : <div key="empty" role="status" className="flex h-[290px] items-center justify-center text-xs text-muted sm:h-[320px]">{empty}</div>}
   </section>

@@ -8,6 +8,7 @@ import { toNavItems } from '@/lib/listNav'
 import { BOARDS, getBoardType } from '@/lib/board'
 import { boardTag } from '@/components/stock-table/primitives'
 import { DatePicker } from '@/components/DatePicker'
+import { MethodHelp } from '@/components/MethodHelp'
 import { PageHeader } from '@/components/PageHeader'
 import { EmptyState } from '@/components/EmptyState'
 import { ErrorState } from '@/components/ErrorState'
@@ -42,12 +43,18 @@ export function StrengthLadder({ asOf, onDateChange }: { asOf: string; onDateCha
     <div className="flex flex-wrap items-center gap-2 border-b border-border px-4 py-2 text-xs">
       <DatePicker value={asOf || query.data?.as_of || cnDateFromUtc(new Date().toISOString())} onChange={onDateChange} />
       {asOf && <button type="button" className="text-accent" onClick={() => onDateChange('')}>返回最新</button>}
-      <label className="flex items-center gap-1 text-secondary">状态
-        <select aria-label="趋势状态" value={status} onChange={event => setStatus(event.target.value as typeof status)} className="rounded border border-border bg-elevated px-2 py-1">
-          <option value="all">全部</option>
-          {Object.entries(STATUS_LABELS).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
-        </select>
-      </label>
+      <div className="inline-flex items-center">
+        <label className="flex items-center gap-1 text-secondary">状态
+          <select aria-label="趋势状态" value={status} onChange={event => setStatus(event.target.value as typeof status)} className="rounded border border-border bg-elevated px-2 py-1">
+            <option value="all">全部</option>
+            {Object.entries(STATUS_LABELS).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+          </select>
+        </label>
+        <MethodHelp label="趋势强度梯队口径">
+          <p>20日涨幅至少3%入榜。状态优先级依次为近60日新高、放量上涨、动量走强。</p>
+          <p>新高和新低容差为0.5%。放量要求5日量比≥1.5且当日上涨。价格与动量使用前复权口径。</p>
+        </MethodHelp>
+      </div>
       <label className="flex items-center gap-1 text-secondary">板块
         <select aria-label="趋势板块" value={board} onChange={event => setBoard(event.target.value)} className="rounded border border-border bg-elevated px-2 py-1">
           <option value="all">全部</option>
@@ -56,11 +63,10 @@ export function StrengthLadder({ asOf, onDateChange }: { asOf: string; onDateCha
       </label>
       {query.data && !query.isError && <span className="text-muted">展示 {shown} / 入榜 {totalRanked} · 可计算 {query.data.eligible}/{query.data.total}</span>}
     </div>
-    <div className="border-b border-border px-4 py-2 text-[11px] text-muted space-y-1">
-      <p>20日涨幅至少3%入榜。状态优先级：近60日新高 → 放量上涨 → 动量走强；新高容差0.5%，放量要求5日量比≥1.5且当日上涨。</p>
-      {query.data && !query.isError && <p>全市场近60日新高 {query.data.counts.near_high} 只 / 近60日新低 {query.data.counts.near_low} 只（含0.5%容差）。价格与动量使用前复权口径。</p>}
-      {!query.isError && query.data?.warnings.map(warning => <p key={warning} className="text-warning">{warning}</p>)}
-    </div>
+    {query.data && !query.isError && <div className="space-y-1 border-b border-border px-4 py-2 text-[11px] text-muted">
+      <p>全市场近60日新高 {query.data.counts.near_high} 只 / 近60日新低 {query.data.counts.near_low} 只</p>
+      {query.data.warnings.map(warning => <p key={warning} className="text-warning">{warning}</p>)}
+    </div>}
     {query.isLoading ? <div role="status" className="flex flex-1 items-center justify-center text-muted"><RefreshCw className="mr-2 h-4 w-4 animate-spin" />加载趋势梯队…</div>
       : query.isError ? <ErrorState title="趋势梯队加载失败" retrying={query.isFetching} onRetry={() => query.refetch()} />
       : tiers.length === 0 ? <EmptyState icon={TrendingUp} title="暂无趋势股票" hint={totalRanked ? '当前筛选条件下没有股票，请调整状态或板块' : '该日期没有达到20日涨幅3%的股票，或本地历史行情不足'} />

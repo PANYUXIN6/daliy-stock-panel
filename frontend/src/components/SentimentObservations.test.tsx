@@ -1,8 +1,10 @@
 // @vitest-environment jsdom
+import { act } from 'react'
+import { createRoot } from 'react-dom/client'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { expect, it } from 'vitest'
 import type { SentimentObservation, SentimentObservations as Data } from '@/lib/api'
-import { SentimentObservations, observationValue } from './SentimentObservations'
+import { SentimentObservationHelp, SentimentObservations, observationValue } from './SentimentObservations'
 import { SentimentRadar } from './SentimentRadar'
 const observation: SentimentObservation = {
   key: 'up_pct', label: '上涨比例', group: 'breadth', unit: '%', value: 61,
@@ -18,9 +20,29 @@ it('uses supplied fixed-window percentile and preserves raw percent units and co
   expect(result).toContain('+5.0个百分点')
   expect(result).toContain('有效涨跌 4000 家')
   expect(result).toContain('日期不同')
-  expect(result).toContain('固定500个交易日')
-  expect(result).toContain('常量序列为P50')
-  expect(result).toContain('收盘落盘不代表全市场覆盖')
+  expect(result).not.toContain('固定500个交易日')
+  expect(result).not.toContain('收盘落盘不代表全市场覆盖')
+})
+it('shows observation methodology on keyboard focus and dismisses it with Escape', async () => {
+  Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true })
+  const host = document.createElement('div')
+  document.body.append(host)
+  const root = createRoot(host)
+  try {
+    await act(async () => root.render(<SentimentObservationHelp data={data} />))
+    const help = host.querySelector<HTMLButtonElement>('button[aria-label="状态观察口径"]')!
+    expect(document.querySelector('[role="tooltip"]')).toBeNull()
+    await act(async () => help.focus())
+    const note = document.getElementById(help.getAttribute('aria-describedby')!)?.textContent
+    expect(note).toContain('固定500个交易日')
+    expect(note).toContain('常量序列为P50')
+    expect(note).toContain('收盘落盘不代表全市场覆盖')
+    await act(async () => help.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })))
+    expect(document.querySelector('[role="tooltip"]')).toBeNull()
+  } finally {
+    await act(async () => root.unmount())
+    host.remove()
+  }
 })
 it('distinguishes missing data from insufficient history; old APIs cannot fabricate a score', () => {
   const partial = { ...data, observations: [{ ...observation, percentile: null, history_sample_count: 20 }, { ...observation, key: 'option_sentiment', label: '期权情绪', group: 'external' as const, value: null, percentile: null, missing_reason: '数据源未接入' }] }

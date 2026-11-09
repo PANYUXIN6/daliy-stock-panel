@@ -26,6 +26,7 @@ import { useQuoteStatus } from '@/lib/useSharedQueries'
 import { cn } from '@/lib/cn'
 import { fmtPct, priceColorClass } from '@/lib/format'
 import { boardTag } from '@/components/stock-table/primitives'
+import { MethodHelp } from '@/components/MethodHelp'
 import { PageHeader } from '@/components/PageHeader'
 import { Modal } from '@/components/Modal'
 
@@ -285,8 +286,7 @@ function SetupCard({ accId, onDone, onCancel }: { accId: string; onDone: (create
         <h2 id="setup-card-title" className="text-[16px] leading-6 font-semibold">创建虚拟账户</h2>
       </div>
       <p className="mt-2 text-xs leading-relaxed text-muted">
-        虚拟资金 + 真实行情价格模拟撮合, 不涉及任何真实资金。费用口径与回测一致,
-        创建后仍可在「费用」里调整; 本次取值会记住, 作为下次新建的默认。
+        使用虚拟资金，按真实行情价格模拟撮合。
       </p>
       <label className="mt-4 block text-xs text-secondary">账户名称 (可选)</label>
       <input
@@ -303,7 +303,13 @@ function SetupCard({ accId, onDone, onCancel }: { accId: string; onDone: (create
         className="mt-1 w-full rounded-btn border border-border bg-base px-3 py-2 font-mono text-sm outline-none focus:border-accent/50"
         placeholder="1000000"
       />
-      <div className="mt-3 grid grid-cols-3 gap-2">
+      <div className="mt-3 flex items-center gap-1 text-xs text-secondary">
+        <span>费用</span>
+        <MethodHelp label="新建账户费用口径">
+          <p>费用采用与回测相同的模型。创建后可在「费用」中调整，本次设置会作为下次新建的默认值。</p>
+        </MethodHelp>
+      </div>
+      <div className="mt-1 grid grid-cols-3 gap-2">
         <div>
           <label className="block text-[11px] text-muted">佣金 (万)</label>
           <input type="number" step="0.1" min="0" value={commissionWan} onChange={e => setCommissionWan(e.target.value)}
@@ -726,13 +732,19 @@ function OrderForm({ acc, holdings = [], onDone }: { acc: string; holdings?: Pap
           />
         </div>
         <div>
-          <label className="text-[11px] text-muted">订单类型</label>
+          <div className="flex items-center gap-1 text-[11px] text-muted">
+            <span>订单类型</span>
+            <MethodHelp label="模拟撮合口径">
+              <p>交易时段的即时单按最新快照价计入滑点成交。ETF 即时单转为次日开盘单。</p>
+              <p>次日开盘和当日收盘单由盘后流程按实际开盘价或收盘价撮合。</p>
+              <p>当日买入次一交易日可卖（T+1）。停牌单顺延3日后过期。除权按因子调整数量与成本，并记录在台账中。</p>
+            </MethodHelp>
+          </div>
           <div className="mt-1 flex gap-1.5">
             {(Object.keys(ORDER_TYPE_LABEL) as Array<'market' | 'next_open' | 'close'>).map(t => (
               <button
                 key={t}
                 onClick={() => setOrderType(t)}
-                title={t === 'market' ? '盘中按最新快照价成交; ETF 即时单自动转次日开盘' : undefined}
                 className={cn(
                   'flex-1 rounded-btn border py-1 text-[11px] transition-colors',
                   orderType === t ? 'border-accent/40 bg-accent/10 text-accent' : 'border-border text-muted hover:text-secondary',
@@ -889,9 +901,10 @@ function FeeSettingsModal({ accId, fees, queue, onSaved, onClose }: {
             费用与撮合设置
             <span className="ml-1.5 font-mono text-[10px] text-muted">{accId}</span>
           </h3>
+          <MethodHelp label="费用与撮合设置口径"><p>费用采用与回测相同的模型。</p></MethodHelp>
         </div>
         <p className="mt-2 text-[11px] leading-relaxed text-muted">
-          仅影响之后的新成交, 已有台账与统计不重算。口径与回测费用模型一致。
+          新设置仅影响之后的成交，已有台账与统计沿用原记录。
         </p>
         <div className="mt-4 grid grid-cols-3 gap-2">
           <div>
@@ -1559,17 +1572,19 @@ function CompareView({ onCreateSingle }: { onCreateSingle: () => void }) {
       <PageHeader
         title="模拟盘"
         className="flex-col items-stretch sm:flex-row sm:items-center"
-        subtitle="多账户并行对比 — 同本金 · 同费率 · 点表头排序, 点行展开完整账户操作"
+        subtitle="多账户并行对比 · 点表头排序，点行展开账户操作"
         right={
           <div className="flex shrink-0 flex-wrap items-center gap-2 whitespace-nowrap">
-            <button
-              onClick={() => setCreateOpen(true)}
-              className="flex items-center gap-1 rounded-btn bg-accent px-2.5 py-1 text-[11px] font-medium text-white transition-opacity hover:bg-accent/90"
-              title="同本金同费率批量创建一批账户, 各绑一条策略/监控规则跟单, 保证对比口径一致"
-            >
-              <Plus className="h-3 w-3" />
-              批量创建账户
-            </button>
+            <div className="inline-flex items-center">
+              <button
+                onClick={() => setCreateOpen(true)}
+                className="flex items-center gap-1 rounded-btn bg-accent px-2.5 py-1 text-[11px] font-medium text-white transition-opacity hover:bg-accent/90"
+              >
+                <Plus className="h-3 w-3" />
+                批量创建账户
+              </button>
+              <MethodHelp label="批量账户对比口径"><p>同批账户使用相同的本金、费率与跟单参数，各绑定一条策略或监控规则。</p></MethodHelp>
+            </div>
             <button
               onClick={onCreateSingle}
               className="flex items-center gap-0.5 rounded-btn border border-border px-2 py-1 text-[11px] text-muted transition-colors hover:border-accent/40 hover:text-accent"
@@ -1917,7 +1932,6 @@ function BatchCreateModal({ onClose, onCreated }: { onClose: () => void; onCreat
         <div className="flex items-center gap-2">
           <GitCompare className="h-4 w-4 text-accent" />
           <h3 id="arena-create-title" className="text-sm font-semibold text-foreground">批量创建对比账户</h3>
-          <span className="text-[10px] text-muted">同本金 · 同费率 · 同跟单参数 — 口径一致由构造保证</span>
         </div>
 
         {/* 对比来源 */}
@@ -2477,12 +2491,7 @@ function AccountPanel({ acc, name, onDeleted }: { acc: string; name?: string; on
               profit_loss_ratio: stats?.profit_loss_ratio ?? null,
             }} />
             <div className="rounded-card border border-border/60 bg-base/40 p-3 text-[11px] leading-relaxed text-muted">
-              <div className="font-medium text-secondary">撮合口径</div>
-              <div className="mt-1">· 即时单: 交易时段按最新快照价 + 滑点成交</div>
-              <div>· 次日开盘 / 当日收盘单: 盘后管道按真实开盘/收盘价成交</div>
-              <div>· T+1: 当日买入次一交易日可卖</div>
-              <div>· 停牌顺延 3 日自动过期; 除权按因子调整数量与成本, 台账留痕</div>
-              <div className="mt-2 flex items-center justify-between border-t border-border/40 pt-2">
+              <div className="flex items-center justify-between">
                 <span title="开启后, 触及涨停的买入/触及跌停的卖出不再直接过期, 转次日开盘重试 (最多顺延 3 日)">
                   涨跌停排队次日重试
                 </span>

@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { MethodHelp } from '@/components/MethodHelp'
 import type { BoxOscillation, BoxOscillationResponse, KlinePeriod } from '@/lib/api'
 import { BOX_LEVEL_LABELS, KLINE_PERIOD_LABELS, boxStatusLabel,
   type BoxLevelFilter, type BoxOscillationView, type BoxStatusFilter } from '@/lib/useBoxOscillation'
@@ -6,6 +7,8 @@ import { BOX_LEVEL_LABELS, KLINE_PERIOD_LABELS, boxStatusLabel,
 const selectClass = 'min-w-0 rounded border border-border bg-base px-1.5 py-1 text-[11px] text-secondary outline-none focus:border-accent'
 const eventLabels = { breakout_pending: '越界待确认', breakout_confirmed: '突破确认', returned: '回到箱内' } as const
 const price = (value: number) => Number(value).toFixed(2)
+const calendarCoverageRule = '本地交易日历未覆盖全部历史，按已存有效交易记录计数，不补齐缺失 K 线。'
+const completedKlineRule = '未完成的日／周／月 K 线仅供展示，不参与触点、箱体或突破确认。'
 
 function BoxDetails({ box, allBoxes, config }: { box: BoxOscillation; allBoxes: BoxOscillation[]; config?: BoxOscillationResponse['config'] }) {
   const parent = allBoxes.find(item => item.id === box.parent_id)
@@ -47,6 +50,7 @@ function BoxDetails({ box, allBoxes, config }: { box: BoxOscillation; allBoxes: 
 export function BoxOscillationControls({ view }: { view: BoxOscillationView }) {
   const [expanded, setExpanded] = useState(false)
   const { period, enabled, report, query, selectedBox } = view
+  const diagnostics = [...new Set(report?.diagnostics)].filter(note => note !== calendarCoverageRule && note !== completedKlineRule)
   return (
     <div className="mb-1 min-w-0 px-1">
       <div className="flex flex-wrap items-center gap-1.5 text-[11px]">
@@ -56,8 +60,15 @@ export function BoxOscillationControls({ view }: { view: BoxOscillationView }) {
               className={`rounded px-2 py-0.5 ${period === key ? 'bg-accent/20 text-accent' : 'text-muted hover:text-secondary'}`}>{label}</button>
           ))}
         </div>
-        <button type="button" aria-pressed={enabled} onClick={() => view.setEnabled(!enabled)}
-          className={`rounded px-2 py-1 ${enabled ? 'bg-accent/20 text-accent' : 'bg-elevated text-muted'}`}>箱体</button>
+        <div className="inline-flex items-center gap-0.5">
+          <button type="button" aria-pressed={enabled} onClick={() => view.setEnabled(!enabled)}
+            className={`rounded px-2 py-1 ${enabled ? 'bg-accent/20 text-accent' : 'bg-elevated text-muted'}`}>箱体</button>
+          <MethodHelp label="箱体识别说明">
+            <p>{completedKlineRule}</p>
+            {report?.diagnostics.includes(calendarCoverageRule) && <p>{calendarCoverageRule}</p>}
+            <p>默认只列出收盘位于箱内或上下沿附近的结构。</p>
+          </MethodHelp>
+        </div>
         {enabled && <>
           <select aria-label="箱体大小" value={view.level} onChange={event => view.setLevel(event.target.value as BoxLevelFilter)} className={selectClass}>
             <option value="all">全部大小</option><option value="short">小箱体</option><option value="medium">中箱体</option><option value="long">大箱体</option>
@@ -72,17 +83,12 @@ export function BoxOscillationControls({ view }: { view: BoxOscillationView }) {
         </>}
       </div>
       {view.rangeError && <div role="alert" className="py-1 text-[11px] text-danger">{view.rangeError}</div>}
-      {enabled && <div role="status" className="flex flex-wrap gap-x-3 gap-y-1 py-1 text-[10px] text-muted">
-        {query.isLoading && <span>识别箱体中…</span>}
-        {query.isError && <><span className="text-danger">箱体读取失败</span><button type="button" className="text-accent" onClick={() => { void query.refetch() }}>重试</button></>}
-        {report && <span>{report.status === 'no_prices' ? '缺少本地历史K线' : report.status === 'insufficient_data' ? '已完成K线不足，暂不能确认箱体' : view.filteredBoxes.length === 0 ? '当前范围与筛选条件下没有箱体' : view.showAll ? `显示 ${view.filteredBoxes.length} 个箱体` : `${selectedBox ? `${BOX_LEVEL_LABELS[selectedBox.level]} · ${boxStatusLabel(selectedBox)} · ${selectedBox.duration_bars} 根` : ''}`}</span>}
-        {report && <span>已存历史 {report.history_start ?? '—'} 起 · 识别截止 {report.as_of ?? '—'}</span>}
-        {report?.diagnostics.map((message, index) => <span key={`${index}:${message}`}>{message}</span>)}
-        <span>按已完成{KLINE_PERIOD_LABELS[period]}识别；当前未完成K线仅供展示</span>
-        {!view.showDistant && <span>默认只列出收盘位于箱内或上下沿附近的结构</span>}
-      </div>}
-      {!enabled && period !== 'daily' && <div role="status" className="py-1 text-[10px] text-muted">
-        当前未完成{KLINE_PERIOD_LABELS[period]}仅供展示。{report?.diagnostics.join('；')}
+      {(enabled || (period !== 'daily' && diagnostics.length > 0)) && <div role="status" className="flex flex-wrap gap-x-3 gap-y-1 py-1 text-[10px] text-muted">
+        {enabled && query.isLoading && <span>识别箱体中…</span>}
+        {enabled && query.isError && <><span className="text-danger">箱体读取失败</span><button type="button" className="text-accent" onClick={() => { void query.refetch() }}>重试</button></>}
+        {enabled && report && <span>{report.status === 'no_prices' ? '缺少本地历史K线' : report.status === 'insufficient_data' ? '已完成K线不足，暂不能确认箱体' : view.filteredBoxes.length === 0 ? '当前范围与筛选条件下没有箱体' : view.showAll ? `显示 ${view.filteredBoxes.length} 个箱体` : `${selectedBox ? `${BOX_LEVEL_LABELS[selectedBox.level]} · ${boxStatusLabel(selectedBox)} · ${selectedBox.duration_bars} 根` : ''}`}</span>}
+        {enabled && report?.history_start && <span>已存历史 {report.history_start} 起{report.as_of ? ` · 识别截止 ${report.as_of}` : ''}</span>}
+        {diagnostics.map(note => <span key={note} className="text-warning">{note}</span>)}
       </div>}
       {enabled && expanded && report && <div className="mb-2 rounded border border-border bg-elevated/40 p-2">
         {view.filteredBoxes.length > 0 && <div className="flex flex-wrap items-center gap-2">

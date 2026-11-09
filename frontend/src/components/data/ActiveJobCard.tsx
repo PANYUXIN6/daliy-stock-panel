@@ -1,3 +1,4 @@
+import { MethodHelp } from '@/components/MethodHelp'
 import { useRef, useMemo, useEffect, useState } from 'react'
 import { motion } from 'framer-motion'
 import { Ban, Loader2, CheckCircle2, XCircle, X } from 'lucide-react'
@@ -125,8 +126,9 @@ export function ActiveJobCard({ job, onDismiss }: { job: PipelineJob; onDismiss?
           </div>
         </div>
         {!isDone && (
-          <div className="font-mono text-2xl font-bold tracking-tight">
-            {job.progress}<span className="text-[16px] leading-6 text-muted">%</span>
+          <div className="flex items-center gap-1">
+            <span className="font-mono text-2xl font-bold tracking-tight">{job.progress}<span className="text-[16px] leading-6 text-muted">%</span></span>
+            <MethodHelp label="总体进度口径"><p>总体进度按阶段推进，不代表剩余时间。</p></MethodHelp>
           </div>
         )}
         {isDone && onDismiss && <button type="button" aria-label="关闭任务详情" title="关闭详情，仍可在同步历史查看" onClick={onDismiss} className="rounded p-1 text-muted hover:text-foreground"><X className="h-4 w-4" /></button>}
@@ -141,7 +143,6 @@ export function ActiveJobCard({ job, onDismiss }: { job: PipelineJob; onDismiss?
               transition={{ duration: 0.4, ease: [0.16, 1, 0.3, 1] }}
             />
           </div>
-          <p className="mt-1 text-[10px] text-muted">总体进度按阶段推进，不代表剩余时间。</p>
           {job.stage_pct > 0 && (
             <div className="flex items-center justify-between mt-1">
               <span className="text-[10px] text-muted">当前阶段</span>

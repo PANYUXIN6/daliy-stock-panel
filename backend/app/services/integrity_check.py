@@ -77,7 +77,7 @@ def run_check(
     return report
 
 
-def _known_issues(root: Path, assets: list[str], end: date) -> list[data_integrity.IntegrityIssue]:
+def known_issues(root: Path, assets: list[str], end: date) -> list[data_integrity.IntegrityIssue]:
     grouped = {}
     for entry in daily_health.snapshot(root)["entries"]:
         if entry["asset_type"] in assets and entry["day"] <= end.isoformat():
@@ -98,7 +98,7 @@ def _make_report(root: Path, lookback_days: int, assets: list[str], end: date, i
     daily_health.record_scan(root, issues, assets=assets,
                             start=end - timedelta(days=lookback_days - 1), end=end)
     seen = {(i.table, i.day) for i in issues}
-    issues = [*issues, *(i for i in _known_issues(root, assets, end) if (i.table, i.day) not in seen)]
+    issues = [*issues, *(i for i in known_issues(root, assets, end) if (i.table, i.day) not in seen)]
     no_data = [a for a in assets if not any(
         p.is_dir() and p.name[5:] <= end.isoformat()
         for p in (root / ASSET_TABLES[a]).glob("date=*")
@@ -139,12 +139,12 @@ def run_repair(repo, capset, report_id: str, on_progress: Callable | None = None
     raw = _scan(root, days, assets, end, on_progress)
     _make_report(root, days, assets, end, raw)
     # 更早自检已发现的异常也会影响当前窗口, 逐日重读以区分取数和仅需重算。
-    for known in _known_issues(root, assets, end):
+    for known in known_issues(root, assets, end):
         current = data_integrity.inspect_daily_partition(root, known.table, known.day)
         found = [current] if current else []
         daily_health.record_scan(root, found, assets=[data_integrity.TABLE_FAMILY[known.table]],
                                 start=known.day, end=known.day)
-    issues = [i for i in _known_issues(root, assets, end) if _repairable(i)]
+    issues = [i for i in known_issues(root, assets, end) if _repairable(i)]
     if not issues:
         return run_check(root, lookback_days=days, asset_types=assets, end_date=end)
     backup_id = uuid.uuid4().hex

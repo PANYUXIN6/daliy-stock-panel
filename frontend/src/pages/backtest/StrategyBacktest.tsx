@@ -1,8 +1,9 @@
 import { BacktestEvidencePanel } from './components/BacktestEvidencePanel'
+import { MethodHelp } from '@/components/MethodHelp'
 import { OverlayFilterEditor } from '@/components/signals/OverlayFilterEditor'
 import { useState, useMemo, useEffect, useRef, useCallback, memo, type ReactNode } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { motion, AnimatePresence } from 'framer-motion'
+import { motion } from 'framer-motion'
 import { Play, FlaskConical, Clock, Loader2, Square, Search, Plus, X, SlidersHorizontal, BarChart3, Gauge, Zap, ListPlus, HelpCircle, ChevronRight, AlertTriangle, Layers, BookmarkPlus, Download } from 'lucide-react'
 import {
   api,
@@ -104,65 +105,6 @@ const quickRangeTitle = (range: QuickRangeConfig) => range.unit === 'all'
 
 const INPUT_CLS = `w-full px-2.5 py-1.5 rounded-input bg-surface border border-border text-xs
   focus:outline-none focus:border-accent transition-colors duration-150 ease-smooth`
-
-/** 成交时序说明 — 黄色问号图标, 点击弹出气泡。
- * 用 fixed 定位脱离父容器 overflow 裁剪(左侧表单是 overflow-y-auto, absolute 气泡会被裁)。 */
-function FillRuleHint() {
-  const [open, setOpen] = useState(false)
-  const [pos, setPos] = useState<{ top: number; left: number } | null>(null)
-  const iconRef = useRef<HTMLButtonElement>(null)
-
-  const handleOpen = () => {
-    if (!open && iconRef.current) {
-      const r = iconRef.current.getBoundingClientRect()
-      setPos({ top: r.bottom + 4, left: r.left })
-    }
-    setOpen(v => !v)
-  }
-
-  // 气泡宽度 256px(w-64), 若右侧超出视口则向左对齐
-  const bubbleLeft = pos ? Math.min(pos.left, window.innerWidth - 256 - 8) : 0
-
-  return (
-    <div className="relative inline-flex items-center">
-      <button
-        ref={iconRef}
-        type="button"
-        onClick={handleOpen}
-        aria-label="查看成交时序说明"
-        aria-expanded={open}
-        title="查看成交时序说明"
-        className="inline-flex h-3.5 w-3.5 items-center justify-center text-yellow-500/80 transition-colors hover:text-yellow-500"
-      >
-        <HelpCircle className="h-3.5 w-3.5" />
-      </button>
-      <AnimatePresence>
-        {open && pos && (
-          <>
-            <div className="fixed inset-0 z-40" onClick={() => setOpen(false)} />
-            <motion.div
-              initial={{ opacity: 0, y: -4, scale: 0.95 }}
-              animate={{ opacity: 1, y: 0, scale: 1 }}
-              exit={{ opacity: 0, y: -4, scale: 0.95 }}
-              transition={{ duration: 0.15 }}
-              style={{ top: pos.top, left: bubbleLeft }}
-              className="fixed z-50 w-64 bg-surface border border-border rounded-md shadow-xl p-3 text-[11px] text-secondary leading-relaxed"
-              onClick={e => e.stopPropagation()}
-            >
-              <div className="font-medium text-foreground mb-1.5">成交时序说明</div>
-              <div className="space-y-1">
-                <div><b className="text-foreground">建仓口径</b>和<b className="text-foreground">清仓口径</b>分别控制买卖信号出现后的成交时点。</div>
-                <div><b className="text-foreground">信号日收盘</b>仅适用于收盘前可确认的信号；收盘后确认的信号应选择<b className="text-foreground">次日开盘</b>。</div>
-                <div><b className="text-foreground">信号触发卖出</b>仅在分钟成交开启且卖出信号支持分钟回放时可用；分钟收盘确认后按下一分钟开盘成交。</div>
-                <div>买卖信号由<b className="text-foreground">策略触发器</b>决定，这里只控制信号出现后的成交时点。</div>
-              </div>
-            </motion.div>
-          </>
-        )}
-      </AnimatePresence>
-    </div>
-  )
-}
 
 const SRC_MAP: Record<string, string> = { builtin: '内置', custom: '自定义', ai: 'AI', composite: '叠加' }
 const TRADE_PAGE_SIZE_OPTIONS = [10, 20, 30, 50, 100]
@@ -1874,7 +1816,11 @@ export function StrategyBacktest({ loadCandidate, onLoadConsumed }: {
           <div>
             <div className="mb-1.5 flex items-center gap-1">
               <label className="text-xs font-medium text-secondary">建仓口径</label>
-              <FillRuleHint />
+              <MethodHelp label="查看成交时序说明">
+                <p>策略触发器决定何时产生信号，建仓和清仓口径分别决定信号出现后的成交时点。</p>
+                <p>信号日收盘适用于收盘前可确认的信号。收盘后确认的信号应选择次日开盘。</p>
+                <p>启用分钟成交且卖出信号支持分钟回放时，可选择信号触发卖出。分钟收盘确认后按下一分钟开盘成交。</p>
+              </MethodHelp>
             </div>
             {isMinuteStrategy ? (
               <div className={`${INPUT_CLS} flex items-center gap-1.5`} title="信号在盘中触发分钟成交，无次日开盘口径">
@@ -2811,7 +2757,6 @@ export function StrategyBacktest({ loadCandidate, onLoadConsumed }: {
               <div className="mb-4 rounded-btn border border-accent/25 bg-accent/5 px-3 py-2.5 text-[11px] leading-5 text-secondary">
                 <div className="font-medium text-foreground">触发 / 成交 / 仓位关系</div>
                 <div className="mt-1">触发器决定什么时候产生买卖信号；评分只在多个买点同时出现时排序。</div>
-                <div>成交口径可分别设置建仓/清仓：默认建仓次日开盘（避免未来函数）、清仓当日收盘（持仓中可盘中/收盘卖）。</div>
                 <div>退出优先级：止损/移动止损 &gt; 卖点信号 &gt; 到期平仓；到期只作兜底，不抢占卖点或风控。</div>
                 <div>最大持仓数控制同时持股数量，最大总仓位控制资金投入比例；剩余现金不等于可新增持仓名额。</div>
                 {matrixStrategy && <div className="text-accent">当前为 Matrix 策略，进出场信号由策略公式生成，不能用列信号覆盖。</div>}

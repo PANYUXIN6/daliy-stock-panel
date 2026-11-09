@@ -126,6 +126,10 @@ export function Data() {
     mutationFn: api.pipelineRun,
     onSuccess: trackModuleJob,
   })
+  const completeHistory = useMutation({
+    mutationFn: api.completeDataHistory,
+    onSuccess: trackModuleJob,
+  })
   const syncMinuteHistory = useMutation({
     mutationFn: (days: number) => api.syncMinute(days, false),
     onSuccess: trackModuleJob,
@@ -391,7 +395,7 @@ export function Data() {
   const s = status.data
   const isLoading = status.isLoading
   const isRunning = !!activeJobId && (!job.data || job.data.status === 'running' || job.data.status === 'pending')
-  const isStarting = startSync.isPending || syncMinuteHistory.isPending || syncClassifications.isPending || syncEtfReference.isPending || pipelineConfirmation.busy
+  const isStarting = startSync.isPending || completeHistory.isPending || syncMinuteHistory.isPending || syncClassifications.isPending || syncEtfReference.isPending || pipelineConfirmation.busy
   const collectionBusy = isRunning || isStarting || (!!liveId && !liveJobFinished) || syncIndexDaily.isPending || indexConfirmation.busy || refreshQuotes.isPending || quoteConfirmation.busy || updateDepth.isPending || depthConfirmation.busy
   const financialRunning = isRunning && job.data?.request_key?.startsWith('financial:') === true
   const minuteHistoryDays = prefs.data?.minute_sync_days ?? 5
@@ -692,12 +696,12 @@ export function Data() {
       <div ref={topRef} />
       <PageHeader
         title="数据"
-        subtitle="更新日常数据 · 补齐历史 · 查看可用状态"
+        subtitle="更新日常数据 · 检查并补齐历史 · 查看可用状态"
         className="flex-wrap pl-14 md:pl-5"
         right={
           <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
             {!hasData && !isLoading && (
-              <span className="text-xs text-accent animate-pulse">首次使用请选择更新日常数据或补齐历史</span>
+              <span className="text-xs text-accent animate-pulse">首次使用请选择更新日常数据或检查并补齐历史</span>
             )}
             {isRunning && !!activeJobId && (
               <button
@@ -863,14 +867,14 @@ export function Data() {
               },
               {
                 title: '历史数据',
-                label: '补齐历史',
-                description: '选择开始日期，统一补采股票与指数历史，并重算指标、市场环境和主线。',
-                detail: '用于首次准备长历史、修复缺口或雷达历史不足，无需再逐项重算。',
+                label: '检查并补齐历史',
+                description: '检查 2024-01-01 至今的股票、核心指数和已启用的 ETF 日线，补齐缺口及分析所需的数据。',
+                detail: '先检查本地数据，再补采并重算受影响的指标、市场环境和主线。当天正式日线于北京时间 16:00 后纳入检查。',
                 available: hasDailyBatchCap && hasAdjCap && !prefs.isLoading && !prefs.isError,
-                pending: false,
+                pending: completeHistory.isPending,
                 settings: null,
-                action: () => setShowRepair(true),
-                error: undefined,
+                action: () => completeHistory.mutate(),
+                error: completeHistory.error?.message,
               },
               {
                 title: '分钟历史数据',
@@ -899,6 +903,11 @@ export function Data() {
                   {module.pending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Play className="h-3.5 w-3.5" />}
                   {module.label}
                 </button>
+                {module.title === '历史数据' && <button type="button" onClick={() => setShowRepair(true)}
+                  disabled={!module.available || collectionBusy}
+                  className="mt-2 px-3 py-1.5 text-xs text-secondary hover:text-accent disabled:opacity-40">
+                  自选日期补齐
+                </button>}
                 {!module.available && !prefs.isLoading && <p className="mt-2 text-[10px] text-muted">当前数据源或配置暂不可用，请检查设置。</p>}
                 {module.error && <p role="alert" className="mt-2 text-xs text-danger">{module.error}</p>}
               </div>

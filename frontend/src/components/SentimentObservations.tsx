@@ -1,4 +1,5 @@
 import type { SentimentObservation, SentimentObservations as ObservationSet } from '@/lib/api'
+import { MethodHelp } from '@/components/MethodHelp'
 import { fmtBigNum } from '@/lib/format'
 
 const GROUPS = [
@@ -8,6 +9,18 @@ const GROUPS = [
   ['speculation', '短线投机', '涨跌停与连板结构，不代表全市场'],
   ['external', '补充数据', '尚无可用数据时不纳入判断'],
 ] as const
+export function SentimentObservationHelp({ data }: { data?: ObservationSet | null }) {
+  return <MethodHelp label="状态观察口径">
+    <p>各维度独立观察，不合成情绪总分。收盘落盘不代表全市场覆盖，各指标分母见有效样本。</p>
+    <p>分位使用观察日之前固定500个交易日，切换图表范围不改变分位。相同值按中位秩计入，常量序列为P50。高/低极端分别为分位≥90/≤10，持续天数仅描述历史。</p>
+    {GROUPS.map(([key, label, description]) => <p key={key}>{label} · {description}</p>)}
+    {data?.version === 'observations-v1' && <>
+      <p>本地自定义状态统计，不是论文复现或收益预测。{data.universe.exclude_st == null ? 'ST过滤口径未知。' : data.universe.exclude_st ? '剔除ST。' : '包含ST。'}{data.universe.suspension_rule}。</p>
+      {data.limitations.map(item => <p key={item}>{item}</p>)}
+    </>}
+  </MethodHelp>
+}
+
 export function observationValue(item: SentimentObservation, value = item.value, change = false): string {
   if (value == null || !Number.isFinite(value)) return '不可计算'
   const sign = change && value > 0 ? '+' : ''
@@ -26,18 +39,17 @@ export function SentimentObservations({ data, expectedDate, compact = false }: {
     <div className="flex flex-wrap gap-x-3 gap-y-1 text-muted">
       <span>数据日期 {data.as_of}</span><span>样本 {data.coverage.sample_count ?? '未知'} 家</span>{data.coverage.valid_change_count != null && <span>有效涨跌 {data.coverage.valid_change_count} 家</span>}
       {data.coverage.is_complete_day === false && <span className="text-warning">收盘口径尚未确认，分位不可计算</span>}
-      <span>收盘落盘不代表全市场覆盖，各指标分母见有效样本。</span>
       {expectedDate && expectedDate !== data.as_of && <span role="status" className="text-warning">日期不同：页面 {expectedDate}</span>}
       {!data.coverage.method_current && <span className="text-warning">历史口径尚未更新，指标不可计算</span>}
     </div>
-    {compact && <p className="text-secondary">{data.context.join('；') || '暂无可用状态摘要'}。各维度独立观察，不合成情绪总分。</p>}
-    {GROUPS.map(([key, label, description]) => {
+    {compact && <p className="text-secondary">{data.context.join('；') || '暂无可用状态摘要'}。</p>}
+    {GROUPS.map(([key, label]) => {
       const allItems = data.observations.filter(o => o.group === key)
       const compactKeys = ['up_pct', 'above_ma20_pct', 'total_amount', 'amount_ratio_5_20', 'index_position_60', 'limit_up_pct', 'seal_rate']
       const items = compact ? allItems.filter(o => compactKeys.includes(o.key)) : allItems
       if (!items.length) return null
       return <section key={key}>
-        <div className="mb-1 flex flex-wrap items-baseline gap-x-2"><h3 className="font-medium text-foreground">{label}</h3><span className="text-[10px] text-muted">{description}</span></div>
+        <h3 className="mb-1 font-medium text-foreground">{label}</h3>
         <div className="max-w-full overflow-x-auto" tabIndex={0} role="region" aria-label={`${label}指标表`}>
           <table className={`w-full whitespace-nowrap text-left text-[11px] ${compact ? '' : 'min-w-[640px]'}`}><thead className="text-[10px] text-muted"><tr><th className="py-1 font-normal">指标</th><th className="font-normal">原值</th><th className="font-normal">历史分位</th>{!compact && <><th className="font-normal">较5日前</th><th className="font-normal">极端持续</th><th className="font-normal">有效样本</th></>}</tr></thead>
             <tbody>{items.map(o => <tr key={o.key} className="border-t border-border/40">
@@ -51,7 +63,6 @@ export function SentimentObservations({ data, expectedDate, compact = false }: {
       </section>
     })}
     {compact && <p className="text-[10px] text-muted">融资、期权、行业ETF净申购：尚无可用数据。完整分项与变化见市场环境。</p>}
-    <p className="text-[10px] leading-4 text-muted">分位使用观察日之前固定500个交易日，切换图表范围不改变分位；相同值按中位秩计入，常量序列为P50。{ranked.length < available.length ? '部分指标历史不足或不可比，暂不提供分位（—）；原值仍独立展示。' : ''}{!compact && '高/低极端分别为分位≥90/≤10；持续天数仅描述历史。'}</p>
-    <details className="text-[10px] leading-5 text-muted"><summary className="cursor-pointer">方法与数据口径</summary><p>本地自定义状态统计，不是论文复现或收益预测。{data.universe.exclude_st == null ? 'ST过滤口径未知。' : data.universe.exclude_st ? '剔除ST。' : '包含ST。'}{data.universe.suspension_rule}。</p>{data.limitations.map(item => <p key={item}>{item}</p>)}</details>
+    {ranked.length < available.length && <p className="text-[10px] leading-4 text-muted">部分指标历史不足或不可比，暂不提供分位（—）；原值仍独立展示。</p>}
   </div>
 }

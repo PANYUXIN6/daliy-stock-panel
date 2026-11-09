@@ -1,25 +1,30 @@
+import { MethodHelp } from '@/components/MethodHelp'
 import { useEffect, useMemo, useRef } from 'react'
 import * as echarts from 'echarts/core'
 import { LineChart, BarChart } from 'echarts/charts'
-import { GridComponent, TooltipComponent, LegendComponent, DataZoomComponent } from 'echarts/components'
+import { GridComponent, TooltipComponent, LegendComponent, DataZoomComponent, MarkLineComponent } from 'echarts/components'
 import { CanvasRenderer } from 'echarts/renderers'
 import type { EChartsOption, LineSeriesOption, BarSeriesOption } from 'echarts'
 import { useChartTheme } from '@/lib/theme'
 
-echarts.use([LineChart, BarChart, GridComponent, TooltipComponent, LegendComponent, DataZoomComponent, CanvasRenderer])
+echarts.use([LineChart, BarChart, GridComponent, TooltipComponent, LegendComponent, DataZoomComponent, MarkLineComponent, CanvasRenderer])
 
 export interface FlowSeries {
   name: string
   data: (number | null)[]
   color: string
   type?: 'line' | 'bar'
-  index?: boolean
+  rightAxis?: boolean
   signed?: boolean
   stack?: string
+  pointColors?: (string | undefined)[]
+  dashed?: boolean
 }
 
-export function FlowChart({ title, labels, series, zoom = false, empty = '暂无数据' }: {
+export function FlowChart({ title, labels, series, zoom = false, empty = '暂无数据',
+  leftAxisName = '亿元', rightAxisName = '上证指数（点）', showLegend = true, referenceValue, help }: {
   title: string; labels: string[]; series: FlowSeries[]; zoom?: boolean; empty?: string
+  leftAxisName?: string; rightAxisName?: string; showLegend?: boolean; referenceValue?: number | null; help?: string
 }) {
   const container = useRef<HTMLDivElement>(null)
   const instance = useRef<echarts.ECharts | null>(null)
@@ -29,7 +34,7 @@ export function FlowChart({ title, labels, series, zoom = false, empty = '暂无
     animation: false,
     color: series.map(s => s.color),
     grid: { left: 12, right: 15, top: 64, bottom: zoom ? 42 : 16, containLabel: true },
-    legend: { type: 'scroll', top: 6, left: 10, right: 10, textStyle: { color: theme.text, fontSize: 10 },
+    legend: { show: showLegend, type: 'scroll', top: 6, left: 10, right: 10, textStyle: { color: theme.text, fontSize: 10 },
       pageTextStyle: { color: theme.text }, pageIconColor: theme.text },
     tooltip: { trigger: 'axis', confine: true, renderMode: 'richText',
       backgroundColor: theme.tooltipBg, borderColor: theme.tooltipBorder, textStyle: { color: theme.tooltipText },
@@ -38,24 +43,27 @@ export function FlowChart({ title, labels, series, zoom = false, empty = '暂无
       axisLabel: { color: theme.text, fontSize: 10, hideOverlap: true },
       axisLine: { lineStyle: { color: theme.border } }, axisTick: { show: false } },
     yAxis: [
-      { type: 'value', name: '亿元', nameTextStyle: { color: theme.text, fontSize: 10 },
+      { type: 'value', name: leftAxisName, nameTextStyle: { color: theme.text, fontSize: 10, align: 'left' },
         axisLabel: { color: theme.text, fontSize: 10 }, splitLine: { lineStyle: { color: theme.grid, type: 'dashed' } } },
-      { type: 'value', name: series.some(s => s.index) ? '指数点位' : '', show: series.some(s => s.index), scale: true,
-        nameTextStyle: { color: theme.text, fontSize: 10 }, axisLabel: { color: theme.text, fontSize: 10 }, splitLine: { show: false } },
+      { type: 'value', name: rightAxisName, show: series.some(s => s.rightAxis), scale: true,
+        nameTextStyle: { color: theme.text, fontSize: 10, align: 'right' }, axisLabel: { color: theme.text, fontSize: 10 }, splitLine: { show: false } },
     ],
     dataZoom: zoom ? [{ type: 'inside', filterMode: 'none' },
       { type: 'slider', height: 15, bottom: 0, showDetail: false, borderColor: 'transparent',
         textStyle: { color: theme.text }, fillerColor: theme.zoomFill }] : [],
-    series: series.map(s => {
-      const base = { name: s.name, yAxisIndex: s.index ? 1 : 0, stack: s.stack,
+    series: series.map((s, seriesIndex) => {
+      const base = { name: s.name, yAxisIndex: s.rightAxis ? 1 : 0, stack: s.stack,
         itemStyle: { color: s.color }, emphasis: { focus: 'series' as const } }
       if (s.type === 'bar') return { ...base, type: 'bar', barMaxWidth: 18,
-        data: s.data.map(v => s.signed && v != null ? { value: v, itemStyle: { color: v >= 0 ? '#ef6464' : '#35b88a' } } : v),
+        data: s.data.map((v, i) => v == null ? null : { value: v,
+          itemStyle: { color: s.pointColors?.[i] ?? (s.signed ? (v >= 0 ? '#ef6464' : '#35b88a') : s.color) } }),
+        markLine: seriesIndex === 0 && referenceValue != null ? { symbol: 'none', silent: true,
+          label: { show: false }, lineStyle: { type: 'dashed', color: '#d7a658' }, data: [{ yAxis: referenceValue }] } : undefined,
       } satisfies BarSeriesOption
       return { ...base, type: 'line', data: s.data, showSymbol: false, connectNulls: false,
-        lineStyle: { width: 1.8, color: s.color } } satisfies LineSeriesOption
+        lineStyle: { width: 1.8, color: s.color, type: s.dashed ? 'dashed' : 'solid' } } satisfies LineSeriesOption
     }),
-  }), [labels, series, theme, zoom])
+  }), [labels, series, theme, zoom, leftAxisName, rightAxisName, showLegend, referenceValue])
 
   useEffect(() => {
     if (!container.current || !hasData) return
@@ -68,7 +76,9 @@ export function FlowChart({ title, labels, series, zoom = false, empty = '暂无
   useEffect(() => { instance.current?.setOption(option, true) }, [option, hasData])
 
   return <section className="min-w-0 rounded-card border border-border bg-surface p-4" aria-label={title}>
-    <h3 className="text-sm font-semibold text-foreground">{title}</h3>
+    <div className="flex flex-wrap items-baseline justify-between gap-2"><div className="flex items-center gap-1"><h3 className="text-sm font-semibold text-foreground">{title}</h3>{help && <MethodHelp label={`${title}口径`}><p>{help}</p></MethodHelp>}</div>
+      {referenceValue != null && <span className="font-mono text-xs text-accent">最新值 {referenceValue.toFixed(1)} 亿</span>}
+    </div>
     {hasData ? <div key="chart" ref={container} className="mt-3 h-[290px] w-full sm:h-[320px]" role="img" aria-label={`${title}，${labels[0] ?? ''}至${labels.at(-1) ?? ''}`} />
       : <div key="empty" role="status" className="flex h-[290px] items-center justify-center text-xs text-muted sm:h-[320px]">{empty}</div>}
   </section>

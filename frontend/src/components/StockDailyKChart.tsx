@@ -6,6 +6,7 @@ import { useTheme } from '@/lib/theme'
 import { klineDailyQueryOptions } from '@/lib/kline'
 import { storage } from '@/lib/storage'
 import { getKlineDefaultRange, KLINE_PERIOD_LABELS, useBoxOscillation } from '@/lib/useBoxOscillation'
+import { MethodHelp } from '@/components/MethodHelp'
 import { BoxOscillationControls } from '@/components/BoxOscillationControls'
 import {
   EChartsCandlestick,
@@ -261,9 +262,14 @@ export function StockDailyKChart({
               onClick={() => toggleIndicator(ind.key)}
             />
           ))}
-          {isDaily && <ChartPill active={showEarnings} label="业绩断层" activeClass="bg-accent/20 text-accent"
-            title="正式财报版：业绩断层、缺口回踩、中点回踩；按当时可用版本计算"
-            onClick={() => setShowEarnings(v => !v)} />}
+          {isDaily && <div className="inline-flex items-center">
+            <ChartPill active={showEarnings} label="业绩断层" activeClass="bg-accent/20 text-accent"
+              onClick={() => setShowEarnings(v => !v)} />
+            <MethodHelp label="业绩断层识别口径">
+              <p>使用当时可用的正式财报版本计算业绩断层、缺口回踩和中点回踩。</p>
+              <p>首次历史回填沿用财务版本库的保守日期，缺失依据不补信号，后续修订不撤销旧断层。</p>
+            </MethodHelp>
+          </div>}
           {activeIndicators.includes('vol') && (
             <div className="ml-0.5 flex h-5 items-center gap-1.5 border-l border-border/70 pl-2">
               <span className="text-[10px] text-muted">量比</span>
@@ -330,7 +336,6 @@ export function StockDailyKChart({
             : ({ no_versions: '暂无财务版本，请在数据页同步财务', data_insufficient: '没有满足条件且当时可用的财报依据，暂不生成信号',
               no_calendar: '缺少本地交易日历', no_prices: '缺少历史日K', unsupported: '仅支持股票正式财报' }[report.status])}
           </span>}
-          <span title="首次历史回填沿用财务版本库的保守日期，缺失依据不补信号，后续修订不撤销旧断层">当时可用版本 · 保守历史口径</span>
         </div>
       )}
       {isDaily && <div className="flex flex-wrap items-center gap-x-3 gap-y-1 px-1 py-1 text-[10px] text-muted" role="status">

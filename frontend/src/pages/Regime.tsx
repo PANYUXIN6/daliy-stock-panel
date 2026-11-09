@@ -25,7 +25,8 @@ import { useCurrentUser } from '@/lib/auth'
 import { useChartTheme } from '@/lib/theme'
 import { toast } from '@/components/Toast'
 import { Modal } from '@/components/Modal'
-import { SentimentObservations } from '@/components/SentimentObservations'
+import { MethodHelp } from '@/components/MethodHelp'
+import { SentimentObservationHelp, SentimentObservations } from '@/components/SentimentObservations'
 import { cn } from '@/lib/cn'
 
 const STATE_ORDER: RegimeState[] = ['strong', 'lean_strong', 'range', 'lean_weak', 'weak', 'unavailable']
@@ -126,12 +127,13 @@ function useEChart(
 }
 
 // ── 页内通用 SectionTitle (对齐 Dashboard 渐变竖条风格) ────
-function SectionTitle({ icon: Icon, title, hint }: { icon: typeof Activity; title: string; hint?: ReactNode }) {
+function SectionTitle({ icon: Icon, title, hint, help }: { icon: typeof Activity; title: string; hint?: ReactNode; help?: string }) {
   return (
     <div className="flex items-center gap-2">
       <span className="h-3 w-0.5 rounded-full bg-gradient-to-b from-accent to-accent/30" />
       <Icon className="h-3.5 w-3.5 text-accent" />
       <h2 className="text-xs font-semibold text-foreground">{title}</h2>
+      {help && <MethodHelp label={`${title}说明`}><p>{help}</p></MethodHelp>}
       {hint != null && <span className="ml-auto text-[10px] text-muted font-mono">{hint}</span>}
     </div>
   )
@@ -757,12 +759,13 @@ export function Regime() {
       )}
 
       {latest && <details className={cn(cardCls, 'p-3')}>
-        <summary className="cursor-pointer text-xs font-medium text-foreground">状态分项 · {selRow?.date ?? latest.date} · 原值、固定500日分位与变化</summary>
+        <summary className="cursor-pointer text-xs font-medium text-foreground">状态分项 · {selRow?.date ?? latest.date}</summary>
         <div className="my-3 flex flex-wrap items-center gap-2 text-xs text-muted">
           <label htmlFor="observation-date">观察日期</label>
           <select id="observation-date" className="rounded border border-border bg-base p-1" value={selRow?.date ?? latest.date} onChange={e => setSelDate(e.target.value)}>
             {[...rows].reverse().map(row => <option key={row.date} value={row.date}>{row.date}</option>)}
           </select>
+          <SentimentObservationHelp data={observationData} />
         </div>
         {observations.isPending ? <p role="status" className="text-xs text-muted">状态观察加载中…</p>
           : observations.isError ? <p role="alert" className="text-xs text-warning">状态观察加载失败。<button type="button" className="ml-2 underline" onClick={() => void observations.refetch()}>重试观察</button></p>
@@ -841,7 +844,7 @@ export function Regime() {
       {phaseStats && phaseStreak && (
         <div className={cn(cardCls, 'p-3')}>
           <SectionTitle icon={Flame} title="阶段历史统计"
-            hint="所选范围内的描述统计，边界阶段可能未完整结束；不代表未来转移概率" />
+            help="所选范围内的描述统计，边界阶段可能未完整结束；不代表未来转移概率" />
           <div className="mt-2 flex flex-wrap items-center gap-x-6 gap-y-2 text-[11px]">
             <span className="text-secondary">
               <span style={{ color: MARKET_PHASE_COLORS[phaseStreak.phase], fontWeight: 600 }}>
@@ -877,7 +880,7 @@ export function Regime() {
       {hasPhaseData && rows.length > 0 && (
         <div className={cn(cardCls, 'p-3')}>
           <SectionTitle icon={Flame} title="短线投机阶段时间轴"
-            hint="堆叠柱=涨停(首板+2板+) · 高度(红) · 晋级率(蓝) · ▲切换 · 点击日期回看当日" />
+            help="堆叠柱=涨停(首板+2板+) · 高度(红) · 晋级率(蓝) · ▲切换 · 点击日期回看当日" />
           {/* 当日快照: 点击图表日期出现 — 阶段/梯队指标/当日主线 top3 一屏回看 */}
           {selRow && (
             <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1.5 rounded-md border border-accent/25 bg-accent/5 px-2.5 py-1.5">
@@ -934,7 +937,7 @@ export function Regime() {
       {segments.length > 0 && (
         <div className={cn(cardCls, 'p-3')}>
           <SectionTitle icon={Layers} title="阶段 × 主线"
-            hint={`${segments.length} 段 · 主线按段内 top5 天数排序`} />
+            hint={`${segments.length} 段`} help="主线按阶段内进入前五名的天数排序。" />
           {/* 最大高度内滚动: 段数多时不再拉长页面; 表头吸顶保证滚动时列名可见。
               border-separate 是 sticky 前提 — Chromium 在 border-collapse:collapse
               (preflight 默认) 下表格元素 sticky 失效; spacing-0 保持视觉不变。 */}
@@ -995,7 +998,7 @@ export function Regime() {
       {/* ── 主线排行 (窗口内持续性) ── */}
       <div className={cn(cardCls, 'p-3')}>
         <SectionTitle icon={Layers} title="主线排行"
-          hint={<span className="hidden sm:inline text-[9px] text-muted">{mainline.data?.membership_note}</span>}
+          help={mainline.data?.membership_note}
         />
         <div className="mt-2 flex items-center gap-2">
           <div className="flex items-center rounded-btn border border-border bg-base/60 p-0.5">
@@ -1162,7 +1165,7 @@ export function Regime() {
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
         <div className={cn(cardCls, 'p-3 lg:col-span-2')}>
           <SectionTitle icon={Activity} title="环境自定义参考分趋势"
-            hint="自定义参考分(粗) · 涨跌强弱/投机/抗跌/趋势(细, 可点图例切换) · 背景色=状态" />
+            help="自定义参考分(粗) · 涨跌强弱/投机/抗跌/趋势(细, 可点图例切换) · 背景色=状态" />
           <div ref={trendRef} className="mt-2 h-[320px]" />
         </div>
         <div className={cn(cardCls, 'p-3')}>

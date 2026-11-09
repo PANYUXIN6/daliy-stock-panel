@@ -102,6 +102,22 @@ def test_merge_backfills_details_into_legacy_schema(tmp_path):
 # ── 变化判定: enriched 局部重算的触发精度 ───────────────────────────
 
 
+def test_history_completion_only_adds_missing_factors(tmp_path):
+    out = tmp_path / "all.parquet"
+    day = date(2026, 6, 26)
+    first, second = "600519.SH", "000001.SZ"
+    _atomic_write_parquet(pl.DataFrame([_detail_row(symbol=first, td=day, f=1.02)]), out)
+    upstream = pl.DataFrame([
+        _detail_row(symbol=first, td=day, f=1.04),
+        _detail_row(symbol=second, td=day, f=1.03),
+    ])
+    assert _merge_adj_factor_store(out, upstream, only_missing=True) == (1, [second])
+    assert dict(pl.read_parquet(out).select("symbol", "ex_factor").iter_rows()) == {first: 1.02, second: 1.03}
+    before = out.read_bytes()
+    assert _merge_adj_factor_store(out, upstream, only_missing=True) == (0, [])
+    assert out.read_bytes() == before
+
+
 def test_merge_detail_only_backfill_reports_no_changed_symbols(tmp_path):
     """扩表后重拉全历史: 因子值全部未变, 只是补明细 → 不触发任何 enriched 重算。"""
     out = tmp_path / "all.parquet"

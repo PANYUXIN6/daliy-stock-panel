@@ -208,7 +208,9 @@ it('isolates daily prices during index changes and keeps the current index durin
 })
 
 it('周月线使用所选指数的聚合K线，点击最后交易日打开分时，切换指数不透传旧数据', async () => {
-  fixtures.boxes.mockImplementation(async (symbol: string, period: string) => ({ symbol, period, status: 'ready', boxes: [], diagnostics: ['未完成周期仅供展示'],
+  const method = '未完成的日／周／月 K 线仅供展示，不参与触点、箱体或突破确认。'
+  const missing = '日历范围内有 2 个交易日无有效记录（可能停牌或缺采），不补点；请核对本地数据完整性。'
+  fixtures.boxes.mockImplementation(async (symbol: string, period: string) => ({ symbol, period, status: 'ready', boxes: [], diagnostics: [method, missing],
     rows: [{ date: period === 'weekly' ? '2026-09-11' : '2026-09-30', open: 3000, high: 3100, low: 2900, close: 3050, volume: 12 }] }))
   await act(async () => root.render(<MemoryRouter><QueryClientProvider client={client}><Indices /></QueryClientProvider></MemoryRouter>))
   await settle()
@@ -219,7 +221,13 @@ it('周月线使用所选指数的聚合K线，点击最后交易日打开分时
   await click('周K')
   expect(fixtures.boxes).toHaveBeenCalledWith('000001.SH', 'weekly', expect.objectContaining({ start: expect.stringMatching(/^2021-/) }))
   expect(host.querySelector<HTMLElement>('[data-daily-chart]')?.dataset.close).toBe('3050')
-  expect(host.textContent).toContain('未完成周期仅供展示')
+  expect(host.textContent).not.toContain(method)
+  expect(host.querySelector('[role="status"]')?.textContent).toContain(missing)
+  const help = host.querySelector<HTMLButtonElement>('[aria-label="箱体识别说明"]')!
+  await act(async () => help.click())
+  const tooltip = document.querySelector('[role="tooltip"]')
+  expect(tooltip?.textContent).toContain(method)
+  expect(tooltip?.textContent).not.toContain(missing)
   const start = host.querySelector<HTMLInputElement>('[aria-label="K线起始日期"]')!
   await act(async () => {
     Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(start, '2024-01-01')

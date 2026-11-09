@@ -19,7 +19,7 @@ import {
 } from './widgets'
 import type { DashboardItem, WidgetType } from './layout'
 import { SentimentRadar } from '@/components/SentimentRadar'
-import { SentimentObservations } from '@/components/SentimentObservations'
+import { SentimentObservationHelp, SentimentObservations } from '@/components/SentimentObservations'
 import { ExternalLinkWidget } from './ExternalLinkWidget'
 
 /** 渲染上下文: 数据切片与交互回调(由 Dashboard 页提供, 组件不自取数据) */
@@ -168,7 +168,7 @@ export const WIDGET_DEFS: WidgetDef[] = [
     id: 'radar', label: '情绪雷达', icon: Sparkles, minW: 3, minH: 7, defW: 4, defH: 8,
     render: ctx => sectionCard(
       <>
-        <SectionTitle icon={Sparkles} title="情绪雷达" hint="各维度独立观察" />
+        <SectionTitle icon={Sparkles} title="情绪雷达" help={<SentimentObservationHelp data={ctx.data.sentiment} />} />
         <SentimentRadar data={ctx.data.sentiment} />
         <SentimentObservations data={ctx.data.sentiment} expectedDate={ctx.data.as_of ?? undefined} compact />
       </>,

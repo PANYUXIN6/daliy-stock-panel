@@ -3873,6 +3873,7 @@ export const api = {
     ),
 
   dataStatus: () => request<DataStatus>('/api/data/status'),
+  completeDataHistory: () => request<{ job_id: string }>('/api/data/history/complete', { method: 'POST' }),
   collectionSyncCheck: (input: CollectionSyncRequest) =>
     request<CollectionSyncCheck>('/api/data/sync-check', { method: 'POST', body: JSON.stringify(input) }),
   dataIntegrity: () => request<{
@@ -4825,6 +4826,15 @@ export interface PipelineJob {
     /** 单标的、指定日期的分钟补采行数。 */
     rows?: number
     skipped_stages?: string[]
+    history_completion?: {
+      start_date: string
+      end_date: string
+      today_deferred: boolean
+      daily_rows: number
+      factor_rows: number
+      unverified_days: number
+      unverified_rows: number
+    }
     analysis?: {
       as_of: string
       is_complete_day: boolean

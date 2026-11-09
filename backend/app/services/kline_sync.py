@@ -220,8 +220,18 @@ def sync_daily_batch(symbols: list[str],
     failed_out: 可选出参。拉取失败的分块标的会追加进该 list, 供上层判定「部分失败」
                 而非静默当成功(某分块断网 → 这些标的本轮未更新, 保持旧数据)。
     """
+    out = list(_iter_tickflow_daily_frames(
+        symbols, count=count, batch_size=batch_size, rpm=rpm, start_time=start_time,
+        end_time=end_time, on_chunk_done=on_chunk_done, failed_out=failed_out, coverage=coverage,
+    ))
+    return pl.concat(out, how="diagonal_relaxed") if out else pl.DataFrame()
+
+
+def _iter_tickflow_daily_frames(symbols, *, count=None, batch_size=None, rpm=None,
+                               start_time=None, end_time=None, on_chunk_done=None,
+                               failed_out=None, coverage=None):
+    """逐批产生标准日线，使多年精准补数可以边核对边暂存。"""
     tf = get_client()
-    out: list[pl.DataFrame] = []
     chunks = chunked(symbols, batch_size)
     failed_syms: list[str] = []
 
@@ -261,10 +271,14 @@ def sync_daily_batch(symbols: list[str],
         seg = _compact_klines_to_df(raw)
         if not seg.is_empty():
             seg = seg.with_columns(_timestamp_to_beijing_datetime(pl.col("timestamp")).alias("datetime")).drop("timestamp")
-            out.append(_normalize_daily(seg, coverage=coverage))
+            normalized = _normalize_daily(seg, coverage=coverage)
+        else:
+            normalized = None
 
         if on_chunk_done:
             on_chunk_done(i + 1, len(chunks))
+        if normalized is not None:
+            yield normalized
 
     # 部分失败可见化: 聚合一条 WARNING(而非只有逐块 debug/warning), 并回传出参。
     if failed_syms:
@@ -274,11 +288,6 @@ def sync_daily_batch(symbols: list[str],
                        len(failed_syms), len(symbols), failed_syms[:10])
         if failed_out is not None:
             failed_out.extend(failed_syms)
-
-    if not out:
-        return pl.DataFrame()
-    return pl.concat(out, how="diagonal_relaxed")
-
 
 def iter_custom_daily_frames(provider, symbols, *, asset_type="stock", **kwargs):
     """复用流式/单帧插件契约; 旧股票插件可继续省略 asset_type 参数。"""
@@ -327,14 +336,12 @@ def iter_daily_frames(
         raise DailySourceUnavailableError("当前日K数据源不可用, 请检查数据源配置")
     limit = resolve_limit(capset, Cap.KLINE_DAILY_BATCH, default_batch=100)
     failures: list[str] = []
-    frame = sync_daily_batch(
+    yield from _iter_tickflow_daily_frames(
         symbols, start_time=start_time, end_time=end_time,
         batch_size=limit.batch, rpm=limit.rpm, on_chunk_done=on_chunk_done, failed_out=failures,
     )
     if failures:
         raise RuntimeError(f"日K获取失败: {', '.join(failures[:10])}")
-    if not frame.is_empty():
-        yield frame
 
 
 def sync_and_persist_daily_batch(
@@ -652,7 +659,7 @@ def _align_adj_factor_frame(df: pl.DataFrame) -> pl.DataFrame:
     return df.select(["symbol", "trade_date", "ex_factor", *ADJ_DETAIL_COLS])
 
 
-def _merge_adj_factor_store(out: Path, new_data: pl.DataFrame) -> tuple[int, list[str]]:
+def _merge_adj_factor_store(out: Path, new_data: pl.DataFrame, *, only_missing: bool = False) -> tuple[int, list[str]]:
     """合并写入 adj_factor 的 all.parquet, 返回 (新增行数, 因子发生变化的 symbol 列表)。
 
     how="diagonal" 兼容存量三列 schema (旧行明细自动为 null);
@@ -665,10 +672,21 @@ def _merge_adj_factor_store(out: Path, new_data: pl.DataFrame) -> tuple[int, lis
     """
     out.parent.mkdir(parents=True, exist_ok=True)
     new_data = _align_adj_factor_frame(new_data)
+    if only_missing and new_data.filter(
+        pl.col("symbol").is_null() | pl.col("trade_date").is_null()
+        | (~pl.col("ex_factor").is_finite() | (pl.col("ex_factor") <= 0)).fill_null(True),
+    ).height:
+        raise ValueError("除权因子来源返回了无效记录，未写入数据")
     if not out.exists():
         _atomic_write_parquet(new_data.sort(["symbol", "trade_date"]), out)
         return new_data.height, sorted(new_data["symbol"].unique().to_list())
     existing = pl.read_parquet(out)
+    if only_missing:
+        existing = _align_adj_factor_frame(existing)
+        valid = existing.filter(pl.col("ex_factor").is_finite() & (pl.col("ex_factor") > 0))
+        new_data = new_data.join(valid.select("symbol", "trade_date"), on=["symbol", "trade_date"], how="anti")
+        if new_data.is_empty():
+            return 0, []
     before = existing.height
     # ex_factor 变化判定 (明细回填不算): 与存量按 (symbol, trade_date) 对齐,
     # 旧值缺失 (新事件) 或值差超容差即视为变化。
@@ -677,7 +695,7 @@ def _merge_adj_factor_store(out: Path, new_data: pl.DataFrame) -> tuple[int, lis
         on=["symbol", "trade_date"], how="left", suffix="_old",
     ).filter(
         pl.col("ex_factor_old").is_null()
-        | ((pl.col("ex_factor") - pl.col("ex_factor_old")).abs() > 1e-9)
+        | (~pl.col("ex_factor_old").is_finite() | ((pl.col("ex_factor") - pl.col("ex_factor_old")).abs() > 1e-9))
     )
     changed_symbols = sorted(set(diffed["symbol"].to_list()))
     merged = pl.concat([existing, new_data], how="diagonal").unique(
@@ -693,7 +711,8 @@ def sync_adj_factor(symbols: list[str], repo: KlineRepository,
                     end_time: datetime | None = None,
                     on_chunk_done: Callable[[int, int], None] | None = None,
                     asset_type: str = "stock",
-                    require_complete: bool = False) -> tuple[int, list[str]]:
+                    require_complete: bool = False,
+                    only_missing: bool = False) -> tuple[int, list[str]]:
     """同步除权因子(Starter+)。SDK 接口:`tf.klines.ex_factors(symbols=...)`。
 
     支持增量: 传 start_time/end_time 只拉取该时间范围内的新除权事件。
@@ -703,6 +722,21 @@ def sync_adj_factor(symbols: list[str], repo: KlineRepository,
     """
     if not symbols:
         return 0, []
+
+    def commit(new_data: pl.DataFrame) -> tuple[int, list[str]]:
+        if only_missing:
+            new_data = _align_adj_factor_frame(new_data)
+            selected = pl.col("symbol").is_in(symbols)
+            if start_time:
+                selected &= pl.col("trade_date") >= start_time.date()
+            if end_time:
+                selected &= pl.col("trade_date") <= end_time.date()
+            new_data = new_data.filter(selected.fill_null(True))
+            if new_data.is_empty():
+                return 0, []
+        factor_dir = "adj_factor_etf" if asset_type == "etf" else "adj_factor"
+        return _merge_adj_factor_store(repo.store.data_dir / factor_dir / "all.parquet", new_data,
+                                       only_missing=only_missing)
 
     provider_name = preferences.get_adj_factor_provider()
     if provider_name != "tickflow":
@@ -734,11 +768,7 @@ def sync_adj_factor(symbols: list[str], repo: KlineRepository,
                 else:
                     return 0, []
             else:
-                factor_dir = "adj_factor_etf" if asset_type == "etf" else "adj_factor"
-                added, affected = _merge_adj_factor_store(
-                    repo.store.data_dir / factor_dir / "all.parquet", new_data
-                )
-                return added, affected
+                return commit(new_data)
         elif require_complete:
             raise RuntimeError(f"数据源 {provider_name} 未提供可用除权因子")
         # 自定义源未配置 adj_factor → 回退 TickFlow
@@ -800,8 +830,7 @@ def sync_adj_factor(symbols: list[str], repo: KlineRepository,
 
     new_data = pl.concat(all_dfs, how="diagonal_relaxed") if len(all_dfs) > 1 else all_dfs[0]
 
-    factor_dir = "adj_factor_etf" if asset_type == "etf" else "adj_factor"
-    added, affected = _merge_adj_factor_store(repo.store.data_dir / factor_dir / "all.parquet", new_data)
+    added, affected = commit(new_data)
     logger.info("adj_factor merged: +%d new rows, %d changed symbols, %d fetched / %d symbols",
                 added, len(affected), new_data.height, len(symbols))
     return added, affected

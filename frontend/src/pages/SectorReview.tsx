@@ -4,6 +4,7 @@ import { useQuery } from '@tanstack/react-query'
 import { RefreshCw } from 'lucide-react'
 import { api, type SectorReviewMode, type SectorReviewParams, type SectorReviewRow } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
+import { MethodHelp } from '@/components/MethodHelp'
 import { PageHeader } from '@/components/PageHeader'
 import { SectorReviewDetails } from '@/components/sector-review/SectorReviewDetails'
 import { amount, CLASSIFICATIONS, pct, pp, ratio, reasonCounts, truth } from '@/components/sector-review/format'
@@ -103,7 +104,16 @@ export function SectorReview() {
         {data?.coverage.market_exclusions && <p className="text-muted">市场样本形成时排除：{reasonCounts(data.coverage.market_exclusions)}</p>}
         {query.isFetching && data && <p role="status" className="text-accent">正在刷新，暂保留本次上下文的上一份结果…</p>}
       </div>
-      <div className="flex flex-wrap gap-2" role="tablist" aria-label="复盘视图">{([['event', '事件共振跟踪'], ['countertrend', '调整逆势']] as const).map(([value, label]) => <button key={value} role="tab" aria-selected={mode === value} className={`rounded-lg px-4 py-2 text-sm ${mode === value ? 'bg-accent text-white' : 'bg-surface text-secondary border border-border'}`} onClick={() => changeMode(value)}>{label}</button>)}</div>
+      <div className="flex flex-wrap items-center gap-2">
+        <div className="flex flex-wrap gap-2" role="tablist" aria-label="复盘视图">{([['event', '事件共振跟踪'], ['countertrend', '调整逆势']] as const).map(([value, label]) => <button key={value} role="tab" aria-selected={mode === value} className={`rounded-lg px-4 py-2 text-sm ${mode === value ? 'bg-accent text-white' : 'bg-surface text-secondary border border-border'}`} onClick={() => changeMode(value)}>{label}</button>)}</div>
+        <MethodHelp label="板块复盘计算口径">
+          <p>规则 {data?.rules_version ?? 'sector-review-v2'}。成员在事件T−1或逆势窗口前一交易日形成，需21个连续正式收盘价及20日成交额，形成后保留缺数成员。板块每日等权，收益复合计算。相对净值收益=(1+板块收益)/(1+基准收益)−1。</p>
+          <p>事件成交额基线固定为T前20日，逆势基线为各评价日前20日，均不含评价当日。下跌日统计以同窗口指数下跌日为条件分母。成交额扩张和资金净流入是不同指标。条件分为满足、不满足、未知，数据完整性单独列示。</p>
+          <p>历史结果按当前数据重算，分类和复权修订可能改变结果。成员详情展示历史证据，可通过「查看当前行情」查看最新行情。规则仅用于描述历史表现。</p>
+          {data?.response_overview?.overlap_note && <p>{data.response_overview.overlap_note}</p>}
+          <p>分类观察时间 {data?.membership_observed_at ?? '—'} · 分类版本 {data?.membership_fingerprint ?? '—'} · 输入快照 {data?.snapshot_id ?? '—'} · 计算时间 {data?.computed_at ?? '—'}</p>
+        </MethodHelp>
+      </div>
       <div className="flex flex-wrap items-center gap-3 text-xs">
         {mode === 'event' ? <><label className="flex items-center gap-2">观察截至S<input className={inputClass} aria-label="观察截至日S" type="date" value={viewAsOf} min={day} max={followup.at(-1) ?? info?.calendar?.end} onChange={e => update({ view_as_of: e.target.value })} /></label><button className="text-accent disabled:text-muted" disabled={!latestObservation} onClick={() => update({ view_as_of: latestObservation ?? day })}>观察到T+3或最近完整日</button>{!data?.response_overview?.window_finished && <span className="text-muted">观察窗口未结束</span>}</> : <label className="flex items-center gap-2">窗口<select className={inputClass} aria-label="逆势窗口" value={window} onChange={e => update({ window: e.target.value })}>{[5, 10, 20, 60].map(n => <option value={n} key={n}>{n}个交易日</option>)}</select></label>}
       </div>
@@ -112,7 +122,7 @@ export function SectorReview() {
         <div className="grid grid-cols-2 gap-3 md:grid-cols-4">{[['当日收益', pct(data.benchmark_evidence.day_return)], ['事前5 / 20日收益', `${pct(data.benchmark_evidence.pre_returns['5'])} / ${pct(data.benchmark_evidence.pre_returns['20'])}`], ['盘中最低相对昨收 / 收盘位置', `${pct(data.benchmark_evidence.low_vs_prev_close)} / ${pct(data.benchmark_evidence.close_position)}`], ['较此前20日成交额 / 前20日收盘高点', `${ratio(data.benchmark_evidence.amount_ratio)} / ${data.benchmark_evidence.prior20_close_high?.toFixed(2) ?? '—'}`]].map(([label, value]) => <div key={label}><p className="text-muted">{label}</p><p className="mt-1 font-mono text-foreground">{value}</p></div>)}</div>
         {mode === 'event' && <p className="leading-6">下探收复昨收且扩额：{truth(data.benchmark_evidence.labels.reclaim_with_expansion)} · 回落后上涨且扩额：{truth(data.benchmark_evidence.labels.rebound_with_expansion)} · 突破此前20日收盘高点且扩额：{truth(data.benchmark_evidence.labels.breakout20_with_expansion)}</p>}
         <p className="text-muted">宽基ETF旁证：{data.etf?.reason ?? '尚未提供'}</p>
-        {data.response_overview && <p className="border-t border-border pt-3 leading-6">T日共振候选 {data.response_overview.same_day_candidates} 个 · 各日确定首次走强：{Object.entries(data.response_overview.first_strength_counts).map(([d, n]) => `${d} ${n}个`).join('；')}<br /><span className="text-muted">{data.response_overview.overlap_note}</span></p>}
+        {data.response_overview && <p className="border-t border-border pt-3 leading-6">T日共振候选 {data.response_overview.same_day_candidates} 个 · 各日确定首次走强：{Object.entries(data.response_overview.first_strength_counts).map(([d, n]) => `${d} ${n}个`).join('；')}</p>}
       </section>}
       <div className="flex flex-wrap items-center gap-3 text-xs">
         <label className="flex items-center gap-2">{mode === 'event' ? '候选' : '区间状态'}<select aria-label="结果筛选" className={inputClass} value={filter} onChange={e => setFilter(e.target.value)}>{mode === 'event' ? <><option value="default">已入选</option><option value="false">未入选</option><option value="unknown">待判定</option></> : <><option value="default">逆势上涨与相对抗跌</option>{Object.entries(CLASSIFICATIONS).map(([v, label]) => <option value={v} key={v}>{label}</option>)}</>}<option value="all">全部（含未达比较下限）</option></select></label>
@@ -130,7 +140,6 @@ export function SectorReview() {
           <td className="px-3 py-3">{mode === 'event' ? pct(row.background?.['20'].relative_return) : <>{row.down_days.wins}/{row.down_days.comparable_days} · 共 {row.down_days.benchmark_down_days ?? '未知'} 天<p className="mt-1 text-muted">{row.down_days.complete ? '下跌日统计完整' : '可比较子样本'}{row.down_days.small_sample ? ' · 样本少' : ''}</p></>}</td><td className="px-3 py-3">{mode === 'event' ? <>{streak(row)}<br />{pp(row.latest.breadth_diff)}</> : pp(row.down_days.mean_excess)}</td><td className="px-3 py-3">{pct(row.member_up_ratio)} / {pct(row.member_median_return)}</td><td className="px-3 py-3">{mode === 'event' ? pp(row.latest.share_delta) : amount(row.latest.amount)}</td><td className="px-3 py-3">形成 {row.formed_members}/{row.original_members}<p className="mt-1 text-muted">{row.data_complete ? '证据完整' : '数据不足'}{!row.eligible_for_comparison ? ' · 未达下限' : ''}</p></td></tr>{expanded?.context === contextKey && expanded.sector === row.sector_id && <tr><td colSpan={8} className="p-3">{details(row)}</td></tr>}</Fragment>)}</tbody></table></>}
       </div>
       <div className="space-y-3 md:hidden">{rows.map(row => <section className="rounded-lg border border-border bg-surface p-3 text-xs" key={row.sector_id}><button className="w-full text-left" aria-expanded={expanded?.context === contextKey && expanded.sector === row.sector_id} onClick={() => toggle(row)}><div className="flex justify-between gap-2"><strong className="text-accent">{row.name}</strong><span>{CLASSIFICATIONS[row.classification]}</span></div><p className="mt-2">板块 {pct(row.sector_return)} · 基准 {pct(row.benchmark_return)} · 相对 {pct(row.relative_return)}</p><p className="mt-2 text-muted">{mode === 'event' ? firstStrength(row) : `下跌日跑赢 ${row.down_days.wins}/${row.down_days.comparable_days} · 指数下跌共 ${row.down_days.benchmark_down_days ?? '未知'} 天`}</p><p className="mt-2 text-muted">形成成员 {row.formed_members}/{row.original_members} · {row.data_complete ? '证据完整' : '数据不足'} · 点击展开</p></button>{expanded?.context === contextKey && expanded.sector === row.sector_id && <div className="mt-3">{details(row)}</div>}</section>)}</div>
-      <details className="rounded-lg border border-border p-4 text-xs leading-6 text-muted"><summary className="cursor-pointer text-secondary">计算口径与版本</summary><p className="mt-2">规则 {data?.rules_version ?? 'sector-review-v2'}。成员在事件T−1或逆势窗口前一交易日形成，需21个连续正式收盘价及20日成交额；形成后不因缺失删除成员。板块每日等权，收益复合计算。相对净值收益=(1+板块收益)/(1+基准收益)−1。</p><p>事件成交额基线固定为T前20日，逆势基线为各评价日前20日；不含评价当日。下跌日统计只以同窗口指数下跌日为条件分母。“成交额扩张”不等于净流入。三值条件：满足／不满足／未知；数据完整性独立列示。</p><p>历史结果按当前数据重新计算，分类和复权修订可能改变结果。成员详情为历史证据，“查看当前行情”为独立入口。当前规则用于描述，不代表预测、交易胜率或仓位建议。</p><p>分类观察时间 {data?.membership_observed_at ?? '—'} · 分类版本 {data?.membership_fingerprint ?? '—'} · 输入快照 {data?.snapshot_id ?? '—'} · 计算时间 {data?.computed_at ?? '—'}</p></details>
     </div>
   </div>
 }

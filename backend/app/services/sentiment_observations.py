@@ -186,6 +186,21 @@ def load_observation(data_dir: Path, target_date: str | None = None) -> dict | N
     return copy.deepcopy(values.get(target_date or max(values)))
 
 
+def analysis_readiness(data_dir: Path, target_date: str | None = None) -> dict | None:
+    observation = load_observation(data_dir, target_date)
+    if observation is None or not observation["coverage"]["method_current"]:
+        return None
+    axes = {"up_pct", "above_ma20_pct", "total_amount", "index_position_60", "limit_up_pct", "seal_rate"}
+    radar = [item for item in observation["observations"] if item["key"] in axes]
+    return {
+        "as_of": observation["as_of"],
+        "is_complete_day": observation["coverage"]["is_complete_day"],
+        "radar_ready": len(radar) == len(axes) and all(item["percentile"] is not None for item in radar),
+        "radar_history_min": min((item["history_sample_count"] for item in radar), default=0),
+        "radar_history_max": max((item["history_sample_count"] for item in radar), default=0),
+    }
+
+
 @lru_cache(maxsize=8)
 def _current_observation(key: tuple, serialized_row: str) -> dict:
     from datetime import date

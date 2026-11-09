@@ -31,6 +31,21 @@ class IntegrityRepairIn(BaseModel):
     report_id: str = Field(pattern=r"^[a-f0-9]{32}$")
 
 
+@router.post("/history/complete")
+async def complete_history(request: Request) -> dict:
+    from app.api.pipeline import _submit_job, finalize_market_data
+    from app.services.history_completion import complete_history as run_completion
+
+    state = request.app.state
+    repo = state.repo
+    qs = getattr(state, "quote_service", None)
+    return await _submit_job(
+        repo, qs, lambda progress: lambda: run_completion(repo, state.capabilities, progress),
+        request_key="daily_integrity_complete_history",
+        finalize=lambda: finalize_market_data(repo, qs, extra_datasets=("daily_integrity",)),
+    )
+
+
 async def _start_integrity_job(request: Request, operation: Callable, *, repair: bool) -> dict:
     from app.api.pipeline import _submit_job, finalize_market_data
     from app.services.shared_runtime import publish_data_update

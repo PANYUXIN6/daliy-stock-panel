@@ -114,6 +114,20 @@ def record_issues(root: Path, issues) -> None:
         _save(root, old, [*entries, *found.values()])
 
 
+def record_recompute(root: Path, asset_type: str, day: date, symbols: list[str | None]) -> None:
+    """登记已存在日线的待重算依赖，保留同一标的尚未修复的日线异常。"""
+    with _LOCK:
+        old = snapshot(root)
+        entries = {_key(e): e for e in old["entries"]}
+        for symbol in symbols:
+            key = (asset_type, day.isoformat(), symbol)
+            entries.setdefault(key, {
+                "asset_type": asset_type, "day": day.isoformat(), "symbol": symbol,
+                "needs_raw": False, "needs_enriched": True, "kind": "missing", "reason": "指标待重算",
+            })
+        _save(root, old, list(entries.values()))
+
+
 def record_scan(root: Path, issues, *, assets: list[str], start: date, end: date) -> None:
     found = _issue_entries(issues)
     with _LOCK:

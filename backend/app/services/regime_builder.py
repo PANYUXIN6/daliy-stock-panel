@@ -779,7 +779,7 @@ def latest_phase_transition(data_dir: Path) -> tuple[str, str, str] | None:
 
 
 def compute_regime_incremental(repo, data_dir: Path, *, today: date | None = None,
-                               refresh_today: bool = False) -> pl.DataFrame:
+                               refresh_today: bool = False, refresh_from: date | None = None) -> pl.DataFrame:
     """增量计算 regime(供 daily_pipeline / 启动补算调用)。
 
     双检测: 1) 缺口(enriched 有但 regime 没有) 2) stale(enriched 被覆写)。
@@ -796,7 +796,8 @@ def compute_regime_incremental(repo, data_dir: Path, *, today: date | None = Non
     # stale: enriched 覆写过
     stale = detect_stale_dates(data_dir, repo)
 
-    to_compute = sorted(d for d in set(missing) | set(stale) if d <= today)
+    requested = {day for day in enriched_dates if day >= refresh_from} if refresh_from is not None else set()
+    to_compute = sorted(d for d in set(missing) | set(stale) | requested if d <= today)
     if refresh_today and today in enriched_dates:
         to_compute = sorted(set(to_compute) | {today})
     if not to_compute:

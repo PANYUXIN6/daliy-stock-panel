@@ -12,7 +12,9 @@ export const STAGE_LABELS: Record<string, string> = {
   resolve_universe: '解析标的池',
   sync_instruments: '同步个股维表',
   sync_daily: '同步日 K',
+  integrity_check: '检查历史数据',
   sync_adj: '同步除权因子',
+  sync_adj_factor: '核对除权因子',
   compute_enriched: '计算技术指标',
   sync_index: '同步核心指数与 ETF',
   prefetch_index: '预取核心指数',
@@ -110,6 +112,7 @@ export function ActiveJobCard({ job, onDismiss }: { job: PipelineJob; onDismiss?
   const duration = job.duration_s ?? elapsedSeconds(job.started_at, now)
   const updated = job.last_progress_at ?? job.log?.at(-1)?.ts
   const updateAge = elapsedSeconds(updated, now)
+  const history = job.result?.history_completion
 
   return (
     <div className={`rounded-card border ${meta.border} ${meta.bg} p-5`}>
@@ -153,6 +156,14 @@ export function ActiveJobCard({ job, onDismiss }: { job: PipelineJob; onDismiss?
       )}
 
       {updated && <div className="mb-3 text-[10px] text-muted">最后更新 {formatLogTime(updated)}{!isDone && updateAge != null ? ` · ${updateAge} 秒前` : ''}</div>}
+
+      {job.status === 'succeeded' && history && <div className="mb-3 rounded-btn border border-border bg-base/40 p-3 text-xs leading-5">
+        <p className="text-foreground">已检查 {history.start_date} 至 {history.end_date}</p>
+        <p className="text-secondary">补齐或修正 {history.daily_rows.toLocaleString()} 条日线，新增 {history.factor_rows.toLocaleString()} 条除权因子。</p>
+        {history.unverified_days > 0 && <p className="text-warning">有 {history.unverified_days.toLocaleString()} 个日期的开市状态待核实。</p>}
+        {history.unverified_rows > 0 && <p className="text-warning">有 {history.unverified_rows.toLocaleString()} 条标的日线缺少来源证据，无法确认是否应有数据。</p>}
+        {history.today_deferred && <p className="text-secondary">当天尚未到正式日线检查时间。</p>}
+      </div>}
 
       {job.status === 'succeeded' && job.result?.analysis && <div className="mb-3 rounded-btn border border-border bg-base/40 p-3 text-xs leading-5">
         <p className="text-foreground">行情与关联分析已更新 · {job.result.analysis.as_of}</p>

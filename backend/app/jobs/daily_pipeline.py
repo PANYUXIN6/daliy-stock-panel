@@ -1051,20 +1051,12 @@ def _run_now(
         raise PipelineStageError(stage_errors)
 
     if with_analysis:
-        from app.services.sentiment_observations import load_observation
+        from app.services.sentiment_observations import analysis_readiness
 
-        observation = load_observation(repo.store.data_dir)
-        if observation is None or not observation["coverage"]["method_current"]:
+        analysis = analysis_readiness(repo.store.data_dir)
+        if analysis is None:
             raise DailyCoverageError("市场环境尚未生成有效结果，请检查行情和指标数据")
-        axes = {"up_pct", "above_ma20_pct", "total_amount", "index_position_60", "limit_up_pct", "seal_rate"}
-        radar = [item for item in observation["observations"] if item["key"] in axes]
-        result["analysis"] = {
-            "as_of": observation["as_of"],
-            "is_complete_day": observation["coverage"]["is_complete_day"],
-            "radar_ready": len(radar) == 6 and all(item["percentile"] is not None for item in radar),
-            "radar_history_min": min((item["history_sample_count"] for item in radar), default=0),
-            "radar_history_max": max((item["history_sample_count"] for item in radar), default=0),
-        }
+        result["analysis"] = analysis
 
     # 发布市场数据不依赖可选的 AI 文本生成，也不增加缺口补齐门禁。
     from app.services.review_publication import publish_review_if_ready

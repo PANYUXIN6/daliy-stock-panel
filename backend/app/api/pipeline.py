@@ -64,14 +64,15 @@ async def trigger_pipeline_job(repo, capset, quote_service=None, *, postmarket: 
     )
 
 
-def finalize_market_data(repo, quote_service=None, *, include_minute: bool = False) -> None:
+def finalize_market_data(repo, quote_service=None, *, include_minute: bool = False,
+                         extra_datasets: tuple[str, ...] = ()) -> None:
     """更新与历史补数共用退出刷新；部分写入也发布，任务终态仍由异常决定。"""
     from app.services.shared_runtime import publish_data_update, publish_quotes
 
     repo.refresh_cache()
     if quote_service is not None:
         publish_quotes(quote_service)
-    datasets = ["daily", "enriched", "regime", "mainline", "ext_data"]
+    datasets = ["daily", "enriched", "regime", "mainline", "ext_data", *extra_datasets]
     if include_minute:
         datasets.append("minute")
     publish_data_update(repo.store.data_dir, datasets)

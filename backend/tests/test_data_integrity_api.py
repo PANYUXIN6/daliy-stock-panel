@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import time
 from contextlib import contextmanager
-from datetime import date
+from datetime import date, datetime
 from types import SimpleNamespace
 
 import polars as pl
@@ -67,6 +67,87 @@ def finished(store, jid):
             return job
         time.sleep(0.01)
     raise AssertionError("job did not finish")
+
+
+def test_complete_history_repairs_sparse_partitions_before_analysis(app_env, monkeypatch):
+    import json
+
+    from app.market_time import CN_TZ
+    from app.services import history_completion, kline_sync, regime_builder
+    from app.services.index_const import CORE_INDEX_SYMBOLS
+
+    app, store, root, paused = app_env
+    repo = app.state.repo
+    old, recent, today = date(2025, 6, 10), date(2026, 11, 6), date(2026, 11, 9)
+    a, b = "600001.SH", "600002.SH"
+
+    def rows(day, symbols, *, close=10.0, ts=None):
+        return pl.DataFrame({"symbol": list(symbols), "date": [day] * len(symbols)}).with_columns(
+            pl.lit(close).alias("open"), pl.lit(close + 1).alias("high"), pl.lit(close - 1).alias("low"),
+            pl.lit(close).alias("close"), pl.lit(100.0).alias("volume"), pl.lit(1000.0).alias("amount"),
+            pl.lit(ts, dtype=pl.Int64).alias("quote_ts"),
+        )
+
+    monkeypatch.setattr(history_completion, "cn_now", lambda: datetime(2026, 11, 9, 11, tzinfo=CN_TZ))
+    monkeypatch.setattr(trading_day, "calendar_status", lambda root: {
+        "start": "2024-01-01", "end": today.isoformat(), "days": [str(old), str(recent), str(today)],
+    })
+    monkeypatch.setattr(history_completion, "_classification_gaps", lambda *_: 0)
+    monkeypatch.setattr(kline_sync, "sync_adj_factor", lambda *_, **__: (0, []))
+    monkeypatch.setattr(preferences, "get_daily_data_provider", lambda: "tickflow")
+    instruments = pl.DataFrame({"symbol": [a, b], "as_of": [today, today],
+                                "listing_date": [old, old], "name": ["甲", "乙"]})
+    (root / "instruments").mkdir(exist_ok=True)
+    instruments.write_parquet(root / "instruments/instruments.parquet")
+    monkeypatch.setattr(repo, "get_instruments_asset", lambda asset: instruments if asset == "stock" else pl.DataFrame())
+    repo.append_daily(rows(old, [a]))
+    repo.append_daily(rows(recent, [a, b]))
+    repo.append_daily(rows(recent, [a], ts=int(datetime(2026, 11, 6, 11, tzinfo=CN_TZ).timestamp() * 1000)))
+    repo.append_daily(rows(today, [a, b]))
+    repo.append_index_daily(rows(old, CORE_INDEX_SYMBOLS))
+    repo.append_index_daily(rows(recent, CORE_INDEX_SYMBOLS))
+    today_path = root / f"kline_daily/date={today}/part.parquet"
+    before_today = today_path.read_bytes()
+    requests = []
+
+    def fetch(symbols, _caps, *, asset_type, start_time, end_time, **_):
+        requests.append((asset_type, start_time.date(), end_time.date()))
+        if asset_type == "stock":
+            yield rows(old, [a, b], close=22.0)
+            yield rows(recent, [a, b], close=21.0)
+            yield rows(today, [a, b], close=88.0)
+
+    monkeypatch.setattr(kline_sync, "iter_daily_frames", fetch)
+    with TestClient(app) as client:
+        response = client.post("/api/data/history/complete")
+        assert response.status_code == 200
+        result = finished(store, response.json()["job_id"])
+        assert result["status"] == "succeeded", result["error"]
+        assert result["result"]["history_completion"] == {
+            "start_date": "2024-01-01", "end_date": "2026-11-08", "today_deferred": True,
+            "daily_rows": 2, "factor_rows": 0, "unverified_days": 0, "unverified_rows": 0,
+        }
+        assert result["result"]["analysis"]["is_complete_day"] is True
+        assert paused == ["pause", "resume"]
+        assert set(json.loads((root / "runtime/data_update.json").read_text())["datasets"]) == {
+            "daily", "enriched", "regime", "mainline", "ext_data", "daily_integrity",
+        }
+        history = regime_builder.load_regime_history(root).filter(pl.col("date") == old)
+        assert history["total_count"].item() == 2
+        older_path = root / f"kline_daily/date={old}/part.parquet"
+        assert dict(pl.read_parquet(older_path).select("symbol", "close").iter_rows()) == {a: 10.0, b: 22.0}
+        latest = pl.read_parquet(root / f"kline_daily/date={recent}/part.parquet").sort("symbol")
+        assert latest["close"].to_list() == [21.0, 10.0]
+        assert latest["quote_ts"].null_count() == 2
+        assert today_path.read_bytes() == before_today
+
+        original = older_path.read_bytes()
+        repeated = client.post("/api/data/history/complete")
+        result = finished(store, repeated.json()["job_id"])
+        assert result["status"] == "succeeded", result["error"]
+        assert result["result"]["history_completion"]["daily_rows"] == 0
+        assert requests == [("stock", old, recent)]
+        assert older_path.read_bytes() == original
 
 
 def test_api_scan_and_repair_publish_rechecked_report(app_env, monkeypatch):

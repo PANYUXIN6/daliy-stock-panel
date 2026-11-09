@@ -42,7 +42,8 @@ def plan_daily_repair(issues) -> list[DailyRepairTarget]:
             for (asset, day), symbols in sorted(grouped.items())]
 
 
-def repair_integrity_issues(repo, capset, issues, *, backup_dir: Path, on_progress=None) -> dict:
+def repair_integrity_issues(repo, capset, issues, *, backup_dir: Path, on_progress=None,
+                            fetch_daily=None) -> dict:
     """精准修补编排: 所有源数据先暂存校验, 再写原始日K, 最后重算并发布依赖。
 
     普通同步/旧的手动范围回补仍调用原有管道。本入口只处理已经确认的异常,
@@ -56,6 +57,7 @@ def repair_integrity_issues(repo, capset, issues, *, backup_dir: Path, on_progre
 
     root = Path(repo.store.data_dir)
     targets = plan_daily_repair(issues)
+    fetch_daily = fetch_daily or kline_sync.iter_daily_frames
     staging = root / ".daily_repair_staging" / backup_dir.name
     removals = {}
     repo._validate_repair_path(staging)
@@ -82,7 +84,7 @@ def repair_integrity_issues(repo, capset, issues, *, backup_dir: Path, on_progre
                      f"获取 {target_day} 日K批次 {cur}/{total}", stage_pct=int(100 * cur / total) if total else 0)
 
             frames = []
-            for incoming in kline_sync.iter_daily_frames(
+            for incoming in fetch_daily(
                 symbols, capset, start_time=datetime.combine(target.day, datetime.min.time(), tzinfo=CN_TZ),
                 end_time=datetime.combine(target.day, datetime.max.time(), tzinfo=CN_TZ), asset_type=target.asset_type,
                 on_chunk_done=progress,
@@ -115,21 +117,26 @@ def repair_integrity_issues(repo, capset, issues, *, backup_dir: Path, on_progre
             if not frame.is_empty() and data_integrity.inspect_daily_partition(staging, daily_dirname(target.asset_type), target.day):
                 raise ValueError(f"数据源返回的 {target.day} 日K未通过复检, 未写入正式数据")
 
-        for i, target in enumerate(targets):
-            emit("sync_daily", 45 + int(10 * i / max(len(targets), 1)), f"写入已校验的 {target.day} 修补日K")
-            table = daily_dirname(target.asset_type)
-            frame = pl.read_parquet(staging / table / f"date={target.day}/part.parquet")
-            repo.replace_daily_rows(target.asset_type, target.day, frame,
-                                    symbols=list(target.symbols) if target.symbols is not None else None,
-                                    backup_dir=backup_dir / table / f"date={target.day}",
-                                    remove_symbols=removals[target])
-            if removals[target]:
-                emit("sync_daily", 55, f"已备份并清理 {target.day} 的非交易遗留记录 ({len(removals[target])} 只)")
-            remaining = data_integrity.inspect_daily_partition(root, table, target.day)
-            if remaining is not None:
-                raise ValueError(f"{target.day} 日K仍未通过校验, 未进入指标计算")
-            daily_health.record_scan(root, [], assets=[target.asset_type], start=target.day, end=target.day)
-            repo.rebuild_views()
+        raw_changed = False
+        try:
+            for i, target in enumerate(targets):
+                emit("sync_daily", 45 + int(10 * i / max(len(targets), 1)), f"写入已校验的 {target.day} 修补日K")
+                table = daily_dirname(target.asset_type)
+                frame = pl.read_parquet(staging / table / f"date={target.day}/part.parquet")
+                repo.replace_daily_rows(target.asset_type, target.day, frame,
+                                        symbols=list(target.symbols) if target.symbols is not None else None,
+                                        backup_dir=backup_dir / table / f"date={target.day}",
+                                        remove_symbols=removals[target])
+                raw_changed = True
+                if removals[target]:
+                    emit("sync_daily", 55, f"已备份并清理 {target.day} 的非交易遗留记录 ({len(removals[target])} 只)")
+                remaining = data_integrity.inspect_daily_partition(root, table, target.day)
+                if remaining is not None:
+                    raise ValueError(f"{target.day} 日K仍未通过校验, 未进入指标计算")
+                daily_health.record_scan(root, [], assets=[target.asset_type], start=target.day, end=target.day)
+        finally:
+            if raw_changed:
+                repo.rebuild_views()
 
         # 每只股票各自的最早异常日起点; 只有无法定位的整日异常才扩大到整类资产。
         handled = {(data_integrity.TABLE_FAMILY[i.table], i.day.isoformat()) for i in issues}

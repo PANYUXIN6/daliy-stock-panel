@@ -24,7 +24,7 @@ const mocks = vi.hoisted(() => ({
   syncMinuteSingle: vi.fn(), regimeMainline: vi.fn(), regimeRecompute: vi.fn(),
   regimeMainlineRecompute: vi.fn(), mainlineFilterUpdate: vi.fn(), extDataPresetFetch: vi.fn(),
   syncIndexDaily: vi.fn(), quoteStatus: vi.fn(), preferences: vi.fn(), capabilities: vi.fn(),
-  dataStatus: vi.fn(), pipelineRun: vi.fn(), updateInstrumentsSchedule: vi.fn(),
+  dataStatus: vi.fn(), pipelineRun: vi.fn(), completeDataHistory: vi.fn(), updateInstrumentsSchedule: vi.fn(),
   updateDepthPollingInterval: vi.fn(),
   runLimitLadderFix: vi.fn(), capabilityMatrix: vi.fn(),
   updatePipelineRegimeEnabled: vi.fn(),
@@ -76,6 +76,7 @@ beforeEach(() => {
   mocks.pipelineJobs.mockResolvedValue({ active_id: null, jobs: [] })
   mocks.regimeCoverage.mockResolvedValue({ rows: 0 })
   mocks.pipelineRun.mockResolvedValue({ job_id: 'pipeline-new' })
+  mocks.completeDataHistory.mockResolvedValue({ job_id: 'history-completion' })
   mocks.syncMinute.mockResolvedValue({ job_id: 'minutes-batch-new', status: 'started' })
   mocks.extDataPresetsSync.mockResolvedValue({ job_id: 'classifications-new', reused: false })
   mocks.syncEtfReference.mockResolvedValue({ job_id: 'etf-reference-new', reused: false })
@@ -301,6 +302,24 @@ it('进度查询失败显示可重试提示，恢复后继续展示同一后台�
   expect(host.textContent).not.toContain('后台任务可能仍在执行')
 })
 
+it('一键检查历史启动后台任务，并显示实际补齐和待核实数量', async () => {
+  mocks.pipelineJob.mockResolvedValue({
+    id: 'history-completion', status: 'succeeded', request_key: 'daily_integrity_complete_history',
+    stage: 'done', progress: 100, log: [], result: {
+      history_completion: { start_date: '2024-01-01', end_date: '2026-11-08', today_deferred: true,
+        daily_rows: 42, factor_rows: 2, unverified_days: 0, unverified_rows: 3 },
+    },
+  })
+  await render(<Data />)
+  await act(async () => button('检查并补齐历史').click())
+  await settle()
+  expect(mocks.completeDataHistory).toHaveBeenCalledOnce()
+  expect(mocks.pipelineJob).toHaveBeenCalledWith('history-completion')
+  expect(host.textContent).toContain('已检查 2024-01-01 至 2026-11-08')
+  expect(host.textContent).toContain('补齐或修正 42 条日线')
+  expect(host.textContent).toContain('3 条标的日线缺少来源证据')
+})
+
 it('失败详情保留供查看，停止请求失败在确认框中显示原因', async () => {
   mocks.pipelineJob.mockResolvedValue({ id: 'pipeline-new', status: 'failed', stage: 'sync_daily', progress: 30, stage_pct: 20, log: [], error: '当日正式日线尚未齐全' })
   await render(<Data />)
@@ -426,7 +445,7 @@ it.each(['succeeded', 'failed'] as const)('保留 %s 详情时，修正与重算
   mocks.pipelineJob.mockResolvedValue({ id: 'finished', status, stage: 'done', progress: 100, log: [] })
   await render(<Data />)
   expect(host.querySelector('[aria-label="关闭任务详情"]')).not.toBeNull()
-  await act(async () => button('补齐历史').click())
+  await act(async () => button('自选日期补齐').click())
   await settle()
   expect(button('开始补齐').disabled).toBe(false)
   const repairTitle = [...host.querySelectorAll('h3')].find(node => node.textContent === '补齐历史')!
@@ -475,7 +494,7 @@ async function openDataSettings(title: string) {
 it('历史补齐统一提交任务，失败原因可见且保留日期供重试', async () => {
   mocks.repairDaily.mockRejectedValueOnce(new Error('日线来源暂不可用'))
   await render(<Data />)
-  await act(async () => button('补齐历史').click())
+  await act(async () => button('自选日期补齐').click())
   await settle()
   expect(host.textContent).toContain('已有数据按股票和日期合并，无需先清除；分钟历史单独更新')
   await act(async () => button('开始补齐').click())
@@ -496,7 +515,7 @@ it.each([
 ] as const)('查看历史详情后显式启动 %s，立即跟踪新任务并恢复后续任务跟踪', async (entry, jobId) => {
   await selectHistoricalJob()
   if (entry === 'repair') {
-    await act(async () => button('补齐历史').click())
+    await act(async () => button('自选日期补齐').click())
     await settle()
     await act(async () => button('开始补齐').click())
   } else if (entry === 'daily-settings') {

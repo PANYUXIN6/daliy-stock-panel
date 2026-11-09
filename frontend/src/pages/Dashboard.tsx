@@ -1,4 +1,4 @@
-import { lazy, Suspense, useState, useCallback, useMemo } from 'react'
+import { useState, useCallback, useMemo } from 'react'
 import { useCurrentUser } from '@/lib/auth'
 import { useQuery } from '@tanstack/react-query'
 import { Check, Gauge, GripVertical, Info, Loader2, RefreshCw, RotateCcw, Timer } from 'lucide-react'
@@ -15,8 +15,6 @@ import { AddWidgetPanel } from '@/components/dashboard/AddWidgetPanel'
 import { useDashboardLayout } from '@/components/dashboard/useDashboardLayout'
 import { DEFAULT_LAYOUT, widgetDef, type WidgetCtx } from '@/components/dashboard/registry'
 import { cloneItems, GRID_COLS, type WidgetType } from '@/components/dashboard/layout'
-
-const EtfReferenceChart = lazy(() => import('@/components/dashboard/EtfReferenceChart'))
 
 /** 打开个股预览的来源榜 (用于行高亮与切股导航列表) */
 type PreviewSource = 'gain' | 'loss' | 'amount' | 'active' | 'concept' | 'industry' | 'alert'
@@ -61,11 +59,6 @@ export function Dashboard() {
     queryFn: () => api.overviewMarket(selectedDate),
     staleTime: 5_000,
   })
-  const etfReference = useQuery({
-    queryKey: QK.etfReference(selectedDate),
-    queryFn: () => api.etfReference(selectedDate),
-    staleTime: 60 * 60_000,
-  })
   const data = overview.data
   const caps = useCapabilities()
   const hasDepth = !!caps.data?.capabilities?.['depth5.batch']
@@ -75,7 +68,6 @@ export function Dashboard() {
   const handleRefresh = () => {
     setManualFetching(true)
     void overview.refetch().finally(() => setManualFetching(false))
-    void etfReference.refetch()
   }
 
   if (overview.isLoading && !data) {
@@ -194,11 +186,6 @@ export function Dashboard() {
       )}
 
       <DashboardGrid ctx={widgetCtx} items={dashItems.filter(item => isAdmin || item.t !== 'monitor')} onItemsChange={setDashItems} editing={dashEditing} />
-
-      <Suspense fallback={<div className="mt-1.5 h-[260px] rounded-card border border-border bg-surface/80" />}>
-        <EtfReferenceChart data={etfReference.data} loading={etfReference.isLoading}
-          error={etfReference.isError} onRetry={() => { void etfReference.refetch() }} />
-      </Suspense>
 
       <StockPreviewDialog
         symbol={previewStock?.symbol ?? null}

@@ -55,9 +55,9 @@ export default function EtfReferenceChart({ data, loading, error, onRetry }: {
 
   const latest = rows?.at(-1)
   return (
-    <section className="mb-1.5 min-w-0 overflow-hidden rounded-card border border-border bg-surface/80 p-2 shadow-[0_1px_2px_hsl(var(--border)/0.4)]" aria-label="国家队持仓占比参考">
+    <section className="min-w-0 overflow-hidden rounded-card border border-border bg-surface p-4" aria-label="国家队持仓占比参考">
       <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1 px-1">
-        <h2 className="flex items-center gap-1.5 text-xs font-semibold text-foreground">
+        <h2 className="flex items-center gap-1.5 text-sm font-semibold text-foreground">
           <LineChart className="h-3.5 w-3.5 text-accent" />国家队持仓占比参考
         </h2>
         <div className="flex items-baseline gap-3">

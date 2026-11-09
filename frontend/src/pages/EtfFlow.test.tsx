@@ -4,22 +4,25 @@ import { createRoot, type Root } from 'react-dom/client'
 import { MemoryRouter } from 'react-router-dom'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
-import type { EtfFlowBoard } from '@/lib/api'
+import type { EtfFlowBoard, EtfReference } from '@/lib/api'
 import { EtfFlow } from './EtfFlow'
 
 const fixtures = vi.hoisted(() => ({
-  load: vi.fn(), sync: vi.fn(), admin: false,
+  load: vi.fn(), reference: vi.fn(), sync: vi.fn(), admin: false,
 }))
 vi.mock('@/lib/api', () => ({ api: {
-  etfFlow: fixtures.load, syncEtfFlow: fixtures.sync,
+  etfFlow: fixtures.load, etfReference: fixtures.reference, syncEtfFlow: fixtures.sync,
   pipelineJobs: async () => ({ jobs: [] }),
   pipelineJob: async () => ({ status: 'running', log: [{ msg: '正在采集份额' }] }),
   pipelineJobCancel: async () => ({}),
 } }))
 vi.mock('@/lib/auth', () => ({ useCurrentUser: () => ({ role: fixtures.admin ? 'admin' : 'guest' }) }))
 vi.mock('@/lib/useSharedQueries', () => ({ useCapabilityMatrix: () => ({ data: { capabilities: [] } }) }))
-vi.mock('./etfFlow/FlowChart', () => ({ FlowChart: ({ title, series }: { title: string; series: unknown }) =>
-  <section aria-label={title}><h3>{title}</h3><pre>{JSON.stringify(series)}</pre></section>,
+vi.mock('./etfFlow/FlowChart', () => ({ FlowChart: ({ title, series, labels }: { title: string; series: unknown; labels: string[] }) =>
+  <section aria-label={title} data-labels={JSON.stringify(labels)}><h3>{title}</h3><pre>{JSON.stringify(series)}</pre></section>,
+}))
+vi.mock('./etfFlow/EtfReferenceChart', () => ({ default: ({ data }: { data?: EtfReference }) =>
+  <section aria-label="国家队持仓占比参考">国家队持仓占比参考 {data?.as_of}</section>,
 }))
 
 function response(day = '2026-11-05'): EtfFlowBoard {
@@ -54,6 +57,8 @@ beforeEach(() => {
   Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true })
   fixtures.admin = false
   fixtures.load.mockReset().mockImplementation(async (day?: string) => response(day))
+  fixtures.reference.mockReset().mockImplementation(async (day?: string) => ({ state: 'no_data', rows: [], as_of: day ?? null,
+    checked_at: null, update_failed: false }))
   fixtures.sync.mockReset().mockResolvedValue({ job_id: 'flow-job' })
   host = document.createElement('div')
   document.body.append(host)
@@ -73,7 +78,7 @@ async function mount() {
   await settle()
 }
 
-it('preserves gaps in table and cumulative data, and hides collection from viewers', async () => {
+it('preserves gaps and refreshes the reference chart at the bottom without exposing collection to viewers', async () => {
   await mount()
   expect(host.textContent).toContain('重点ETF资金看板')
   const ranking = host.querySelector('[aria-label="单只ETF表现"]')!
@@ -83,9 +88,34 @@ it('preserves gaps in table and cumulative data, and hides collection from viewe
   const help = ranking.querySelector<HTMLButtonElement>('button[aria-label="单只ETF表现口径"]')!
   await act(async () => help.click())
   expect(document.getElementById(help.getAttribute('aria-describedby')!)?.textContent).toContain('按成交额降序')
-  const chart = host.querySelector('[aria-label="已识别宽基ETF · 区间累计净申购"] pre')!
-  expect(JSON.parse(chart.textContent!)[0].data).toEqual([1, null])
+  const chart = host.querySelector('[aria-label="宽基ETF日度净流入与累计净流入"] pre')!
+  expect(JSON.parse(chart.textContent!).at(-1)).toMatchObject({ name: '累计净流入', data: [1, null], rightAxis: true })
   expect(host.textContent).not.toContain('同步数据')
+  expect(host.querySelector('main')?.lastElementChild?.getAttribute('aria-label')).toBe('国家队持仓占比参考')
+  const checks = fixtures.reference.mock.calls.length
+  await act(async () => [...host.querySelectorAll('button')].find(b => b.textContent === '刷新')!.click())
+  await settle()
+  expect(fixtures.reference.mock.calls.length).toBe(checks + 1)
+})
+
+it('keeps cumulative excess gaps and highlights the last three sessions even when they are signal days', async () => {
+  const board = response()
+  board.signal_average = [3e8, null, 4e8].map((amount, i) => ({ time: `09:3${i}`, amount_yuan: amount,
+    cumulative_yuan: null, samples: 1, cumulative_samples: 0 }))
+  board.normal_average = [1e8, 1e8, 1e8].map((amount, i) => ({ time: `09:3${i}`, amount_yuan: amount,
+    cumulative_yuan: null, samples: 1, cumulative_samples: 0 }))
+  board.daily = ['2026-10-29', '2026-10-30', '2026-11-02', '2026-11-03', '2026-11-04'].map((date, i) => ({
+    ...board.daily[0], date, signal: i === 0 || i === 3, amount_yuan: (i + 1) * 1e8,
+  }))
+  fixtures.load.mockResolvedValueOnce(board)
+  await mount()
+  const profile = JSON.parse(host.querySelector('[aria-label="放量案例日 · 重点ETF分钟成交额"] pre')!.textContent!)
+  expect(profile[1]).toMatchObject({ name: '较常态日多成交', data: [2, null, null], rightAxis: true })
+  const amountChart = host.querySelector('[aria-label^="日度成交额："]')!
+  expect(JSON.parse(amountChart.getAttribute('data-labels')!)).toEqual(['2026-10-29', '2026-11-02', '2026-11-03', '2026-11-04'])
+  const bars = JSON.parse(amountChart.querySelector('pre')!.textContent!)[0]
+  expect(bars.data).toEqual([1, 3, 4, 5])
+  expect(bars.pointColors).toEqual([null, '#d7a658', '#d7a658', '#d7a658'])
 })
 
 it('does not display the previous date while a newly selected date is loading', async () => {
@@ -102,6 +132,8 @@ it('does not display the previous date while a newly selected date is loading', 
   await act(async () => resolve(response('2026-11-04')))
   await settle()
   expect(host.querySelector('#etf-minute')?.textContent).toContain('2026-11-04')
+  expect(fixtures.reference).toHaveBeenLastCalledWith('2026-11-04')
+  expect(host.querySelector('[aria-label="国家队持仓占比参考"]')?.textContent).toContain('2026-11-04')
 })
 
 it('starts the selected collection window and follows the shared job progress', async () => {

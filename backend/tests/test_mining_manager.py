@@ -229,8 +229,10 @@ def test_start_reuses_active_and_success_but_force_creates_new_run(make_manager)
 def test_cancel_while_waiting_for_capacity_never_calls_runner(
     make_manager,
     isolated_limiter: HeavyJobLimiter,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     runner_called = threading.Event()
+    waiting_for_capacity = threading.Event()
 
     def runner(task, progress_cb, cancel_event):
         runner_called.set()
@@ -238,9 +240,18 @@ def test_cancel_while_waiting_for_capacity_never_calls_runner(
 
     assert isolated_limiter.acquire("mining", timeout=0)
     try:
+        acquire = isolated_limiter.acquire
+
+        def acquire_with_signal(*args, **kwargs):
+            waiting_for_capacity.set()
+            return acquire(*args, **kwargs)
+
+        monkeypatch.setattr(isolated_limiter, "acquire", acquire_with_signal)
         manager = make_manager(runner)
         created = manager.start({"factor_names": ["quality"]}, "data-v1")
         run_id = created["run_id"]
+        # queued 也可能表示仍在调度队列中；先确认线程已开始等待重任务容量。
+        assert waiting_for_capacity.wait(1)
         assert manager.store.get(run_id)["status"] == "queued"  # type: ignore[index]
 
         cancelling = manager.cancel(run_id)
@@ -252,6 +263,48 @@ def test_cancel_while_waiting_for_capacity_never_calls_runner(
         )
     finally:
         isolated_limiter.release("mining")
+
+
+def test_cancel_before_scheduler_starts_job_releases_queue_capacity(
+    make_manager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.services.task_scheduler import TaskScheduler
+
+    scheduler = TaskScheduler(workers=1, capacity=2)
+    occupied_started = threading.Event()
+    release_occupied = threading.Event()
+    runner_called = threading.Event()
+
+    def occupy_worker():
+        occupied_started.set()
+        assert release_occupied.wait(5)
+
+    def runner(task, progress_cb, cancel_event):
+        runner_called.set()
+        return {"status": "succeeded"}
+
+    monkeypatch.setattr(
+        mining_manager_module, "submit_research", lambda work: scheduler.submit("owner", work),
+    )
+    occupied = scheduler.submit("owner", occupy_worker)
+    try:
+        assert occupied_started.wait(1)
+        manager = make_manager(runner)
+        run_id = manager.start({"factor_names": ["quality"]}, "data-v1")["run_id"]
+
+        cancelled = manager.cancel(run_id)
+        assert cancelled["status"] == "cancelled"
+        assert [event["type"] for event in manager.store.read_events(run_id)] == [
+            "queued", "cancelled",
+        ]
+        # 工作线程仍被占用时即可重新入队，证明取消立即释放了待处理名额。
+        following = scheduler.submit("owner", lambda: None)
+    finally:
+        release_occupied.set()
+        occupied.result(5)
+    following.result(5)
+    assert not runner_called.is_set()
 
 
 def test_cancel_running_job_wins_over_worker_success(make_manager) -> None:

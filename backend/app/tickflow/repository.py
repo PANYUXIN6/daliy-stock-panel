@@ -2533,6 +2533,16 @@ class KlineRepository:
         把读/算移出锁外; 锁内用指纹确认基底未被其他写入者改动, 失配则重试,
         重试耗尽退回锁内直读直写 (正确性优先, 牺牲隔离性)。
         """
+        def _read_existing() -> pl.DataFrame:
+            try:
+                source = out.open("rb")
+            except FileNotFoundError:
+                return pl.DataFrame()
+            # 固定本次读取的文件，避免 Polars 按路径分阶段读取元数据/数据时
+            # 跨越一次原子替换，把不同版本拼在一起而报 parquet 损坏。
+            with source:
+                return pl.read_parquet(source)
+
         def _merge(existing: pl.DataFrame) -> pl.DataFrame:
             if existing.is_empty():
                 return incoming.sort(["symbol", "date"])
@@ -2541,8 +2551,9 @@ class KlineRepository:
             ).sort(["symbol", "date"])
 
         for _ in range(retries):
-            existing = pl.read_parquet(out) if out.exists() else pl.DataFrame()
+            # 必须先取指纹；读取后再取会把旧内容配上新版本，漏掉并发更新。
             base_fp = self._partition_fingerprint(out)
+            existing = _read_existing()
             merged = _merge(existing)
             with self._write_lock:
                 if self._partition_fingerprint(out) != base_fp:
@@ -2551,7 +2562,7 @@ class KlineRepository:
             return
         # 乐观重试耗尽 (罕见: 高频并发写同一分区): 退回锁内全量模式保证正确性
         with self._write_lock:
-            existing = pl.read_parquet(out) if out.exists() else pl.DataFrame()
+            existing = _read_existing()
             self._write_partition_locked(out, _merge(existing), existing, publication)
 
     def _write_partition_locked(

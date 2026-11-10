@@ -49,8 +49,13 @@ function BoxDetails({ box, allBoxes, config }: { box: BoxOscillation; allBoxes: 
 /** 个股与指数共用周期切换、筛选和可核对的结构证据。 */
 export function BoxOscillationControls({ view }: { view: BoxOscillationView }) {
   const [expanded, setExpanded] = useState(false)
-  const { period, enabled, report, query, selectedBox } = view
+  const { period, enabled, report, query, nearestBox, selectedBox } = view
   const diagnostics = [...new Set(report?.diagnostics)].filter(note => note !== calendarCoverageRule && note !== completedKlineRule)
+  const summary = report?.status === 'no_prices' ? '缺少本地历史K线'
+    : report?.status === 'insufficient_data' ? '已完成K线不足，暂不能确认箱体'
+    : nearestBox ? `最近箱体 · ${BOX_LEVEL_LABELS[nearestBox.level]} · ${boxStatusLabel(nearestBox)} · ${nearestBox.duration_bars} 根`
+    : view.filteredBoxes.length > 0 ? '缺少已完成收盘价，无法选出最近箱体'
+    : '当前范围与筛选条件下没有箱体'
   return (
     <div className="mb-1 min-w-0 px-1">
       <div className="flex flex-wrap items-center gap-1.5 text-[11px]">
@@ -66,7 +71,8 @@ export function BoxOscillationControls({ view }: { view: BoxOscillationView }) {
           <MethodHelp label="箱体识别说明">
             <p>{completedKlineRule}</p>
             {report?.diagnostics.includes(calendarCoverageRule) && <p>{calendarCoverageRule}</p>}
-            <p>默认只列出收盘位于箱内或上下沿附近的结构。</p>
+            <p>默认从已形成箱体中选取离最新完成收盘最近的一个。收盘在箱内时距离为零，等距时优先显示较窄的箱体。</p>
+            {report && <p>展示至少持续 {view.minDisplayBars} 根已完成{KLINE_PERIOD_LABELS[period]}的结构。</p>}
           </MethodHelp>
         </div>
         {enabled && <>
@@ -76,7 +82,6 @@ export function BoxOscillationControls({ view }: { view: BoxOscillationView }) {
           <select aria-label="箱体状态" value={view.status} onChange={event => view.setStatus(event.target.value as BoxStatusFilter)} className={selectClass}>
             <option value="all">全部状态</option><option value="candidate">形成中候选</option><option value="confirmed">已形成</option><option value="broken">已突破</option><option value="invalidated">结构失效</option>
           </select>
-          <label className="flex items-center gap-1.5 text-muted"><input type="checkbox" checked={view.showDistant} onChange={event => view.setShowDistant(event.target.checked)} />显示全部箱体</label>
           <button type="button" aria-expanded={expanded} onClick={() => setExpanded(value => !value)} className="rounded px-2 py-1 text-accent hover:bg-elevated">
             {expanded ? '收起详情' : '箱体详情'}{report ? `（${view.filteredBoxes.length}）` : ''}
           </button>
@@ -86,7 +91,7 @@ export function BoxOscillationControls({ view }: { view: BoxOscillationView }) {
       {(enabled || (period !== 'daily' && diagnostics.length > 0)) && <div role="status" className="flex flex-wrap gap-x-3 gap-y-1 py-1 text-[10px] text-muted">
         {enabled && query.isLoading && <span>识别箱体中…</span>}
         {enabled && query.isError && <><span className="text-danger">箱体读取失败</span><button type="button" className="text-accent" onClick={() => { void query.refetch() }}>重试</button></>}
-        {enabled && report && <span>{report.status === 'no_prices' ? '缺少本地历史K线' : report.status === 'insufficient_data' ? '已完成K线不足，暂不能确认箱体' : view.filteredBoxes.length === 0 ? '当前范围与筛选条件下没有箱体' : view.showAll ? `显示 ${view.filteredBoxes.length} 个箱体` : `${selectedBox ? `${BOX_LEVEL_LABELS[selectedBox.level]} · ${boxStatusLabel(selectedBox)} · ${selectedBox.duration_bars} 根` : ''}`}</span>}
+        {enabled && report && <span>{summary}</span>}
         {enabled && report?.history_start && <span>已存历史 {report.history_start} 起{report.as_of ? ` · 识别截止 ${report.as_of}` : ''}</span>}
         {diagnostics.map(note => <span key={note} className="text-warning">{note}</span>)}
       </div>}
@@ -95,8 +100,7 @@ export function BoxOscillationControls({ view }: { view: BoxOscillationView }) {
           <select aria-label="选择箱体" value={selectedBox?.id ?? ''} onChange={event => view.setSelectedId(event.target.value)} className={`${selectClass} max-w-full`}>
             {view.filteredBoxes.map(box => <option key={box.id} value={box.id}>{BOX_LEVEL_LABELS[box.level]} · {boxStatusLabel(box)} · {box.start_date} · {price(box.lower)}–{price(box.upper)}</option>)}
           </select>
-          <label className="flex items-center gap-1.5 text-[11px] text-muted"><input type="checkbox" checked={view.showAll} onChange={event => view.setShowAll(event.target.checked)} />叠加全部筛选结果</label>
-          <span className="text-[10px] text-muted">{view.showAll ? '选择箱体仅切换下方详情' : '当前仅显示所选箱体'}</span>
+          <span className="text-[10px] text-muted">选择箱体仅切换下方详情</span>
         </div>}
         {selectedBox ? <BoxDetails box={selectedBox} allBoxes={report.boxes} config={report.config} /> : <span className="text-[11px] text-muted">当前没有可展示的结构证据</span>}
       </div>}

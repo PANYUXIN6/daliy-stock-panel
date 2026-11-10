@@ -14,6 +14,7 @@ from datetime import date
 from pathlib import Path
 
 import polars as pl
+import pytest
 
 from app.tickflow.repository import DataStore, KlineRepository
 
@@ -53,6 +54,48 @@ def test_concurrent_upserts_do_not_lose_rows(tmp_path: Path) -> None:
     final = pl.read_parquet(out)
     assert final["symbol"].n_unique() == sum(len(g) for g in groups)  # 无一丢失
     assert final["symbol"].to_list() == sorted(final["symbol"].to_list())
+
+
+@pytest.mark.parametrize("replace_during_read", [True, False], ids=["during-read", "after-read"])
+def test_upsert_retries_when_partition_is_replaced(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, replace_during_read: bool,
+) -> None:
+    repo = KlineRepository(DataStore(tmp_path))
+    repo.merge_live_daily_asset("stock", _frame(["000001.SZ"]))
+    out = tmp_path / "kline_daily" / "date=2026-09-07" / "part.parquet"
+    # 分别在读取元数据后、读取旧数据后插入另一写入者，稳定覆盖两个竞态窗口。
+    reader_name = "scan_parquet" if replace_during_read else "read_parquet"
+    original_reader = getattr(pl, reader_name)
+    replaced = False
+    concurrent_symbols = [f"{i:06d}.SZ" for i in range(2, 50)]
+
+    def read_with_concurrent_replace(*args, **kwargs):
+        nonlocal replaced
+        result = original_reader(*args, **kwargs)
+        if not replaced:
+            replaced = True
+            if replace_during_read:
+                result.collect_schema()
+            repo.merge_live_daily_asset("stock", _frame(concurrent_symbols))
+        return result
+
+    if replace_during_read:
+        # read_parquet 在定义模块内调用 scan_parquet，不经过顶层 pl 导出。
+        monkeypatch.setattr("polars.io.parquet.functions.scan_parquet", read_with_concurrent_replace)
+    else:
+        monkeypatch.setattr(pl, reader_name, read_with_concurrent_replace)
+    try:
+        repo.merge_live_daily_asset("stock", _frame(["000003.SZ", "000004.SZ"]))
+        assert replaced
+        final = pl.read_parquet(out)
+        assert dict(final.select("symbol", "close").iter_rows()) == {
+            **{symbol: 10.0 + i for i, symbol in enumerate(concurrent_symbols)},
+            "000001.SZ": 10.0,
+            "000003.SZ": 10.0,
+            "000004.SZ": 11.0,
+        }
+    finally:
+        repo.db.close()
 
 
 def test_heavy_merge_runs_outside_write_lock(tmp_path: Path, monkeypatch) -> None:

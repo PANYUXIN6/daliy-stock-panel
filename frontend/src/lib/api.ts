@@ -690,8 +690,14 @@ export interface SentimentObservations {
   limitations: string[]
 }
 
+export interface SentimentRadarSnapshot {
+  as_of: string
+  axes: Pick<SentimentObservation, 'key' | 'label' | 'percentile'>[]
+}
+
 export interface OverviewMarket {
   sentiment?: SentimentObservations | null
+  previous_sentiment_radar?: SentimentRadarSnapshot | null
   as_of: string | null
   quote_status: {
     enabled?: boolean

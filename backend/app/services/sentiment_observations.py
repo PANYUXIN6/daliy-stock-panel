@@ -13,6 +13,7 @@ from app.market_time import cn_now
 
 VERSION = "observations-v1"
 WINDOW = 500
+RADAR_AXES = {"up_pct", "above_ma20_pct", "total_amount", "index_position_60", "limit_up_pct", "seal_rate"}
 SPECS = [
     ("up_pct", "上涨比例", "breadth", "%"),
     ("down_pct", "下跌比例", "breadth", "%"),
@@ -186,16 +187,34 @@ def load_observation(data_dir: Path, target_date: str | None = None) -> dict | N
     return copy.deepcopy(values.get(target_date or max(values)))
 
 
+@lru_cache(maxsize=8)
+def _previous_radar(key: tuple, before: str) -> dict | None:
+    for day, observation in reversed(_file_observations(key).items()):
+        coverage = observation["coverage"]
+        if day >= before or not coverage["is_complete_day"] or not coverage["method_current"]:
+            continue
+        axes = [dict(key=item["key"], label=item["label"], percentile=item["percentile"])
+                for item in observation["observations"]
+                if item["key"] in RADAR_AXES and item["percentile"] is not None]
+        if len(axes) == len(RADAR_AXES):
+            return {"as_of": day, "axes": axes}
+    return None
+
+
+def load_previous_radar(data_dir: Path, before: str) -> dict | None:
+    """Return the most recent drawable closing radar strictly before the requested day."""
+    return copy.deepcopy(_previous_radar(observation_cache_key(data_dir), before))
+
+
 def analysis_readiness(data_dir: Path, target_date: str | None = None) -> dict | None:
     observation = load_observation(data_dir, target_date)
     if observation is None or not observation["coverage"]["method_current"]:
         return None
-    axes = {"up_pct", "above_ma20_pct", "total_amount", "index_position_60", "limit_up_pct", "seal_rate"}
-    radar = [item for item in observation["observations"] if item["key"] in axes]
+    radar = [item for item in observation["observations"] if item["key"] in RADAR_AXES]
     return {
         "as_of": observation["as_of"],
         "is_complete_day": observation["coverage"]["is_complete_day"],
-        "radar_ready": len(radar) == len(axes) and all(item["percentile"] is not None for item in radar),
+        "radar_ready": len(radar) == len(RADAR_AXES) and all(item["percentile"] is not None for item in radar),
         "radar_history_min": min((item["history_sample_count"] for item in radar), default=0),
         "radar_history_max": max((item["history_sample_count"] for item in radar), default=0),
     }

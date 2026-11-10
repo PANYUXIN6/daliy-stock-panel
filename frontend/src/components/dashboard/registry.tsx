@@ -169,7 +169,7 @@ export const WIDGET_DEFS: WidgetDef[] = [
     render: ctx => sectionCard(
       <>
         <SectionTitle icon={Sparkles} title="情绪雷达" help={<SentimentObservationHelp data={ctx.data.sentiment} />} />
-        <SentimentRadar data={ctx.data.sentiment} />
+        <SentimentRadar data={ctx.data.sentiment} previous={ctx.data.previous_sentiment_radar} />
         <SentimentObservations data={ctx.data.sentiment} expectedDate={ctx.data.as_of ?? undefined} compact />
       </>,
       { className: 'overflow-y-auto' },

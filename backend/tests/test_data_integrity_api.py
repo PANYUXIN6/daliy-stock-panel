@@ -78,6 +78,7 @@ def test_complete_history_repairs_sparse_partitions_before_analysis(app_env, mon
 
     app, store, root, paused = app_env
     repo = app.state.repo
+    first = date(2024, 1, 2)
     old, recent, today = date(2025, 6, 10), date(2026, 11, 6), date(2026, 11, 9)
     a, b = "600001.SH", "600002.SH"
 
@@ -90,13 +91,13 @@ def test_complete_history_repairs_sparse_partitions_before_analysis(app_env, mon
 
     monkeypatch.setattr(history_completion, "cn_now", lambda: datetime(2026, 11, 9, 11, tzinfo=CN_TZ))
     monkeypatch.setattr(trading_day, "calendar_status", lambda root: {
-        "start": "2024-01-01", "end": today.isoformat(), "days": [str(old), str(recent), str(today)],
+        "start": "2024-01-01", "end": today.isoformat(), "days": [str(first), str(old), str(recent), str(today)],
     })
     monkeypatch.setattr(history_completion, "_classification_gaps", lambda *_: 0)
     monkeypatch.setattr(kline_sync, "sync_adj_factor", lambda *_, **__: (0, []))
     monkeypatch.setattr(preferences, "get_daily_data_provider", lambda: "tickflow")
     instruments = pl.DataFrame({"symbol": [a, b], "as_of": [today, today],
-                                "listing_date": [old, old], "name": ["甲", "乙"]})
+                                "listing_date": [first, first], "name": ["甲", "乙"]})
     (root / "instruments").mkdir(exist_ok=True)
     instruments.write_parquet(root / "instruments/instruments.parquet")
     monkeypatch.setattr(repo, "get_instruments_asset", lambda asset: instruments if asset == "stock" else pl.DataFrame())
@@ -104,6 +105,7 @@ def test_complete_history_repairs_sparse_partitions_before_analysis(app_env, mon
     repo.append_daily(rows(recent, [a, b]))
     repo.append_daily(rows(recent, [a], ts=int(datetime(2026, 11, 6, 11, tzinfo=CN_TZ).timestamp() * 1000)))
     repo.append_daily(rows(today, [a, b]))
+    repo.append_index_daily(rows(first, CORE_INDEX_SYMBOLS))
     repo.append_index_daily(rows(old, CORE_INDEX_SYMBOLS))
     repo.append_index_daily(rows(recent, CORE_INDEX_SYMBOLS))
     today_path = root / f"kline_daily/date={today}/part.parquet"
@@ -113,6 +115,7 @@ def test_complete_history_repairs_sparse_partitions_before_analysis(app_env, mon
     def fetch(symbols, _caps, *, asset_type, start_time, end_time, **_):
         requests.append((asset_type, start_time.date(), end_time.date()))
         if asset_type == "stock":
+            yield rows(first, [a, b], close=12.0)
             yield rows(old, [a, b], close=22.0)
             yield rows(recent, [a, b], close=21.0)
             yield rows(today, [a, b], close=88.0)
@@ -125,15 +128,16 @@ def test_complete_history_repairs_sparse_partitions_before_analysis(app_env, mon
         assert result["status"] == "succeeded", result["error"]
         assert result["result"]["history_completion"] == {
             "start_date": "2024-01-01", "end_date": "2026-11-08", "today_deferred": True,
-            "daily_rows": 2, "factor_rows": 0, "unverified_days": 0, "unverified_rows": 0,
+            "daily_rows": 4, "factor_rows": 0, "unverified_days": 0, "unverified_rows": 0,
         }
         assert result["result"]["analysis"]["is_complete_day"] is True
         assert paused == ["pause", "resume"]
         assert set(json.loads((root / "runtime/data_update.json").read_text())["datasets"]) == {
             "daily", "enriched", "regime", "mainline", "ext_data", "daily_integrity",
         }
-        history = regime_builder.load_regime_history(root).filter(pl.col("date") == old)
-        assert history["total_count"].item() == 2
+        history = regime_builder.load_regime_history(root).filter(pl.col("date").is_in([first, old]))
+        assert dict(history.select("date", "total_count").iter_rows()) == {first: 2, old: 2}
+        assert pl.read_parquet(root / f"kline_daily/date={first}/part.parquet")["close"].to_list() == [12.0, 12.0]
         older_path = root / f"kline_daily/date={old}/part.parquet"
         assert dict(pl.read_parquet(older_path).select("symbol", "close").iter_rows()) == {a: 10.0, b: 22.0}
         latest = pl.read_parquet(root / f"kline_daily/date={recent}/part.parquet").sort("symbol")
@@ -146,7 +150,7 @@ def test_complete_history_repairs_sparse_partitions_before_analysis(app_env, mon
         result = finished(store, repeated.json()["job_id"])
         assert result["status"] == "succeeded", result["error"]
         assert result["result"]["history_completion"]["daily_rows"] == 0
-        assert requests == [("stock", old, recent)]
+        assert requests == [("stock", first, recent)]
         assert older_path.read_bytes() == original
 
 

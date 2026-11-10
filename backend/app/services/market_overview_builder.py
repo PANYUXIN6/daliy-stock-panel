@@ -456,6 +456,7 @@ def build_market_overview(
     from app.services.sentiment_observations import (
         filter_universe,
         load_observation,
+        load_previous_radar,
         observe_current,
     )
     exclude_st = preferences.get_sentiment_exclude_st()
@@ -582,6 +583,9 @@ def build_market_overview(
     sentiment = load_observation(repo.store.data_dir, str(as_of)) if current.get("is_complete_day") is not False else None
     if sentiment is None:
         sentiment = observe_current(repo.store.data_dir, current)
+    previous_radar = None
+    if not explicit_as_of and sentiment["coverage"]["is_complete_day"] is False:
+        previous_radar = load_previous_radar(repo.store.data_dir, str(as_of))
     radar = [{"key": key, "label": label, "value": current.get(f"{key}_score")}
              for key, label in [("profit", "涨跌强弱"), ("speculation", "短线投机"), ("resilience", "下跌广度"), ("trend", "趋势广度")]]
     emotion_score = current.get("score")
@@ -637,6 +641,7 @@ def build_market_overview(
         },
         "radar": radar,
         "sentiment": sentiment,
+        "previous_sentiment_radar": previous_radar,
         "emotion": {"score": emotion_score, "label": emotion_label, "method": "项目参考评分"},
         "top_gainers": _top_rows(rows, "change_pct", True),
         "top_losers": _top_rows(rows, "change_pct", False),

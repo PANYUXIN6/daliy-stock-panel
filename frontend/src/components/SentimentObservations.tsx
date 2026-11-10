@@ -33,8 +33,8 @@ export function observationValue(item: SentimentObservation, value = item.value,
 }
 export function SentimentObservations({ data, expectedDate, compact = false }: { data?: ObservationSet | null; expectedDate?: string; compact?: boolean }) {
   if (!data || data.version !== 'observations-v1') return <p className="p-3 text-xs text-muted">状态观察不可计算：尚无可用的统一口径数据。</p>
-  const available = data.observations.filter(o => o.value != null)
-  const ranked = available.filter(o => o.percentile != null)
+  const historyLimited = data.observations.some(o => o.value != null && o.percentile == null
+    && (o.history_sample_count < 500 || data.coverage.is_complete_day !== false))
   return <div className="min-w-0 space-y-3 text-xs">
     <div className="flex flex-wrap gap-x-3 gap-y-1 text-muted">
       <span>数据日期 {data.as_of}</span><span>样本 {data.coverage.sample_count ?? '未知'} 家</span>{data.coverage.valid_change_count != null && <span>有效涨跌 {data.coverage.valid_change_count} 家</span>}
@@ -63,6 +63,6 @@ export function SentimentObservations({ data, expectedDate, compact = false }: {
       </section>
     })}
     {compact && <p className="text-[10px] text-muted">融资、期权、行业ETF净申购：尚无可用数据。完整分项与变化见市场环境。</p>}
-    {ranked.length < available.length && <p className="text-[10px] leading-4 text-muted">部分指标历史不足或不可比，暂不提供分位（—）；原值仍独立展示。</p>}
+    {historyLimited && <p className="text-[10px] leading-4 text-muted">部分指标历史不足或不可比，暂不提供分位（—）；原值仍独立展示。</p>}
   </div>
 }

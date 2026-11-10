@@ -221,7 +221,7 @@ it('日周月独立读取，保留历史截止且不把日线标记、缺口和�
   expect(host.querySelector('[data-chart]')?.getAttribute('data-ranges')).toBe('1')
 })
 
-it('箱体默认开启并叠加，选择只切换详情，也能筛选、单独查看及关闭', async () => {
+it('收盘同时在多个已形成箱体内时只画较窄的箱体，详情选择独立于图层筛选', async () => {
   mocks.daily.mockResolvedValue(response('600000.SH', 10.25))
   const base = { period: 'daily', lower: 10, upper: 12, width: 2, width_pct: 20, start_date: '2026-01-01', end_date: '2026-01-31',
     observed_until: '2026-01-31', confirmed_date: '2026-01-22', duration_bars: 22, status: 'confirmed',
@@ -230,13 +230,14 @@ it('箱体默认开启并叠加，选择只切换详情，也能筛选、单独�
     breakout: { status: 'returned', direction: 'up', first_date: '2026-01-28', confirmed_date: null },
     events: [{ type: 'returned', date: '2026-01-29', direction: 'up' }] }
   mocks.boxes.mockResolvedValue({ symbol: '600000.SH', period: 'daily', status: 'ready', history_start: '2020-01-01', as_of: range.end, as_of_close: 11, diagnostics: [], rows: [],
-    config: { breakout_margin_ratio: 0.15, breakout_closes: 2 },
-    boxes: [{ ...base, id: 'small', level: 'short', parent_id: 'large', lower_zone: [9.6, 10.4], upper_zone: [11.6, 12.4] }, { ...base, id: 'large', level: 'long', lower: 8, upper: 15, duration_bars: 70 }] })
+    config: { min_bars: 8, breakout_margin_ratio: 0.15, breakout_closes: 2 },
+    boxes: [{ ...base, id: 'large', level: 'long', lower: 8, upper: 15, width: 7, width_pct: 87.5, duration_bars: 70 },
+      { ...base, id: 'small', level: 'short', parent_id: 'large', lower_zone: [9.6, 10.4], upper_zone: [11.6, 12.4] }] })
   await render()
   expect([...host.querySelectorAll('button')].find(button => button.textContent === '箱体')?.getAttribute('aria-pressed')).toBe('true')
   expect(mocks.boxes).toHaveBeenCalledWith('600000.SH', 'daily', range)
-  expect(host.querySelector('[data-boxes]')?.textContent).toBe('small,large')
-  expect(host.textContent).toContain('显示 2 个箱体')
+  expect(host.querySelector('[data-boxes]')?.textContent).toBe('small')
+  expect(host.textContent).toContain('最近箱体 · 小箱体')
   await clickPill('箱体详情（2）')
   expect(host.textContent).toContain('宽度 20.00%')
   expect(host.textContent).toContain('首次确认 2026-01-22')
@@ -248,12 +249,8 @@ it('箱体默认开启并叠加，选择只切换详情，也能筛选、单独�
   expect(host.textContent).toContain('2026-01-29 向上回到箱内')
   const selector = host.querySelector<HTMLSelectElement>('[aria-label="选择箱体"]')!
   await act(async () => { selector.value = 'large'; selector.dispatchEvent(new Event('change', { bubbles: true })) })
-  expect(host.querySelector('[data-boxes]')?.textContent).toBe('small,large')
+  expect(host.querySelector('[data-boxes]')?.textContent).toBe('small')
   expect(host.textContent).toContain('范围 8.00–15.00')
-  const overlay = [...host.querySelectorAll('label')].find(label => label.textContent?.includes('叠加全部筛选结果'))!.querySelector('input')!
-  expect(overlay.checked).toBe(true)
-  await act(async () => overlay.click())
-  expect(host.querySelector('[data-boxes]')?.textContent).toBe('large')
   const size = host.querySelector<HTMLSelectElement>('[aria-label="箱体大小"]')!
   await act(async () => { size.value = 'long'; size.dispatchEvent(new Event('change', { bubbles: true })) })
   expect(host.querySelector('[data-boxes]')?.textContent).toBe('large')
@@ -268,7 +265,7 @@ it('箱体默认开启并叠加，选择只切换详情，也能筛选、单独�
   expect(host.querySelector('[aria-label="箱体大小"]')).toBeNull()
 })
 
-it('已结束历史默认按完成收盘筛选，能回看远处旧框并区分历史回访', async () => {
+it('历史箱体可按状态回看，主图只展示离完成收盘最近的历史参考', async () => {
   mocks.daily.mockResolvedValue(response('600000.SH', 30))
   const historical = { period: 'daily', level: 'short', lower: 8, upper: 12, width: 4, width_pct: 50,
     start_date: '2025-04-01', end_date: '2025-04-20', observed_until: range.end, confirmed_date: '2025-04-10',
@@ -281,52 +278,50 @@ it('已结束历史默认按完成收盘筛选，能回看远处旧框并区分�
       { ...historical, id: 'far', lower: 1, upper: 2, width: 1, width_pct: 100, revisits: [] },
     ] })
   await render()
+  expect(host.querySelector('[data-boxes]')?.textContent).toBe('')
+  const status = host.querySelector<HTMLSelectElement>('[aria-label="箱体状态"]')!
+  await act(async () => { status.value = 'broken'; status.dispatchEvent(new Event('change', { bubbles: true })) })
   expect(host.querySelector('[data-boxes]')?.textContent).toBe('near')
-  await clickPill('箱体详情（1）')
+  await clickPill('箱体详情（2）')
   expect(host.textContent).toContain('2026-01-30 从上方再次进入原区间')
   expect(host.textContent).toContain('后续回访不会延长原箱体')
-  const showDistant = [...host.querySelectorAll('label')].find(label => label.textContent?.includes('显示全部箱体'))!.querySelector('input')!
-  await act(async () => showDistant.click())
   const selector = host.querySelector<HTMLSelectElement>('[aria-label="选择箱体"]')!
   expect([...selector.options].map(option => option.value)).toEqual(['near', 'far'])
   await act(async () => { selector.value = 'far'; selector.dispatchEvent(new Event('change', { bubbles: true })) })
-  expect(host.querySelector('[data-boxes]')?.textContent).toBe('near,far')
+  expect(host.querySelector('[data-boxes]')?.textContent).toBe('near')
+  expect(host.textContent).toContain('范围 1.00–2.00')
 })
 
-it('当前箱体和候选同样按距离筛选，包含上下沿附近并随完成收盘更新', async () => {
+it('最近箱体按完成收盘重排，并排除少于15根日K的结构', async () => {
   mocks.daily.mockResolvedValue(response('600000.SH', 10.25))
   const base = { period: 'daily', level: 'short', width: 2, width_pct: 20,
     start_date: range.start, end_date: range.end, observed_until: range.end,
-    confirmed_date: '2026-01-22', duration_bars: 22, status: 'confirmed', parent_id: null,
+    confirmed_date: '2026-01-22', duration_bars: 15, status: 'confirmed', parent_id: null,
     missing_conditions: [], upper_touches: [], lower_touches: [],
     breakout: { status: 'none', direction: null, first_date: null, confirmed_date: null }, events: [] }
   const report = { symbol: '600000.SH', period: 'daily', status: 'ready', as_of: range.end, as_of_close: 10,
-    diagnostics: [], rows: [{ date: '2026-02-01', close: 21, is_complete: false }], boxes: [
+    diagnostics: [], config: { min_bars: 8 }, rows: [{ date: '2026-02-01', close: 21, is_complete: false }], boxes: [
       { ...base, id: 'near-upper', lower: 7.8, upper: 9.8, upper_zone: [9.6, 10] },
-      { ...base, id: 'near-lower', lower: 10.2, upper: 12.2, lower_zone: [10, 10.4], status: 'candidate', confirmed_date: null },
-      { ...base, id: 'far-current', lower: 1, upper: 3 },
+      { ...base, id: 'far-current', lower: 13, upper: 15 },
+      { ...base, id: 'short-confirmed', lower: 9, upper: 11, duration_bars: 14 },
+      { ...base, id: 'two-bar-candidate', lower: 9, upper: 11, duration_bars: 2, status: 'candidate', confirmed_date: null },
       { ...base, id: 'far-candidate', lower: 20, upper: 22, status: 'candidate', confirmed_date: null },
     ] }
   mocks.boxes.mockResolvedValue(report)
   await render()
-  expect(host.querySelector('[data-boxes]')?.textContent).toBe('near-upper,near-lower')
+  expect(host.querySelector('[data-boxes]')?.textContent).toBe('near-upper')
   await clickPill('箱体详情（2）')
   const selector = host.querySelector<HTMLSelectElement>('[aria-label="选择箱体"]')!
-  expect([...selector.options].map(option => option.value)).toEqual(['near-upper', 'near-lower'])
-  const overlay = [...host.querySelectorAll('label')].find(label => label.textContent?.includes('叠加全部筛选结果'))!.querySelector('input')!
-  expect(overlay.checked).toBe(true)
+  expect([...selector.options].map(option => option.value)).toEqual(['near-upper', 'far-current'])
 
-  await act(async () => client.setQueryData(QK.klineBoxes('600000.SH', 'daily', range.start, range.end), { ...report, as_of_close: 15 }))
+  await act(async () => client.setQueryData(QK.klineBoxes('600000.SH', 'daily', range.start, range.end), { ...report, as_of_close: 16 }))
   await settle()
-  expect(host.querySelector('[data-boxes]')?.textContent).toBe('')
-  expect(host.textContent).toContain('当前范围与筛选条件下没有箱体')
+  expect(host.querySelector('[data-boxes]')?.textContent).toBe('far-current')
 
-  await act(async () => client.setQueryData(QK.klineBoxes('600000.SH', 'daily', range.start, range.end), { ...report, as_of_close: 21 }))
-  await settle()
+  const status = host.querySelector<HTMLSelectElement>('[aria-label="箱体状态"]')!
+  await act(async () => { status.value = 'candidate'; status.dispatchEvent(new Event('change', { bubbles: true })) })
   expect(host.querySelector('[data-boxes]')?.textContent).toBe('far-candidate')
-  const showDistant = [...host.querySelectorAll('label')].find(label => label.textContent?.includes('显示全部箱体'))!.querySelector('input')!
-  await act(async () => showDistant.click())
-  expect(host.querySelector('[data-boxes]')?.textContent).toBe('near-upper,far-current,near-lower,far-candidate')
+  expect([...selector.options].map(option => option.value)).toEqual(['far-candidate'])
 })
 
 it('轻量渲染优先保留本地专属图层，关闭多空线后可切换且保留ETF元数据', async () => {

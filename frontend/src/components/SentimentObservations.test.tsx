@@ -83,3 +83,24 @@ it('reports radar readiness and preserves complete percentile axes', () => {
   const complete = { ...data, observations: keys.map(key => ({ ...observation, key })) }
   expect(renderToStaticMarkup(<SentimentRadar data={complete} />)).toContain('<polygon')
 })
+
+it('labels a prior closing radar while keeping the latest unconfirmed data visible', () => {
+  const keys = ['up_pct', 'above_ma20_pct', 'total_amount', 'index_position_60', 'limit_up_pct', 'seal_rate']
+  const pending: Data = { ...data, as_of: '2026-11-10', coverage: { ...data.coverage, is_complete_day: false },
+    observations: keys.map(key => ({ ...observation, key, percentile: null })) }
+  const previous = { as_of: '2026-11-09', axes: keys.map(key => ({ key, label: key, percentile: 42 })) }
+  const result = renderToStaticMarkup(<><SentimentRadar data={pending} previous={previous} /><SentimentObservations data={pending} compact /></>)
+  expect(result).toContain('aria-label="2026-11-09 情绪雷达')
+  expect(text(result)).toContain('雷达日期 2026-11-09')
+  expect(text(result)).toContain('2026-11-10 收盘口径尚未确认')
+  expect(text(result)).toContain('数据日期 2026-11-10')
+  expect(text(result)).not.toContain('历史不足或不可比')
+  expect(text(result)).toContain('P42')
+  expect(result).toContain('<polygon')
+  const confirmed: Data = { ...pending, coverage: { ...pending.coverage, is_complete_day: true },
+    observations: keys.map(key => ({ ...observation, key, percentile: 82 })) }
+  const settled = renderToStaticMarkup(<SentimentRadar data={confirmed} previous={previous} />)
+  expect(settled).toContain('aria-label="2026-11-10 情绪雷达')
+  expect(text(settled)).toContain('P82')
+  expect(text(settled)).not.toContain('P42')
+})

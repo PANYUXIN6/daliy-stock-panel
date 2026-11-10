@@ -85,6 +85,44 @@ def test_overview_uses_identical_persisted_statistics(tmp_path, monkeypatch):
     assert result["emotion"]["score"] is None
 
 
+def test_latest_overview_uses_previous_drawable_radar_until_today_is_confirmed(tmp_path, monkeypatch):
+    from app.market_time import CN_TZ
+    from app.services import market_overview_builder as overview
+    from app.services import preferences
+
+    today = date(2026, 11, 10)
+    now = datetime(2026, 11, 10, 14, tzinfo=CN_TZ)
+    monkeypatch.setattr(so, "cn_now", lambda: now)
+    monkeypatch.setattr(preferences, "get_sentiment_exclude_st", lambda: True)
+    rows = [dict(date=today - timedelta(days=501-i), method_version=so.VERSION,
+                 exclude_st=True, is_complete_day=i < 501, **dict.fromkeys(so.RADAR_AXES, 1.0))
+            for i in range(502)]
+    rb.upsert_regime_history(tmp_path, pl.DataFrame(rows))
+    raw = pl.DataFrame(dict(date=[today], symbol=["600000.SH"], close=[10.], volume=[1], change_pct=[.1]))
+    repo = SimpleNamespace(store=SimpleNamespace(data_dir=tmp_path))
+    monkeypatch.setattr(overview, "ScreenerService", lambda _: SimpleNamespace(
+        latest_date=lambda: today, _load_enriched_for_date=lambda _: raw))
+    monkeypatch.setattr(overview, "_index_quotes", lambda *args: [])
+    monkeypatch.setattr(overview, "_dimension_rank", lambda *args, **kwargs: {"leading": [], "lagging": []})
+
+    result = overview.build_market_overview(repo)
+    assert result["sentiment"]["as_of"] == str(today)
+    assert result["sentiment"]["coverage"]["is_complete_day"] is False
+    assert all(item["percentile"] is None for item in result["sentiment"]["observations"])
+    fallback = result["previous_sentiment_radar"]
+    assert fallback["as_of"] == str(rows[-2]["date"])
+    assert {axis["key"]: axis["percentile"] for axis in fallback["axes"]} == dict.fromkeys(so.RADAR_AXES, 50)
+    assert so.load_previous_radar(tmp_path, fallback["as_of"]) is None
+    assert overview.build_market_overview(repo, as_of=today)["previous_sentiment_radar"] is None
+
+    now = now.replace(hour=16)
+    rb.upsert_regime_history(tmp_path, pl.DataFrame([{**rows[-1], "is_complete_day": True}]))
+    result = overview.build_market_overview(repo)
+    assert result["sentiment"]["coverage"]["is_complete_day"] is True
+    assert result["previous_sentiment_radar"] is None
+    assert so.analysis_readiness(tmp_path, str(today))["radar_ready"] is True
+
+
 def test_history_api_ranks_before_query_and_file_cache_invalidates(tmp_path):
     from app.api.regime import regime_history, regime_latest
     rows = [dict(date=date(2020, 1, 1)+timedelta(days=i), method_version=so.VERSION,

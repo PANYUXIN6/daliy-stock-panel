@@ -37,7 +37,6 @@ export function SentimentObservations({ data, expectedDate, compact = false }: {
     && (o.history_sample_count < 500 || data.coverage.is_complete_day !== false))
   return <div className="min-w-0 space-y-3 text-xs">
     <div className="flex flex-wrap gap-x-3 gap-y-1 text-muted">
-      <span>数据日期 {data.as_of}</span><span>样本 {data.coverage.sample_count ?? '未知'} 家</span>{data.coverage.valid_change_count != null && <span>有效涨跌 {data.coverage.valid_change_count} 家</span>}
       {data.coverage.is_complete_day === false && <span className="text-warning">收盘口径尚未确认，分位不可计算</span>}
       {expectedDate && expectedDate !== data.as_of && <span role="status" className="text-warning">日期不同：页面 {expectedDate}</span>}
       {!data.coverage.method_current && <span className="text-warning">历史口径尚未更新，指标不可计算</span>}

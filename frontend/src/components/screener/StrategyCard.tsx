@@ -1,4 +1,4 @@
-import { Settings2, TrendingDown, RadioTower } from 'lucide-react'
+import { Loader2, Settings2, TrendingDown, RadioTower } from 'lucide-react'
 import { motion } from 'framer-motion'
 import { storage } from '@/lib/storage'
 
@@ -86,7 +86,7 @@ interface StrategyCardProps {
   loading: boolean
   cardSize: CardSize
   onRun: () => void
-  disabled: boolean
+  disabled?: boolean
   onSettings: () => void
   /** 是否已加入策略监控 */
   monitored?: boolean
@@ -94,7 +94,8 @@ interface StrategyCardProps {
   onToggleMonitor?: () => void
   /** 周期徽章 (如 '分钟'); 日线策略不传 */
   timeframeBadge?: string
-  /** 后台计算中 (渐进式 run_all): 数字未出时显示脉冲占位 */
+  /** 此策略正在独立计算，保留旧计数并显示 loading。 */
+  resultDate?: string
   computing?: boolean
   /** 等待运行 (自动计算关闭/失败时的分钟策略): 数字未出时显示「待计算」点击引导 */
   awaitRun?: boolean
@@ -103,7 +104,7 @@ interface StrategyCardProps {
 export function StrategyCard({
   name, description, source, active, count, expiredCount,
   loading, cardSize,
-  onRun, disabled, onSettings, monitored, onToggleMonitor, timeframeBadge, computing, awaitRun,
+  onRun, disabled, onSettings, monitored, onToggleMonitor, timeframeBadge, computing, awaitRun, resultDate,
 }: StrategyCardProps) {
   const cs = CARD_STYLES[cardSize]
   const activeCls = active
@@ -123,6 +124,7 @@ export function StrategyCard({
       initial={{ opacity: 0, scale: 0.95 }}
       animate={{ opacity: 1, scale: 1 }}
       transition={{ duration: 0.12, ease: [0.16, 1, 0.3, 1] }}
+      title={resultDate ? `上次结果：${resultDate}；点击检查更新` : '每天 16:00 后点击计算'}
       className={`${cs.card} border transition-all duration-150 text-left group ${activeCls}`}
     >
       {cardSize === 'large' ? (
@@ -135,6 +137,7 @@ export function StrategyCard({
                 <span className="text-[9px] px-1 py-px rounded border font-medium leading-tight shrink-0 border-sky-500/30 bg-sky-500/10 text-sky-400">{timeframeBadge}</span>
               )}
               <span className="text-xs font-medium truncate text-foreground">{name}</span>
+              {computing && <Loader2 role="status" aria-label={`${name}计算中`} className="h-3 w-3 shrink-0 animate-spin text-accent" />}
             </div>
             {description && (
               <span className="text-[10px] text-muted leading-tight mt-0.5 line-clamp-1">{description}</span>
@@ -153,11 +156,8 @@ export function StrategyCard({
                 )}
               </div>
             )}
-            {count == null && !loading && computing && (
-              <span className="mt-1.5 text-sm font-mono font-bold text-muted/50 animate-pulse">···</span>
-            )}
             {count == null && !loading && !computing && awaitRun && (
-              <span className="mt-1.5 text-[10px] text-muted/60 transition-colors group-hover:text-accent/80" title="自动计算未开启或失败 — 点击卡片实时计算">待计算</span>
+              <span className="mt-1.5 text-[10px] text-muted/60 transition-colors group-hover:text-accent/80" title="点击检查更新">待计算</span>
             )}
             {loading && <div className="mt-1 h-4 w-10 rounded bg-elevated animate-pulse" />}
           </button>
@@ -183,14 +183,12 @@ export function StrategyCard({
                 <span className="text-[9px] px-1 py-px rounded border font-medium leading-tight shrink-0 border-sky-500/30 bg-sky-500/10 text-sky-400">{timeframeBadge}</span>
               )}
               <span className="text-xs font-medium truncate text-foreground">{name}</span>
+              {computing && <Loader2 role="status" aria-label={`${name}计算中`} className="h-3 w-3 shrink-0 animate-spin text-accent" />}
               {count != null && !loading && (
                 <span className={`text-xs font-mono font-bold tabular-nums shrink-0 ${countCls}`}>{count}</span>
               )}
-              {count == null && !loading && computing && (
-                <span className="text-xs font-mono font-bold text-muted/50 animate-pulse shrink-0">···</span>
-              )}
               {count == null && !loading && !computing && awaitRun && (
-                <span className="text-[10px] text-muted/60 transition-colors group-hover:text-accent/80 shrink-0" title="自动计算未开启或失败 — 点击卡片实时计算">待计算</span>
+                <span className="text-[10px] text-muted/60 transition-colors group-hover:text-accent/80 shrink-0" title="点击检查更新">待计算</span>
               )}
               {loading && <span className="w-5 h-3 rounded bg-elevated animate-pulse shrink-0" />}
             </div>
@@ -222,14 +220,12 @@ export function StrategyCard({
             className="flex items-center gap-1 cursor-pointer disabled:opacity-50 disabled:cursor-wait">
             <span className="text-[8px] px-0.5 rounded bg-secondary/10 text-muted border border-border font-medium leading-tight">{srcLabel}</span>
             <span className="text-[10px] font-medium whitespace-nowrap text-foreground">{name}</span>
+              {computing && <Loader2 role="status" aria-label={`${name}计算中`} className="h-3 w-3 shrink-0 animate-spin text-accent" />}
             {count != null && !loading && (
               <span className={`text-xs font-mono font-bold tabular-nums ${countCls}`}>{count}</span>
             )}
-            {count == null && !loading && computing && (
-              <span className="text-xs font-mono font-bold text-muted/50 animate-pulse">···</span>
-            )}
             {count == null && !loading && !computing && awaitRun && (
-              <span className="text-[9px] text-muted/60 transition-colors group-hover:text-accent/80 shrink-0" title="自动计算未开启或失败 — 点击卡片实时计算">待算</span>
+              <span className="text-[9px] text-muted/60 transition-colors group-hover:text-accent/80 shrink-0" title="点击检查更新">待算</span>
             )}
             {hasExpired && (
               <span className="text-[9px] font-mono text-red-400/70">{'-' + expiredCount}</span>

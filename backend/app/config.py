@@ -78,7 +78,9 @@ class Settings(BaseSettings):
     # 299.6s 慢于串行 — 默认 1 (串行)。保留开关供配合 POLARS_MAX_THREADS 调优实验。
     strategy_run_all_workers: int = 1
 
-    # run_all 渐进式返回: HTTP 同步等待时限 (秒)。策略按历史耗时升序执行,
+    # 未指定 background 的 run_all 渐进式返回: HTTP 同步等待时限 (秒)。
+    # 页面日线请求使用 background=true，立即返回任务编号，不使用此时限。
+    # 策略按历史耗时升序执行,
     # 到点后已算完的随响应返回, 未算完的转后台继续算并逐个写入策略缓存,
     # 前端轮询 cached-summary 点亮卡片。0 = 关闭 (整段阻塞, 旧行为)。
     strategy_run_all_first_return_s: float = 15.0

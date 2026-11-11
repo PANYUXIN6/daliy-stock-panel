@@ -58,6 +58,9 @@ export const QK = {
   // Screener
   screener:             ['screener'] as const,
   screenerStrategies:   (assetType: string = 'stock', timeframe: '1d' | '1m' | 'all' = '1d') => ['screener-strategies', assetType, timeframe] as const,
+  screenerTasksRoot: ['screener-tasks'] as const,
+  screenerTasks: (asset: string, asOf: string) => ['screener-tasks', asset, asOf] as const,
+  screenerSnapshot: (asset: string, strategyId: string, asOf: string, ext: string) => ['screener-cached', 'manual', asset, strategyId, asOf, ext] as const,
   screenerCachedSummary: ['screener-cached', 'summary'] as const,
   screenerCachedRoot:    ['screener-cached'] as const,
   screenerRunStatus:     (runId: string) => ['screener-run-status', runId] as const,

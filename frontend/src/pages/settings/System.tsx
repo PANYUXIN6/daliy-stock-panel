@@ -8,8 +8,6 @@ import { useState, useCallback, useEffect } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { Settings2, Trash2, RefreshCw, Bell, Volume2, Info, ExternalLink, ZoomIn, Minus, Plus } from 'lucide-react'
 import { usePreferences, useVersion } from '@/lib/useSharedQueries'
-import { api } from '@/lib/api'
-import { QK } from '@/lib/queryKeys'
 import { PageHeader } from '@/components/PageHeader'
 import { BacktestMemorySettings } from '@/components/settings/BacktestMemorySettings'
 import { refreshAlertToastConfig } from '@/components/AlertToast'
@@ -25,9 +23,7 @@ export function SettingsSystemPanel() {
   const prefsQuery = usePreferences()
   const prefs = prefsQuery.data
   const { data: versionData } = useVersion()
-  const [saving, setSaving] = useState(false)
 
-  const screenerAutoRun = prefs?.screener_auto_run ?? true
   const [extTpl, setExtTpl] = useState(() => loadStockExternalTemplate())
   const [clearing, setClearing] = useState(false)
 
@@ -88,16 +84,6 @@ export function SettingsSystemPanel() {
     }
   }, [voiceConfigured])
 
-  const save = useCallback(async (cfg: Record<string, unknown>) => {
-    setSaving(true)
-    try {
-      await api.updateRealtimeMonitorConfig(cfg)
-      qc.invalidateQueries({ queryKey: QK.preferences })
-    } finally {
-      setSaving(false)
-    }
-  }, [qc])
-
   // 刷新前端缓存: 清除 react-query 缓存 + 强制重载 (绕过浏览器缓存)
   // 不动 localStorage (用户列配置/策略池等偏好保留), 也不影响后端的本地股票数据
   const handleClearCache = useCallback(() => {
@@ -122,13 +108,7 @@ export function SettingsSystemPanel() {
           <h3 className="text-sm font-medium text-foreground">策略页</h3>
         </div>
 
-        <ToggleRow
-          label="进入策略页自动运行策略"
-          desc="开启后进入策略页自动跑所有策略获取命中数; 关闭则需手动点击"
-          checked={screenerAutoRun}
-          disabled={saving}
-          onChange={(v) => save({ screener_auto_run: v })}
-        />
+        <p className="text-sm text-secondary">策略由手动点击更新。每天 16:00 后检查正式盘后数据；已有有效结果直接复用，页面加载不会自动计算。</p>
       </section>
 
       {prefs ? <BacktestMemorySettings value={prefs.backtest_worker_rss_limit_gib} /> : (
@@ -149,7 +129,6 @@ export function SettingsSystemPanel() {
           label="开启监控通知弹窗"
           desc="收到监控告警时在右下角弹出通知卡片"
           checked={toastEnabled}
-          disabled={saving}
           onChange={(v) => {
             accountStorage.setItem('alert_toast_enabled', v ? '1' : '0')
             setToastEnabled(v)

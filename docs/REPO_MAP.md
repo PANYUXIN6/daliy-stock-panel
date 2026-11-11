@@ -84,7 +84,7 @@ authority_status: observed
 | 交易日历或显式历史缺口检查 | `services/trading_day.py::sync_calendar` 由 collector 保存日历并累积重叠区间已确认日期（支持财报事件回放），`is_trading_day` 只读；历史检查仍在 `services/data_integrity.py` | `test_trading_day.py`、`test_data_integrity.py` |
 | 日 K 自检与精准修补 | 数据页 `DataIntegrityPanel` → collector `api/data.py` 的 `/integrity` 报告与任务 → `data_integrity.py`、`daily_health.py`、`integrity_check.py` → `repair_daily.py` 暂存校验／备份 → 仓库定向替换 → `pipeline.recompute_daily_symbols` 与环境／主线范围重算 → 现有共享发布；管道先续修已登记异常 | `test_integrity_self_check.py`、`test_precise_daily_repair.py`、`test_daily_repair_history_discovery.py`、`test_data_integrity_api.py` |
 | 策略筛选、参数或评分 | `api/screener.py`、`api/strategy.py` → `services/screener.py`、`strategy/engine.py`、`strategy/scoring.py`、`strategy/overlay.py`、`strategy/config.py` | `test_strategy_registry.py`、`test_strategy_saved_params.py`、`test_strategy_overlay.py`、`test_strategy_scoring.py`、`test_screener_cache_api.py` |
-| 多用户任务排队与限流 | 选股各命令 → `services/strategy_run_queue.py`；回测／优化／步进／挖掘 → `services/task_scheduler.py` → `heavy_job_limiter.py`；按用户轮转、有界待处理数量、在途选股去重、排队取消释放名额；渐进任务返回 `run_id`，`GET /api/screener/run-status/{run_id}` → `useScreenerRunStatus` 传递终态与逐策略错误，状态仅本用户可读 | `test_strategy_run_queue.py`、`test_screener_run_all_progressive.py`、`useScreenerRunStatus.test.tsx`、`test_task_scheduler.py`、`test_research_ownership.py`、`test_mining_manager.py` |
+| 逐策略手动选股与任务恢复 | `api/screener.py::submit_manual_strategy/manual_tasks` → `services/screener_tasks.py` → `strategy_run_queue.py` 单线程独占槽；`review_publication.py` 提供正式盘后版本；`screener_snapshots.py` 保存逐策略、逐日个人快照；前端 `useScreenerRunStatus.ts` 批量恢复状态，`Screener.tsx` 仅点击标签提交 | `test_screener_tasks.py`、`test_screener_publication.py`、`test_strategy_run_queue.py`；前端 `useScreenerRunStatus.test.tsx`、`StrategyCard.test.tsx` |
 | 公共快照与个人摘要缓存 | `services/snapshot_cache.py` 合并总览和历史的同键构建；`financial_snapshot.py` 按文件版本复用财务表；`strategy_cache.py` 以 `path_locks.py` 隔离文件锁并缓存摘要；`user_runtime.py::background_active` 避免空闲账号参与实时计算 | `test_snapshot_cache.py`、`test_strategy_cache.py`、`test_financial_demand.py`、`test_user_runtime_boundaries.py` |
 | 日K自检与精准修补 | `api/data.py::integrity` → `services/integrity_check.py` / `repair_daily.py` → 仓库按标的替换与指标重算；任务复用 collector 唯一写入槽，`daily_health.py` 保存已知问题、续修状态与修订版本 | `test_integrity_self_check.py`、`test_precise_daily_repair.py`、`test_daily_repair_history_discovery.py`；`DataIntegrityPanel.test.tsx` |
 | 扩展配置分享 | `api/ext_data.py` → `services/ext_config_transfer.py` / `ext_data_schema.py` / `package_archive.py`；单表白名单、脱敏、只创建新目录，再沿既有扩展数据刷新链发布 | `test_ext_config_transfer.py`；`ExtConfigTransfer.test.tsx` |
@@ -124,6 +124,8 @@ authority_status: observed
 
 筛选：api/screener → ScreenerService.build_strategy_context
       → StrategyEngine.run → 过滤、评分、排序 → 策略结果缓存 / 响应
+      点击标签 POST tasks/{strategy_id} → 16:00 与正式版本检查 → 缓存复用 / 独立任务
+      → GET tasks 批量恢复状态 → 标签 loading / 逐日快照 / 独立失败或取消
 
 盘中：collector QuoteService → 当前实时 Provider → 标准行情
       → 当日日线与 enriched 更新 → 监控评估 / 模拟盘撮合

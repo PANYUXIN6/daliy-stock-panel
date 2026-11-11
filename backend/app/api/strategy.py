@@ -63,7 +63,7 @@ def _data_dir(request: Request) -> Path:
 def _invalidate_strategy_runtime(request: Request, strategy_id: str | None = None) -> None:
     from app.services import strategy_cache
 
-    strategy_cache.clear_cache(_data_dir(request), strategy_id)
+    strategy_cache.clear_cache(_data_dir(request), strategy_id, invalidate_manual=False)
     runtime = runtime_for(request)
     runtime.strategy_engine.clear_realtime_matrices()
     for name in ("monitor_engine", "paper_monitor_engine"):

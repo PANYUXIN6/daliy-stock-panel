@@ -10,9 +10,10 @@ import time
 from contextlib import suppress
 from dataclasses import asdict, replace
 from datetime import date, datetime
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from app.config import settings
@@ -112,6 +113,8 @@ async def verify_earnings_gap(req: EarningsGapVerifyRequest, request: Request):
         payload.update(rows=rows, total=len(rows))
         authorize()
         strategy_cache.write_cache(repo.store.data_dir, str(as_of), {STRATEGY_ID: payload})
+        from app.services import screener_snapshots
+        screener_snapshots.save_result(repo.store.data_dir, "stock", "1d", str(as_of), STRATEGY_ID, payload)
 
     def make_run(progress, cancel_event):
         def run():
@@ -523,6 +526,9 @@ def _cached_with_realtime(request: Request) -> dict:
 def get_cached(
     request: Request,
     ext_columns: str | None = Query(None, description="逗号分隔: config_id.field_name"),
+    manual: bool = False,
+    asset_type: Literal["stock", "etf"] = "stock",
+    as_of: date | None = None,
 ):
     """读取策略结果缓存, 并叠加监控引擎本轮实时算出的结果。
 
@@ -532,7 +538,8 @@ def get_cached(
       被监控的策略拿到新鲜信号, 非监控策略保留原信号。
     - 同日行情只覆盖价格展示字段，不重算评分、不写回策略缓存。
     """
-    cached = with_live_quotes(_cached_with_realtime(request), request.app.state.repo)
+    cached = (_manual_cached(request, asset_type, as_of) if manual else
+              with_live_quotes(_cached_with_realtime(request), request.app.state.repo))
 
     # 无任何数据 (盘后缓存空 + 无实时结果) → 返回空标记, 前端据此提示
     if not cached.get("results") and cached.get("as_of") is None:
@@ -550,6 +557,44 @@ def get_cached_summary(request: Request):
     return strategy_cache.read_summary(request.app.state.repo.store.data_dir, realtime)
 
 
+@router.get("/tasks")
+def manual_tasks(request: Request, asset_type: Literal["stock", "etf"] = "stock", as_of: date | None = None):
+    from app.services.screener_tasks import summary
+    return summary(request.app.state.repo.store.data_dir, asset_type, as_of)
+
+
+class ManualStrategyRequest(BaseModel):
+    asset_type: Literal["stock", "etf"] = "stock"
+    as_of: date | None = None
+
+
+@router.post("/tasks/{strategy_id}")
+def submit_manual_strategy(strategy_id: str, body: ManualStrategyRequest, request: Request):
+    from app.services.screener_tasks import submit
+    from app.services.task_scheduler import JobQueueFullError
+    engine = getattr(runtime_for(request), "strategy_engine", None)
+    if engine is None:
+        raise HTTPException(503, "策略引擎未初始化")
+    if not engine.has(strategy_id):
+        raise HTTPException(404, "策略不存在")
+    try:
+        payload = submit(request.app.state.repo, engine, strategy_id, body.asset_type, body.as_of)
+    except JobQueueFullError as exc:
+        raise HTTPException(429, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    task = payload["task"]
+    return JSONResponse(status_code=202 if task else 200, content=payload,
+                        headers={"Location": f"/api/screener/run-status/{task['run_id']}"} if task else {})
+
+
+def _manual_cached(request: Request, asset_type: str, as_of: date | None) -> dict:
+    from app.services.screener_tasks import results
+    saved = results(request.app.state.repo.store.data_dir, asset_type, as_of)
+    return {"results": {sid: {k: v for k, v in result.items() if k != "input_version"} for sid, result in saved.items()},
+            "as_of": max((r["as_of"] for r in saved.values()), default=None), "updated_at": None}
+
+
 @router.get("/run-status/{run_id}")
 def get_run_status(run_id: str):
     """只读当前用户的执行状态，独立于成功结果缓存，保留迟发错误。"""
@@ -559,16 +604,27 @@ def get_run_status(run_id: str):
     return status
 
 
+@router.delete("/run-status/{run_id}")
+def cancel_run(run_id: str):
+    status = strategy_run_queue.MANAGER.cancel(run_id)
+    if status is None:
+        raise HTTPException(status_code=404, detail="策略任务不存在或已过期")
+    return status
+
+
 @router.get("/cached-result/{strategy_id}")
 def get_cached_result(
     strategy_id: str,
     request: Request,
     ext_columns: str | None = Query(None, description="逗号分隔: config_id.field_name"),
+    manual: bool = False,
+    asset_type: Literal["stock", "etf"] = "stock",
+    as_of: date | None = None,
 ):
     """按需返回单个策略的完整明细及其今日失效行。"""
-    cached = with_live_quotes(
+    cached = (_manual_cached(request, asset_type, as_of) if manual else with_live_quotes(
         _cached_with_realtime(request), request.app.state.repo, strategy_id=strategy_id,
-    )
+    ))
     raw_result = (cached.get("results") or {}).get(strategy_id)
     if not isinstance(raw_result, dict):
         return {
@@ -670,10 +726,10 @@ def _run_all_progressive(
     first_return_s: float,
     t_total: float,
 ) -> dict:
-    """run_all 渐进式执行: 快策略随响应先返回, 慢策略后台算完逐个落缓存。
+    """run_all 后台执行: 逐个落缓存，返回任务编号和当前状态快照。
 
     执行全程在单飞执行器里 (见 services/strategy_run_queue.py): 相同请求
-    搭车现有执行, 不同请求排队; HTTP 侧只轮询状态快照到首返时限。
+    搭车现有执行, 不同请求排队; first_return_s=0 时只提交不等待计算。
     """
     data_dir = repo.store.data_dir
     key = strategy_run_queue.command_key(
@@ -714,6 +770,7 @@ def _run_all_progressive(
         all_results: dict[str, dict] = {}
         elapsed_map: dict[str, float] = {}
         for sid in ordered_ids:
+            handle.checkpoint()
             t0 = time.perf_counter()
             # 逐策略隔离: 单个策略崩溃 (如自定义代码的数据类型错误) 只记
             # 错误跳过, 不让整批剩余策略陪葬 — 其余策略照常算完落缓存。
@@ -752,6 +809,7 @@ def _run_all_progressive(
                     payload["warnings"] = w
             elapsed_map[sid] = (time.perf_counter() - t0) * 1000
             # 逐策略增量落盘 (write_cache 同日按 sid 合并), 前端轮询即可逐个看到
+            handle.checkpoint()
             try:
                 strategy_cache.write_cache(data_dir, str(as_of), {sid: payload})
             except Exception:  # noqa: BLE001 -- 单策略及缓存写入失败已记录warning并按既有任务契约反馈
@@ -774,7 +832,7 @@ def _run_all_progressive(
         snap = handle.snapshot()
 
     done_results = snap["results"]
-    if snap["error"] and not done_results:
+    if first_return_s > 0 and snap["error"] and not done_results:
         raise HTTPException(status_code=500, detail=snap["error"])
     logger.info(
         "run_all: first return %.1fms (%d done, %d pending)",
@@ -788,7 +846,8 @@ def _run_all_progressive(
         "results": done_results,
         "pending": snap["pending"],
         "errors": snap["errors"],
-        "complete": snap["done"] and not snap["error"],
+        "complete": snap["done"] and not snap["error"] and snap["phase"] != "cancelled",
+        "phase": snap["phase"],
         "error": snap["error"],
         "started_at": snap["started_at_ms"],
     }
@@ -862,12 +921,12 @@ def run_all(request: Request, body: dict | None = None):
     }
     overrides_map = {sid: all_overrides.get(sid, {}) for sid in all_ids}
 
-    # 渐进式返回 (页面首屏路径): 按历史耗时升序执行, 首返时限内算完的随响应
-    # 返回, 慢策略转后台继续算并逐个写入策略缓存, 前端轮询 cached-summary 点亮。
-    # 仅日线 + summary_only (策略页卡片) 启用; 分钟/明细请求保持整段阻塞。
+    # 页面日线请求仅提交后台任务并立即返回编号，不等待资源或计算。
+    # 原有调用方仍可使用短暂等待首批结果的路径；分钟/明细请求保持原契约。
+    background = body.get("background") is True
     first_return_s = settings.strategy_run_all_first_return_s
-    if body.get("summary_only") and timeframe == "1d" and first_return_s > 0:
-        return _run_all_progressive(
+    if body.get("summary_only") and timeframe == "1d" and (background or first_return_s > 0):
+        payload = _run_all_progressive(
             repo=repo,
             engine=engine,
             svc=svc,
@@ -877,9 +936,15 @@ def run_all(request: Request, body: dict | None = None):
             all_ids=all_ids,
             params_map=params_map,
             overrides_map=overrides_map,
-            first_return_s=first_return_s,
+            first_return_s=0 if background else first_return_s,
             t_total=t_total,
         )
+        if background:
+            return JSONResponse(
+                status_code=202, content=payload,
+                headers={"Location": f"/api/screener/run-status/{payload['run_id']}"},
+            )
+        return payload
 
     def execute():
         try:

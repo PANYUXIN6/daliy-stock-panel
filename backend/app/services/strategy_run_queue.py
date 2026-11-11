@@ -1,13 +1,13 @@
 """策略 run_all 渐进式执行 — 单飞后台执行 + 快策略先返回。
 
 页面进入策略页时 run_all 全量跑需要 ~2 分钟, 用户只能盯着空卡片等。此模块把
-执行拆成「同步等一小段 + 后台继续算」:
+执行拆成「提交取得任务编号 + 后台计算 + 状态查询」:
 
 - 全局同一时刻只执行一个选股任务 (包括单策略、分钟和 run_all),
   按用户轮转调度; 相同 key (资产/周期/日期/策略集) 的重复请求
   直接搭车现有执行, 不重复算。
-- 按历史耗时升序执行: 快策略 (秒级) 在首返时限内完成并随 HTTP 响应返回,
-  慢策略 (分钟级) 留在后台慢慢算。
+- 按历史耗时升序执行: 页面提交立即返回任务编号，快策略先完成，
+  慢策略留在后台继续；原有调用方仍可短暂等待首批结果。
 - 每个策略算完立刻增量写入 strategy_cache, 前端轮询任务状态获知完成或失败，
   并刷新 cached-summary 逐个点亮卡片数字。
 """
@@ -36,6 +36,7 @@ _TIMINGS_FILENAME = "strategy_run_timings.json"
 _timings_lock = threading.Lock()
 _STATUS_TTL = 30 * 60
 _MAX_COMPLETED_STATUSES = 256
+_CAPACITY_WAIT_TIMEOUT_S = 300.0
 
 
 def _timings_path(data_dir: Path) -> Path:
@@ -87,8 +88,9 @@ def order_strategy_ids(all_ids: list[str], timings: dict[str, float]) -> list[st
 class StrategyRunHandle:
     """一次 run_all 的执行状态; 端点线程 (读) 与后台执行线程 (写) 共享。"""
 
-    def __init__(self, key: tuple, ordered_ids: list[str]) -> None:
+    def __init__(self, key: tuple, ordered_ids: list[str], metadata: dict | None = None) -> None:
         self.key = key
+        self.metadata = metadata or {}
         self.run_id = uuid.uuid4().hex
         self.started_at_ms = int(time.time() * 1000)
         self._lock = threading.Lock()
@@ -97,7 +99,25 @@ class StrategyRunHandle:
         self._errors: dict[str, str] = {}
         self._error: str | None = None
         self._done = False
+        self._phase = "queued"
+        self.cancel_event = threading.Event()
         self.future: Future = Future()
+
+    def set_phase(self, phase: str) -> None:
+        with self._lock:
+            if not self._done:
+                self._phase = "cancelling" if self.cancel_event.is_set() else phase
+
+    def request_cancel(self) -> None:
+        with self._lock:
+            if not self._done:
+                self.cancel_event.set()
+                self._phase = "cancelling"
+
+    def checkpoint(self) -> None:
+        from app.services.heavy_job_limiter import HeavyJobCancelledError
+        if self.cancel_event.is_set():
+            raise HeavyJobCancelledError("策略计算已取消")
 
     def complete(self, sid: str, payload: dict) -> None:
         with self._lock:
@@ -117,21 +137,26 @@ class StrategyRunHandle:
             self._error = message
             self._remaining.clear()
             self._done = True
+            self._phase = "done"
 
     def finish(self) -> None:
         with self._lock:
             self._done = True
+            self._phase = "cancelled" if self.cancel_event.is_set() else "done"
+            self._remaining.clear()
 
     def snapshot(self) -> dict:
         """线程安全快照: 结果拷贝 + 剩余/逐策略错误/整体错误/完成状态。"""
         with self._lock:
             return {
                 "run_id": self.run_id,
+                "metadata": dict(self.metadata),
                 "results": dict(self._results),
                 "pending": list(self._remaining),
                 "errors": dict(self._errors),
                 "error": self._error,
                 "done": self._done,
+                "phase": self._phase,
                 "started_at_ms": self.started_at_ms,
             }
 
@@ -190,11 +215,32 @@ class StrategyRunManager:
                 return None
             return deepcopy(completed[2])
 
+    def active(self, key: tuple) -> dict | None:
+        owner = current_user()
+        full_key = (str(owner.data_dir.resolve()), owner.id, *key)
+        with self._lock:
+            handle = self._handles.get(full_key)
+            if handle is None or handle.snapshot()["done"]:
+                return None
+            return deepcopy(handle.snapshot())
+
+    def list_statuses(self, namespace: str) -> list[dict]:
+        """One owner-scoped read restores every card, including terminal failures."""
+        owner = current_user()
+        owner_key = (str(owner.data_dir.resolve()), owner.id)
+        with self._lock:
+            self._prune_statuses()
+            statuses = [h.snapshot() for h in self._runs.values() if h.key[:2] == owner_key]
+            statuses.extend(s for key, _, s in self._completed.values() if key == owner_key)
+            return deepcopy([s for s in statuses if s.get("metadata", {}).get("namespace") == namespace])
+
     def get_or_submit(
         self,
         key: tuple,
         ordered_ids: list[str],
         job: Callable[[StrategyRunHandle], None],
+        *,
+        metadata: dict | None = None,
     ) -> StrategyRunHandle:
         owner = current_user()
         key = (str(owner.data_dir.resolve()), owner.id, *key)
@@ -210,7 +256,7 @@ class StrategyRunManager:
             existing = self._handles.get(key)
             if existing is not None and not existing.snapshot()["done"]:
                 return existing
-            handle = StrategyRunHandle(key, ordered_ids)
+            handle = StrategyRunHandle(key, ordered_ids, metadata)
             self._handles[key] = handle
             if ordered_ids:
                 self._runs[handle.run_id] = handle
@@ -222,13 +268,55 @@ class StrategyRunManager:
                 raise
         return handle
 
+    def cancel(self, run_id: str) -> dict | None:
+        owner = current_user()
+        owner_key = (str(owner.data_dir.resolve()), owner.id)
+        with self._lock:
+            self._prune_statuses()
+            handle = self._runs.get(run_id)
+            if handle is None:
+                completed = self._completed.get(run_id)
+                return deepcopy(completed[2]) if completed and completed[0] == owner_key else None
+            if handle.key[:2] != owner_key:
+                return None
+            handle.request_cancel()
+        # Future cancellation releases queued capacity immediately; never mark an
+        # executing native computation as finished before its thread has exited.
+        if handle.future.cancel():
+            handle.finish()
+            self._retire(handle)
+        return deepcopy(handle.snapshot())
+
+    def _retire(self, handle):
+        with self._lock:
+            if self._handles.get(handle.key) is handle:
+                self._handles.pop(handle.key)
+            if self._runs.pop(handle.run_id, None) is not None:
+                self._completed[handle.run_id] = (handle.key[:2], time.monotonic(), handle.snapshot())
+                self._prune_statuses()
+
     def _run_one(self, handle, job):
-        from app.services.heavy_job_limiter import shared_heavy_job_limiter
+        from app.services.heavy_job_limiter import (
+            HeavyJobCancelledError,
+            HeavyJobLimitTimeoutError,
+            shared_heavy_job_limiter,
+        )
         try:
             # Cold repository loads can rebuild the full enriched matrix and
             # require an exclusive reservation; nested loads reuse this slot.
-            with shared_heavy_job_limiter.slot("exclusive"):
+            handle.set_phase("waiting")
+            with shared_heavy_job_limiter.slot(
+                "exclusive", timeout=_CAPACITY_WAIT_TIMEOUT_S, cancel_event=handle.cancel_event,
+            ):
+                handle.checkpoint()
+                handle.set_phase("running")
                 result = job(handle)
+        except HeavyJobCancelledError:
+            handle.finish()
+        except HeavyJobLimitTimeoutError as exc:
+            message = "等待服务器计算资源超时，可能内存不足或有其他重任务正在运行，请稍后重试"
+            handle.fail(message)
+            raise TimeoutError(message) from exc
         except BaseException as exc:
             # Native compute failures can inherit BaseException; mirror the worker
             # boundary so every failed Future also has a terminal UI status.
@@ -239,12 +327,7 @@ class StrategyRunManager:
             handle.finish()
             return result
         finally:
-            with self._lock:
-                if self._handles.get(handle.key) is handle:
-                    self._handles.pop(handle.key)
-                if self._runs.pop(handle.run_id, None) is not None:
-                    self._completed[handle.run_id] = (handle.key[:2], time.monotonic(), handle.snapshot())
-                    self._prune_statuses()
+            self._retire(handle)
 
     def run_sync(self, key: tuple, work: Callable):
         """单策略、分钟与完整批次共用执行槽；只复用在途结果，返回独立快照。"""

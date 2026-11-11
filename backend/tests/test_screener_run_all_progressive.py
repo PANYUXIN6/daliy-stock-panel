@@ -8,7 +8,8 @@ from datetime import date
 from types import SimpleNamespace
 
 import pytest
-from fastapi import HTTPException
+from fastapi import FastAPI, HTTPException
+from fastapi.testclient import TestClient
 
 from app.api import screener as screener_api
 from app.config import settings
@@ -78,8 +79,102 @@ def _wait_cache_results(tmp_path, want_ids, timeout=8.0) -> dict:
 @pytest.fixture()
 def fast_first_return(monkeypatch):
     # The deadline measures execution, not first-import initialization of dependencies.
+    from app.backtest import strategy  # noqa: F401
     from app.services import financial_demand  # noqa: F401
     monkeypatch.setattr(settings, "strategy_run_all_first_return_s", 0.4)
+
+
+def _client(tmp_path, engine):
+    state = _request(tmp_path, engine).app.state
+    app = FastAPI()
+    app.state.repo = state.repo
+    app.state.user_runtimes = state.user_runtimes
+    app.include_router(screener_api.router)
+    return TestClient(app)
+
+
+def test_background_submission_returns_202_while_resources_unavailable(monkeypatch, tmp_path):
+    from app.services import heavy_job_limiter
+
+    monkeypatch.setattr(heavy_job_limiter, '_memory_admission_ok', lambda: False)
+    monkeypatch.setattr(settings, 'strategy_run_all_first_return_s', 0)
+    monkeypatch.setattr(screener_api, 'ScreenerService', _FakeService)
+    manager = strategy_run_queue.StrategyRunManager()
+    monkeypatch.setattr(strategy_run_queue, 'MANAGER', manager)
+    engine = _FakeEngine({'slow': 0})
+    body = {'as_of': AS_OF, 'strategy_ids': ['slow'], 'summary_only': True, 'background': True}
+    with _client(tmp_path, engine) as client:
+        response = client.post('/api/screener/run_all', json=body)
+        payload = response.json()
+        try:
+            assert response.status_code == 202
+            assert payload['pending'] == ['slow'] and not payload['complete']
+            assert response.headers['location'] == f"/api/screener/run-status/{payload['run_id']}"
+            assert client.get(response.headers['location']).json()['done'] is False
+            # More retries than the owner quota still reuse the accepted task.
+            for _ in range(5):
+                repeated = client.post('/api/screener/run_all', json=body)
+                assert repeated.status_code == 202
+                assert repeated.json()['run_id'] == payload['run_id']
+            assert not engine.executed
+        finally:
+            client.delete(response.headers['location'])
+        deadline = time.monotonic() + 5
+        while not manager.status(payload['run_id'])['done'] and time.monotonic() < deadline:
+            time.sleep(.01)
+        assert manager.status(payload['run_id'])['phase'] == 'cancelled'
+
+
+def test_background_submission_returns_before_calculation_and_reports_later_result(monkeypatch, tmp_path, fast_first_return):
+    entered, release = threading.Event(), threading.Event()
+    monkeypatch.setattr(settings, 'strategy_run_all_first_return_s', 900)
+    monkeypatch.setattr(screener_api, 'ScreenerService', _FakeService)
+    manager = strategy_run_queue.StrategyRunManager()
+    monkeypatch.setattr(strategy_run_queue, 'MANAGER', manager)
+
+    class Engine(_FakeEngine):
+        def run_all(self, *args, **kwargs):
+            entered.set()
+            assert release.wait(5)
+            return super().run_all(*args, **kwargs)
+
+    with _client(tmp_path, Engine({'slow': 0})) as client:
+        try:
+            response = client.post('/api/screener/run_all', json={
+                'as_of': AS_OF, 'strategy_ids': ['slow'], 'summary_only': True, 'background': True,
+            })
+            assert response.status_code == 202
+            assert response.json()['results'] == {}
+            assert response.json()['pending'] == ['slow']
+            assert entered.wait(5)
+            status = client.get(response.headers['location']).json()
+            assert status['phase'] == 'running' and not status['done']
+        finally:
+            release.set()
+        assert set(_wait_cache_results(tmp_path, ['slow'])) == {'slow'}
+        status = client.get(response.headers['location']).json()
+        assert status['done'] and status['results']['slow']['total'] == 1
+
+
+def test_background_submission_keeps_immediate_compute_failure_in_task_status(monkeypatch, tmp_path):
+    manager = strategy_run_queue.StrategyRunManager()
+    monkeypatch.setattr(strategy_run_queue, 'MANAGER', manager)
+    monkeypatch.setattr(screener_api, 'ScreenerService', _FakeService)
+    def fail(handle):
+        raise ValueError('历史数据准备失败')
+    handle = manager.get_or_submit(('failed',), ['bad'], fail)
+    with pytest.raises(ValueError, match='历史数据准备失败'):
+        handle.future.result(5)
+    monkeypatch.setattr(manager, 'get_or_submit', lambda *args: handle)
+    with _client(tmp_path, _FakeEngine({'bad': 0})) as client:
+        response = client.post('/api/screener/run_all', json={
+            'as_of': AS_OF, 'strategy_ids': ['bad'], 'summary_only': True, 'background': True,
+        })
+        assert response.status_code == 202
+        assert response.json()['error'] == '历史数据准备失败'
+        assert not response.json()['complete']
+        status = client.get(response.headers['location']).json()
+        assert status['done'] and status['error'] == '历史数据准备失败'
 
 
 def test_run_all_returns_fast_first_then_background_fills_cache(
@@ -239,9 +334,36 @@ def test_status_route_hides_other_users_and_missing_tasks(monkeypatch, tmp_path)
     handle.future.result(5)
     with user_scope(UserContext('b' * 32, 'admin', tmp_path)):
         for run_id in (handle.run_id, 'missing'):
-            with pytest.raises(HTTPException) as error:
-                screener_api.get_run_status(run_id)
-            assert error.value.status_code == 404
+            for endpoint in (screener_api.get_run_status, screener_api.cancel_run):
+                with pytest.raises(HTTPException) as error:
+                    endpoint(run_id)
+                assert error.value.status_code == 404
+
+
+def test_cancel_during_strategy_compute_does_not_publish_late_result(monkeypatch, tmp_path, fast_first_return):
+    entered, release = threading.Event(), threading.Event()
+    manager = strategy_run_queue.StrategyRunManager()
+    monkeypatch.setattr(strategy_run_queue, 'MANAGER', manager)
+    monkeypatch.setattr(screener_api, 'ScreenerService', _FakeService)
+    class Engine(_FakeEngine):
+        def run_all(self, *args, **kwargs):
+            entered.set()
+            assert release.wait(5)
+            return super().run_all(*args, **kwargs)
+    try:
+        response = screener_api.run_all(_request(tmp_path, Engine({'slow': 0})), {
+            'as_of': AS_OF, 'strategy_ids': ['slow'], 'summary_only': True,
+        })
+        assert entered.wait(5)
+        assert screener_api.cancel_run(response['run_id'])['phase'] == 'cancelling'
+    finally:
+        release.set()
+    deadline = time.monotonic() + 5
+    while not screener_api.get_run_status(response['run_id'])['done'] and time.monotonic() < deadline:
+        time.sleep(.01)
+    status = screener_api.get_run_status(response['run_id'])
+    assert status['phase'] == 'cancelled' and not status['results']
+    assert not (strategy_cache.read_cache(tmp_path) or {}).get('results')
 
 
 def test_run_all_job_level_error_without_results_is_500(

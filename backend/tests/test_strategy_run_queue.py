@@ -187,3 +187,93 @@ def test_job_level_failure_preserves_error_and_clears_pending(error_type):
         handle.future.result(5)
     assert manager.status(handle.run_id)['error'] == '准备历史行情失败'
     assert manager.status(handle.run_id)['pending'] == []
+
+
+def test_capacity_wait_times_out_and_releases_owner_quota(monkeypatch):
+    from app.services import heavy_job_limiter as limiter
+
+    monkeypatch.setattr(limiter, '_memory_admission_ok', lambda: False)
+    monkeypatch.setattr(q, '_CAPACITY_WAIT_TIMEOUT_S', .02)
+    manager = q.StrategyRunManager()
+    executed = []
+    for i in range(5):  # More than the per-owner quota must remain possible after failure.
+        handle = manager.get_or_submit(('low-memory', i), ['a'], lambda h: executed.append(True))
+        with pytest.raises(TimeoutError, match='等待服务器计算资源超时'):
+            handle.future.result(5)
+        status = manager.status(handle.run_id)
+        assert status['done'] and not status['pending']
+        assert '内存不足' in status['error']
+    assert not executed
+
+
+def test_cancel_queued_task_releases_quota_without_executing():
+    manager = q.StrategyRunManager()
+    entered, release = threading.Event(), threading.Event()
+
+    def block(handle):
+        entered.set()
+        assert release.wait(5)
+
+    first = manager.get_or_submit(('blocker',), ['a'], block)
+    assert entered.wait(5)
+    try:
+        pending = [manager.get_or_submit(('queued', i), ['b'], lambda h: pytest.fail('cancelled work ran'))
+                   for i in range(3)]
+        assert manager.cancel(pending[0].run_id)['phase'] == 'cancelled'
+        assert pending[0].future.cancelled()
+        replacement = manager.get_or_submit(('replacement',), ['c'], lambda h: h.complete('c', {'total': 0}))
+        for handle in pending[1:]:
+            assert manager.cancel(handle.run_id)['done']
+    finally:
+        release.set()
+    first.future.result(5)
+    replacement.future.result(5)
+    assert manager.status(replacement.run_id)['results'] == {'c': {'total': 0}}
+
+
+def test_cancel_waiting_for_memory_does_not_require_memory_recovery(monkeypatch):
+    from app.services import heavy_job_limiter as limiter
+
+    checked = threading.Event()
+    def no_memory():
+        checked.set()
+        return False
+    monkeypatch.setattr(limiter, '_memory_admission_ok', no_memory)
+    manager = q.StrategyRunManager()
+    handle = manager.get_or_submit(('memory',), ['a'], lambda h: pytest.fail('work ran'))
+    assert checked.wait(5)
+    assert manager.status(handle.run_id)['phase'] == 'waiting'
+    manager.cancel(handle.run_id)
+    handle.future.result(5)
+    assert manager.status(handle.run_id)['phase'] == 'cancelled'
+    assert manager.status(handle.run_id)['error'] is None
+    assert limiter.shared_heavy_job_limiter.in_use == 0
+
+
+def test_cancel_running_task_waits_for_worker_and_preserves_completed_results(private_owner):
+    from app.services.user_context import UserContext, user_scope
+
+    manager = q.StrategyRunManager()
+    entered, release = threading.Event(), threading.Event()
+    def compute(handle):
+        handle.complete('fast', {'total': 2})
+        entered.set()
+        assert release.wait(5)
+        handle.checkpoint()
+        pytest.fail('cancelled strategy continued')
+    handle = manager.get_or_submit(('compute',), ['fast', 'slow'], compute)
+    assert entered.wait(5)
+    try:
+        for other in (UserContext('b' * 32, 'admin', private_owner.data_dir),
+                      UserContext(private_owner.id, 'admin', private_owner.data_dir / 'other')):
+            with user_scope(other):
+                assert manager.cancel(handle.run_id) is None
+        assert not handle.cancel_event.is_set()
+        status = manager.cancel(handle.run_id)
+        assert status['phase'] == 'cancelling' and not status['done']
+        assert status['results'] == {'fast': {'total': 2}}
+    finally:
+        release.set()
+    handle.future.result(5)
+    assert manager.status(handle.run_id)['phase'] == 'cancelled'
+    assert manager.status(handle.run_id)['pending'] == []

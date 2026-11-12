@@ -107,8 +107,18 @@ def clear_all_user_caches(data_dir: Path) -> None:
             break
 
 
-def clear_cache(data_dir: Path, strategy_id: str | None = None) -> None:
+def clear_cache(data_dir: Path, strategy_id: str | None = None, *, invalidate_manual: bool = True) -> None:
     """清除失效结果；参数更新只清对应策略，注册表重载仍清整份缓存。"""
+    from app.services import screener_snapshots
+    if invalidate_manual:
+        screener_snapshots.invalidate(data_dir, strategy_id)
+    else:
+        # 配置变化由输入版本精确比较；重载相同定义不应强制重算。
+        with path_lock(screener_snapshots.path(data_dir)):
+            saved = screener_snapshots.read(data_dir)
+            if any(saved.values()):
+                screener_snapshots.write(data_dir, saved)
+
     import traceback
 
     # 运维可见性: 策略页依赖本缓存秒加载, 被清空即整页回退到全量重算。

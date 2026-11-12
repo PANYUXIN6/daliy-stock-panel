@@ -13,6 +13,8 @@ const mocks = vi.hoisted(() => ({
   verify: vi.fn(), pipelineJob: vi.fn(), pipelineJobCancel: vi.fn(),
   screenerStrategies: vi.fn(), screenerCachedSummary: vi.fn(), screenerCachedResult: vi.fn(),
   screenerRunAll: vi.fn(), screenerRunPreset: vi.fn(), screenerRunStatus: vi.fn(),
+  screenerCancelRun: vi.fn(), strategyReload: vi.fn(), submitTask: vi.fn(),
+  activeTasks: {} as Record<string, any>,
   pool: ['earnings_breakout_gap'], prune: vi.fn(),
   prefs: { screener_auto_run: true },
   status: { enriched: { latest_date: '2026-10-16', earliest_date: '2026-01-01' } },
@@ -22,10 +24,16 @@ vi.mock('@/lib/api', () => ({ api: {
   pipelineJob: mocks.pipelineJob,
   pipelineJobCancel: mocks.pipelineJobCancel,
   screenerStrategies: mocks.screenerStrategies,
+  screenerTasks: async (...args: unknown[]) => ({ ...await mocks.screenerCachedSummary(...args), tasks: mocks.activeTasks }),
+  screenerSubmitTask: mocks.submitTask,
+  screenerSnapshot: mocks.screenerCachedResult,
+  screenerSnapshots: async () => ({ results: {}, as_of: null }),
   screenerCachedSummary: mocks.screenerCachedSummary,
   screenerCachedResult: mocks.screenerCachedResult,
   screenerRunAll: mocks.screenerRunAll,
   screenerRunStatus: mocks.screenerRunStatus,
+  screenerCancelRun: mocks.screenerCancelRun,
+  strategyReload: mocks.strategyReload,
   screenerRunPreset: mocks.screenerRunPreset,
   minuteRefreshStatus: async () => ({ healthy: false }),
   watchlistList: async () => ({ symbols: [] }),
@@ -83,6 +91,8 @@ beforeEach(() => {
   Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true })
   vi.resetAllMocks()
   mocks.pool = ['earnings_breakout_gap']
+  mocks.activeTasks = {}
+  mocks.submitTask.mockResolvedValue({ task: null, notice: null })
   mocks.prefs.screener_auto_run = true
   mocks.verify.mockResolvedValue({ job_id: 'verify-1', reused: false })
   mocks.pipelineJob.mockImplementation(async (id: string) => ({
@@ -339,205 +349,51 @@ it('已有选股缓存但尚未核验时，独立核验按钮仍可启动首次�
   expect(mocks.verify).toHaveBeenCalledTimes(1)
 })
 
-it('实际策略页缺少缓存时自动批量计算仍不发核验命令', async () => {
-  mocks.screenerCachedSummary.mockResolvedValue({ as_of: '2026-10-16', results: {}, today_ever_counts: {} })
+
+it('缺少缓存时进入页面、切换日期与新增策略都不自动计算', async () => {
+  mocks.screenerCachedSummary.mockResolvedValue({ as_of: null, results: {}, today_ever_counts: {} })
   await renderScreener()
-  expect(mocks.screenerRunAll).toHaveBeenCalled()
+  await act(async () => button('历史日期').click())
+  await settle()
+  await act(async () => [...host.querySelectorAll('button')].find(item => item.textContent?.includes('策略池'))!.click())
+  await act(async () => button('添加新策略').click())
+  await renderScreener()
+  expect(mocks.submitTask).not.toHaveBeenCalled()
+  expect(mocks.screenerRunAll).not.toHaveBeenCalled()
   expect(mocks.verify).not.toHaveBeenCalled()
 })
 
-it('后台任务运行中新增策略排队，终态后继续运行且保留原策略错误', async () => {
-  mocks.screenerStrategies.mockResolvedValue({ presets: [
-    { id: 'earnings_breakout_gap', name: '业绩断层跳空', asset_types: ['stock'], timeframes: ['1d'] },
-    { id: 'new-strategy', name: '新增策略', asset_types: ['stock'], timeframes: ['1d'] },
-  ], load_errors: [] })
-  mocks.screenerCachedSummary.mockResolvedValue({ as_of: '2026-10-16', results: {}, today_ever_counts: {} })
-  mocks.screenerRunAll.mockResolvedValueOnce({
-    run_id: 'daily-1', as_of: '2026-10-16', results: {}, pending: ['earnings_breakout_gap'],
-  }).mockResolvedValue({ as_of: '2026-10-16', results: { 'new-strategy': { total: 2, as_of: '2026-10-16' } }, complete: true })
-  mocks.screenerRunStatus.mockResolvedValue({ run_id: 'daily-1', pending: ['earnings_breakout_gap'], results: {}, errors: {}, error: null, done: false, started_at_ms: 1 })
-  await renderScreener()
-  expect(mocks.screenerRunAll).toHaveBeenCalledTimes(1)
-  await act(async () => [...host.querySelectorAll('button')].find(item => item.textContent?.includes('策略池'))!.click())
-  await act(async () => button('添加新策略').click())
-  // 池变化触发自动补算时，missing IDs 仍包含旧批次，不应把它排队再跑。
-  await renderScreener()
-  await settle()
-  expect(mocks.screenerRunAll).toHaveBeenCalledTimes(1)
-  await act(async () => qc.setQueryData(QK.screenerRunStatus('daily-1'), {
-    run_id: 'daily-1', pending: [], results: {}, errors: { earnings_breakout_gap: '利润表读取失败' }, error: null, done: true, started_at_ms: 1,
-  }))
-  await settle()
-  expect(mocks.screenerRunAll).toHaveBeenCalledTimes(2)
-  expect(mocks.screenerRunAll).toHaveBeenLastCalledWith('2026-10-16', ['new-strategy'], 'stock')
-  expect(host.textContent).toContain('业绩断层跳空：利润表读取失败')
-  expect(button('重试未完成策略').disabled).toBe(false)
-})
-
-function prepareQueuedBatch() {
-  mocks.screenerStrategies.mockResolvedValue({ presets: [
-    { id: 'earnings_breakout_gap', name: '业绩断层跳空', asset_types: ['stock'], timeframes: ['1d'] },
-    { id: 'new-strategy', name: '新增策略', asset_types: ['stock'], timeframes: ['1d'] },
-  ], load_errors: [] })
-  mocks.screenerCachedSummary.mockResolvedValue({ as_of: '2026-10-16', results: {}, today_ever_counts: {} })
-  mocks.screenerRunAll.mockResolvedValueOnce({
-    run_id: 'queued-origin', as_of: '2026-10-16', results: {}, pending: ['earnings_breakout_gap'],
-  }).mockImplementation(async (date: string, ids: string[]) => ({
-    as_of: date, results: Object.fromEntries(ids.map(id => [id, { total: 2, as_of: date }])), complete: true,
-  }))
-  mocks.screenerRunStatus.mockResolvedValue({
-    run_id: 'queued-origin', pending: ['earnings_breakout_gap'], results: {}, errors: {}, error: null, done: false, started_at_ms: 1,
-  })
-}
-
-async function addQueuedStrategy() {
-  await act(async () => [...host.querySelectorAll('button')].find(item => item.textContent?.includes('策略池'))!.click())
-  await act(async () => button('添加新策略').click())
-  await renderScreener()
-  expect(mocks.screenerRunAll).toHaveBeenCalledTimes(1)
-}
-
-async function finishQueuedOrigin() {
-  const final = {
-    run_id: 'queued-origin', pending: [], results: { earnings_breakout_gap: { total: 1, as_of: '2026-10-16' } },
-    errors: {}, error: null, done: true, started_at_ms: 1,
-  }
-  mocks.screenerRunStatus.mockResolvedValue(final)
-  await act(async () => qc.setQueryData(QK.screenerRunStatus('queued-origin'), final))
-  await settle()
-}
-
-it.each([false, true])('新增策略排队后跨资产往返，原批次离开期间完成=%s时仍仅提交新增一次', async finishesAway => {
-  prepareQueuedBatch()
-  await renderScreener()
-  await addQueuedStrategy()
-  await act(async () => button('ETF').click())
-  await settle()
-  if (finishesAway) await finishQueuedOrigin()
-  expect(mocks.screenerRunAll).toHaveBeenCalledTimes(1)
-  await act(async () => button('股票').click())
-  await settle()
-  if (!finishesAway) await finishQueuedOrigin()
-  expect(mocks.screenerRunAll).toHaveBeenCalledTimes(2)
-  expect(mocks.screenerRunAll).toHaveBeenLastCalledWith('2026-10-16', ['new-strategy'], 'stock')
-  await act(async () => button('ETF').click())
-  await settle()
-  await act(async () => button('股票').click())
-  await settle()
-  expect(mocks.screenerRunAll).toHaveBeenCalledTimes(2)
-})
-
-it('待提交策略按日期保留，历史视图不提交其他日期的队列', async () => {
-  prepareQueuedBatch()
-  await renderScreener()
-  await addQueuedStrategy()
-  // 关闭自动计算只影响后续历史页，手动新增形成的队列仍须继续。
-  mocks.prefs.screener_auto_run = false
-  await act(async () => button('历史日期').click())
-  await settle()
-  await finishQueuedOrigin()
-  expect(mocks.screenerRunAll).toHaveBeenCalledTimes(1)
-  await act(async () => button('最新日期').click())
-  await settle()
-  expect(mocks.screenerRunAll).toHaveBeenCalledTimes(2)
-  expect(mocks.screenerRunAll).toHaveBeenLastCalledWith('2026-10-16', ['new-strategy'], 'stock')
-})
-
-it('首返前新增的待提交策略切出后仍保留，返回原资产后接续计算', async () => {
-  prepareQueuedBatch()
+it('已有历史结果时更新只在对应标签显示loading，重复点击不创建任务', async () => {
+  const sid = 'earnings_breakout_gap'
+  const waiting = { run_id: 'manual', metadata: { strategy_id: sid, asset_type: 'stock', as_of: '2026-10-16', timeframe: '1d' },
+    pending: [sid], results: {}, errors: {}, error: null, done: false, phase: 'waiting', started_at_ms: 1 }
   let resolve!: (value: unknown) => void
-  mocks.screenerRunAll.mockReset().mockReturnValueOnce(new Promise(done => { resolve = done }))
-    .mockResolvedValue({ as_of: '2026-10-16', results: { 'new-strategy': { total: 2, as_of: '2026-10-16' } }, complete: true })
+  mocks.submitTask.mockReturnValue(new Promise(done => { resolve = done }))
   await renderScreener()
-  await addQueuedStrategy()
-  // 已排队的手动请求独立于自动补算，防止漏队列被自动计算偶然补救。
-  mocks.prefs.screener_auto_run = false
-  await act(async () => button('ETF').click())
-  await settle()
-  await act(async () => resolve({
-    run_id: 'queued-origin', as_of: '2026-10-16', results: {}, pending: ['earnings_breakout_gap'],
-  }))
-  await settle()
-  await finishQueuedOrigin()
-  expect(mocks.screenerRunAll).toHaveBeenCalledTimes(1)
-  await act(async () => button('股票').click())
-  await settle()
-  expect(mocks.screenerRunAll).toHaveBeenCalledTimes(2)
-  expect(mocks.screenerRunAll).toHaveBeenLastCalledWith('2026-10-16', ['new-strategy'], 'stock')
-})
-
-it.each(['succeeded', 'failed'] as const)('股票任务切到 ETF 再返回恢复跟踪并展示%s终态，不重复提交', async outcome => {
-  const runId = `resume-${outcome}`
-  mocks.screenerCachedSummary.mockResolvedValue({ as_of: '2026-10-16', results: {}, today_ever_counts: {} })
-  mocks.screenerRunAll.mockResolvedValue({
-    run_id: runId, as_of: '2026-10-16', results: {}, pending: ['earnings_breakout_gap'],
-  })
-  mocks.screenerRunStatus.mockResolvedValue({
-    run_id: runId, pending: ['earnings_breakout_gap'], results: {}, errors: {}, error: null, done: false, started_at_ms: 1,
-  })
-  await renderScreener()
-  expect(mocks.screenerRunAll).toHaveBeenCalledTimes(1)
-  expect(mocks.screenerRunStatus).toHaveBeenCalledWith(runId)
-  await act(async () => button('ETF').click())
-  await settle()
-  const pollsBeforeReturn = mocks.screenerRunStatus.mock.calls.length
-  const errors = outcome === 'failed' ? { earnings_breakout_gap: '切换期间利润表读取失败' } : {}
-  const results = outcome === 'succeeded' ? { earnings_breakout_gap: { total: 7, as_of: '2026-10-16' } } : {}
-  mocks.screenerRunStatus.mockResolvedValue({ run_id: runId, pending: [], results, errors, error: null, done: true, started_at_ms: 1 })
-  if (outcome === 'succeeded') {
-    mocks.screenerCachedSummary.mockResolvedValue({ as_of: '2026-10-16', results, today_ever_counts: {} })
-  }
-  expect(host.textContent).not.toContain('切换期间利润表读取失败')
-  await act(async () => button('股票').click())
-  await settle()
-  expect(mocks.screenerRunStatus.mock.calls.length).toBeGreaterThan(pollsBeforeReturn)
-  expect(mocks.screenerRunStatus).toHaveBeenLastCalledWith(runId)
-  expect(mocks.screenerRunAll).toHaveBeenCalledTimes(1)
   const card = [...host.querySelectorAll('button')].find(item => item.textContent?.includes('业绩断层跳空'))!
-  expect(card.textContent).not.toContain('···')
-  if (outcome === 'failed') {
-    expect(host.textContent).toContain('业绩断层跳空：切换期间利润表读取失败')
-    expect(button('重试未完成策略').disabled).toBe(false)
-  } else {
-    expect(card.textContent).toContain('7')
-  }
-})
-
-it('首返尚未到达时切到 ETF，股票响应保留到切回后继续跟踪', async () => {
-  let resolve!: (value: unknown) => void
-  mocks.screenerCachedSummary.mockResolvedValue({ as_of: '2026-10-16', results: {}, today_ever_counts: {} })
-  mocks.screenerRunAll.mockReturnValue(new Promise(done => { resolve = done }))
-  mocks.screenerRunStatus.mockResolvedValue({
-    run_id: 'late-first-response', pending: [], results: {},
-    errors: { earnings_breakout_gap: '首返后后台计算失败' }, error: null, done: true, started_at_ms: 1,
-  })
-  await renderScreener()
-  expect(mocks.screenerRunAll).toHaveBeenCalledTimes(1)
-  await act(async () => button('ETF').click())
+  await act(async () => { card.click(); card.click(); card.click() })
+  expect(mocks.submitTask).toHaveBeenCalledTimes(1)
+  expect(host.querySelector('[aria-label="业绩断层跳空计算中"]')).not.toBeNull()
+  mocks.activeTasks = { [sid]: waiting }
+  await act(async () => resolve({ task: waiting, notice: null }))
   await settle()
-  await act(async () => resolve({
-    run_id: 'late-first-response', as_of: '2026-10-16', results: {}, pending: ['earnings_breakout_gap'],
-  }))
-  await settle()
-  expect(mocks.screenerRunStatus).not.toHaveBeenCalled()
-  expect(host.textContent).not.toContain('首返后后台计算失败')
-  await act(async () => button('股票').click())
-  await settle()
-  expect(mocks.screenerRunStatus).toHaveBeenCalledWith('late-first-response')
-  expect(host.textContent).toContain('业绩断层跳空：首返后后台计算失败')
-  expect(mocks.screenerRunAll).toHaveBeenCalledTimes(1)
-})
-
-it('实际策略卡片选择历史日期时沿用原本地选股入口', async () => {
-  mocks.screenerRunAll.mockImplementation(async (date: string) => ({ as_of: date, results: {} }))
-  mocks.screenerRunPreset.mockResolvedValue({ as_of: '2026-10-15', strategy: 'earnings_breakout_gap', total: 0, rows: [] })
-  await renderScreener()
-  await act(async () => button('历史日期').click())
-  await settle()
-  const card = [...host.querySelectorAll('button')].find(item => item.textContent?.includes('业绩断层跳空'))!
   await act(async () => card.click())
+  expect(mocks.submitTask).toHaveBeenCalledTimes(1)
+  expect(host.textContent).toContain('结果日期 2026-10-16')
+  expect(button('重载').disabled).toBe(true)
+  mocks.screenerCancelRun.mockResolvedValue({ ...waiting, done: true, phase: 'cancelled', pending: [] })
+  await act(async () => button('取消此策略计算').click())
   await settle()
+  expect(host.querySelector('[aria-label="业绩断层跳空计算中"]')).toBeNull()
   expect(mocks.verify).not.toHaveBeenCalled()
-  expect(mocks.screenerRunPreset).toHaveBeenCalledWith('earnings_breakout_gap', undefined, '2026-10-15', undefined, 'stock', '1d')
-  expect(host.textContent).toContain('历史结果按财报版本可用时间回放')
+})
+
+it('手动点击历史日期传给独立策略任务，不触发财务核验', async () => {
+  await renderScreener()
+  await act(async () => button('历史日期').click())
+  await settle()
+  await act(async () => [...host.querySelectorAll('button')].find(item => item.textContent?.includes('业绩断层跳空'))!.click())
+  await settle()
+  expect(mocks.submitTask).toHaveBeenLastCalledWith('earnings_breakout_gap', 'stock', '2026-10-15')
+  expect(mocks.verify).not.toHaveBeenCalled()
 })

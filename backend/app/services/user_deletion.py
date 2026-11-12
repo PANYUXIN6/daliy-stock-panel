@@ -80,10 +80,10 @@ def user_operation(root: Path, uid: str):
 
 def forget_user_caches(root: Path, uid: str, runtimes=None) -> None:
     from app.factors import registry
-    from app.services import preferences, strategy_cache, strategy_run_queue
+    from app.services import preferences, screener_snapshots, strategy_cache, strategy_run_queue
     from app.strategy import config, custom_signals, monitor
 
-    for module in (preferences, strategy_cache, config, custom_signals, registry, monitor):
+    for module in (preferences, screener_snapshots, strategy_cache, config, custom_signals, registry, monitor):
         module.forget_user_cache(root, uid)
     strategy_run_queue.MANAGER.forget_user(root, uid)
     if runtimes is not None:

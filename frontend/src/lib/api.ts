@@ -596,8 +596,11 @@ export interface ScreenerCachedSummary {
   updated_at: number | null
 }
 
-/** run_all 渐进式返回: 快策略已算完, 慢策略后台继续算 */
+export type ScreenerRunPhase = 'queued' | 'waiting' | 'running' | 'cancelling' | 'cancelled' | 'done'
+
+/** 日线任务提交后立即返回；通过 run_id 查询计算状态。 */
 export interface ScreenerRunAllSummary {
+  phase?: ScreenerRunPhase
   run_id?: string
   as_of: string | null
   results: Record<string, ScreenerResultSummary>
@@ -613,6 +616,7 @@ export interface ScreenerRunAllSummary {
 }
 
 export interface ScreenerRunStatus {
+  phase?: ScreenerRunPhase
   run_id: string
   results: Record<string, ScreenerResultSummary>
   pending: string[]
@@ -620,6 +624,13 @@ export interface ScreenerRunStatus {
   error: string | null
   done: boolean
   started_at_ms: number
+}
+
+export interface ScreenerTaskStatus extends ScreenerRunStatus {
+  metadata: { strategy_id: string; asset_type: 'stock' | 'etf'; timeframe: '1d' | '1m'; as_of: string }
+}
+export interface ScreenerTasksSummary extends ScreenerCachedSummary {
+  tasks: Record<string, ScreenerTaskStatus>
 }
 
 export interface ScreenerCachedResult {
@@ -3525,12 +3536,28 @@ export const api = {
     }),
   screenerRunAll: (asOf?: string, strategyIds?: string[], assetType: 'stock' | 'etf' = 'stock', timeframe: '1d' | '1m' = '1d') =>
     request<ScreenerRunAllSummary>(
-      '/api/screener/run_all', { method: 'POST', timeoutMs: COMPUTE_REQUEST_TIMEOUT_MS, body: JSON.stringify({ as_of: asOf ?? null, strategy_ids: strategyIds ?? null, asset_type: assetType, timeframe, summary_only: true }) },
+      '/api/screener/run_all', {
+        method: 'POST',
+        timeoutMs: timeframe === '1d' ? DEFAULT_REQUEST_TIMEOUT_MS : COMPUTE_REQUEST_TIMEOUT_MS,
+        body: JSON.stringify({ as_of: asOf ?? null, strategy_ids: strategyIds ?? null, asset_type: assetType, timeframe, summary_only: true, background: timeframe === '1d' }),
+      },
     ),
+  screenerTasks: (assetType: 'stock' | 'etf', asOf?: string) =>
+    request<ScreenerTasksSummary>(`/api/screener/tasks?asset_type=${assetType}${asOf ? `&as_of=${asOf}` : ''}`, { quiet: true }),
+  screenerSubmitTask: (strategyId: string, assetType: 'stock' | 'etf', asOf?: string) =>
+    request<{ task: ScreenerTaskStatus | null; notice: string | null }>(`/api/screener/tasks/${encodeURIComponent(strategyId)}`, {
+      method: 'POST', body: JSON.stringify({ asset_type: assetType, as_of: asOf || null }), quiet: true,
+    }),
+  screenerSnapshot: (strategyId: string, assetType: 'stock' | 'etf', asOf?: string, extColumns?: string) =>
+    request<ScreenerCachedResult>(`/api/screener/cached-result/${encodeURIComponent(strategyId)}?${new URLSearchParams({ manual: 'true', asset_type: assetType, ...(asOf ? { as_of: asOf } : {}), ...(extColumns ? { ext_columns: extColumns } : {}) })}`),
+  screenerSnapshots: (assetType: 'stock' | 'etf', asOf?: string, extColumns?: string) =>
+    request<{ as_of: string | null; results: Record<string, { total: number; as_of: string; rows: any[] }>; today_ever_rows?: Record<string, Record<string, any>> }>(`/api/screener/cached?${new URLSearchParams({ manual: 'true', asset_type: assetType, ...(asOf ? { as_of: asOf } : {}), ...(extColumns ? { ext_columns: extColumns } : {}) })}`),
   screenerCachedSummary: () =>
     request<ScreenerCachedSummary>('/api/screener/cached-summary'),
   screenerRunStatus: (runId: string) =>
     request<ScreenerRunStatus>(`/api/screener/run-status/${encodeURIComponent(runId)}`, { quiet: true }),
+  screenerCancelRun: (runId: string) =>
+    request<ScreenerRunStatus>(`/api/screener/run-status/${encodeURIComponent(runId)}`, { method: 'DELETE' }),
   screenerCachedResult: (strategyId: string, extColumns?: string) =>
     request<ScreenerCachedResult>(
       extColumns

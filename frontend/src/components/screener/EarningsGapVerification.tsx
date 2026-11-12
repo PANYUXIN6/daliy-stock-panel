@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { api, type EarningsGapVerificationSummary } from '@/lib/api'
+import { QK } from '@/lib/queryKeys'
 import { useCurrentUser } from '@/lib/auth'
 import { useCollectorJob } from '@/lib/useCollectorJob'
 import { CollectorJobProgress } from '@/components/CollectorJobProgress'
@@ -35,6 +36,7 @@ export function useEarningsGapVerification({ asOf, latestDate, assetType, verifi
       if (!mounted.current || scopeRef.current !== variables.scope) return
       setSubmitted({ scope: variables.scope, jobId: data.job_id })
       void qc.invalidateQueries({ queryKey: ['screener-cached'] })
+      void qc.invalidateQueries({ queryKey: QK.screenerTasksRoot })
     },
     onSettled: (_data, _error, variables) => {
       if (inFlightScope.current === variables.scope) inFlightScope.current = null
@@ -46,6 +48,7 @@ export function useEarningsGapVerification({ asOf, latestDate, assetType, verifi
     : null
   const job = useCollectorJob(jobId, () => {
     void qc.invalidateQueries({ queryKey: ['screener-cached'] })
+    void qc.invalidateQueries({ queryKey: QK.screenerTasksRoot })
     void qc.invalidateQueries({ queryKey: ['financials'] })
     void qc.invalidateQueries({ queryKey: ['earnings-breakout'] })
   })
@@ -53,6 +56,7 @@ export function useEarningsGapVerification({ asOf, latestDate, assetType, verifi
   useEffect(() => {
     if (jobId && job.data?.status === 'running') {
       void qc.invalidateQueries({ queryKey: ['screener-cached'] })
+      void qc.invalidateQueries({ queryKey: QK.screenerTasksRoot })
     }
   }, [jobId, job.data?.status, job.data?.stage, job.data?.progress, qc])
   const submitting = mutation.isPending && mutation.variables?.scope === scope

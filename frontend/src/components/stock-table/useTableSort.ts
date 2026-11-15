@@ -47,5 +47,6 @@ export function useTableSort<T>(getSortValue: (r: T, col: ColumnConfig) => any =
     })
   }, [sort, getSortValue])
 
-  return { sort, toggle, sortRows }
+  const reset = useCallback(() => setSort(null), [])
+  return { sort, toggle, sortRows, reset }
 }

@@ -207,11 +207,15 @@ def test_run_regime_batch_excludes_st(tmp_path, monkeypatch):
 
 
 def test_single_day_cache_increment_keeps_previous_trading_day_promotion_pool(tmp_path, monkeypatch):
+    import json
     from types import SimpleNamespace
 
     from app.services import preferences
 
     previous, target = date(2026, 9, 30), date(2026, 10, 9)
+    calendar = tmp_path / "calendar" / "trading_days.json"
+    calendar.parent.mkdir()
+    calendar.write_text(json.dumps({"days": [str(previous), str(target)]}))
     rows = []
     for day, consecutive in ((previous, 1), (target, 2)):
         for i in range(12):
@@ -237,9 +241,14 @@ def test_single_day_cache_increment_keeps_previous_trading_day_promotion_pool(tm
 
 def test_run_regime_batch_aggregates_fallback_per_batch(tmp_path, monkeypatch):
     """回归 #241: fallback 不得保留所有批次的个股明细后再统一聚合。"""
+    import json
+
     from app.services import market_mainline, preferences
 
     target_dates = [date(2026, 1, day) for day in range(2, 6)]
+    calendar = tmp_path / "calendar" / "trading_days.json"
+    calendar.parent.mkdir()
+    calendar.write_text(json.dumps({"days": [str(day) for day in target_dates]}))
     enriched_dir = tmp_path / "kline_daily_enriched"
     for trade_date in target_dates:
         partition = enriched_dir / f"date={trade_date.isoformat()}"
@@ -316,7 +325,9 @@ def test_run_regime_batch_aggregates_fallback_per_batch(tmp_path, monkeypatch):
     assert result["up_count"].to_list() == [0, 0, 0, 0]
     assert result["down_count"].to_list() == [1, 1, 1, 1]
     assert result["limit_up"].sum() == 0
-    assert_frame_equal(result.drop("exclude_st").sort("date"), expected.sort("date"))
+    assert_frame_equal(result.select(expected.columns).sort("date"), expected.sort("date"))
+    # 新集合表现需要交易日历；缺失时不影响原有环境统计，也不制造溢价。
+    assert result["previous_limit_up_premium"].null_count() == len(target_dates)
 
 
 # ───────────────────────── 持久化(upsert) ─────────────────────────

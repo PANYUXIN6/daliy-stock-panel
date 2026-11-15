@@ -10,6 +10,7 @@ from pathlib import Path
 import polars as pl
 
 from app.market_time import cn_now
+from app.services.market_sentiment import classify_sentiment
 
 VERSION = "observations-v1"
 WINDOW = 500
@@ -29,6 +30,9 @@ SPECS = [
     ("index_drawdown_120", "上证120日回撤", "price", "ratio"),
     ("index_rsi21", "上证RSI21（简单均值）", "price", "points"),
     ("limit_up", "涨停家数", "speculation", "count"),
+    ("limit_up_amount", "涨停成交额", "speculation", "CNY"),
+    ("previous_limit_up_premium", "昨日涨停股今日收盘溢价", "speculation", "ratio"),
+    ("previous_broken_performance", "昨日炸板股今日收盘表现", "speculation", "ratio"),
     ("limit_down", "跌停家数", "speculation", "count"),
     ("touched_limit", "触板家数", "speculation", "count"),
     ("broken_rate", "炸板率", "speculation", "ratio"),
@@ -115,7 +119,7 @@ def _build_observations(rows: list[dict], today: str, after_close: bool) -> list
             streaks[key] = streaks[key] + 1 if side and side == last_sides[key] else int(side is not None)
             last_sides[key] = side
             old = prior[-5][0] if len(prior) >= 5 and prior[-5][1] == row.get("exclude_st") else None
-            denom_key = {"above_ma20_pct": "ma20_valid_count", "above_ma60_pct": "ma60_valid_count", "seal_rate": "touched_limit", "broken_rate": "touched_limit"}.get(key)
+            denom_key = {"above_ma20_pct": "ma20_valid_count", "above_ma60_pct": "ma60_valid_count", "seal_rate": "touched_limit", "broken_rate": "touched_limit", "previous_limit_up_premium": "previous_limit_up_valid", "previous_broken_performance": "previous_broken_valid"}.get(key)
             denominator = row.get(denom_key) if denom_key else row.get("change_valid_count") if key in {"up_pct", "down_pct"} else row.get("total_count") if key in {"limit_up_pct", "limit_down_pct"} else None
             missing_reason = None
             if value is None:
@@ -132,6 +136,7 @@ def _build_observations(rows: list[dict], today: str, after_close: bool) -> list
                 extreme_streak=streaks[key], extreme_side=side))
             history[key].append((value if complete else None, row.get("exclude_st")))
         row["sentiment"] = dict(version=VERSION, as_of=str(row["date"]),
+            classification=classify_sentiment({**row, "is_complete_day": current and complete}, rows[max(0, i - 5):i]),
             universe=dict(exclude_st=row.get("exclude_st"), suspension_rule="仅剔除成交量明确为零且涨跌幅明确为零的股票"),
             coverage=dict(sample_count=finite(row.get("total_count")), valid_change_count=finite(row.get("change_valid_count")), method_current=current, is_complete_day=complete, is_closed_day=complete, market_coverage_verified=False, completeness_note="来源收盘口径已确认，不证明全市场覆盖验收通过" if complete else "盘中或缺少收盘来源状态，需刷新或重算"), observations=observations,
             context=_context(observations) if current else [],

@@ -1,4 +1,5 @@
 import { useRef, useState } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { RefreshCw } from 'lucide-react'
 import { api, type EveningReport as Report, type EveningRecord, type EveningReportStatus } from '@/lib/api'
@@ -9,6 +10,8 @@ import { PageHeader } from '@/components/PageHeader'
 import { StockPreviewDialog } from '@/components/StockPreviewDialog'
 import { WatchlistAddMenu } from '@/components/WatchlistAddMenu'
 import { EveningReportContent } from '@/components/evening-report/EveningReportContent'
+import { EveningFeedbackButtons, useEveningFeedback } from '@/components/evening-report/EveningFeedbackButtons'
+import { EveningPersonalNav } from '@/components/evening-report/EveningPersonalNav'
 
 const panel = 'rounded-xl border border-border bg-surface p-4 sm:p-5'
 const control = 'rounded border border-border bg-elevated px-3 py-2 text-xs text-foreground disabled:opacity-50'
@@ -20,8 +23,9 @@ function Status({ value }: { value: EveningReportStatus }) {
 export function EveningReport() {
   const user = useCurrentUser()
   const qc = useQueryClient()
-  const [chosenDate, setDate] = useState('')
-  const [version, setVersion] = useState('')
+  const [searchParams] = useSearchParams()
+  const [chosenDate, setDate] = useState(searchParams.get('date') ?? '')
+  const [version, setVersion] = useState(searchParams.get('version') ?? '')
   const [submittedJob, setSubmittedJob] = useState<{ date: string; id: string } | null>(null)
   const dates = useQuery({ queryKey: QK.eveningReportDates(), queryFn: ({ signal }) => api.eveningReportDates(signal) })
   const today = useQuery({ queryKey: QK.eveningReportStatus(), queryFn: ({ signal }) => api.eveningReportStatus('', signal), refetchInterval: 30_000 })
@@ -29,13 +33,14 @@ export function EveningReport() {
   const report = useQuery({ queryKey: QK.eveningReport(day, version), queryFn: ({ signal }) => api.eveningReport(day, version, signal), enabled: !!day })
   const status = useQuery({ queryKey: QK.eveningReportStatus(day), queryFn: ({ signal }) => api.eveningReportStatus(day, signal), enabled: !!day, refetchInterval: query => query.state.data?.status === 'generating' ? 2_000 : 30_000 })
   const data = report.data && 'records' in report.data ? report.data : undefined
-  const refresh = () => { void qc.invalidateQueries({ queryKey: QK.eveningReportRoot }) }
+  const refresh = () => { void qc.invalidateQueries({ queryKey: QK.eveningReportRoot }); if (user) void qc.invalidateQueries({ queryKey: QK.eveningPersonalRoot(user.id) }) }
   const job = useCollectorJob((submittedJob?.date === day ? submittedJob.id : null) ?? (user?.role === 'admin' ? status.data?.job_id ?? null : null), refresh)
   const rebuild = useMutation({ mutationFn: (request: { date: string; mode: 'live' | 'revision' }) => api.eveningReportRebuild(request.date, request.mode), onSuccess: (result, request) => { setSubmittedJob({ date: request.date, id: result.job_id }); refresh() } })
   const versions = dates.data?.dates.find(d => d.date === day)?.versions ?? []
   const loading = dates.isLoading || (day && report.isLoading)
   return <div className="space-y-5 pb-8 min-w-0 break-words">
     <PageHeader title="每日晚报" right={<button className={control} onClick={refresh}><RefreshCw className="mr-1 inline h-3.5 w-3.5" />刷新</button>} />
+    <EveningPersonalNav />
     <section className={panel}>
       <div className="flex flex-wrap items-end gap-4">
         <label className="space-y-1 text-xs"><span className="block text-muted">报告日期</span><input aria-label="报告日期" type="date" className={control} value={day} onChange={e => { setDate(e.target.value); setVersion(''); setSubmittedJob(null); rebuild.reset() }} /></label>
@@ -50,18 +55,26 @@ export function EveningReport() {
     {!loading && !data && report.data && <section className={panel}><Status value={report.data as EveningReportStatus} /></section>}
     {status.data && (status.data.status !== 'published' || !data) && <section className={panel}><Status value={status.data} /></section>}
     {user?.role === 'admin' && day && <details className="rounded-lg border border-border px-4 py-3 text-xs"><summary className="cursor-pointer text-secondary">生成管理{job.running ? ' · 生成中' : ''}</summary>
-      <div className="mt-3 space-y-3"><div className="flex flex-wrap items-center gap-3"><button className={control} disabled={rebuild.isPending || job.running || status.data?.status === 'generating'} onClick={() => rebuild.mutate({ date: day, mode: data ? 'revision' : 'live' })}>{rebuild.isPending ? '提交中…' : data ? '生成修订版' : '重试生成'}</button><span className="text-muted">由管理员显式提交；原发布保持可读。</span></div>
+      <div className="mt-3 space-y-3"><div className="flex flex-wrap items-center gap-3"><button className={control} disabled={rebuild.isPending || job.running || status.data?.status === 'generating'} onClick={() => rebuild.mutate({ date: day, mode: data ? 'revision' : 'live' })}>{rebuild.isPending ? '提交中…' : data ? '生成修订版' : '重试生成'}</button><span className="text-muted">今日缺少有效输入时，16:00后先准备数据并验收，再生成晚报；历史日期需保留当时的完整输入。原发布保持可读。</span></div>
       {rebuild.isError && <p role="alert" className="text-danger">提交失败：{rebuild.error.message}</p>}
       {job.data && <div role="status">任务：{job.data.outcome === 'cancelled' ? '已取消' : job.data.status === 'succeeded' ? '已完成' : job.data.status === 'failed' ? '失败' : '生成中'} · {job.data.progress}% · {job.message}{job.data.error && <p className="text-danger">{job.data.error}</p>}{job.running && <button className={`${control} ml-3`} disabled={job.cancel.isPending} onClick={() => job.cancel.mutate()}>取消生成</button>}</div>}
       {(job.isError || job.cancel.isError) && <p role="alert" className="text-danger">任务操作失败：{job.error?.message ?? job.cancel.error?.message}</p>}
     </div></details>}
-    {data && <ReportContent key={`${data.date}:${data.version}`} report={data} />}
+    {data && <ReportContent key={`${user?.id}:${data.date}:${data.version}`} report={data} />}
   </div>
 }
 
 type AddState = { pending: boolean; group: string | null; error?: string }
 function ReportContent({ report }: { report: Report }) {
   const qc = useQueryClient()
+  const user = useCurrentUser()
+  const personal = useQuery({ queryKey: QK.eveningPersonal(user?.id ?? '', report.date, report.version),
+    queryFn: ({ signal }) => api.eveningPersonal(report.date, report.version, signal), enabled: !!user,
+    refetchInterval: query => query.state.data?.ready === false ? 5_000 : false })
+  const feedback = useEveningFeedback(user?.id ?? '')
+  const records = personal.data && personal.data.user_id === user?.id ? personal.data.records : []
+  const personalReady = !!personal.data?.ready && personal.data.user_id === user?.id
+  const bySymbol = new Map(records.map(record => [record.symbol, record]))
   const [preview, setPreview] = useState<{ symbol: string; name?: string; list: { symbol: string; name: string }[] } | null>(null)
   const [adds, setAdds] = useState<Record<string, AddState>>({})
   // 同步锁避免重复点击改写自选加入信息。
@@ -86,7 +99,11 @@ function ReportContent({ report }: { report: Report }) {
     {adds[row.symbol]?.error && <div role="alert" className="text-danger">{adds[row.symbol].error}<button className="ml-2 underline" onClick={() => void add(row, adds[row.symbol].group)}>按原分组重试</button></div>}
   </div>
   return <>
-    <EveningReportContent report={report} renderActions={actions} />
+    {personal.isError ? <p role="alert" className="text-sm text-danger">个人记录读取失败：{personal.error.message}<button className={`${control} ml-2`} onClick={() => void personal.refetch()}>重试个人记录</button></p> : !personalReady && <p role="status" className="text-xs text-secondary">{personal.isLoading ? '正在读取个人记录…' : '个人观察记录准备中，完成后可设置星标与盈亏。'}</p>}
+    <EveningReportContent report={report} renderActions={actions} onOpenStock={open} personalRecords={records} feedbackReady={personalReady} renderFeedback={row => {
+      const record = bySymbol.get(row.symbol)
+      return <EveningFeedbackButtons name={row.name} record={record} state={record ? feedback.states[record.episode_id] : undefined} disabled={!personalReady || personal.isError} onChange={feedback.change} onRetry={() => record && feedback.retry(record.episode_id)} />
+    }} />
     {watchlist.isError && <p role="alert" className="text-xs text-danger">自选状态加载失败，暂不能添加：{watchlist.error.message}<button className="ml-2 underline" onClick={() => void watchlist.refetch()}>重试加载自选</button></p>}
     <StockPreviewDialog symbol={preview?.symbol ?? null} name={preview?.name} navList={preview?.list} onNavigate={(symbol, name) => setPreview(previous => previous ? { ...previous, symbol, name } : null)} onClose={() => setPreview(null)} />
   </>

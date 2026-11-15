@@ -53,6 +53,8 @@ def admin_required(path: str, method: str) -> bool:
     if any(path == p or path.startswith(p + "/") for p in ("/api/data", "/api/pipeline")):
         return True
     if path == "/api/evening-report" or path.startswith("/api/evening-report/"):
+        if path == '/api/evening-report/feedback' and method == 'PUT':
+            return False
         return method not in ("GET", "HEAD", "OPTIONS")
     if method in ("GET", "HEAD", "OPTIONS"):
         if path.startswith("/api/settings"):

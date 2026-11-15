@@ -187,7 +187,7 @@ def _index_window_start(data_dir: Path, today: _date, override: _date | None,
 
 
 def _prepare_postmarket_inputs(prefetch, repo, capset, today: _date,
-                               index_start: _date) -> None:
+                               index_start: _date, *, evening_only: bool = False) -> None:
     """只并发轻量取数；历史指数、仓库写入、指标计算均留在管道线程。"""
     import asyncio
     from datetime import datetime
@@ -212,10 +212,11 @@ def _prepare_postmarket_inputs(prefetch, repo, capset, today: _date,
                                        f"{label}：{done}/{total} 只")
             return asyncio.run(ext_presets.prepare_preset(config_id, repo.store.data_dir, on_progress=progress))
         prefetch.submit(task_id, label, prepare_classification)
-    prefetch.submit("prefetch_auction", "预取竞价风向标", lambda:
-                    auction_benchmark.prepare_auction_benchmark(repo.store.data_dir, today))
-    prefetch.submit("prefetch_dragon_tiger", "预取龙虎榜", lambda:
-                    dragon_tiger.prepare_dragon_tiger(repo.store.data_dir, today))
+    if not evening_only:
+        prefetch.submit("prefetch_auction", "预取竞价风向标", lambda:
+                        auction_benchmark.prepare_auction_benchmark(repo.store.data_dir, today))
+        prefetch.submit("prefetch_dragon_tiger", "预取龙虎榜", lambda:
+                        dragon_tiger.prepare_dragon_tiger(repo.store.data_dir, today))
 
 
 def run_instruments_sync(repo: KlineRepository) -> dict:
@@ -271,6 +272,7 @@ def run_now(
     postmarket: bool = False,
     target_date: _date | None = None,
     with_analysis: bool = False,
+    evening_only: bool = False,
 ) -> dict:
     from app.services.pipeline_prefetch import PipelinePrefetch, PipelineProgress
 
@@ -279,7 +281,7 @@ def run_now(
     try:
         return _run_now(repo, capset, progress, override_start_date,
                         postmarket=postmarket, target_date=target_date,
-                        with_analysis=with_analysis, prefetch=prefetch)
+                        with_analysis=with_analysis, evening_only=evening_only, prefetch=prefetch)
     except BaseException as exc:
         from app.services.pipeline_jobs import JobCancelledError
 
@@ -299,6 +301,7 @@ def _run_now(
     postmarket: bool = False,
     target_date: _date | None = None,
     with_analysis: bool = False,
+    evening_only: bool = False,
     prefetch,
 ) -> dict:
     """立即执行一次盘后管道,支持进度回调。
@@ -311,6 +314,7 @@ def _run_now(
     postmarket: 自动盘后任务强制同步 A 股、核心指数与环境，并验收当日正式数据。
     with_analysis: 用户主动更新／补齐历史，固定准备分析依赖，分钟历史独立更新。
     target_date: 排队任务的目标北京日期，跨日期后不执行。
+    evening_only: 手动晚报只准备并验收必需输入，在步骤8后结束。
     """
     emit = on_progress
     skipped: list[str] = []
@@ -321,6 +325,8 @@ def _run_now(
     from app.services.daily_coverage import DailyCoverage, DailyCoverageError
 
     today = cn_today()
+    if evening_only and not postmarket:
+        raise ValueError("晚报输入准备必须启用盘后完整性验收")
     if with_analysis and not index_sync.daily_source_available(capset):
         raise DailyCoverageError("日线批量能力不可用，无法更新股票与核心指数，请先配置数据源")
     if postmarket and target_date is not None and target_date != today:
@@ -593,7 +599,7 @@ def _run_now(
 
     index_start = _index_window_start(repo.store.data_dir, today, override_start_date, index_stale_day)
     if postmarket:
-        _prepare_postmarket_inputs(prefetch, repo, capset, today, index_start)
+        _prepare_postmarket_inputs(prefetch, repo, capset, today, index_start, evening_only=evening_only)
 
     # Step 2: 计算 enriched
     #   判断策略:
@@ -698,7 +704,7 @@ def _run_now(
     etf_count = 0
     etf_adj_symbols = 0
     pull_index = postmarket or with_analysis or _prefs.get_pipeline_pull_index()
-    pull_etf = _prefs.get_pipeline_pull_etf()
+    pull_etf = not evening_only and _prefs.get_pipeline_pull_etf()
 
     if index_sync.daily_source_available(capset) and (pull_index or pull_etf):
         _types = []
@@ -888,7 +894,7 @@ def _run_now(
             emit("compute_regime", 92, f"市场环境 {regime_days} 天")
             # 阶段切换推送监控通知 (软失败, 不影响管道): 末两日阶段不同 = 今日发生切换。
             # 切入退潮/冰点为风险信号, 用 warn 级别; 其余 info。
-            if regime_days:
+            if regime_days and not evening_only:
                 try:
                     _push_phase_change_alert(repo.store.data_dir)
                 except Exception as e:  # noqa: BLE001 -- 独立阶段隔离，保留warning及原任务错误汇总
@@ -968,6 +974,12 @@ def _run_now(
             EveningReportStore(repo.store.data_dir).save_readiness(today.isoformat(), {
                 "date": today.isoformat(), "complete": False, "reason": str(exc),
             })
+
+    if evening_only:
+        if stage_errors:
+            raise PipelineStageError(stage_errors)
+        emit.finish()
+        return {"postmarket_date": today.isoformat(), "readiness": readiness}
 
     # Step 2.8: 模拟盘结算: 顺延单按当日开盘/收盘撮合 → 除权调整 → 定版净值。
     # 幂等: 重跑同日不会重复成交/二次除权 (订单状态与 corp_action 台账守卫)。
@@ -1638,6 +1650,14 @@ def start_scheduler(repo: KlineRepository) -> AsyncIOScheduler:
     inst_sched = preferences.get_instruments_schedule()
 
     scheduler = AsyncIOScheduler(timezone="Asia/Shanghai")
+    from app.services import evening_report_jobs
+
+    scheduler.add_job(
+        evening_report_jobs.run_retention, args=[repo],
+        trigger=CronTrigger(hour="2-5", minute=10, timezone="Asia/Shanghai"),
+        id="evening_retention", replace_existing=True, coalesce=True, max_instances=1,
+        misfire_grace_time=3600, next_run_time=cn_now(),
+    )
     from app.services import etf_reference
 
     scheduler.add_job(

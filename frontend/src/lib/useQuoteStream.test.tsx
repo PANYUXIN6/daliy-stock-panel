@@ -7,6 +7,8 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { expect, it, vi } from 'vitest'
 import { useQuoteStream } from './useQuoteStream'
 import { QK } from './queryKeys'
+import { AuthContext } from './auth'
+import type { User } from './api'
 vi.mock('@/components/AlertToast', () => ({ pushAlertToasts: vi.fn() }))
 vi.mock('./stockAnalysisStore', () => ({ loadHistory: vi.fn() }))
 vi.mock('./aiReportStore', () => ({ loadHistory: vi.fn() }))
@@ -196,5 +198,21 @@ it('晚报发布仅刷新晚报查询，行情推送不改变归档事实', asyn
     await act(async () => Stream.current.dispatchEvent(new MessageEvent('data_updated', { data: JSON.stringify({ datasets: ['evening_report'] }) })))
     for (const key of reportKeys) expect(qc.getQueryState(key)?.isInvalidated).toBe(true)
     expect(qc.getQueryState(QK.watchlist)?.isInvalidated).toBe(false)
+  } finally { await act(async () => root.unmount()); qc.clear(); vi.unstubAllGlobals() }
+})
+
+it('客观回看更新只刷新当前账号个人查询，不波及其他账号与行情', async () => {
+  Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true })
+  vi.stubGlobal('EventSource', Stream)
+  const qc = new QueryClient()
+  const own = [QK.eveningPersonal('user-a', '2026-11-02', 'v1'), QK.eveningHistory('user-a', '2026-11'), QK.eveningFeedbackOverview('user-a')]
+  const others = [QK.eveningPersonal('user-b', '2026-11-02', 'v1'), QK.eveningReport('2026-11-02'), QK.watchlist]
+  for (const key of [...own, ...others]) qc.setQueryData(key, { value: 1 })
+  const root = createRoot(document.createElement('div'))
+  try {
+    await act(async () => root.render(<AuthContext.Provider value={{ id: 'user-a' } as User}><QueryClientProvider client={qc}><Probe /></QueryClientProvider></AuthContext.Provider>))
+    await act(async () => Stream.current.dispatchEvent(new MessageEvent('data_updated', { data: JSON.stringify({ datasets: ['evening_report_tracking'] }) })))
+    own.forEach(key => expect(qc.getQueryState(key)?.isInvalidated).toBe(true))
+    others.forEach(key => expect(qc.getQueryState(key)?.isInvalidated).toBe(false))
   } finally { await act(async () => root.unmount()); qc.clear(); vi.unstubAllGlobals() }
 })

@@ -13,6 +13,8 @@ import {
 // framer-motion 等重库) → 大幅减小首屏 bundle。命名导出用 .then 映射为 default。
 // Layout 为应用外壳, 保持同步加载。
 const EveningReport = lazy(() => import('./pages/EveningReport').then(m => ({ default: m.EveningReport })))
+const EveningHistory = lazy(() => import('./pages/EveningHistory').then(m => ({ default: m.EveningHistory })))
+const EveningFeedbackOverview = lazy(() => import('./pages/EveningFeedbackOverview').then(m => ({ default: m.EveningFeedbackOverview })))
 const Watchlist = lazy(() => import('./pages/Watchlist').then(m => ({ default: m.Watchlist })))
 const Screener = lazy(() => import('./pages/Screener').then(m => ({ default: m.Screener })))
 const Backtest = lazy(() => import('./pages/Backtest').then(m => ({ default: m.Backtest })))
@@ -44,6 +46,8 @@ const Dev = lazy(() => import('./pages/Dev').then(m => ({ default: m.Dev })))
 const CORE_ROUTE_PATHS = new Set([
   '/',
   '/evening-report',
+  '/evening-report/history',
+  '/evening-report/overview',
   '/overview',
   '/analysis',
   '/analysis/:menuId',
@@ -97,6 +101,8 @@ export const router = createBrowserRouter([
       { path: 'login', element: <Navigate to="/" replace /> },
       { index: true, element: <Dashboard /> },
       { path: 'evening-report', element: <EveningReport /> },
+      { path: 'evening-report/history', element: <EveningHistory /> },
+      { path: 'evening-report/overview', element: <EveningFeedbackOverview /> },
       { path: 'overview', element: <Navigate to="/" replace /> },
       { path: 'analysis', element: <Navigate to="/settings?tab=ext-pages" replace /> },
       { path: 'analysis/:menuId', element: <AnalysisDetail /> },

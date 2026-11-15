@@ -25,6 +25,9 @@ def input_versions(data_dir: Path, day: date) -> dict:
     paths = []
     for table in ('kline_daily', 'kline_daily_enriched', 'kline_index_daily'):
         paths.extend(reader.files(table, end=day))
+    factor_path = data_dir / 'adj_factor' / 'all.parquet'
+    if factor_path.exists():
+        paths.append(factor_path)
     references = []
     for path in sorted(paths):
         try:
@@ -53,6 +56,11 @@ def save_ready(data_dir: Path, day: date, coverage, observations: list[dict], ma
             raise DailyCoverageError(f"本轮分类响应缺少 {len(missing)} 只范围内证券，不能由合并旧表补齐")
     from app.services import evening_report_classification
     from app.services.preferences import get_mainline_filter_config
+    from app.services.sentiment_observations import load_observation
+
+    # Freeze the same dated domain result displayed by the environment page.
+    sentiment = load_observation(data_dir, day.isoformat())
+    market = {**market, 'sentiment': sentiment}
 
     store = EveningReportStore(data_dir)
     calendar = calendar_status(data_dir)
@@ -94,6 +102,8 @@ def save_ready(data_dir: Path, day: date, coverage, observations: list[dict], ma
 def require_ready(data_dir: Path, day: date, *, input_id: str | None = None) -> dict:
     store = EveningReportStore(data_dir)
     evidence = store.input_evidence(input_id) if input_id else store.readiness(day.isoformat())
+    if input_id and evidence is None:
+        raise DailyCoverageError(f'{day} 的完整输入证据已过保留期或不存在；可核验原快照，不能完整重演历史筛选')
     if not evidence or not evidence.get('complete'):
         raise DailyCoverageError('等待正式行情、分类与市场环境完成本轮验收')
     if evidence.get('date') != day.isoformat() or not evidence.get('metadata') or not evidence.get('calendar'):
@@ -135,7 +145,7 @@ def _prices(reader: SectorReviewReader, day: date, instruments: pl.DataFrame, ca
         raise DailyCoverageError('正式历史指标为空')
     lf = scan_enriched_parquet(enriched_paths, hive_partitioning=True)
     names = set(lf.collect_schema().names())
-    wanted = ['symbol', 'date', 'open', 'low', 'close', 'high', 'ma5', 'ma10', 'ma20', 'atr_14', 'high_60d',
+    wanted = ['symbol', 'date', 'open', 'low', 'close', 'high', 'ma5', 'ma10', 'ma20', 'bull_bear_line', 'atr_14', 'high_60d',
               'signal_limit_up', 'signal_limit_down', 'consecutive_limit_ups',
               'raw_close', 'raw_high', 'raw_low', 'amount', 'volume', 'quote_ts']
     enriched = guarded_collect(lf.select([pl.col(c) if c in names else pl.lit(None).alias(c)
@@ -167,7 +177,7 @@ def _prices(reader: SectorReviewReader, day: date, instruments: pl.DataFrame, ca
             cancel_check()
         batch = symbols[offset:offset + 256]
         part = compute_indicators(frame.filter(pl.col('symbol').is_in(batch)),
-                                  needed={'ma5', 'ma10', 'ma20', 'atr_14', 'high_60d', 'change_pct', 'vol_ratio_5d'})
+                                  needed={'ma5', 'ma10', 'ma20', 'bull_bear_line', 'atr_14', 'high_60d', 'change_pct', 'vol_ratio_5d'})
         part = compute_limit_signals(part, instruments.filter(pl.col('symbol').is_in(batch)),
                                      needed={'signal_limit_up', 'signal_limit_down', 'consecutive_limit_ups'})
         keep = [column for column in [*wanted, 'formal', 'raw_open'] if column in part.columns]
@@ -245,12 +255,8 @@ def _memberships(evidence: dict) -> tuple[pl.DataFrame, dict]:
     for sector_id, symbols in sorted(counts.items()):
         declared = evening_report_classification.exclusion(sector_id)
         reasons = [declared[1]] if declared else []
-        if len(symbols) < cfg['min_members']:
-            reasons.append('分类原始成员数低于既有过滤下限')
-        if len(symbols) > cfg['max_members']:
-            reasons.append('分类原始成员数高于既有过滤上限')
-        if sector_id in cfg['blacklist']:
-            reasons.append('既有分类黑名单')
+        if len(symbols) > 120:
+            reasons.append('分类完整成员数超过120只')
         if reasons:
             excluded.append({'sector_id': sector_id, 'members': len(symbols), 'reasons': reasons,
                              'category': declared[0] if declared else 'configured_filter'})
@@ -258,9 +264,10 @@ def _memberships(evidence: dict) -> tuple[pl.DataFrame, dict]:
     kept = [row for row in rows if row['source'] != 'concept' or row['sector_id'] not in blocked]
     frame = pl.DataFrame(kept, schema={'symbol': pl.String, 'sector_id': pl.String,
                                       'sector_name': pl.String, 'source': pl.String})
-    return frame, {'config': cfg, 'rule_version': evening_report_classification.RULE_VERSION, 'excluded': excluded,
+    return frame, {'config': {'max_members': 120}, 'previous_config': cfg,
+                   'rule_version': evening_report_classification.RULE_VERSION, 'excluded': excluded,
                    'excluded_counts': dict(Counter(item['category'] for item in excluded)),
-                   'limitation': '明确非产业标签按版本化完整名称排除；来源未提供独立语义元数据，未列入映射的标签仅按已保存人数与黑名单规则过滤'}
+                   'limitation': '明确非产业标签按版本化完整名称排除；成员上限按本轮完整分类统计，未列入语义映射的标签不凭名称猜测'}
 
 
 def load_inputs(data_dir: Path, day: date, evidence: dict, cancel_check=None):
@@ -281,17 +288,68 @@ def load_inputs(data_dir: Path, day: date, evidence: dict, cancel_check=None):
         suspension.update(confirmed=True, source='formal_daily_history', basis='formal_daily_zero_price_or_volume_amount',
                           source_version=evidence['versions']['stock_generation'], obtained_at=evidence['cutoff'])
     check()
-    benchmark = reader.raw('kline_index_daily', date.fromisoformat(before[0]), day)
-    benchmark = benchmark.filter(pl.col('symbol') == '000001.SH').with_columns(
+    all_benchmarks = reader.raw('kline_index_daily', date.fromisoformat(before[0]), day).with_columns(
         (pl.col('quote_ts').is_null() & pl.col('close').is_finite() & (pl.col('close') > 0)).alias('formal'))
+    benchmark = all_benchmarks.filter(pl.col('symbol') == '000001.SH')
     memberships, sector_filter = _memberships(evidence)
     check()
     return EveningInputs(trade_date=day.isoformat(), next_trade_date=future[0] if future else None,
                          cutoff=evidence['cutoff'], calendar=before, prices=prices,
                          metadata=_metadata(data_dir, evidence, before, historical_suspensions), memberships=memberships,
-                         benchmark=benchmark, market=evidence['market'],
+                         benchmark=benchmark, abnormal_benchmarks=all_benchmarks, market=evidence['market'],
                          provenance={'classifications': evidence['classifications'], 'sector_filter': sector_filter,
+                                     'calendar': evidence['calendar'],
                                      'scope_version': evidence.get('scope_version'),
                                      'suspensions': evidence['halted_evidence'] + historical_suspensions,
                                      'membership_changes': _classification_changes(data_dir, evidence, before),
                                      'input_versions': evidence['versions']})
+
+
+def prepare_evaluation_inputs(data_dir: Path, inputs) -> None:
+    """Recompute both endpoints from raw closes at one explicit factor cutoff.
+
+    Runs only in the post-publication evaluator, never while reading a report.
+    Report-date enriched values are not reused as evaluation prices.
+    """
+    from app.indicators.pipeline import _apply_adj_factor
+
+    path = data_dir / 'adj_factor' / 'all.parquet'
+    if not path.exists():
+        raise DailyCoverageError('客观回看缺少可核验复权因子文件')
+    try:
+        factors = pl.read_parquet(path).select(
+            pl.col('symbol'), pl.col('trade_date').cast(pl.Date, strict=False),
+            pl.col('ex_factor').cast(pl.Float64, strict=False))
+    except (OSError, pl.exceptions.PolarsError) as exc:
+        raise DailyCoverageError('客观回看复权因子不可读') from exc
+    if factors.select(pl.any_horizontal(pl.all().is_null()).any()).item():
+        raise DailyCoverageError('客观回看复权因子包含未知字段')
+    factors = factors.filter(pl.col('trade_date') <= date.fromisoformat(inputs.trade_date))
+    if (factors.select((~pl.col('ex_factor').is_finite() | (pl.col('ex_factor') <= 0)).any()).item()
+            or factors.select(pl.struct('symbol', 'trade_date').is_duplicated().any()).item()):
+        raise DailyCoverageError('客观回看复权因子无效或重复')
+    dates = (pl.col('date').str.to_date() if inputs.prices.schema['date'] == pl.String else pl.col('date').cast(pl.Date))
+    frame = inputs.prices.with_columns(dates)
+    raw = frame.select('symbol', 'date', pl.col('raw_close').alias('close'))
+    adjusted = _apply_adj_factor(raw, factors).select('symbol', 'date', 'close')
+    inputs.prices = frame.drop('close').join(adjusted, on=['symbol', 'date'], how='left')
+    if 'is_st' in inputs.metadata.columns:
+        inputs.prices = inputs.prices.join(inputs.metadata.select('symbol', pl.col('is_st').alias('_is_st_at_cutoff')),
+                                          on='symbol', how='left').with_columns(
+            pl.when(pl.col('date') == date.fromisoformat(inputs.trade_date))
+            .then(pl.col('_is_st_at_cutoff')).otherwise(None).alias('is_st')).drop('_is_st_at_cutoff')
+    # The current instrument table cannot establish historical ST status.
+    # Keep historical tradability unknown instead of applying today's regime.
+    inputs.prices = inputs.prices.with_columns([
+        pl.when(pl.col('date') == date.fromisoformat(inputs.trade_date)).then(pl.col(key)).otherwise(None).alias(key)
+        for key in ('signal_limit_up', 'signal_limit_down') if key in inputs.prices.columns])
+    calendar = inputs.provenance.get('calendar', {})
+    source = next((ref for ref in inputs.provenance['input_versions']['files']
+                   if ref[0] == 'adj_factor/all.parquet'), None)
+    inputs.provenance['evaluation_context'] = {
+        'adjust_method': 'qfq', 'adjust_base_date': inputs.trade_date,
+        'adjust_rule_version': 'raw-times-event-cumfactor-over-base-v1',
+        'adjustment_source': source,
+        'calendar_version': {key: calendar.get(key) for key in ('start', 'end', 'updated_at')},
+        'suspension_source': sorted({row.get('source', 'unspecified') for row in inputs.provenance.get('suspensions', [])}),
+    }

@@ -12,6 +12,10 @@ export const QK = {
   eveningReportDates: (mode = 'live') => ['evening-report', 'dates', mode] as const,
   eveningReport: (date: string, version = '', mode = 'live') => ['evening-report', 'report', mode, date, version] as const,
   eveningReportStatus: (date = '') => ['evening-report', 'status', date] as const,
+  eveningPersonalRoot: (userId: string) => ['evening-personal', userId] as const,
+  eveningPersonal: (userId: string, date: string, version: string) => ['evening-personal', userId, 'report', date, version] as const,
+  eveningHistory: (userId: string, month: string) => ['evening-personal', userId, 'history', month] as const,
+  eveningFeedbackOverview: (userId: string) => ['evening-personal', userId, 'overview'] as const,
   sectorReviewAvailability: ['sector-review', 'availability'] as const,
   sectorReview: (mode: string, params: object) => ['sector-review', mode, params] as const,
   sectorReviewMembers: (mode: string, params: object, sector: string, snapshot: string, page: number) => ['sector-review', 'members', mode, params, sector, snapshot, page] as const,
@@ -211,6 +215,7 @@ export const SSE_INVALIDATE_PREFIXES = [
 export const DATASET_QUERY_PREFIXES: Record<string, readonly string[]> = {
   daily_integrity: ['data-integrity'],
   evening_report: ['evening-report'],
+  evening_report_tracking: ['evening-personal'],
   etf_reference: ['etf-reference'],
   etf_flow: ['etf-flow'],
   daily: ['sector-review', 'kline-boxes', 'kline-gaps', 'earnings-breakout', 'kline', 'kline-latest', 'kline-batch', 'index-daily', 'index-quotes', 'screener-kline-batch', 'watchlist-enriched', 'overview-market', 'limit-ladder', 'market-snapshot', 'stock-levels', 'lots-kline', 'sector-rotation-index-daily', 'screener-cached', 'regime-history', 'regime-observations', 'regime-latest', 'regime-states', 'regime-coverage', 'regime-phases', 'regime-mainline', 'rps-rotation'],

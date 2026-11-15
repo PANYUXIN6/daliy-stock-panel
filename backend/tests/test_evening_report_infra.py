@@ -3,13 +3,14 @@ from __future__ import annotations
 
 import asyncio
 import json
+from contextlib import nullcontext
 from datetime import date, datetime, timedelta
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import polars as pl
 import pytest
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 
 from app.api import evening_report, pipeline
@@ -229,7 +230,7 @@ def test_generation_restarts_classification_continuity_and_reuses_matching_daily
     for day in days[:3]:
         jobs.generate(repo, date.fromisoformat(day), revision=False, progress=lambda *a, **k: None)
     previous = store.get(days[2])
-    assert any(identity['valid'] is True for identity in previous['state']['identities'].values())
+    assert any(identity['valid'] is True for identity in store.state(days[2])['state']['identities'].values())
 
     if revision:
         # Reproduce archives produced by the faulty entry point: new input IDs
@@ -240,6 +241,7 @@ def test_generation_restarts_classification_continuity_and_reuses_matching_daily
         old_branch = RevisionBranch(store)
         for day in days[2:]:
             payload = store.get(day)
+            payload['state'] = store.state(day)['state']
             if day in days[4:]:
                 payload['scope_version'] = new_scope
             old_branch.append(day, payload, payload['input_reference'])
@@ -259,24 +261,25 @@ def test_generation_restarts_classification_continuity_and_reuses_matching_daily
             jobs.generate(repo, date.fromisoformat(day), revision=False, progress=lambda *a, **k: None)
         reports = [store.get(day) for day in days[3:]]
 
-    first, second, third = reports
+    first, _second, third = reports
+    first_state, second_state, third_state = [store.state(report['date'], report['version'])['state'] for report in reports]
     assert all(report['scope_version'] == new_scope for report in reports)
-    assert first['sectors'][0]['round']['status'] == 'probing'
-    assert not any(identity['valid'] is True for identity in first['state']['identities'].values())
+    assert next(iter(first_state['rounds'].values()))['status'] == 'probing'
+    assert not any(identity['valid'] is True for identity in first_state['identities'].values())
     assert first['statistics']['publication_frequency']['report_days'] == 1
-    assert second['sectors'][0]['round']['status'] == 'active'
+    assert next(iter(second_state['rounds'].values()))['status'] == 'active'
     assert third['statistics']['publication_frequency']['report_days'] == 3
-    assert any(identity['valid'] is True for identity in third['state']['identities'].values())
+    assert any(identity['valid'] is True for identity in third_state['identities'].values())
     assert store.get(days[2]) == previous
 
 
 def test_concept_filter_uses_original_members_and_never_filters_industry():
-    rows = [{'symbol': str(i), 'sector_id': '宽基', 'sector_name': '宽基', 'source': 'concept'} for i in range(8)]
+    rows = [{'symbol': str(i), 'sector_id': '宽基', 'sector_name': '宽基', 'source': 'concept'} for i in range(121)]
     rows += [{'symbol': 'x', 'sector_id': '宽基', 'sector_name': '宽基', 'source': 'industry'}]
     frame, evidence = inputs._memberships({'classifications': [{'memberships': rows}],
                                           'sector_filter_config': {'min_members': 1, 'max_members': 7, 'blacklist': []}})
     assert frame['source'].to_list() == ['industry']
-    assert evidence['excluded'][0]['members'] == 8
+    assert evidence['excluded'][0]['members'] == 121
 
 
 def test_original_is_immutable_and_public_view_does_not_load_internal_archive(tmp_path, monkeypatch):
@@ -434,8 +437,11 @@ def test_revision_failure_does_not_turn_into_automatic_original_retry(tmp_path, 
     jobs._save_attempt(tmp_path, str(day), 'revision', {'status': 'failed', 'reason': '历史输入已改写'})
     trigger = AsyncMock()
     monkeypatch.setattr(jobs, 'trigger', trigger)
+    derived = AsyncMock(return_value=None)
+    monkeypatch.setattr(jobs, '_queue_tracking', derived)
     assert asyncio.run(jobs.run_scheduled(SimpleNamespace(store=SimpleNamespace(data_dir=tmp_path)))) is None
     trigger.assert_not_awaited()
+    derived.assert_awaited_once()
     assert jobs.status(tmp_path, str(day))['status'] == 'failed'
     assert jobs.status(tmp_path, str(day), mode='live')['status'] == 'published'
 
@@ -486,6 +492,381 @@ def task_runtime(accepted, monkeypatch):
 async def drain_tasks():
     while pipeline._tasks:
         await asyncio.gather(*list(pipeline._tasks))
+
+
+@pytest.fixture
+def manual_runtime(task_runtime, monkeypatch):
+    from app.services.auth import AuthStore
+    from app.services.user_context import UserContext, user_scope
+
+    state, registry = task_runtime
+    auth = AuthStore(state.root)
+    admin = auth.bootstrap('manualadmin', 'initial-secret')
+    token, _ = auth.login('manualadmin', 'initial-secret', 'ip', '')
+    actor = UserContext(admin['id'], 'admin', state.root, session_token=token)
+    monkeypatch.setattr(jobs, '_queue_tracking', AsyncMock())
+    with user_scope(actor):
+        yield state, registry, auth, token
+
+
+@pytest.mark.parametrize('initial', ['missing', 'changed', 'accepted', 'revision', 'revision_after_queue'])
+def test_manual_generation_prepares_only_when_needed_then_publishes(manual_runtime, monkeypatch, initial):
+    from app.jobs import daily_pipeline
+
+    state, registry, _, _ = manual_runtime
+    store = EveningReportStore(state.root)
+    original = None
+    if initial.startswith('revision'):
+        original = jobs.generate(state.repo, state.day, revision=False, progress=lambda *a, **k: None)
+    if initial in ('missing', 'revision'):
+        store.save_readiness(str(state.day), {'complete': False})
+    if initial == 'changed':
+        write(state.root, 'kline_daily', state.raw)  # invalidates the old accepted file references
+    if original:
+        # Revocation is authoritative even when the archived input's files are unchanged.
+        assert inputs.require_ready(state.root, state.day, input_id=state.evidence['input_id'])['complete']
+    refreshed = Mock()
+    monkeypatch.setattr(pipeline, 'finalize_market_data', refreshed)
+    caps = object()
+    quote_service = SimpleNamespace(paused=nullcontext)
+
+    def prepare(repo, capset, *, on_progress, postmarket, target_date, evening_only):
+        assert repo is state.repo and capset is caps
+        assert postmarket and evening_only and target_date == state.day
+        assert registry.get(pipeline_jobs._run_slot_owner)['request_key'].startswith('evening_report:')
+        on_progress('sync_daily', 45, '准备正式行情')
+        assert jobs.status(state.root, str(state.day))['reason'] == '准备正式行情'
+        inputs.save_ready(state.root, state.day, state.coverage,
+                          state.evidence['classifications'], state.evidence['market'])
+        return {}
+
+    prepared = Mock(side_effect=prepare)
+    monkeypatch.setattr(daily_pipeline, 'run_now', prepared)
+    async def run():
+        request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(
+            repo=state.repo, quote_service=quote_service, capabilities=caps)))
+        result = await evening_report.rebuild(request, evening_report.RebuildRequest(
+            date=state.day, mode='revision' if original else 'live'))
+        if initial == 'revision_after_queue':
+            store.save_readiness(str(state.day), {'complete': False})
+        await drain_tasks()
+        return result
+
+    result = asyncio.run(run())
+    job = registry.get(result['job_id'])
+    assert job['status'] == 'succeeded', job.get('error')
+    assert prepared.call_count == refreshed.call_count == (0 if initial == 'accepted' else 1)
+    assert store.get(str(state.day), job['result']['version'])['input_reference']['input_id'] == store.readiness(str(state.day))['input_id']
+    if original:
+        assert store.get(str(state.day))['version'] == original['version']
+        assert job['result']['version'] != original['version']
+    assert pipeline_jobs._run_slot_owner is None
+
+
+@pytest.mark.parametrize(('failure', 'revision'), [
+    ('exception', False), ('unaccepted', False), ('cancel', False), ('revoked', False), ('unaccepted', True),
+])
+def test_manual_preparation_failure_never_publishes_and_refreshes_partial_data(manual_runtime, monkeypatch, failure, revision):
+    from app.jobs import daily_pipeline
+
+    state, registry, auth, token = manual_runtime
+    store = EveningReportStore(state.root)
+    original = (jobs.generate(state.repo, state.day, revision=False, progress=lambda *a, **k: None)
+                if revision else None)
+    store.save_readiness(str(state.day), {'complete': False})
+    refreshed = Mock()
+    monkeypatch.setattr(pipeline, 'finalize_market_data', refreshed)
+
+    def prepare(*args, on_progress, **kwargs):
+        on_progress('sync_daily', 45, '准备正式行情')
+        if failure == 'exception':
+            raise DailyCoverageError('正式行情不完整')
+        if failure == 'cancel':
+            pipeline.cancel_job(pipeline_jobs._run_slot_owner)
+        if failure == 'revoked':
+            inputs.save_ready(state.root, state.day, state.coverage,
+                              state.evidence['classifications'], state.evidence['market'])
+            auth.revoke_session(token)
+        return {}
+
+    monkeypatch.setattr(daily_pipeline, 'run_now', prepare)
+    async def run():
+        result = await jobs.trigger(state.repo, day=state.day, revision=revision, capset=object())
+        await drain_tasks()
+        return result
+
+    result = asyncio.run(run())
+    job = registry.get(result['job_id'])
+    assert job['status'] == 'failed'
+    assert job['outcome'] == ('cancelled' if failure == 'cancel' else 'failed')
+    if original:
+        assert store.get(str(state.day))['version'] == original['version']
+        assert not store.branch_manifests()
+    else:
+        assert not store.has_original(str(state.day))
+    refreshed.assert_called_once_with(state.repo, None)
+    jobs._queue_tracking.assert_not_awaited()
+    assert pipeline_jobs._run_slot_owner is None
+
+
+def test_historical_revision_can_still_recover_archived_input_without_preparing(manual_runtime, monkeypatch):
+    from app.jobs import daily_pipeline
+
+    state, registry, _, _ = manual_runtime
+    store = EveningReportStore(state.root)
+    original = jobs.generate(state.repo, state.day, revision=False, progress=lambda *a, **k: None)
+    store.save_readiness(str(state.day), {'complete': False})
+    monkeypatch.setattr(jobs, 'cn_now', lambda: state.now + timedelta(days=1))
+    prepared = Mock()
+    monkeypatch.setattr(daily_pipeline, 'run_now', prepared)
+
+    async def run():
+        result = await jobs.trigger(state.repo, day=state.day, revision=True, capset=object())
+        monkeypatch.setattr(jobs, 'cn_now', lambda: state.now + timedelta(days=2))
+        await drain_tasks()
+        return result
+
+    result = asyncio.run(run())
+    job = registry.get(result['job_id'])
+    assert job['status'] == 'succeeded', job.get('error')
+    assert job['result']['reused'] is True
+    assert job['result']['version'] == original['version']
+    prepared.assert_not_called()
+
+
+@pytest.mark.parametrize('reason', ['historical', 'before_close', 'automatic'])
+def test_missing_inputs_are_not_prepared_outside_manual_current_postmarket(manual_runtime, monkeypatch, reason):
+    state, registry, _, _ = manual_runtime
+    EveningReportStore(state.root).save_readiness(str(state.day), {'complete': False})
+    if reason == 'historical':
+        monkeypatch.setattr(jobs, 'cn_now', lambda: state.now + timedelta(days=1))
+    elif reason == 'before_close':
+        monkeypatch.setattr(jobs, 'cn_now', lambda: state.now.replace(hour=15))
+    with pytest.raises(HTTPException) as error:
+        asyncio.run(jobs.trigger(state.repo, day=state.day, capset=object(), automatic=reason == 'automatic'))
+    assert error.value.status_code == 409
+    assert not registry.list_recent()
+
+
+@pytest.mark.parametrize('calendar_result', ['trading', 'closed', 'unknown'])
+def test_manual_preparation_requires_confirmed_calendar_after_refresh(manual_runtime, monkeypatch, calendar_result):
+    from app.jobs import daily_pipeline
+    from app.services import trading_day
+
+    state, registry, _, _ = manual_runtime
+    store = EveningReportStore(state.root)
+    store.save_readiness(str(state.day), {'complete': False})
+    calendar_path = state.root / 'calendar' / 'trading_days.json'
+    calendar_path.unlink()
+
+    def sync_calendar(root):
+        assert root == state.root
+        if calendar_result != 'unknown':
+            atomic_json(calendar_path, {**state.evidence['calendar'],
+                                       'days': state.evidence['calendar']['days'] if calendar_result == 'trading' else []})
+        return {}
+
+    def prepare(*args, **kwargs):
+        inputs.save_ready(state.root, state.day, state.coverage,
+                          state.evidence['classifications'], state.evidence['market'])
+        return {}
+
+    refreshed = Mock(side_effect=sync_calendar)
+    prepared = Mock(side_effect=prepare)
+    monkeypatch.setattr(trading_day, 'sync_calendar', refreshed)
+    monkeypatch.setattr(daily_pipeline, 'run_now', prepared)
+    monkeypatch.setattr(pipeline, 'finalize_market_data', lambda *a: None)
+    async def run():
+        result = await jobs.trigger(state.repo, day=state.day, capset=object())
+        await drain_tasks()
+        return result
+
+    result = asyncio.run(run())
+    assert registry.get(result['job_id'])['status'] == ('succeeded' if calendar_result == 'trading' else 'failed')
+    assert store.has_original(str(state.day)) is (calendar_result == 'trading')
+    assert prepared.call_count == (1 if calendar_result == 'trading' else 0)
+    refreshed.assert_called_once_with(state.root)
+
+
+@pytest.mark.parametrize('mode', ['live', 'revision', 'history_through_today'])
+@pytest.mark.parametrize('ready_at_submission', [False, True])
+def test_manual_preparation_rechecks_date_after_waiting_for_execution(manual_runtime, monkeypatch, mode, ready_at_submission):
+    from app.jobs import daily_pipeline
+
+    state, registry, _, _ = manual_runtime
+    store = EveningReportStore(state.root)
+    start = state.day
+    if mode == 'history_through_today':
+        start = state.calendar[-2]
+        _publish_historical_day(state, start)
+    if mode != 'live':
+        jobs.generate(state.repo, state.day, revision=False, progress=lambda *a, **k: None)
+    if not ready_at_submission:
+        store.save_readiness(str(state.day), {'complete': False})
+    original_dates = store.dates()
+    prepared = Mock()
+    monkeypatch.setattr(daily_pipeline, 'run_now', prepared)
+    async def run():
+        result = await jobs.trigger(state.repo, day=start, revision=mode != 'live', capset=object())
+        store.save_readiness(str(state.day), {'complete': False})
+        monkeypatch.setattr(jobs, 'cn_now', lambda: state.now + timedelta(days=1))
+        await drain_tasks()
+        return result
+
+    result = asyncio.run(run())
+    assert registry.get(result['job_id'])['status'] == 'failed'
+    assert '跨日期' in registry.get(result['job_id'])['error']
+    assert store.dates() == original_dates
+    prepared.assert_not_called()
+
+
+def _publish_historical_day(state, day):
+    from copy import deepcopy
+
+    evidence = deepcopy(state.evidence)
+    evidence.pop('input_id')
+    evidence['date'] = str(day)
+    evidence['cutoff'] = f'{day}T16:00:00+08:00'
+    evidence['versions'] = inputs.input_versions(state.root, day)
+    evidence['calendar']['days'] = [value for value in evidence['calendar']['days'] if value <= str(day)]
+    evidence['calendar']['end'] = str(day)
+    for item in evidence['metadata']:
+        item['as_of'] = day
+        item['metadata_observed_at'] = evidence['cutoff']
+    for item in evidence['classifications']:
+        item['obtained_at'] = evidence['cutoff']
+    EveningReportStore(state.root).save_readiness(str(day), evidence)
+    jobs.generate(state.repo, day, revision=False, progress=lambda *a, **k: None)
+    return evidence
+
+
+@pytest.mark.parametrize('crosses_midnight', [False, True])
+def test_queued_historical_revision_rechecks_new_today_dependency(manual_runtime, monkeypatch, crosses_midnight):
+    from app.jobs import daily_pipeline
+
+    state, registry, _, _ = manual_runtime
+    store = EveningReportStore(state.root)
+    start = state.calendar[-2]
+    _publish_historical_day(state, start)
+    def prepare(*args, target_date, **kwargs):
+        assert target_date == state.day
+        inputs.save_ready(state.root, state.day, state.coverage,
+                          state.evidence['classifications'], state.evidence['market'])
+
+    prepared = Mock(side_effect=prepare)
+    monkeypatch.setattr(daily_pipeline, 'run_now', prepared)
+    monkeypatch.setattr(pipeline, 'finalize_market_data', lambda *a: None)
+
+    async def run():
+        result = await jobs.trigger(state.repo, day=start, revision=True, capset=object())
+        # Another queued publication extends the revision while it waits.
+        jobs.generate(state.repo, state.day, revision=False, progress=lambda *a, **k: None)
+        store.save_readiness(str(state.day), {'complete': False})
+        if crosses_midnight:
+            monkeypatch.setattr(jobs, 'cn_now', lambda: state.now + timedelta(days=1))
+        await drain_tasks()
+        return result
+
+    result = asyncio.run(run())
+    job = registry.get(result['job_id'])
+    assert job['status'] == ('failed' if crosses_midnight else 'succeeded'), job.get('error')
+    if crosses_midnight:
+        assert '跨日期' in job['error']
+        assert not store.branch_manifests()
+    else:
+        manifest = store.branch_manifests()[0]
+        assert set(manifest['dates']) == {str(start), str(state.day)}
+        assert manifest['input_ids'][str(state.day)] == store.readiness(str(state.day))['input_id']
+    assert {entry['date'] for entry in store.dates()} == {str(start), str(state.day)}
+    assert prepared.call_count == (0 if crosses_midnight else 1)
+
+
+@pytest.mark.parametrize('missing_input', [None, 'before_submission', 'after_queue', 'today_snapshot'])
+def test_historical_revision_checks_all_dependencies_before_preparing_today(manual_runtime, monkeypatch, missing_input):
+    from app.jobs import daily_pipeline
+
+    state, registry, _, _ = manual_runtime
+    store = EveningReportStore(state.root)
+    start, middle = state.calendar[-3:-1]
+    _publish_historical_day(state, start)
+    historical = _publish_historical_day(state, middle)
+    jobs.generate(state.repo, state.day, revision=False, progress=lambda *a, **k: None)
+    originals = {entry['date']: store.get(entry['date'])['version'] for entry in store.dates()}
+    store.save_readiness(str(state.day), {'complete': False})
+    lost_history = missing_input if missing_input != 'today_snapshot' else None
+    if missing_input == 'today_snapshot':
+        (store.root / 'inputs' / f'{state.evidence["input_id"]}.json.gz').unlink()
+    history_path = store.root / 'inputs' / f'{historical["input_id"]}.json.gz'
+    if lost_history == 'before_submission':
+        history_path.unlink()
+
+    def prepare(repo, caps, *, target_date, postmarket, evening_only, **kwargs):
+        assert target_date == state.day and postmarket and evening_only
+        inputs.save_ready(state.root, state.day, state.coverage,
+                          state.evidence['classifications'], state.evidence['market'])
+        return {}
+
+    prepared = Mock(side_effect=prepare)
+    monkeypatch.setattr(daily_pipeline, 'run_now', prepared)
+    monkeypatch.setattr(pipeline, 'finalize_market_data', lambda *a: None)
+    async def run():
+        result = await jobs.trigger(state.repo, day=start, revision=True, capset=object())
+        if lost_history == 'after_queue':
+            history_path.unlink()
+        await drain_tasks()
+        return result
+
+    if lost_history == 'before_submission':
+        with pytest.raises(HTTPException) as error:
+            asyncio.run(run())
+        assert error.value.status_code == 409
+        assert str(middle) in error.value.detail
+        assert not registry.list_recent()
+    else:
+        result = asyncio.run(run())
+        job = registry.get(result['job_id'])
+        assert job['status'] == ('failed' if lost_history else 'succeeded'), job.get('error')
+        if lost_history:
+            assert str(middle) in job['error']
+        else:
+            manifest = store.branch_manifests()[0]
+            assert set(manifest['dates']) == {str(start), str(middle), str(state.day)}
+            assert manifest['input_ids'][str(state.day)] == store.readiness(str(state.day))['input_id']
+    assert prepared.call_count == (0 if lost_history else 1)
+    assert {entry['date']: store.get(entry['date'])['version'] for entry in store.dates()} == originals
+    if lost_history:
+        assert not store.branch_manifests()
+
+
+@pytest.mark.parametrize('revision', [False, True])
+def test_manual_generation_crossing_midnight_before_publication_keeps_originals(manual_runtime, monkeypatch, revision):
+    from app.services import evening_report_engine
+
+    state, registry, _, _ = manual_runtime
+    store = EveningReportStore(state.root)
+    if revision:
+        jobs.generate(state.repo, state.day, revision=False, progress=lambda *a, **k: None)
+        inputs.save_ready(state.root, state.day, state.coverage,
+                          state.evidence['classifications'], state.evidence['market'])
+    originals = store.dates()
+    calculate = evening_report_engine.build_report
+
+    def crossing_midnight(*args, **kwargs):
+        payload = calculate(*args, **kwargs)
+        monkeypatch.setattr(jobs, 'cn_now', lambda: state.now + timedelta(days=1))
+        return payload
+
+    monkeypatch.setattr(evening_report_engine, 'build_report', crossing_midnight)
+    async def run():
+        result = await jobs.trigger(state.repo, day=state.day, revision=revision, capset=object())
+        await drain_tasks()
+        return result
+
+    result = asyncio.run(run())
+    assert registry.get(result['job_id'])['status'] == 'failed'
+    assert '跨日期' in registry.get(result['job_id'])['error']
+    assert store.dates() == originals
+    assert not store.branch_manifests()
 
 
 def test_later_pipeline_failure_still_generates_independent_report_after_releasing_slot(task_runtime, monkeypatch):
@@ -562,7 +943,7 @@ def test_pending_evening_restart_is_failed_and_can_retry_only_its_step(task_runt
     result = asyncio.run(retry())
     assert result['job_id'] != job_id
     assert restored.get(result['job_id'])['status'] == 'succeeded'
-    assert all(job.get('request_key', '').startswith('evening_report:') for job in restored.list_recent())
+    assert all(job.get('request_key', '').startswith(('evening_report:', 'evening_tracking:')) for job in restored.list_recent())
 
 
 def test_same_input_uses_saved_historical_suspension_not_mutable_ready(accepted):
@@ -595,13 +976,13 @@ def test_automatic_generation_rejects_cross_day_before_any_publication(accepted,
 
 def test_exact_non_industry_mapping_excludes_small_region_but_keeps_real_industry_labels():
     rows = [{'symbol': f's{i}', 'sector_id': label, 'sector_name': label, 'source': 'concept'}
-            for label in ('天津自贸区', '沪股通', '沪深300', '2026三季报预增', '智慧城市', '东数西算', '中国AI 50')
+            for label in ('天津自贸区', '沪股通', '沪深300', '2026三季报预增', '昨日涨停', '智慧城市', '东数西算', '中国AI 50')
             for i in range(6)]
     frame, evidence = inputs._memberships({'classifications': [{'memberships': rows}],
                                           'sector_filter_config': {'min_members': 4, 'max_members': 600, 'blacklist': []}})
     assert set(frame['sector_id']) == {'智慧城市', '东数西算', '中国AI 50'}
-    assert evidence['excluded_counts'] == {'region': 1, 'trading_channel': 1, 'index_constituent': 1, 'style': 1}
-    assert evidence['rule_version'] == 'evening-classification-v1'
+    assert evidence['excluded_counts'] == {'region': 1, 'trading_channel': 1, 'index_constituent': 1, 'style': 1, 'review_attribute': 1}
+    assert evidence['rule_version'] == 'evening-classification-v2'
 
 
 def test_published_archive_survives_event_failure_and_retry_only_republishes_update(accepted, monkeypatch):
@@ -648,17 +1029,23 @@ def test_capacity_queued_evening_can_cancel_without_computing(task_runtime, monk
     assert pipeline_jobs._run_slot_owner is None
 
 
-def test_explicit_rebuild_revalidates_revoked_session_before_delayed_execution(task_runtime):
+@pytest.mark.parametrize('missing_input', [False, True])
+def test_explicit_rebuild_revalidates_revoked_session_before_delayed_execution(task_runtime, monkeypatch, missing_input):
+    from app.jobs import daily_pipeline
     from app.services.auth import AuthStore
     from app.services.user_context import UserContext, user_scope
     state, registry = task_runtime
+    if missing_input:
+        EveningReportStore(state.root).save_readiness(str(state.day), {'complete': False})
+    prepared = Mock()
+    monkeypatch.setattr(daily_pipeline, 'run_now', prepared)
     auth = AuthStore(state.root)
     admin = auth.bootstrap('reviewadmin', 'initial-secret')
     token, _ = auth.login('reviewadmin', 'initial-secret', 'ip', '')
     actor = UserContext(admin['id'], 'admin', state.root, session_token=token)
     async def run():
         with user_scope(actor):
-            result = await jobs.trigger(state.repo, day=state.day)
+            result = await jobs.trigger(state.repo, day=state.day, capset=object())
             auth.revoke_session(token)
             await drain_tasks()
             return result
@@ -666,6 +1053,7 @@ def test_explicit_rebuild_revalidates_revoked_session_before_delayed_execution(t
     assert registry.get(result['job_id'])['status'] == 'failed'
     assert '会话已过期' in registry.get(result['job_id'])['error']
     assert not EveningReportStore(state.root).has_original(str(state.day))
+    prepared.assert_not_called()
 
 
 def test_selection_policy_revision_recomputes_same_inputs_and_preserves_original(accepted, monkeypatch):
@@ -673,17 +1061,17 @@ def test_selection_policy_revision_recomputes_same_inputs_and_preserves_original
     state = accepted
     store = EveningReportStore(state.root)
     current_policy = evening_report_rules.SELECTION_POLICY_VERSION
-    assert current_policy == 'observation-v3'
+    assert current_policy == 'theme-observation-v1'
     submitted = AsyncMock(return_value={'job_id': 'queued'})
     monkeypatch.setattr(pipeline, '_submit_job', submitted)
     monkeypatch.setattr(shared_runtime, 'publish_data_update', lambda *_: None)
-    monkeypatch.setattr(evening_report_rules, 'SELECTION_POLICY_VERSION', 'observation-v2')
+    monkeypatch.setattr(evening_report_rules, 'SELECTION_POLICY_VERSION', 'observation-v3')
     first = jobs.generate(state.repo, state.day, revision=False, progress=lambda *a, **k: None)
     original = store.get(str(state.day))
     asyncio.run(jobs.trigger(state.repo, day=state.day, revision=True, automatic=True))
     old_key = submitted.call_args.kwargs['request_key']
     evidence = store.readiness(str(state.day))
-    # A v2 archive and revision with the same inputs cannot satisfy v3.
+    # A pre-fix archive and revision with the same inputs cannot satisfy the corrected version.
     old_payload = {**original, 'scope_version': SCOPE_VERSION}
     old_branch = RevisionBranch(store)
     old_branch.append(str(state.day), old_payload, original['input_reference'])

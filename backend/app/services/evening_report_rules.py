@@ -5,8 +5,8 @@ from __future__ import annotations
 import math
 from typing import Any
 
-RULE_VERSION = "evening-v1"
-SELECTION_POLICY_VERSION = "observation-v3"
+RULE_VERSION = "evening-v2"
+SELECTION_POLICY_VERSION = "theme-observation-v1"
 PURPOSES = (
     "风险暂停",
     "地位失效",

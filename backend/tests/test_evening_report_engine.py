@@ -1,6 +1,7 @@
 from datetime import date, timedelta
 
 import polars as pl
+import pytest
 
 from app.services.evening_report_engine import EveningInputs, build_report
 
@@ -109,14 +110,14 @@ def test_suspension_keeps_identity_interval_and_membership():
     assert result["sectors"][0]["member_count"] == 23
 
 
-def test_missing_atr_keeps_complete_trend_but_blocks_selection():
+def test_missing_optional_atr_keeps_observation_and_marks_risk_unknown():
     history = []
     for day in (65, 66, 67):
         history.append(build_report(inputs_at(day), history))
     result = build_report(inputs_at(68, missing_atr=("stock00",)), history)
     stock = next(r for r in result["records"] if r["symbol"] == "stock00")
     assert stock["purpose"] == "已确认核心跟踪"
-    assert stock["risk"]["risk_now"] is None and not stock["selected"]
+    assert stock["risk"]["risk_now"] is None and stock["selected"]
     assert any("风险证据不足" in reason for reason in stock["limitations"])
 
 
@@ -134,7 +135,7 @@ def test_historical_snapshot_not_valid_formal_warmup():
     assert "历史正式性" in evidence["qualification"]["unknown_reasons"]
 
 
-def test_recovery_first_true_day_is_still_observation_not_selected():
+def test_legacy_core_recovery_does_not_block_new_role_observation():
     history = []
     for day in (65, 66, 67):
         history.append(build_report(inputs_at(day), history))
@@ -143,7 +144,7 @@ def test_recovery_first_true_day_is_still_observation_not_selected():
     recovering = build_report(inputs_at(69), history)
     stock = next(r for r in recovering["records"] if r["symbol"] == "stock00")
     assert any(i["status"] == "divergent" for i in stock["paths"][0]["identities"])
-    assert not stock["selected"]
+    assert stock["selected"]
     history.append(recovering)
     recovered = build_report(inputs_at(70), history)
     stock = next(r for r in recovered["records"] if r["symbol"] == "stock00")
@@ -347,6 +348,104 @@ def test_confirmed_halted_member_without_price_row_is_known_not_limit_up():
     assert result["sectors"][0]["today_top5"] is True
 
 
+def ecology_gap_inputs(day=65, *, known_ups=0, unknown_ups=1, missing_boards=False):
+    inputs = inputs_at(day)
+    prices, metadata, members = [], [], []
+    # A separate six-member sector: its missing data cannot make sector A incomplete.
+    for n in range(6):
+        symbol = f"extra{n}"
+        part = inputs.prices.filter(pl.col("symbol") == "stock23").with_columns(
+            pl.lit(symbol).alias("symbol"),
+            pl.lit(n < known_ups).alias("signal_limit_up"),
+            pl.lit(3 if n < known_ups else 0).alias("consecutive_limit_ups"),
+        )
+        if known_ups <= n < known_ups + unknown_ups:
+            part = part.with_columns(
+                pl.when(pl.col("date") == inputs.trade_date).then(None)
+                .otherwise(pl.col("signal_limit_up")).alias("signal_limit_up")
+            )
+        if missing_boards and n == 0:
+            part = part.with_columns(
+                pl.when(pl.col("date") == inputs.trade_date).then(None)
+                .otherwise(pl.col("consecutive_limit_ups")).alias("consecutive_limit_ups")
+            )
+        prices.append(part)
+        metadata.append(inputs.metadata.filter(pl.col("symbol") == "stock23").with_columns(
+            pl.lit(symbol).alias("symbol")))
+        members.append(dict(source="concept", sector_id="b", sector_name="产业B", symbol=symbol))
+    inputs.prices = pl.concat([inputs.prices, *prices], how="vertical_relaxed")
+    inputs.metadata = pl.concat([inputs.metadata, *metadata])
+    inputs.memberships = pl.concat([inputs.memberships, pl.DataFrame(members)])
+    return inputs
+
+
+def test_ineligible_ecology_gap_preserves_other_sector_confirmation_and_selection():
+    history = []
+    for day in (65, 66, 67):
+        result = build_report(ecology_gap_inputs(day), history)
+        history.append(result)
+        sector = next(s for s in result["sectors"] if s["sector_id"] == "a")
+        assert sector["ecology"]["complete_ranking"] is True
+        assert sector["today_top5"] is True
+    assert [len(r["selected"]) for r in history] == [2, 2, 2]
+
+
+@pytest.mark.parametrize(("known_ups", "unknown_ups", "missing_boards", "eligible"), [
+    (1, 1, False, False),  # Even if the missing member is limit-up, two cannot participate.
+    (2, 0, True, False),  # Missing board height cannot change an exact count below three.
+    (2, 1, False, None),  # The missing member could be the third limit-up.
+    (3, 0, True, True),   # A participant's missing board height still affects rankings.
+])
+def test_ecology_unknown_only_blocks_ranking_when_sector_can_participate(
+    known_ups, unknown_ups, missing_boards, eligible,
+):
+    result = build_report(ecology_gap_inputs(
+        known_ups=known_ups, unknown_ups=unknown_ups, missing_boards=missing_boards))
+    sectors = {s["sector_id"]: s for s in result["sectors"]}
+    assert sectors["b"]["ecology"]["ranking_eligible"] is eligible
+    assert sectors["b"]["ecology"]["limit_up_count_max"] == known_ups + unknown_ups
+    assert sectors["b"]["ecology"]["computable"] is False
+    if eligible is False:
+        assert sectors["a"]["today_top5"] is True
+        assert sectors["b"]["today_top5"] is False
+    else:
+        assert sectors["a"]["today_top5"] is None
+        assert sectors["a"]["ecology"]["complete_ranking"] is False
+
+
+@pytest.mark.parametrize("gap", ["scope", "formal"])
+def test_unknown_scope_or_nonformal_negative_signal_can_still_change_participation(gap):
+    inputs = ecology_gap_inputs(known_ups=2, unknown_ups=0)
+    if gap == "scope":
+        inputs.metadata = inputs.metadata.with_columns(
+            pl.when(pl.col("symbol") == "extra2").then(None)
+            .otherwise(pl.col("in_scope")).alias("in_scope")
+        )
+    else:
+        inputs.prices = inputs.prices.with_columns(
+            pl.when((pl.col("symbol") == "extra2") & (pl.col("date") == inputs.trade_date))
+            .then(False).otherwise(pl.col("formal")).alias("formal")
+        )
+    result = build_report(inputs)
+    sectors = {s["sector_id"]: s for s in result["sectors"]}
+    assert sectors["b"]["ecology"]["ranking_eligible"] is None
+    assert sectors["b"]["ecology"]["limit_up_count_max"] == 3
+    assert sectors["a"]["today_top5"] is None
+
+
+def test_known_nonparticipant_stays_outside_top5_when_other_participant_has_gap():
+    inputs = ecology_gap_inputs(known_ups=2, unknown_ups=1)
+    inputs.prices = inputs.prices.with_columns(
+        pl.when(pl.col("symbol") == "stock02").then(False)
+        .otherwise(pl.col("signal_limit_up")).alias("signal_limit_up")
+    )
+    result = build_report(inputs)
+    sectors = {s["sector_id"]: s for s in result["sectors"]}
+    assert sectors["a"]["ecology"]["complete_ranking"] is False
+    assert sectors["a"]["today_top5"] is False
+    assert sectors["b"]["today_top5"] is None
+
+
 def test_observation_association_does_not_lock_out_first_formal_active_sector():
     history = []
     for day in (65, 66, 67, 68):
@@ -380,42 +479,6 @@ def test_observation_association_does_not_lock_out_first_formal_active_sector():
     assert not any(i["valid"] is True for i in stock["paths"][0]["identities"])
 
 
-def test_quota_round_robin_industry_supplement_and_catchup_cap():
-    from app.services.evening_report_engine import _select
-
-    sectors, records = {}, []
-    for source, sid in (("concept", "a"), ("concept", "b"), ("industry", "i")):
-        sectors[sid] = {
-            "id": sid,
-            "top5_count": 1,
-            "ecology": {"rank": 1},
-            "features": {"X20": 0.1},
-        }
-        for n in range(3):
-            symbol = f"{sid}{n}"
-            kind = "board" if n == 0 else "trend" if n == 1 else "catchup"
-            path = {
-                "source": source,
-                "sector_id": sid,
-                "selection": {"value": True},
-                "selection_role": kind,
-                "selection_types": [kind],
-                "selection_by_type": {kind: {"role": kind}},
-                "features": {"rank_b": n + 1, "rank_t": n + 1, "rank_e": n + 1},
-            }
-            records.append({"symbol": symbol, "paths": [path]})
-    assert _select(records, sectors) == ["a0", "b0", "a1", "b1", "i0"]
-    # No formal cores; catch-up candidates remain capped at one across source lists.
-    for r in records:
-        p = r["paths"][0]
-        p.update(
-            selection_role="catchup",
-            selection_types=["catchup"],
-            selection_by_type={"catchup": {"role": "catchup"}},
-        )
-    assert len(_select(records, sectors)) == 1
-
-
 def test_failed_probes_do_not_accumulate_unconfirmed_forward_identities():
     import copy
 
@@ -442,27 +505,6 @@ def test_failed_probes_do_not_accumulate_unconfirmed_forward_identities():
         if original is None:
             original = copy.deepcopy(report)
     assert history[0] == original
-
-
-def test_dual_identity_second_slot_reports_actual_complementary_type():
-    from app.services.evening_report_engine import _select
-
-    sectors = {"a": {"id": "a", "top5_count": 1, "ecology": {"rank": 1}, "features": {"X20": 0.1}}}
-    records = []
-    for n in range(2):
-        path = {
-            "source": "concept",
-            "sector_id": "a",
-            "selection": {"value": True},
-            "selection_role": "board",
-            "selection_types": ["board", "trend"],
-            "selection_by_type": {"board": {"role": "board"}, "trend": {"role": "trend"}},
-            "features": {"rank_b": n + 1, "rank_t": n + 1},
-        }
-        records.append({"symbol": str(n), "paths": [path]})
-    assert _select(records, sectors) == ["0", "1"]
-    assert records[1]["paths"][0]["selection_type"] == "trend"
-    assert records[1]["paths"][0]["selection_role"] == "trend"
 
 
 def test_candidate_unknown_does_not_restart_candidate_stage():
@@ -569,7 +611,7 @@ def test_observation_hints_do_not_block_complete_core_paths_or_reset_identity():
         assert next(row for row in view["records"] if row["symbol"] == "stock00") == stock
 
 
-def test_observation_policy_retains_unknown_and_known_risk_gates():
+def test_observation_policy_preserves_risk_facts_without_using_them_as_quota_gates():
     history = []
     for day in (65, 66, 67):
         history.append(build_report(inputs_at(day), history))
@@ -588,7 +630,7 @@ def test_observation_policy_retains_unknown_and_known_risk_gates():
             value.market.update(phase="ice", promo_rate=0.13, seal_rate=None)
         elif case == "core_cold_start":
             result = build_report(value)
-            assert not result["selected"]
+            assert result["selected"]
             assert result["market"]["policy"]["value"] is True
             continue
         elif case == "local_weak":
@@ -614,7 +656,7 @@ def test_observation_policy_retains_unknown_and_known_risk_gates():
             ])
         result = build_report(value, history)
         stock = next(row for row in result["records"] if row["symbol"] == "stock00")
-        assert not stock["selected"], case
+        assert stock["selected"], case
         if case in {"promo_missing", "seal_missing"}:
             assert result["market"]["policy"]["value"] is None
             assert any("市场政策证据不足" in reason for reason in stock["limitations"])

@@ -21,6 +21,7 @@ import polars as pl
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.services.evening_report_engine import EveningInputs, build_report
+from app.services.evening_report_store import EveningReportStore, history_view, report_view
 
 calendar = []
 d = date(2025, 1, 1)
@@ -91,7 +92,14 @@ inputs = EveningInputs(
 )
 parser = argparse.ArgumentParser()
 parser.add_argument("--history-days", type=int, choices=range(1, 31), default=1)
+parser.add_argument("--storage", action="store_true", help="Measure real tiered writes in a temporary directory")
 args = parser.parse_args()
+if args.storage:
+    from tempfile import TemporaryDirectory
+
+    temporary = TemporaryDirectory(prefix="evening-storage-benchmark-")
+    store = EveningReportStore(Path(temporary.name))
+legacy_bytes = 0
 history = []
 elapsed = []
 for index in range(120 - args.history_days, 120):
@@ -99,6 +107,21 @@ for index in range(120 - args.history_days, 120):
     started = time.perf_counter()
     result = build_report(current, history[-7:])
     elapsed.append(time.perf_counter() - started)
+    if args.storage:
+        evidence = {'date': current.trade_date, 'complete': True, 'scope_version': result['scope_version'],
+                    'metadata': metadata.to_dicts(), 'calendar': {'days': current.calendar},
+                    'market': current.market, 'versions': {'stock_generation': 'benchmark', 'files': []},
+                    'cutoff': current.trade_date + 'T16:00:00+08:00',
+                    'classifications': [{'source': source, 'id': source, 'symbols': metadata['symbol'].to_list(),
+                                         'memberships': members.filter(pl.col('source') == source).to_dicts()}
+                                        for source in ('concept', 'industry')]}
+        store.save_readiness(current.trade_date, evidence)
+        reference = {'input_id': evidence['input_id'], 'versions': evidence['versions']}
+        result['input_reference'] = reference
+        legacy_bytes += sum(len(json.dumps(value, ensure_ascii=False, default=str).encode())
+                            for value in (result, report_view(result), history_view(result), evidence))
+        store.save(current.trade_date, result, reference)
+        store.prune(date.fromisoformat(current.trade_date))
     history.append(
         {
             "trade_date": result["trade_date"],
@@ -112,6 +135,22 @@ for index in range(120 - args.history_days, 120):
         }
     )
     history = history[-7:]
+storage_result = None
+if args.storage:
+    from collections import defaultdict
+
+    sizes = defaultdict(int)
+    for path in store.root.rglob('*'):
+        if path.is_file():
+            group = path.relative_to(store.root).parts[0]
+            if group == 'archive':
+                group = ('state' if '.state.' in path.name else 'audit' if '.audit.' in path.name
+                         else 'candidate_boundary' if '.candidates.' in path.name else 'permanent')
+            sizes[group] += path.stat().st_size
+    storage_result = {'bytes_by_tier': dict(sizes), 'total_bytes': sum(sizes.values()),
+                      'legacy_layout_equivalent_bytes': legacy_bytes,
+                      'retained_candidate_count': len(store.get(current.trade_date)['records'])}
+    temporary.cleanup()
 print(
     json.dumps(
         {
@@ -120,6 +159,7 @@ print(
             "sectors": len(result["sectors"]),
             "membership_rows": members.height,
             "history_days": args.history_days,
+            "storage": storage_result,
             "seconds": [round(value, 3) for value in elapsed],
             "report_objects": len(result["records"]),
             "scored_stocks": result["statistics"]["scored_count"],

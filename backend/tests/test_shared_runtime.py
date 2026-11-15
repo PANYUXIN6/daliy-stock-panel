@@ -15,6 +15,22 @@ from app.tickflow.repository import DataStore, KlineRepository
 
 pytestmark = pytest.mark.usefixtures("private_owner")
 
+
+def test_evening_record_event_preserves_market_snapshot_and_caches():
+    from threading import RLock
+
+    from app.services.shared_runtime import refresh_web_data
+
+    snapshot = pl.DataFrame({'symbol': ['000001.SZ'], 'close': [12.5]})
+    repo = SimpleNamespace(_lock=RLock(), _enriched_history_cache=snapshot,
+                           store=SimpleNamespace(_register_views=lambda: pytest.fail('记录事件不应重载行情视图')))
+    state = SimpleNamespace(repo=repo, quote_service=SimpleNamespace(
+        load_snapshot=lambda *_: pytest.fail('记录事件不应重新安装行情快照')))
+    refresh_web_data(state, ['evening_report_tracking'])
+    refresh_web_data(state, ['evening_report', 'evening_report_tracking'])
+    assert repo._enriched_history_cache is snapshot
+
+
 def test_two_web_readers_install_same_persisted_quote_without_recomputation(tmp_path, monkeypatch):
     writer = KlineRepository(DataStore(tmp_path))
     day = date(2026, 10, 9)

@@ -2,20 +2,22 @@
 import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { MemoryRouter } from 'react-router-dom'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { EveningReport } from './EveningReport'
 import { EveningReportContent } from '@/components/evening-report/EveningReportContent'
-import type { EveningReport as Report, User } from '@/lib/api'
+import { ApiError, type EveningReport as Report, type EveningFeedback, type EveningObservation, type EveningPerformance, type EveningPersonalRecord, type User } from '@/lib/api'
 import { AuthContext } from '@/lib/auth'
 import { QK } from '@/lib/queryKeys'
-const mocks = vi.hoisted(() => ({ get: vi.fn(), add: vi.fn(), rebuild: vi.fn(), watched: [] as {symbol: string}[] }))
-vi.mock('@/lib/api', () => ({ api: {
+const mocks = vi.hoisted(() => ({ get: vi.fn(), add: vi.fn(), rebuild: vi.fn(), personal: vi.fn(), feedback: vi.fn(), watched: [] as {symbol: string}[] }))
+vi.mock('@/lib/api', async importOriginal => ({ ...await importOriginal<typeof import('@/lib/api')>(), api: {
   eveningReportDates: async () => ({ dates: [{ date: '2026-11-02', status: 'published', versions: [{ version: 'v2', kind: 'revision', generated_at: '2026-11-02 19:00' }] }] }),
   eveningReport: mocks.get,
   eveningReportStatus: async (date: string) => ({ date: date || '2026-11-03', status: 'waiting', reason: '等待本轮完整分类观察' }),
   watchlistList: async () => ({ symbols: mocks.watched }),
   watchlistGroups: async () => ({ groups: [{ id: 'group-a', name: '观察组', color: 'blue' }] }),
   watchlistAdd: mocks.add, eveningReportRebuild: mocks.rebuild,
+  eveningPersonal: mocks.personal, eveningFeedback: mocks.feedback,
 } }))
 vi.mock('@/lib/useCollectorJob', () => ({ useCollectorJob: (id: string | null) => ({ running: false, cancel: {}, data: id ? { status: 'succeeded', progress: 100, error: null } : undefined, message: id ?? '' }) }))
 vi.mock('@/components/StockPreviewDialog', () => ({ StockPreviewDialog: ({ symbol, onClose }: { symbol: string | null; onClose: () => void }) => symbol ? <div role="dialog">当前行情 {symbol}<button onClick={onClose}>关闭</button></div> : null }))
@@ -28,15 +30,32 @@ function fixture(version = 'v1'): Report {
   }
 }
 let host: HTMLDivElement, root: Root, client: QueryClient
+let saved: Map<string, EveningFeedback>
 beforeEach(() => {
   Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true })
   mocks.get.mockReset().mockImplementation(async (_date: string, version: string) => fixture(version || 'v1'))
   mocks.add.mockReset(); mocks.rebuild.mockReset(); mocks.watched = []
+  saved = new Map()
+  mocks.personal.mockReset().mockImplementation(async (date: string, version: string) => {
+    const report = await mocks.get(date, version)
+    return { user_id: 'test', date, version, ready: true, records: (report.records ?? []).filter((row: Report['records'][number]) => report.selected.includes(row.symbol)).map((row: Report['records'][number]) => personalRecord(row, date, version)) }
+  })
+  mocks.feedback.mockReset().mockImplementation(async request => {
+    const feedback = { starred: request.starred, outcome: request.outcome, revision: request.expected_revision + 1, updated_at: '2026-11-02T18:30:00+08:00' }
+    saved.set(request.symbol, feedback)
+    return { episode_id: request.symbol, ...feedback }
+  })
   host = document.createElement('div'); document.body.append(host); root = createRoot(host)
   client = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity, gcTime: Infinity } } })
 })
 afterEach(async () => { await act(async () => root.unmount()); client.clear(); host.remove() })
-async function render(role = 'guest') { await act(async () => root.render(<AuthContext.Provider value={{ id: 'test', role } as User}><QueryClientProvider client={client}><EveningReport /></QueryClientProvider></AuthContext.Provider>)); await settle(); await settle(); await settle() }
+function personalRecord(row: Report['records'][number], date: string, version: string): EveningPersonalRecord {
+  const performance = (window: number): EveningPerformance => ({ window, target_date: null, as_of: date, return: null, status: 'not_due', reason: '目标日未到', trading_constraints: [], data_version: null })
+  return { id: `${version}:${row.symbol}`, version, day: date, month: date.slice(0, 7), symbol: row.symbol, name: row.name, episode_id: row.symbol, observation: row.observation ?? null,
+    feedback: saved.get(row.symbol) ?? { starred: false, outcome: null, revision: 0, updated_at: null }, started_at: date, last_seen: date, ended_at: null, first_reference: `${version}:${row.symbol}`, historical: false,
+    performance: { '1': performance(1), '3': performance(3), '5': performance(5) } }
+}
+async function render(role = 'guest') { await act(async () => root.render(<AuthContext.Provider value={{ id: 'test', role } as User}><QueryClientProvider client={client}><MemoryRouter><EveningReport /></MemoryRouter></QueryClientProvider></AuthContext.Provider>)); await settle(); await settle(); await settle() }
 async function settle() { await act(async () => { await new Promise(resolve => setTimeout(resolve, 30)) }) }
 async function click(text: string) { const button = [...document.querySelectorAll('button')].find(b => b.textContent === text); expect(button).toBeTruthy(); await act(async () => button!.click()); await settle() }
 async function change(label: string, value: string) { const element = host.querySelector(`[aria-label="${label}"]`) as HTMLInputElement; await act(async () => { const setter = Object.getOwnPropertyDescriptor(element instanceof HTMLSelectElement ? HTMLSelectElement.prototype : HTMLInputElement.prototype, 'value')!.set!; setter.call(element, value); element.dispatchEvent(new Event(element instanceof HTMLSelectElement ? 'change' : 'input', { bubbles: true })) }); await settle() }
@@ -47,7 +66,7 @@ it('只按最终名单顺序展示，最多5只且每股只出现一次', async 
   report.selected = ['stock6', 'stock4', 'stock2', 'stock0', 'stock5', 'stock1', 'stock3']
   mocks.get.mockResolvedValue(report)
   await render()
-  expect([...host.querySelectorAll('article h3')].map(node => node.textContent)).toEqual(['股票6', '股票4', '股票2', '股票0', '股票5'])
+  expect([...host.querySelectorAll('[data-report-stock] button')].map(node => node.textContent)).toEqual(['股票6', '股票4', '股票2', '股票0', '股票5'])
   expect(host.textContent).not.toContain('完整明细')
   expect(host.textContent).not.toContain('固定摘要')
 })
@@ -73,7 +92,7 @@ it('使用实际入选题材及原始收盘价，比例和成交额单位正确�
   report.records[0].paths = [{ ...selected, id: 'old', selected_path: false, sector_name: '旧题材', limitations: ['非入选路径的排名细节'] }, { ...selected, sector_name: '实际题材', selection_role: 'candidate' }]
   mocks.get.mockResolvedValue(report)
   await render()
-  for (const text of ['实际题材', '近期出现走强变化', '收盘 10.00元', '5日 +12.00%', '20日 +20.00%', '成交额 2.00亿', '市场政策证据不足', '位置尚未确认']) expect(host.textContent).toContain(text)
+  for (const text of ['实际题材', '近期出现走强变化', '10.00', '+12.00%', '+20.00%', '2.00亿', '市场政策证据不足', '位置尚未确认']) expect(host.textContent).toContain(text)
   for (const text of ['旧题材', '非入选路径的排名细节', '99.00', 'H_t', '主要用途']) expect(host.textContent).not.toContain(text)
 })
 it('缺入选依据不猜角色，缺原始价格不替换复权价或填零', async () => {
@@ -81,7 +100,7 @@ it('缺入选依据不猜角色，缺原始价格不替换复权价或填零', a
   mocks.get.mockResolvedValue(report)
   await render()
   expect(host.textContent).toContain('本期筛选入选，详细理由未记录')
-  expect(host.textContent).toContain('收盘价未记录')
+  expect(host.querySelector('td[title="旧版未记录"]')?.textContent).toBe('—')
   expect(host.textContent).not.toContain('示例概念')
   expect(host.textContent).not.toContain('收盘 0.00')
 })
@@ -91,19 +110,19 @@ it('版本和日期切换关闭当前行情，不保留上一报告股票', asyn
     report.records[0].name = version === 'v2' ? '修订股票' : '原版股票'
     return report
   })
-  await render(); await click('查看当前行情')
+  await render(); await act(async () => (host.querySelector('[data-report-stock] button') as HTMLButtonElement).click())
   expect(host.querySelector('[role="dialog"]')).not.toBeNull()
   await change('报告版本', 'v2')
   expect(host.querySelector('[role="dialog"]')).toBeNull()
   expect(host.textContent).toContain('修订股票')
   expect(host.textContent).not.toContain('原版股票')
-  await click('查看当前行情'); await change('报告日期', '2026-10-30')
+  await act(async () => (host.querySelector('[data-report-stock] button') as HTMLButtonElement).click()); await change('报告日期', '2026-10-30')
   expect(host.querySelector('[role="dialog"]')).toBeNull()
   expect(host.textContent).toContain('原版股票')
 })
 it('添加失败保留分组重试，成功只刷新自选且已有自选不可重复提交', async () => {
   mocks.add.mockRejectedValueOnce(new Error('连接失败')).mockImplementationOnce(async () => { mocks.watched = [{symbol:'000001.SZ'}]; return {symbols:mocks.watched} })
-  await render(); const invalidate = vi.spyOn(client, 'invalidateQueries')
+  await render(); await click('查看详情'); const invalidate = vi.spyOn(client, 'invalidateQueries')
   await click('加入自选'); await click('观察组')
   expect(host.textContent).toContain('连接失败')
   await click('按原分组重试')
@@ -116,7 +135,7 @@ it('添加失败保留分组重试，成功只刷新自选且已有自选不可�
 it('添加中禁用按钮，阻止重复请求', async () => {
   let resolve!: (value: unknown) => void
   mocks.add.mockImplementation(() => new Promise(done => {resolve = done}))
-  await render(); await click('加入自选'); await click('观察组')
+  await render(); await click('查看详情'); await click('加入自选'); await click('观察组')
   const button = [...host.querySelectorAll('button')].find(b => b.textContent === '添加中…')!
   expect(button.disabled).toBe(true)
   await act(async () => button.click()); expect(mocks.add).toHaveBeenCalledTimes(1)
@@ -168,10 +187,11 @@ it('观察名单保留未归类、压力未结束和过热提示，不从完整�
   report.records.push({ ...row, symbol: '600000.SH', name: '未入选对象', selected: false })
   mocks.get.mockResolvedValue(report)
   await render()
-  expect(host.querySelectorAll('article')).toHaveLength(1)
+  expect(host.querySelectorAll('[data-report-stock]')).toHaveLength(1)
+  await click('查看详情')
   for (const text of ['1只观察', '市场中性', '阶段未归类：当前未命中阶段规则', '压力尚未结束', '位置过热：仅作后续跟踪，留意价格回落', '等待下一交易日正式收盘', '不代表盈利预期或买点']) expect(host.textContent).toContain(text)
   for (const text of ['未入选对象', '尚未满足：不过热', '阶段仍待确认']) expect(host.textContent).not.toContain(text)
-  expect(host.textContent?.match(/位置过热：仅作后续跟踪，留意价格回落/g)).toHaveLength(1)
+  expect(host.querySelector('article')?.textContent?.match(/位置过热：仅作后续跟踪，留意价格回落/g)).toHaveLength(1)
 })
 
 it.each([
@@ -184,6 +204,7 @@ it.each([
   report.market = market
   mocks.get.mockResolvedValue(report)
   await render()
+  await click('查看详情')
   expect(host.textContent).toContain(sentence)
   expect(host.textContent).toContain('当前风险不能计算')
   expect(host.textContent).toContain('位置尚未确认')
@@ -209,4 +230,133 @@ it.each([
   expect(notes[0].textContent).toBe(expected)
   expect(host.textContent?.split(expected)).toHaveLength(2)
   for (const text of ['https://example.test', '2026-10-30 18:00', '2026-10-27']) expect(host.textContent).not.toContain(text)
+})
+
+function observation(index = 0): EveningObservation {
+  return { role: index % 3 === 2 ? 'emotion' : index % 3 === 1 ? 'fallback_leader' : 'true_leader', role_status: 'qualified', board: index % 2 ? 'main' : 'chinext',
+    primary_theme: { id: `theme${Math.floor(index / 3)}`, name: `题材${Math.floor(index / 3)}`, strength: 10 - Math.floor(index / 3) }, related_themes: [],
+    values: { raw_close: 10 + index, change_pct: index / 100, return_5d: index / 100, return_20d: index / 10, identity_score: 40 + index, amount_day: 200000000 },
+    variables: {}, dip: { status: index % 2 ? 'not_met' : 'pending', reasons: ['首波与事件前置待核验'], gates: {}, e1: {}, e2: {} }, reason: '完整观察理由，不以低吸条件否决', rank: index + 1, risks: ['首波前置待核验'] }
+}
+function newFixture(count = 3) {
+  const report = fixture()
+  report.records = Array.from({ length: count }, (_, index) => ({ ...report.records[0], symbol: `0000${String(index).padStart(2, '0')}.SZ`, name: `新版股票${index}`, observation: observation(index) }))
+  report.selected = report.records.map(record => record.symbol)
+  return report
+}
+function displayed() { return [...host.querySelectorAll('[data-report-stock]')].map(node => node.getAttribute('data-report-stock')) }
+async function feedbackClick(text: string, symbol = '000000.SZ') {
+  const row = host.querySelector(`[data-report-stock="${symbol}"]`)?.closest('tr')
+  const button = [...row!.querySelectorAll('button')].find(button => button.getAttribute('aria-label')?.includes(text))!
+  expect(button).toBeTruthy()
+  await act(async () => button.click()); await settle(); await settle()
+}
+
+it('新版15只按归档排序；组合筛选、数值排序及恢复都不重选、不改归档', async () => {
+  const report = newFixture(15)
+  report.records[0].observation!.values.return_5d = null
+  report.selected = [...report.selected].reverse()
+  const original = JSON.stringify(report)
+  mocks.get.mockResolvedValue(report)
+  await render()
+  expect(displayed()).toEqual(report.selected)
+  expect(host.querySelectorAll('table')).toHaveLength(1)
+  const requests = mocks.get.mock.calls.length
+  const header = [...host.querySelectorAll('th')].find(node => node.textContent?.startsWith('5日涨幅'))!
+  await act(async () => header.click())
+  expect(displayed()[0]).toBe(report.records[1].symbol)
+  expect(displayed().at(-1)).toBe(report.records[0].symbol)
+  await act(async () => header.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })))
+  expect(displayed()[0]).toBe(report.records[14].symbol)
+  expect(displayed().at(-1)).toBe(report.records[0].symbol)
+  await click('恢复原报告顺序')
+  expect(displayed()).toEqual(report.selected)
+  await change('题材', 'theme1'); await change('主角色', 'fallback_leader'); await change('交易板块', 'chinext'); await change('低吸状态', 'pending')
+  expect(displayed()).toEqual([report.records[4].symbol])
+  await change('搜索股票', '不存在')
+  expect(host.textContent).toContain('没有符合当前筛选的股票')
+  expect(host.textContent).toContain('本报告仍有 15 只')
+  await click('清除筛选')
+  expect(displayed()).toEqual(report.selected)
+  expect(JSON.stringify(report)).toBe(original)
+  expect(mocks.get).toHaveBeenCalledTimes(requests)
+  expect(mocks.rebuild).not.toHaveBeenCalled()
+})
+
+it('星标与盈亏独立、盈亏互斥且均可取消；反馈不触发行情或自选操作', async () => {
+  mocks.get.mockResolvedValue(newFixture())
+  await render()
+  const invalidate = vi.spyOn(client, 'invalidateQueries')
+  await feedbackClick('符合我的审美')
+  await feedbackClick('我亏了')
+  expect(saved.get('000000.SZ')).toMatchObject({ starred: true, outcome: 'loss' })
+  await feedbackClick('我赚了')
+  expect(saved.get('000000.SZ')).toMatchObject({ starred: true, outcome: 'profit' })
+  await feedbackClick('我赚了')
+  expect(saved.get('000000.SZ')).toMatchObject({ starred: true, outcome: null })
+  await feedbackClick('符合我的审美')
+  expect(saved.get('000000.SZ')).toMatchObject({ starred: false, outcome: null })
+  expect(mocks.feedback.mock.calls.map(([request]) => request.expected_revision)).toEqual([0, 1, 2, 3, 4])
+  expect(host.querySelector('[role="dialog"]')).toBeNull()
+  expect(mocks.add).not.toHaveBeenCalled()
+  expect(invalidate.mock.calls.every(([options]) => options?.queryKey?.[0] === 'evening-personal' && options.queryKey[1] === 'test')).toBe(true)
+})
+
+it('已星标筛选下取消后立即消失，清除筛选仍保留原推荐', async () => {
+  mocks.get.mockResolvedValue(newFixture())
+  await render(); await feedbackClick('符合我的审美'); await change('星标', 'starred')
+  expect(displayed()).toEqual(['000000.SZ'])
+  await feedbackClick('符合我的审美')
+  expect(displayed()).toEqual([])
+  expect(host.textContent).toContain('当前显示 0 / 本报告 3 只')
+  await click('清除筛选')
+  expect(displayed()).toHaveLength(3)
+  expect(saved.get('000000.SZ')?.starred).toBe(false)
+})
+
+it('保存失败保持原状态，重试复用请求标识，保存中禁止快速重复提交', async () => {
+  mocks.get.mockResolvedValue(newFixture())
+  mocks.feedback.mockRejectedValueOnce(new Error('连接中断'))
+  await render(); await feedbackClick('符合我的审美')
+  expect(host.textContent).toContain('连接中断')
+  const group = host.querySelector('[aria-label="新版股票0的个人反馈"]')!
+  expect(group.querySelector('[aria-pressed="true"]')).toBeNull()
+  const requestId = mocks.feedback.mock.calls[0][0].request_id
+  let resolve!: (value: unknown) => void
+  mocks.feedback.mockImplementationOnce(() => new Promise(done => { resolve = done }))
+  await click('重试保存')
+  expect(mocks.feedback.mock.calls[1][0].request_id).toBe(requestId)
+  expect([...group.querySelectorAll('button')].every(button => button.disabled)).toBe(true)
+  await act(async () => group.querySelector('button')!.click())
+  expect(mocks.feedback).toHaveBeenCalledTimes(2)
+  await act(async () => { saved.set('000000.SZ', { starred: true, outcome: null, revision: 1, updated_at: null }); resolve({ episode_id: '000000.SZ', ...saved.get('000000.SZ') }) }); await settle()
+  expect(group.querySelector('[aria-pressed="true"]')).not.toBeNull()
+})
+
+it('并发冲突重新读取服务器状态，不静默覆盖或重放过期请求', async () => {
+  mocks.get.mockResolvedValue(newFixture())
+  mocks.feedback.mockImplementationOnce(async () => {
+    saved.set('000000.SZ', { starred: false, outcome: 'loss', revision: 2, updated_at: null })
+    throw new ApiError('记录版本冲突', 409)
+  })
+  await render(); await feedbackClick('符合我的审美')
+  expect(host.textContent).toContain('记录已在另一处更新')
+  const group = host.querySelector('[aria-label="新版股票0的个人反馈"]')!
+  expect(group.querySelector('[aria-pressed="true"]')?.textContent).toBe('亏')
+  expect(host.textContent).not.toContain('重试保存')
+  await feedbackClick('符合我的审美')
+  expect(mocks.feedback.mock.calls[1][0]).toMatchObject({ expected_revision: 2, starred: true, outcome: 'loss' })
+})
+
+it('个人记录未准备好时按钮禁用，日期切换不保留上一报告筛选', async () => {
+  mocks.get.mockImplementation(async (day: string) => ({ ...newFixture(), date: day, trade_date: day }))
+  mocks.personal.mockResolvedValue({ user_id: 'test', ready: false, records: [] })
+  await render()
+  expect(host.textContent).toContain('个人观察记录准备中')
+  expect([...host.querySelectorAll('[aria-label="新版股票0的个人反馈"] button')].every(button => (button as HTMLButtonElement).disabled)).toBe(true)
+  await change('题材', 'theme0'); await change('主角色', 'emotion')
+  expect(displayed()).toHaveLength(1)
+  await change('报告日期', '2026-11-01')
+  expect(displayed()).toHaveLength(3)
+  expect((host.querySelector('[aria-label="主角色"]') as HTMLSelectElement).value).toBe('')
 })

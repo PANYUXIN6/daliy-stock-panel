@@ -35,7 +35,7 @@ from app.services.evening_report_rules import (
 )
 from app.services.market_mainline import _SCORE_WEIGHTS
 
-SCOPE_VERSION = "main-chinext-nonst-v1/evening-classification-v1"
+SCOPE_VERSION = "main-chinext-nonst-v1/evening-classification-v2"
 
 DISCLAIMER = "本报告用于识别与持续跟踪值得观察的股票，不构成交易指令。观察规则为初值，识别与跟踪效果仍需积累记录。范围为主板、创业板非ST股票，未核验隔夜新闻公告。"
 
@@ -52,6 +52,7 @@ class EveningInputs:
     cutoff: str = ""
     market: dict = field(default_factory=dict)
     provenance: dict = field(default_factory=dict)
+    abnormal_benchmarks: pl.DataFrame = field(default_factory=pl.DataFrame)
 
 
 def _frame(frame: pl.DataFrame, defaults: dict) -> pl.DataFrame:
@@ -477,20 +478,19 @@ def _build_sectors(
             if not before
             else "成员口径未变化",
         }
-        up_members = [
-            s
-            for s in scope
-            if profiles[s]["meta"].get("trading_normal") is not False
-            and profiles[s]["window"][-1].get("signal_limit_up") is True
-        ]
-        up_known = coverage["scope_unknown"] == 0 and all(
-            profiles[s]["meta"].get("trading_normal") is False
-            or (
-                profiles[s]["window"][-1].get("formal") is True
-                and profiles[s]["window"][-1].get("signal_limit_up") is not None
-            )
-            for s in scope
-        )
+        up_members = []
+        unknown_up_count = coverage["scope_unknown"]
+        for s in scope:
+            if profiles[s]["meta"].get("trading_normal") is False:
+                continue
+            today = profiles[s]["window"][-1]
+            if today.get("formal") is not True or today.get("signal_limit_up") is None:
+                unknown_up_count += 1
+            elif today["signal_limit_up"] is True:
+                up_members.append(s)
+        # 缺数不是零；用可能涨停家数的上界判断它能否改变「至少3只」参评资格。
+        max_up_count = len(up_members) + unknown_up_count
+        ranking_eligible = True if len(up_members) >= 3 else False if max_up_count < 3 else None
         consec = [profiles[s]["features"].get("consecutive_limit_ups") for s in up_members]
         ecology = {
             "limit_up_count": len(up_members),
@@ -500,7 +500,10 @@ def _build_sectors(
         }
         sector["ecology"] = {
             **ecology,
-            "computable": up_known and all(finite(x) for x in consec),
+            "unknown_limit_up_count": unknown_up_count,
+            "limit_up_count_max": max_up_count,
+            "ranking_eligible": ranking_eligible,
+            "computable": unknown_up_count == 0 and all(finite(x) for x in consec),
             "rank": None,
         }
         sectors.append(sector)
@@ -628,7 +631,10 @@ def _build_sectors(
             for s in same
             if s["ecology"]["computable"] and s["ecology"]["limit_up_count"] >= 3
         ]
-        ecology_complete = all(s["ecology"]["computable"] for s in same)
+        ecology_complete = all(
+            s["ecology"]["ranking_eligible"] is False or s["ecology"]["computable"]
+            for s in same
+        )
         ecology_scores = {s["id"]: 0.0 for s in ecological}
         for key, weight in _SCORE_WEIGHTS.items():
             values = _percentiles(ecological, key)
@@ -645,7 +651,10 @@ def _build_sectors(
                 score=ecology_scores.get(sid),
                 complete_ranking=ecology_complete,
             )
-            today_top = ranks.get(sid, 999999) <= 5 if ecology_complete else None
+            today_top = (
+                False if sector["ecology"]["ranking_eligible"] is False
+                else ranks.get(sid, 999999) <= 5 if ecology_complete else None
+            )
             top_days = [
                 history.get(d, {}).get("state", {}).get("top5", {}).get(sid) for d in dates[-5:-1]
             ] + [today_top]
@@ -728,9 +737,10 @@ def build_report(
     calendar = sorted({str(d) for d in inputs.calendar if str(d) <= inputs.trade_date})
     if not calendar or calendar[-1] != inputs.trade_date:
         raise ValueError("量化日期必须在交易日历内")
-    if len(calendar) < 21:
-        raise ValueError("市场交易日历不足21日")
+    if len(calendar) < 5:
+        raise ValueError("题材强度所需市场交易日历不足5日")
     dates = calendar[-21:]
+    continuity_start = dates[-7] if len(dates) >= 7 else dates[0]
     scope_version = inputs.provenance.get("scope_version", SCOPE_VERSION)
     archive = {
         r["trade_date"]: r
@@ -1140,7 +1150,7 @@ def build_report(
     for key, identity in previous.get("identities", {}).items():
         intervals = identity.get("intervals", [])
         relevant = any(
-            interval.get("ended_at") is None or interval["ended_at"] >= dates[-7]
+            interval.get("ended_at") is None or interval["ended_at"] >= continuity_start
             for interval in intervals
         )
         if key not in state["identities"] and relevant:
@@ -1160,9 +1170,18 @@ def build_report(
                     "reason": "当日观察资格结束",
                 }
             )
-    selected = _select(current, sector_by_id)
-    for record in current:
-        record["selected"] = record["symbol"] in selected
+    from app.services.evening_report_observation import apply_observation
+
+    observation = apply_observation(inputs, records, sectors, previous, calendar, cancel)
+    selected = observation["selected"]
+    state["observation_roles"] = observation["role_state"]
+    # The old purpose/position judgement is explanatory evidence. A complete new
+    # role can enter on its own, including on the first classification observation.
+    current_symbols = {r["symbol"] for r in current}
+    for record in records:
+        if record["observation"]["role"] != "other" and record["symbol"] not in current_symbols:
+            record["purpose"] = record["purpose"] or "新增观察候选"
+            current.append(record)
     amount_coverage = []
     for regime, count in sorted(amount_counts.items()):
         passed, failed, unknown = count["n_pass"], count["n_fail"], count["n_unknown"]
@@ -1247,6 +1266,29 @@ def build_report(
             last.get("statistics", {}),
         )
     )
+    stats["legacy_confirmation_audit"] = {key: stats.pop(key) for key in (
+        "selection_path_audit", "selection_eligible_before_quota", "selection_quota_excluded",
+        "selection_blocked_stock_count", "selection_blocking_counts", "risk_unknown_only_stock_count",
+        "risk_unknown_mixed_stock_count", "zero_selection_only_risk_unknown")}
+    eligible = [r for r in records if r["observation"]["eligibility"]["value"] is True
+                and r["observation"]["primary_theme"] and r["observation"]["role"] != "other"
+                and (r["observation"]["role"] != "emotion" or r["observation"]["board"] == "chinext")]
+    stats.update(selection_eligible_before_quota=len(eligible),
+                 selection_quota_excluded=len(eligible) - len(selected),
+                 zero_selection_reasons=observation["zero_reasons"],
+                 role_counts=observation["role_counts"], theme_missing_count=observation["theme_missing_count"],
+                 theme_count=len(observation["themes"]),
+                 dip_counts=dict(Counter(r["observation"]["dip"]["status"] for r in records if r["selected"])))
+    stats["observation_path_counts"] = {
+        role: {label: sum(r["observation"]["conditions"][role] is value for r in records)
+               for label, value in (("matched", True), ("unmatched", False), ("unknown", None))}
+        for role in ("true_leader", "fallback_leader", "emotion")}
+    stats["observation_exclusion_counts"] = dict(Counter(
+        reason for r in records for reason in (
+            r["observation"]["eligibility"]["failed_reasons"] + r["observation"]["eligibility"]["unknown_reasons"]
+            + (["不在入选题材"] if not r["observation"]["primary_theme"] else [])
+            + (["尚无完整角色路径"] if r["observation"]["role"] == "other" else [])
+            + (["主板情绪股不分配名额"] if r["observation"]["role"] == "emotion" and r["observation"]["board"] != "chinext" else []))))
     # Archive each numerical evidence set once. Forward state stores only the fields
     # consumed on a later day; public records retain full independent explanations.
     current_paths = {association["path_id"] for association in state["associations"].values()}
@@ -1265,12 +1307,12 @@ def build_report(
         earlier = [
             interval
             for interval in intervals
-            if interval.get("ended_at") is not None and interval["ended_at"] < dates[-7]
+            if interval.get("ended_at") is not None and interval["ended_at"] < continuity_start
         ]
         recent = [
             interval
             for interval in intervals
-            if interval.get("ended_at") is None or interval["ended_at"] >= dates[-7]
+            if interval.get("ended_at") is None or interval["ended_at"] >= continuity_start
         ]
         compact_identities[key] = {
             **identity,
@@ -1311,10 +1353,12 @@ def build_report(
         "selection_policy_version": SELECTION_POLICY_VERSION,
         "scope_version": scope_version,
         "disclaimer": DISCLAIMER,
-        "summary": f"今日入选观察{len(selected)}只，完整跟踪{len(current)}只。"
+        "summary": f"{len(observation['themes'])}个重点题材，今日入选观察{len(selected)}只。"
         if selected
         else "今日暂无入选观察股票；完整跟踪记录及限制继续保留。",
         "market": {**inputs.market, "policy": policy},
+        "audit": observation["audit"],
+        "observation_themes": observation["themes"],
         "records": current,
         "sectors": sectors,
         "events": events,
@@ -1338,6 +1382,8 @@ def build_report(
                 "features": profiles[r["symbol"]]["features"],
                 "risk": r["risk"],
                 "position": r["position"],
+                "observation": r["observation"],
+                "selected": r["selected"],
             }
             for r in records
         ],
@@ -1688,70 +1734,6 @@ def _classify_record(record, previous_symbols, state, inputs):
             path["selection_types"] = []
 
 
-def _select(records: list[dict], sectors: dict) -> list[str]:
-    selected, catchup_count = [], 0
-    for source in ("concept", "industry"):
-        buckets = defaultdict(list)
-        for record in records:
-            for path in record["paths"]:
-                if path["source"] == source and path["selection"]["value"] is True:
-                    buckets[path["sector_id"]].append((record, path))
-        ordered = sorted(buckets, key=lambda sid: _sector_order(sectors[sid]))
-        industry_count = 0
-        used_roles = defaultdict(set)
-        for turn in range(2):
-            for sid in ordered:
-                choices = [
-                    (r, p)
-                    for r, p in buckets[sid]
-                    if r["symbol"] not in selected
-                    and (p["selection_role"] != "catchup" or catchup_count < 1)
-                ]
-
-                def order(item, used=used_roles[sid], second=bool(turn)):
-                    record, path = item
-                    available = path["selection_types"]
-
-                    def type_order(kind):
-                        role = path["selection_by_type"][kind]["role"]
-                        role_order = {"board": 0, "trend": 1, "candidate": 2, "catchup": 3}[role]
-                        rank_key = (
-                            "rank_b"
-                            if kind == "board"
-                            else "rank_e"
-                            if kind == "catchup"
-                            else "rank_t"
-                        )
-                        return (
-                            kind in used if second else False,
-                            role_order,
-                            path["features"].get(rank_key) or 999999,
-                            kind,
-                        )
-
-                    kind = min(available, key=type_order)
-                    return (*type_order(kind), record["symbol"])
-
-                if not choices:
-                    continue
-                record, path = min(choices, key=order)
-                selected.append(record["symbol"])
-                path["selected_path"] = True
-                chosen_type = order((record, path))[-2]
-                path["selected_type"] = chosen_type
-                path["selection_type"] = chosen_type
-                path["selection_role"] = path["selection_by_type"][chosen_type]["role"]
-                used_roles[sid].add(chosen_type)
-                catchup_count += path["selection_role"] == "catchup"
-                if source == "industry":
-                    industry_count += 1
-                if len(selected) == 5:
-                    return selected
-                if source == "industry" and industry_count >= 2:
-                    return selected
-    return selected
-
-
 def _annotate_events(records, state, previous, events, date):
     """Events are independent from summary quotas and keep identity interval boundaries."""
     for record in records:
@@ -1861,7 +1843,7 @@ def _audit_statistics(
     only_risk_days = prior_frequency.get(
         "zero_with_risk_only_unknown_days",
         sum(
-            r.get("statistics", {}).get("zero_selection_only_risk_unknown", False)
+            bool(r.get("statistics", {}).get("zero_selection_only_risk_unknown", False))
             for r in archive.values()
         ),
     )

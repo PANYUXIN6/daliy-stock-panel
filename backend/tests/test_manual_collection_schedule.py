@@ -24,7 +24,7 @@ def test_scheduler_registers_beijing_postmarket_and_keeps_maintenance(tmp_path, 
         try:
             ids = {job.id for job in scheduler.get_jobs()}
             assert ids == {"trading_calendar", "pre_market_instruments", "reprobe_capabilities",
-                           "daily_pipeline", "post_market_retry", "csi300_etf_reference", "etf_flow"}
+                           "daily_pipeline", "post_market_retry", "csi300_etf_reference", "etf_flow", "evening_retention"}
             reference = scheduler.get_job("csi300_etf_reference")
             assert str(reference.trigger).endswith("hour='16-23', minute='0']")
             assert str(reference.trigger.timezone) == "Asia/Shanghai"

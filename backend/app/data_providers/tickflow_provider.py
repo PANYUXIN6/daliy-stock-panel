@@ -75,13 +75,14 @@ class TickFlowProvider:
                 _timestamp_to_beijing_datetime,
             )
         raw = tf.klines.batch(symbols, **kwargs)
-        # False 直转: 列数组→polars (无 pandas 中转), 加北京墙钟 datetime 列
-        # (normalize_daily 映射为 date); 保留 timestamp 原列 — normalize_daily
-        # 会把它改名为 quote_ts (盘后校验/量比折算用), 不能像 kline_sync 路径那样丢弃。
+        # 历史 K 线 timestamp 表示交易日期，不是实时快照时刻。
+        # 与 kline_sync 一致：转为北京日期后移除，避免被映射成 quote_ts。
         seg = _compact_klines_to_df(raw)
         if seg.is_empty():
             return pl.DataFrame()
-        seg = seg.with_columns(_timestamp_to_beijing_datetime(pl.col("timestamp")).alias("datetime"))
+        seg = seg.with_columns(
+            _timestamp_to_beijing_datetime(pl.col("timestamp")).alias("datetime")
+        ).drop("timestamp")
         return normalize_daily(seg, source=self.name)
 
     def get_adj_factors(

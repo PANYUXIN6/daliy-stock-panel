@@ -22,6 +22,7 @@ import polars as pl
 
 from app.market_time import cn_now, cn_today
 from app.services.fs_utils import atomic_write_parquet
+from app.services.market_sentiment import cohort_performance
 from app.services.sentiment_observations import VERSION, filter_universe
 
 logger = logging.getLogger(__name__)
@@ -251,6 +252,15 @@ def _aggregate_daily(df: pl.DataFrame, index_pct_map: dict | None = None) -> pl.
             if "signal_limit_up" in avail else [pl.lit(0).alias("limit_up")]
         ),
         *(
+            [pl.when(pl.col("signal_limit_up").is_not_null().all()
+                     & (pl.col("amount").is_finite() & pl.col("amount").ge(0))
+                     .filter(pl.col("signal_limit_up").eq(True)).fill_null(False).all())
+             .then(pl.col("amount").filter(pl.col("signal_limit_up").eq(True)).sum())
+             .otherwise(None).alias("limit_up_amount")]
+            if {"signal_limit_up", "amount"}.issubset(avail)
+            else [pl.lit(None, dtype=pl.Float64).alias("limit_up_amount")]
+        ),
+        *(
             [pl.col("signal_limit_down").cast(pl.Boolean).sum().alias("limit_down")]
             if "signal_limit_down" in avail else [pl.lit(0).alias("limit_down")]
         ),
@@ -366,6 +376,7 @@ def _aggregate_daily(df: pl.DataFrame, index_pct_map: dict | None = None) -> pl.
             "state": state,
             "score": score,
             "limit_up": metrics["limit_up"],
+            "limit_up_amount": r.get("limit_up_amount"),
             "limit_down": metrics["limit_down"],
             "broken_limit": broken if r.get("signal_broken_limit_up_valid", 0) == total else None,
             "max_consecutive": metrics["max_consecutive"],
@@ -430,8 +441,29 @@ def _compute_batch(repo, enriched_dir, instruments, historical_shares,
     # 保证每批首日的 _prev_consec 来自 warmup 的最后一个交易日而非 null。
     from app.services.market_phase import with_prev_consecutive
     df = with_prev_consecutive(df)
-    # 丢弃 warmup 行, 只留目标区间
-    return df.filter((pl.col("date") >= batch_start) & (pl.col("date") <= batch_end))
+    # 保留前一交易日供昨日集合左连接；聚合后再裁到本批目标区间。
+    previous = df.filter(pl.col("date") < batch_start)["date"].max()
+    return df.filter((pl.col("date") >= (previous or batch_start)) & (pl.col("date") <= batch_end))
+
+
+def _aggregate_with_cohorts(df, repo, start, end, index_pct_map):
+    from app.services.market_phase import with_prev_consecutive
+    from app.services.trading_day import calendar_status
+
+    calendar = [date.fromisoformat(day) for day in calendar_status(repo.store.data_dir).get("days", [])]
+    if {"symbol", "consecutive_limit_ups"}.issubset(df.columns):
+        df = with_prev_consecutive(df)
+        days = sorted(set(calendar))
+        expected = pl.DataFrame({"date": days, "_calendar_previous": [None, *days[:-1]] if days else []},
+                                schema={"date": pl.Date, "_calendar_previous": pl.Date})
+        df = df.join(expected, on="date", how="left").with_columns(
+            pl.when(pl.col("_prev_consec_date") == pl.col("_calendar_previous"))
+            .then(pl.col("_prev_consec")).otherwise(None).alias("_prev_consec"),
+            pl.col("_calendar_previous").alias("_prev_market_date"),
+        ).drop("_calendar_previous")
+    cohorts = cohort_performance(df, calendar)
+    daily = _aggregate_daily(df.filter(pl.col("date").is_between(start, end)), index_pct_map)
+    return daily.join(cohorts, on="date", how="left") if not daily.is_empty() and not cohorts.is_empty() else daily
 
 
 def _filter_excluded_symbols(df: pl.DataFrame, excluded_symbols: list[str]) -> pl.DataFrame:
@@ -489,7 +521,7 @@ def _scan_enriched_fallback(
             if df.is_empty():
                 return None
             df = _filter_excluded_symbols(df, excluded_symbols)
-            result = _aggregate_daily(df, index_pct_map)
+            result = _aggregate_with_cohorts(df, repo, start, end, index_pct_map)
             return result if not result.is_empty() else None
 
         # 大范围: 每批个股明细立即压缩为日级行, 只保留小型聚合结果。
@@ -505,7 +537,7 @@ def _scan_enriched_fallback(
             if df.is_empty():
                 continue
             df = _filter_excluded_symbols(df, excluded_symbols)
-            daily = _aggregate_daily(df, index_pct_map)
+            daily = _aggregate_with_cohorts(df, repo, bs, be, index_pct_map)
             if not daily.is_empty():
                 daily_parts.append(daily)
         if not daily_parts:
@@ -559,7 +591,12 @@ def run_regime_batch(repo, start: date, end: date) -> pl.DataFrame:
     # enriched 多日数据(优先缓存)。慢路径在每批内部完成过滤和日级聚合,
     # 避免把所有批次的个股明细同时保留到最终 group_by。
     # 单日增量也必须携带前一交易日，否则缓存路径的晋级率会丢失昨日连板池。
-    previous = max((d for d in enriched_date_set(repo) if d < start), default=start)
+    from app.services.trading_day import calendar_status
+
+    calendar = [date.fromisoformat(day) for day in calendar_status(repo.store.data_dir).get("days", [])]
+    previous = max((d for d in calendar if d < start), default=None)
+    if previous is None:
+        previous = max((d for d in enriched_date_set(repo) if d < start), default=start)
     df = repo.get_enriched_range(previous, end)
     if df is None or df.is_empty():
         logger.info("regime batch: enriched cache miss [%s~%s], fallback to scan", start, end)
@@ -582,15 +619,22 @@ def run_regime_batch(repo, start: date, end: date) -> pl.DataFrame:
         from app.services.market_phase import with_prev_consecutive
 
         df = with_prev_consecutive(df)
-    df = df.filter((pl.col("date") >= start) & (pl.col("date") <= end))
-
-    return _attach_daily_context(_aggregate_daily(df, index_pct_map), repo, exclude_st)
+    return _attach_daily_context(_aggregate_with_cohorts(df, repo, start, end, index_pct_map), repo, exclude_st)
 
 
 def _attach_daily_context(df, repo, exclude_st):
     if df.is_empty():
         return df
-    df = df.with_columns(pl.lit(exclude_st).alias("exclude_st"))
+    generation = getattr(repo, "_enriched_history_generation", None)
+    factor_path = repo.store.data_dir / "adj_factor" / "all.parquet"
+    try:
+        stat = factor_path.stat()
+        factor_version = f"{stat.st_mtime_ns}:{stat.st_size}"
+    except FileNotFoundError:
+        factor_version = "unavailable"
+    df = df.with_columns(pl.lit(exclude_st).alias("exclude_st"),
+                         pl.lit(f"enriched={generation or 'unavailable'};factors={factor_version}")
+                         .alias("sentiment_data_version"))
     from datetime import timedelta
     try:
         index = repo.get_index_daily("000001.SH", df["date"].min() - timedelta(days=300), df["date"].max())

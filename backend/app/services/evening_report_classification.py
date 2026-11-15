@@ -7,8 +7,10 @@ from __future__ import annotations
 
 import re
 
-RULE_VERSION = 'evening-classification-v1'
+RULE_VERSION = 'evening-classification-v2'
 _LABELS = {
+    # 与板块轮动既有复盘属性语义一致，但晚报只匹配完整标签。
+    'review_attribute': frozenset({'昨日涨停', '昨日连板', '昨日触涨停', '昨日曾涨停'}),
     'region': frozenset({
         '上海自贸区', '中韩自贸区', '天津自贸区', '广东自贸区', '海南自贸区', '福建自贸区',
         '黑龙江自贸区', '新疆振兴', '京津冀一体化', '横琴新区', '海峡两岸', '粤港澳大湾区',
@@ -26,7 +28,8 @@ _LABELS = {
         '央企国企改革', '上海国企改革', '深圳国企改革',
     }),
 }
-_REASONS = {'region': '地域或区域政策标签，不作为产业板块',
+_REASONS = {'review_attribute': '虚拟复盘属性标签，不作为产业题材',
+            'region': '地域或区域政策标签，不作为产业板块',
             'trading_channel': '交易通道或融资资格标签，不作为产业板块',
             'index_constituent': '明确指数成分标签，不作为产业板块',
             'style': '股票风格、所有权或状态标签，不作为产业板块'}

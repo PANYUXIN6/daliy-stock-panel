@@ -206,6 +206,45 @@ def test_automatic_order_forces_core_inputs_and_environment_but_keeps_manual_pre
     assert preferences.get_pipeline_regime_enabled() is False
 
 
+def test_manual_evening_preparation_reuses_acceptance_and_stops_after_required_inputs(closing, monkeypatch):
+    from app.services.evening_report_inputs import require_ready
+
+    repo, caps, steps, _ = closing
+    monkeypatch.setattr(preferences, 'get_pipeline_pull_etf', lambda: True)
+    for module, name in ((auction_benchmark, 'prepare_auction_benchmark'),
+                         (dragon_tiger, 'prepare_dragon_tiger'),
+                         (daily_pipeline.index_sync, 'sync_etf_instruments')):
+        monkeypatch.setattr(module, name, Mock(side_effect=AssertionError('晚报不依赖此采集')))
+    result = daily_pipeline.run_now(repo, caps, postmarket=True, target_date=DAY, evening_only=True)
+    assert [step for step in steps if step != 'cache'] == [
+        'instruments', 'daily', 'adj', 'enriched', 'indices', 'classifications',
+        'regime', 'concept', 'industry',
+    ]
+    assert result['readiness']['daily']['active'] == len(SYMBOLS)
+    assert require_ready(repo.store.data_dir, DAY)['complete'] is True
+
+
+@pytest.mark.parametrize('failure', ['daily', 'enriched', 'classification', 'mainline'])
+def test_manual_evening_preparation_never_accepts_incomplete_inputs(closing, monkeypatch, failure):
+    from app.services.evening_report_inputs import require_ready
+
+    repo, caps, steps, controls = closing
+    daily_pipeline.run_now(repo, caps, postmarket=True, target_date=DAY, evening_only=True)
+    if failure == 'daily':
+        controls.daily = controls.daily.head(1)
+    elif failure == 'enriched':
+        controls.bad_enriched = True
+    elif failure == 'classification':
+        monkeypatch.setattr(ext_presets, 'prepare_preset', AsyncMock(side_effect=ValueError('分类失败')))
+    else:
+        monkeypatch.setattr(market_mainline, 'compute_mainline_incremental', Mock(side_effect=ValueError('主线失败')))
+    with pytest.raises((DailyCoverageError, ValueError, daily_pipeline.PipelineStageError)):
+        daily_pipeline.run_now(repo, caps, postmarket=True, target_date=DAY, evening_only=True)
+    with pytest.raises(DailyCoverageError):
+        require_ready(repo.store.data_dir, DAY)
+    assert 'paper' not in steps and 'minute' not in steps
+
+
 @pytest.mark.parametrize("repair_start", [None, DAY - timedelta(days=400)])
 def test_user_workflows_complete_analysis_and_leave_minutes_independent(closing, repair_start):
     repo, caps, steps, controls = closing

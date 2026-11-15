@@ -10,6 +10,7 @@ import { feedReviewEvent } from './reviewStore'
 import { loadHistory as loadStockAnalysisHistory } from './stockAnalysisStore'
 import { loadHistory as loadFinancialAnalysisHistory } from './aiReportStore'
 import type { KlineDailyResponse, StrategyAlertEvent } from './api'
+import { useCurrentUser } from './auth'
 
 // ===== 全局 SSE 连接状态 (模块级 store, 仿 AlertToast.tsx 模式) =====
 // 实时行情 SSE 断开时 UI 无感知 → 会漏掉策略告警。这里暴露连接状态,
@@ -80,6 +81,7 @@ export function useQuoteStream(
   onAlert?: (alerts: StrategyAlertEvent[]) => void,
 ) {
   const qc = useQueryClient()
+  const userId = useCurrentUser()?.id
   const esRef = useRef<EventSource | null>(null)
   const retryRef = useRef<ReturnType<typeof setTimeout>>()
   const pagesRef = useRef(sseRefreshPages)
@@ -140,7 +142,8 @@ export function useQuoteStream(
       es.onopen = () => {
         // 连接期间可能遗漏落盘与任务事件；只补读这些共享数据，保留已有页面数据。
         const prefixes = dataUpdateQueryPrefixes(Object.keys(DATASET_QUERY_PREFIXES))
-        void qc.invalidateQueries({ predicate: query => prefixes.has(String(query.queryKey[0])) })
+        void qc.invalidateQueries({ predicate: query => prefixes.has(String(query.queryKey[0]))
+          && (query.queryKey[0] !== 'evening-personal' || query.queryKey[1] === userId) })
         void loadStockAnalysisHistory()
         void loadFinancialAnalysisHistory()
         // 连接成功: 重置退避与 toast 标记
@@ -220,7 +223,8 @@ export function useQuoteStream(
           if (data.datasets.includes('analysis') || data.datasets.includes('all')) void loadStockAnalysisHistory()
           if (data.datasets.includes('financials') || data.datasets.includes('all')) void loadFinancialAnalysisHistory()
           const prefixes = dataUpdateQueryPrefixes(data.datasets)
-          void qc.invalidateQueries({ predicate: query => prefixes.has(String(query.queryKey[0])) })
+          void qc.invalidateQueries({ predicate: query => prefixes.has(String(query.queryKey[0]))
+            && (query.queryKey[0] !== 'evening-personal' || query.queryKey[1] === userId) })
         } catch {
           // 忽略非有效事件，下一次连接仍会补读共享状态。
         }
@@ -296,5 +300,5 @@ export function useQuoteStream(
       }
       _setStatus('disconnected')
     }
-  }, [qc, handleAlerts])
+  }, [qc, handleAlerts, userId])
 }

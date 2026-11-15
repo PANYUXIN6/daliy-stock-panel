@@ -11,8 +11,8 @@ export function EveningFeedbackOverview() {
   const user = useCurrentUser()
   const query = useQuery({ queryKey: QK.eveningFeedbackOverview(user?.id ?? ''), queryFn: ({ signal }) => api.eveningFeedbackOverview(signal), enabled: !!user })
   const data = query.data?.user_id === user?.id ? query.data : undefined
-  return <div className="min-w-0 space-y-5 pb-8">
-    <PageHeader title="反馈概览" right={<button className={eveningControl} onClick={() => void query.refetch()}>刷新概览</button>} />
+  return <div className="mx-auto min-w-0 max-w-[1600px] space-y-5 p-4 pb-8 sm:p-6 sm:pb-10 lg:p-8">
+    <PageHeader className="px-0 pt-0 pb-4" title="反馈概览" right={<button className={eveningControl} onClick={() => void query.refetch()}>刷新概览</button>} />
     <EveningPersonalNav />
     <p className="max-w-3xl text-sm leading-6 text-secondary">这里分别统计审美星标、自报盈亏和推荐后价格表现。同一跟踪过程只计一次当前反馈，取消后从已标记数量移除；这些记录不改变名单与排序。</p>
     {query.isLoading && <p role="status" className="py-8 text-center text-secondary">正在读取反馈概览…</p>}

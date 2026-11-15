@@ -407,6 +407,35 @@ def test_history_reads_only_seven_state_files_regardless_of_archive_age(tmp_path
     assert len(json.dumps(history)) < 4000
 
 
+@pytest.mark.parametrize(('today', 'expected'), [('2026-11-15', '2026-11-13'), ('2026-11-16', '2026-11-16'),
+                                              ('2026-10-04', '2026-09-30')])
+def test_default_status_uses_latest_calendar_trade_day_not_today_or_latest_report(tmp_path, monkeypatch, today, expected):
+    monkeypatch.setattr(jobs, 'cn_now', lambda: datetime.fromisoformat(today).replace(hour=18, tzinfo=CN_TZ))
+    atomic_json(tmp_path / 'calendar' / 'trading_days.json', {
+        'days': ['2026-09-30', '2026-10-09', '2026-11-12', '2026-11-13', '2026-11-16'],
+        'start': '2026-09-30', 'end': '2026-11-16',
+    })
+    EveningReportStore(tmp_path).save('2026-09-29', {'state': {}}, {'input_id': 'a' * 32})
+    jobs._save_attempt(tmp_path, '2026-11-15', 'live', {'status': 'failed', 'reason': '非交易日不能生成'})
+    result = jobs.status(tmp_path)
+    assert result['date'] == expected
+    assert result['status'] == 'waiting'
+    if expected < today:
+        assert '核验保留的当日数据后恢复' in result['reason']
+    assert jobs.status(tmp_path, '2026-11-15')['status'] == 'failed'
+
+
+def test_default_status_does_not_invent_trade_day_without_calendar_or_archive(tmp_path, monkeypatch):
+    monkeypatch.setattr(jobs, 'cn_now', lambda: datetime(2026, 11, 15, 18, tzinfo=CN_TZ))
+    result = jobs.status(tmp_path)
+    assert result['date'] == ''
+    assert result['status'] == 'waiting'
+    assert '交易日历尚未就绪' in result['reason']
+    EveningReportStore(tmp_path).save('2026-11-13', {'state': {}}, {'input_id': 'a' * 32})
+    assert jobs.status(tmp_path)['date'] == '2026-11-13'
+    assert jobs.status(tmp_path)['status'] == 'published'
+
+
 def test_status_distinguishes_incomplete_ready_and_completed_job_without_callback(tmp_path, monkeypatch):
     store = EveningReportStore(tmp_path)
     store.save_readiness('2026-10-16', {'complete': False, 'reason': '分类尚缺证券'})
@@ -466,6 +495,9 @@ def test_browser_read_is_available_to_guest_but_shared_write_is_admin_only(tmp_p
         assert client.get('/api/evening-report/dates').status_code == 401
         client.cookies.set(auth.COOKIE_NAME, token)
         assert client.get('/api/evening-report/dates').json() == {'dates': []}
+        atomic_json(tmp_path / 'calendar' / 'trading_days.json', {'days': ['2026-11-13']})
+        monkeypatch.setattr(jobs, 'cn_now', lambda: datetime(2026, 11, 15, 18, tzinfo=CN_TZ))
+        assert client.get('/api/evening-report/status').json()['date'] == '2026-11-13'
         assert client.get('/api/evening-report?date=2026-10-16').json()['date'] == '2026-10-16'
         assert client.post('/api/evening-report/rebuild', json={'date': '2026-10-16'},
                            headers={'Origin': 'http://testserver'}).status_code == 403
@@ -634,13 +666,11 @@ def test_historical_revision_can_still_recover_archived_input_without_preparing(
     prepared.assert_not_called()
 
 
-@pytest.mark.parametrize('reason', ['historical', 'before_close', 'automatic'])
+@pytest.mark.parametrize('reason', ['before_close', 'automatic'])
 def test_missing_inputs_are_not_prepared_outside_manual_current_postmarket(manual_runtime, monkeypatch, reason):
     state, registry, _, _ = manual_runtime
     EveningReportStore(state.root).save_readiness(str(state.day), {'complete': False})
-    if reason == 'historical':
-        monkeypatch.setattr(jobs, 'cn_now', lambda: state.now + timedelta(days=1))
-    elif reason == 'before_close':
+    if reason == 'before_close':
         monkeypatch.setattr(jobs, 'cn_now', lambda: state.now.replace(hour=15))
     with pytest.raises(HTTPException) as error:
         asyncio.run(jobs.trigger(state.repo, day=state.day, capset=object(), automatic=reason == 'automatic'))
@@ -1090,3 +1120,116 @@ def test_selection_policy_revision_recomputes_same_inputs_and_preserves_original
     assert store.get(str(state.day)) == original
     repeated = jobs.generate(state.repo, state.day, revision=True, progress=lambda *a, **k: None)
     assert repeated['reused'] and repeated['version'] == result['version']
+
+
+@pytest.fixture
+def recoverable(manual_runtime, monkeypatch):
+    import os
+
+    from app.services import evening_report_recovery as recovery
+    from app.services.review_publication import strategy_input_files
+
+    state, registry, _, _ = manual_runtime
+    monkeypatch.setattr(jobs, 'cn_now', lambda: state.now + timedelta(days=1))
+    monkeypatch.setattr(recovery, 'cn_now', lambda: state.now + timedelta(days=1))
+    EveningReportStore(state.root).save_readiness(str(state.day), {'complete': False})
+    factors = state.root / 'adj_factor/all.parquet'
+    factors.parent.mkdir(exist_ok=True)
+    pl.DataFrame(schema={'symbol': pl.String, 'trade_date': pl.Date, 'ex_factor': pl.Float64}).write_parquet(factors)
+    retained = ['instruments/instruments.parquet', 'adj_factor/all.parquet']
+    for name, column in [('ext_gn_ths', '所属概念'), ('ext_hy_ths', '所属同花顺行业')]:
+        relative = f'ext_data/{name}/part.parquet'
+        path = state.root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        pl.DataFrame({'symbol': state.symbols, column: ['电子'] * len(state.symbols)}).write_parquet(path)
+        retained.append(relative)
+    for table, rows in [('regime_history', [{'date': state.day, 'state': 'weak', 'phase': 'unclassified', 'score': 8}]),
+                        ('mainline_history', [{'date': state.day}])]:
+        relative = f'{table}/part.parquet'
+        path = state.root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        pl.DataFrame(rows).write_parquet(path)
+        retained.append(relative)
+    recap = f'market_recap/date={state.day}.json'
+    atomic_json(state.root / recap, {'published': True, 'as_of': str(state.day),
+                'published_at': (state.now + timedelta(minutes=3)).isoformat(),
+                'strategy_inputs': {'stock': strategy_input_files(state.root, state.day)},
+                'overview': {'sentiment': {'as_of': str(state.day), 'version': 'retained-test',
+                                           'label': '当时的情绪'}}})
+    retained.append(recap)
+    for relative in retained:
+        stamp = (state.now + timedelta(minutes=2)).timestamp()
+        os.utime(state.root / relative, (stamp, stamp))
+    atomic_json(state.root / 'job_store/accepted.json', {
+        'id': 'accepted', 'request_key': f'postmarket:{state.day}', 'status': 'succeeded',
+        'started_at': state.now.isoformat(), 'finished_at': (state.now + timedelta(minutes=4)).isoformat(),
+        'result': {'postmarket_date': str(state.day), 'stage_errors': [],
+                   'readiness': {'daily': state.coverage.require(state.symbols)}}})
+    return state, registry
+
+
+def test_manual_historical_original_reaccepts_dated_facts_then_publishes(recoverable):
+    state, registry = recoverable
+
+    async def run():
+        submitted = await jobs.trigger(state.repo, day=state.day)
+        await drain_tasks()
+        return registry.get(submitted['job_id'])
+
+    job = asyncio.run(run())
+    assert job['status'] == 'succeeded', job.get('error')
+    store = EveningReportStore(state.root)
+    evidence = inputs.require_ready(state.root, state.day)
+    assert evidence['recovery']['job_id'] == 'accepted'
+    assert evidence['market']['sentiment']['label'] == '当时的情绪'
+    report = store.get(str(state.day))
+    assert report['late_generation'] is True
+    assert report['recovery_note'] == '恢复计算、当时未发布'
+    assert report['provenance']['recovery']['job_id'] == 'accepted'
+
+
+@pytest.mark.parametrize('defect,reason', [
+    ('classification', '已非该日'), ('stock', '引用不一致'),
+    ('index', '正式指数'), ('cancel', 'cancelled'), ('authority', 'revoked'),
+])
+def test_recovery_rejects_changed_missing_or_revoked_evidence(recoverable, monkeypatch, defect, reason):
+    import os
+
+    from app.services.evening_report_recovery import recover_ready
+
+    state, _ = recoverable
+    check = Mock()
+    authorize = None
+    if defect == 'classification':
+        os.utime(state.root / 'ext_data/ext_gn_ths/part.parquet', None)
+    elif defect == 'stock':
+        os.utime(state.root / 'kline_daily' / f'date={state.day}' / 'part.parquet', None)
+    elif defect == 'index':
+        path = state.root / 'kline_index_daily' / f'date={state.day}' / 'part.parquet'
+        pl.read_parquet(path).with_columns(pl.lit(123, dtype=pl.Int64).alias('quote_ts')).write_parquet(path)
+    elif defect == 'cancel':
+        check = Mock(side_effect=RuntimeError('cancelled'))
+    else:
+        authorize = Mock(side_effect=RuntimeError('revoked'))
+    with pytest.raises(RuntimeError, match=reason):
+        recover_ready(state.repo, state.day, check_cancel=check, authorize=authorize)
+    assert not EveningReportStore(state.root).readiness(str(state.day)).get('complete')
+    assert not EveningReportStore(state.root).has_original(str(state.day))
+
+
+def test_historical_missing_job_is_reported_without_publishing(manual_runtime, monkeypatch):
+    from app.services import evening_report_recovery as recovery
+    state, registry, _, _ = manual_runtime
+    EveningReportStore(state.root).save_readiness(str(state.day), {'complete': False})
+    monkeypatch.setattr(jobs, 'cn_now', lambda: state.now + timedelta(days=1))
+    monkeypatch.setattr(recovery, 'cn_now', lambda: state.now + timedelta(days=1))
+
+    async def run():
+        submitted = await jobs.trigger(state.repo, day=state.day)
+        await drain_tasks()
+        return registry.get(submitted['job_id'])
+
+    result = asyncio.run(run())
+    assert result['status'] == 'failed'
+    assert '缺少成功的当日盘后验收记录' in result['error']
+    assert not EveningReportStore(state.root).has_original(str(state.day))

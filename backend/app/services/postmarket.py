@@ -61,6 +61,8 @@ def reconcile_daily_status(coverage: DailyCoverage, expected: list[str], *,
     if halted & not_listed:
         raise DailyCoverageError("交易状态证据冲突：同一标的同时为停牌和未上市")
     coverage.record_halted(halted, source=status.source, basis="full_session_suspension_status")
+    for symbol in halted:
+        coverage.halted_evidence[symbol].update(status.halted_evidence.get(symbol, {}))
     coverage.not_listed.update(not_listed)
     logger.info("%s 缺行状态核验(%s)：确认停牌 %d 只，尚未上市 %d 只，未解释 %d 只",
                 coverage.day, status.source, len(halted), len(not_listed),

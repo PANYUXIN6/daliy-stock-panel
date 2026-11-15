@@ -45,9 +45,16 @@ def _save_attempt(data_dir: Path, day: str, mode: str, value: dict) -> None:
 
 def status(data_dir: Path, day: str | None = None, *, mode: str | None = None) -> dict:
     from app.services.pipeline_jobs import job_store
+    from app.services.trading_day import calendar_status
 
-    day = day or cn_now().date().isoformat()
     store = EveningReportStore(data_dir)
+    if not day:
+        today = cn_now().date().isoformat()
+        day = max((value for value in calendar_status(data_dir).get('days', []) if value <= today), default='')
+        if not day:
+            day = max((entry['date'] for entry in store.dates() if entry['date'] <= today), default='')
+        if not day:
+            return {'date': '', 'status': 'waiting', 'reason': '交易日历尚未就绪，暂时无法确定最近交易日'}
     attempt = _read_attempt(data_dir, day, mode)
     job = job_store.get(attempt['job_id']) if attempt.get('job_id') else None
     if job and job['status'] in ('pending', 'running'):
@@ -64,6 +71,8 @@ def status(data_dir: Path, day: str | None = None, *, mode: str | None = None) -
         return {**attempt, 'date': day, 'status': 'published', 'reason': '原发布已归档'}
     ready = store.readiness_status(day)
     complete = bool(ready and ready.get('complete'))
+    if not ready and day < cn_now().date().isoformat():
+        return {'date': day, 'status': 'waiting', 'reason': '尚无该日完整输入；管理员可重试生成，核验保留的当日数据后恢复'}
     return {'date': day, 'status': 'ready' if complete else 'waiting',
             'reason': '输入已验收，等待执行槽' if complete else
                       (ready or {}).get('reason', '等待正式行情、分类与市场环境完成本轮验收')}
@@ -224,8 +233,8 @@ def generate(repo, day: date, *, revision: bool, progress, automatic: bool = Fal
             branch.close()
 
 
-def _generation_evidence(data_dir: Path, day: date, revision: bool) -> dict | None:
-    """None means only today's dependency needs preparation; history must pass."""
+def _generation_evidence(data_dir: Path, day: date, revision: bool, *, allow_recovery: bool = False) -> dict | None:
+    """Manual missing originals may reaccept dated facts; revisions stay exact."""
     original = EveningReportStore(data_dir).original_metadata(day.isoformat())
     if original and not revision:
         return {'input_id': original['input_id'], 'scope_version': original.get('scope_version')}
@@ -237,7 +246,7 @@ def _generation_evidence(data_dir: Path, day: date, revision: bool) -> dict | No
     try:
         return require_ready(data_dir, day)
     except DailyCoverageError:
-        if day != cn_now().date():
+        if day != cn_now().date() and not (allow_recovery and day < cn_now().date()):
             raise
         return None
 
@@ -270,9 +279,18 @@ def _prepare_and_generate(repo, quote_service, capset, day: date, *, revision: b
     emit('evening_report', 0, '核验每日晚报输入…')
     if authorize:
         authorize()
-    if _generation_evidence(data_dir, day, revision) is None:
+    if _generation_evidence(data_dir, day, revision, allow_recovery=not automatic) is None:
         if automatic:
             raise DailyCoverageError('等待正式行情、分类与市场环境完成本轮验收')
+        if day < cn_now().date() and not revision:
+            from app.services.evening_report_recovery import recover_ready
+
+            emit('prepare_evening_report', 10, '核验保留的历史行情、分类与停牌依据…')
+            recover_ready(repo, day, check_cancel=lambda: emit(
+                'prepare_evening_report', 30, '正在重新验收历史输入…', skip_log=True), authorize=authorize)
+            return generate(repo, day, revision=False,
+                            progress=lambda stage, pct, msg, **kwargs: emit(stage, 75 + int(pct * .24), msg, **kwargs),
+                            automatic=False, authorize=authorize, diagnostics=diagnostics)
         preparation_day = current_day or cn_now().date()
         _require_preparation_time(preparation_day)
         if capset is None:
@@ -328,11 +346,12 @@ async def trigger(repo, quote_service=None, *, day: date, revision: bool = False
                 raise AuthError('共享晚报重建仅管理员可执行', 403, 'ADMIN_REQUIRED')
         authorize()
     try:
-        evidence = _generation_evidence(data_dir, day, revision)
+        evidence = _generation_evidence(data_dir, day, revision, allow_recovery=not automatic)
         if evidence is None:
             if automatic:
                 raise DailyCoverageError('等待正式行情、分类与市场环境完成本轮验收')
-            _require_preparation_time(requested_on)
+            if day >= requested_on or revision:
+                _require_preparation_time(requested_on)
     except DailyCoverageError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     context = copy_context()

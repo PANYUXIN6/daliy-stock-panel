@@ -227,7 +227,7 @@ export const DATASET_QUERY_PREFIXES: Record<string, readonly string[]> = {
   review: ['review-publication', 'review-reports'],
   dragon_tiger: ['dragon-tiger'],
   auction_benchmark: ['auction-benchmark', 'abnormal-overview'],
-  calendar: ['sector-review', 'kline-boxes', 'etf-flow'],
+  calendar: ['sector-review', 'kline-boxes', 'etf-flow', 'evening-report'],
   index: ['sector-review', 'kline-boxes'],
   etf: ['sector-review', 'kline-boxes'],
   // ST/主线过滤配置先于重算发布；其他页面也必须立即重读口径有效性。

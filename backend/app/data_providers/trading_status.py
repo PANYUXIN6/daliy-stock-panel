@@ -30,6 +30,7 @@ class DailyTradingStatus:
     source: str = "eastmoney"
     halted: frozenset[str] = field(default_factory=frozenset)
     not_listed: frozenset[str] = field(default_factory=frozenset)
+    halted_evidence: dict[str, dict] = field(default_factory=dict)
 
 
 def _date(value) -> date | None:
@@ -157,6 +158,7 @@ def get_daily_trading_status(day: date, symbols: list[str], *,
     if not requested:
         return DailyTradingStatus(day)
     halted: set[str] = set()
+    halted_evidence: dict[str, dict] = {}
     not_listed: set[str] = set()
     try:
         with httpx.Client(timeout=httpx.Timeout(15.0, connect=5.0)) as client:
@@ -167,6 +169,13 @@ def get_daily_trading_status(day: date, symbols: list[str], *,
                 symbol = row.get("SECUCODE")
                 if symbol in requested and _halted_on(row, day):
                     halted.add(symbol)
+                    halted_evidence[symbol] = {
+                        "suspend_start": row["SUSPEND_START_TIME"],
+                        "suspend_end": row["SUSPEND_END_TIME"],
+                        "suspend_duration": row["SUSPEND_EXPIRE"],
+                        "predicted_resume_date": row["PREDICT_RESUME_DATE"],
+                        "source_report": "RPT_CUSTOM_SUSPEND_DATA_INTERFACE",
+                    }
             remaining = requested - halted
             # 以调用方的完整代码映射为准，不根据裸代码前缀猜测交易所或资产类型。
             code_map = {s.split(".")[0]: s for s in remaining}
@@ -184,4 +193,5 @@ def get_daily_trading_status(day: date, symbols: list[str], *,
     except (httpx.HTTPError, ValueError, ImportError) as exc:
         raise TradingStatusError("停复牌／上市状态数据获取失败") from exc
     check()
-    return DailyTradingStatus(day, halted=frozenset(halted), not_listed=frozenset(not_listed))
+    return DailyTradingStatus(day, halted=frozenset(halted), not_listed=frozenset(not_listed),
+                              halted_evidence=halted_evidence)

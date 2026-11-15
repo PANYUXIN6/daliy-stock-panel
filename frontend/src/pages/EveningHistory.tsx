@@ -34,8 +34,8 @@ export function EveningHistory() {
   const user = useCurrentUser()
   const [month, setMonth] = useState(() => cnDateFromUtc(new Date().toISOString()).slice(0, 7))
   const query = useQuery({ queryKey: QK.eveningHistory(user?.id ?? '', month), queryFn: ({ signal }) => api.eveningHistory(month, signal), enabled: !!user && !!month })
-  return <div className="min-w-0 space-y-5 pb-8">
-    <PageHeader title="观察历史" right={<button className={eveningControl} onClick={() => void query.refetch()}>刷新记录</button>} />
+  return <div className="mx-auto min-w-0 max-w-[1600px] space-y-5 p-4 pb-8 sm:p-6 sm:pb-10 lg:p-8">
+    <PageHeader className="px-0 pt-0 pb-4" title="观察历史" right={<button className={eveningControl} onClick={() => void query.refetch()}>刷新记录</button>} />
     <EveningPersonalNav />
     <div className="flex flex-wrap items-center gap-4"><label className="space-y-1 text-xs"><span className="block text-secondary">记录月份</span><input aria-label="记录月份" type="month" value={month} className={eveningControl} onChange={event => setMonth(event.target.value)} /></label><p className="max-w-2xl text-xs leading-5 text-secondary">保存每次推荐的原始引用；连续观察共享同一跟踪过程。星标只记审美，自报盈亏与推荐后价格表现分开记录。</p></div>
     {query.isLoading && <p role="status" className="py-8 text-center text-secondary">正在读取本月观察历史…</p>}

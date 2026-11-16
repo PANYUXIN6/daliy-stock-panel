@@ -43,13 +43,16 @@ def input_versions(data_dir: Path, day: date) -> dict:
 
 
 def save_ready(data_dir: Path, day: date, coverage, observations: list[dict], market: dict,
-               *, recovery: dict | None = None) -> dict:
+               *, recovery: dict | None = None, recovered_metadata: list[dict] | None = None) -> dict:
     """Called only after required stages 1–8 succeeded, inside the pipeline slot."""
     if len(observations) != 2 or any(not o or o.get('complete') is not True for o in observations):
         raise DailyCoverageError('本轮概念及行业完整分类观察尚未就绪')
     if any(date.fromisoformat(o['obtained_at'][:10]) != day for o in observations):
         raise DailyCoverageError('分类观察并非目标交易日取得，不能作为当晚原发布输入')
-    metadata = pl.read_parquet(data_dir / 'instruments' / 'instruments.parquet').to_dicts()
+    if recovered_metadata is not None and not recovery:
+        raise DailyCoverageError('恢复的证券资格必须附带历史核验依据')
+    metadata = (recovered_metadata if recovered_metadata is not None else
+                pl.read_parquet(data_dir / 'instruments' / 'instruments.parquet').to_dicts())
     expected = {row['symbol'] for row in metadata if _scope(row) is True}
     for observation in observations:
         missing = expected - set(observation['symbols'])

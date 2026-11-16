@@ -1141,7 +1141,8 @@ def recoverable(manual_runtime, monkeypatch):
         relative = f'ext_data/{name}/part.parquet'
         path = state.root / relative
         path.parent.mkdir(parents=True, exist_ok=True)
-        pl.DataFrame({'symbol': state.symbols, column: ['电子'] * len(state.symbols)}).write_parquet(path)
+        pl.DataFrame({'symbol': state.symbols, '股票简称': state.metadata['name'],
+                      column: ['电子'] * len(state.symbols)}).write_parquet(path)
         retained.append(relative)
     for table, rows in [('regime_history', [{'date': state.day, 'state': 'weak', 'phase': 'unclassified', 'score': 8}]),
                         ('mainline_history', [{'date': state.day}])]:
@@ -1186,6 +1187,63 @@ def test_manual_historical_original_reaccepts_dated_facts_then_publishes(recover
     assert report['late_generation'] is True
     assert report['recovery_note'] == '恢复计算、当时未发布'
     assert report['provenance']['recovery']['job_id'] == 'accepted'
+
+
+def test_recovery_uses_dated_names_after_next_morning_metadata_sync(recoverable):
+    state, registry = recoverable
+    path = state.root / 'instruments/instruments.parquet'
+    current = state.metadata.with_columns(
+        pl.lit('*ST现在').alias('name'), pl.lit(True).alias('is_st'),
+        pl.lit(False).alias('is_current'), pl.lit('star').alias('board'),
+        pl.lit(state.day + timedelta(days=1)).alias('as_of'),
+        pl.lit((state.now + timedelta(days=1)).isoformat()).alias('metadata_observed_at'))
+    current.write_parquet(path)
+
+    async def run():
+        submitted = await jobs.trigger(state.repo, day=state.day)
+        await drain_tasks()
+        return registry.get(submitted['job_id'])
+
+    result = asyncio.run(run())
+    assert result['status'] == 'succeeded', result.get('error')
+    evidence = inputs.require_ready(state.root, state.day)
+    assert evidence['recovery']['metadata_method'] == 'dated-names-with-verified-listing-events'
+    assert {r['name'] for r in evidence['metadata']} == set(state.metadata['name'])
+    assert all(r['is_st'] is False and r['board'] == 'main' and r['is_current'] for r in evidence['metadata'])
+    assert all(r['metadata_observed_at'].startswith(str(state.day)) and
+               r['listing_observed_at'].startswith(str(state.day + timedelta(days=1))) for r in evidence['metadata'])
+    assert pl.read_parquet(path).equals(current)
+    assert EveningReportStore(state.root).get(str(state.day))['statistics']['eligible_count'] == len(state.symbols)
+
+
+@pytest.mark.parametrize('defect,reason', [
+    ('missing_name', '缺少当日证券名称'), ('name_conflict', '名称不一致'),
+    ('listing', '上市日期'), ('missing_member', '证券名称'),
+])
+def test_dated_name_recovery_rejects_unsupported_qualification(recoverable, defect, reason):
+    import os
+
+    from app.services.evening_report_recovery import recover_ready
+
+    state, _ = recoverable
+    path = state.root / 'instruments/instruments.parquet'
+    os.utime(path, None)
+    if defect == 'listing':
+        state.metadata.with_columns(pl.lit(str(state.day)).alias('listing_date')).write_parquet(path)
+    else:
+        names = ['ext_gn_ths', 'ext_hy_ths'] if defect in ('missing_name', 'missing_member') else ['ext_gn_ths']
+        for name in names:
+            path = state.root / f'ext_data/{name}/part.parquet'
+            stamp = path.stat().st_mtime_ns
+            frame = pl.read_parquet(path)
+            frame = (frame.drop('股票简称') if defect == 'missing_name' else
+                     frame.filter(pl.col('symbol') != state.symbols[0]) if defect == 'missing_member' else
+                     frame.with_columns(pl.lit('另一名称').alias('股票简称')))
+            frame.write_parquet(path)
+            os.utime(path, ns=(stamp, stamp))
+    with pytest.raises(DailyCoverageError, match=reason):
+        recover_ready(state.repo, state.day)
+    assert not EveningReportStore(state.root).readiness(str(state.day)).get('complete')
 
 
 @pytest.mark.parametrize('defect,reason', [

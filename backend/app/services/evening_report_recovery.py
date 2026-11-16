@@ -14,6 +14,7 @@ from uuid import uuid4
 import polars as pl
 
 from app.market_time import CN_TZ, cn_now
+from app.parquet import scan_daily_parquet
 from app.services.daily_coverage import DailyCoverage, DailyCoverageError
 from app.services.evening_report_inputs import _scope, input_versions, save_ready
 from app.services.evening_report_store import read_json
@@ -65,7 +66,7 @@ def _metadata_from_dated_names(root: Path, day: date, frames: list[pl.DataFrame]
     listings = {row['symbol']: row for row in current.select(
         'symbol', 'listing_date', 'metadata_source', 'metadata_observed_at').to_dicts()}
     files = SectorReviewReader(root).files('kline_daily', end=day)
-    first_trade = dict(pl.scan_parquet(files).select('symbol', 'date').group_by('symbol')
+    first_trade = dict(scan_daily_parquet(files).select('symbol', 'date').group_by('symbol')
                        .agg(pl.col('date').min()).collect().iter_rows())
     rows = []
     observed = max(o['obtained_at'] for o in observations)

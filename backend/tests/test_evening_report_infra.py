@@ -1190,7 +1190,20 @@ def test_manual_historical_original_reaccepts_dated_facts_then_publishes(recover
 
 
 def test_recovery_uses_dated_names_after_next_morning_metadata_sync(recoverable):
+    import os
+
+    from app.services.review_publication import strategy_input_files
+
     state, registry = recoverable
+    # Real retained history spans files written before quote_ts was introduced.
+    old = state.root / 'kline_daily' / f'date={state.calendar[0]}' / 'part.parquet'
+    pl.read_parquet(old).drop('quote_ts').write_parquet(old)
+    recap = state.root / 'market_recap' / f'date={state.day}.json'
+    stamp = recap.stat().st_mtime_ns
+    publication = json.loads(recap.read_text())
+    publication['strategy_inputs']['stock'] = strategy_input_files(state.root, state.day)
+    atomic_json(recap, publication)
+    os.utime(recap, ns=(stamp, stamp))
     path = state.root / 'instruments/instruments.parquet'
     current = state.metadata.with_columns(
         pl.lit('*ST现在').alias('name'), pl.lit(True).alias('is_st'),

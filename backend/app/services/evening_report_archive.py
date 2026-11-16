@@ -94,6 +94,7 @@ securities or features outside the frozen allocation pool.
                                  'stock_generation': reference.get('stock_generation')}
     provenance = report.get('provenance', {})
     permanent['provenance'] = {
+        'recovery': provenance.get('recovery'),
         'classifications': [{key: value for key, value in observation.items()
                             if key not in ('symbols', 'memberships')}
                             | {'symbol_count': len(observation.get('symbols', [])),

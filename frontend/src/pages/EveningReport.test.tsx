@@ -9,11 +9,11 @@ import { EveningReportContent } from '@/components/evening-report/EveningReportC
 import { ApiError, type EveningReport as Report, type EveningFeedback, type EveningObservation, type EveningPerformance, type EveningPersonalRecord, type User } from '@/lib/api'
 import { AuthContext } from '@/lib/auth'
 import { QK } from '@/lib/queryKeys'
-const mocks = vi.hoisted(() => ({ get: vi.fn(), add: vi.fn(), rebuild: vi.fn(), personal: vi.fn(), feedback: vi.fn(), watched: [] as {symbol: string}[] }))
+const mocks = vi.hoisted(() => ({ get: vi.fn(), dates: vi.fn(), status: vi.fn(), add: vi.fn(), rebuild: vi.fn(), personal: vi.fn(), feedback: vi.fn(), watched: [] as {symbol: string}[] }))
 vi.mock('@/lib/api', async importOriginal => ({ ...await importOriginal<typeof import('@/lib/api')>(), api: {
-  eveningReportDates: async () => ({ dates: [{ date: '2026-11-02', status: 'published', versions: [{ version: 'v2', kind: 'revision', generated_at: '2026-11-02 19:00' }] }] }),
+  eveningReportDates: mocks.dates,
   eveningReport: mocks.get,
-  eveningReportStatus: async (date: string) => ({ date: date || '2026-11-03', status: 'waiting', reason: '等待本轮完整分类观察' }),
+  eveningReportStatus: mocks.status,
   watchlistList: async () => ({ symbols: mocks.watched }),
   watchlistGroups: async () => ({ groups: [{ id: 'group-a', name: '观察组', color: 'blue' }] }),
   watchlistAdd: mocks.add, eveningReportRebuild: mocks.rebuild,
@@ -34,6 +34,8 @@ let saved: Map<string, EveningFeedback>
 beforeEach(() => {
   Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true })
   mocks.get.mockReset().mockImplementation(async (_date: string, version: string) => fixture(version || 'v1'))
+  mocks.dates.mockReset().mockResolvedValue({ dates: [{ date: '2026-11-02', status: 'published', versions: [{ version: 'v2', kind: 'revision', generated_at: '2026-11-02 19:00' }] }] })
+  mocks.status.mockReset().mockImplementation(async (date: string) => ({ date: date || '2026-11-02', status: 'waiting', reason: '等待本轮完整分类观察' }))
   mocks.add.mockReset(); mocks.rebuild.mockReset(); mocks.watched = []
   saved = new Map()
   mocks.personal.mockReset().mockImplementation(async (date: string, version: string) => {
@@ -60,6 +62,42 @@ async function settle() { await act(async () => { await new Promise(resolve => s
 async function click(text: string) { const button = [...document.querySelectorAll('button')].find(b => b.textContent === text); expect(button).toBeTruthy(); await act(async () => button!.click()); await settle() }
 async function change(label: string, value: string) { const element = host.querySelector(`[aria-label="${label}"]`) as HTMLInputElement; await act(async () => { const setter = Object.getOwnPropertyDescriptor(element instanceof HTMLSelectElement ? HTMLSelectElement.prototype : HTMLInputElement.prototype, 'value')!.set!; setter.call(element, value); element.dispatchEvent(new Event(element instanceof HTMLSelectElement ? 'change' : 'input', { bubbles: true })) }); await settle() }
 
+it('默认展示最近交易日而非旧报告日期，状态仅出现一次且重试使用该日', async () => {
+  const status = { date: '2026-11-13', status: 'waiting', reason: '未保留该日完整输入，无法按当时口径恢复生成' }
+  mocks.status.mockResolvedValue(status)
+  mocks.get.mockResolvedValue(status)
+  mocks.rebuild.mockRejectedValue(new Error(status.reason))
+  await render('admin')
+  expect((host.querySelector('[aria-label="报告日期"]') as HTMLInputElement).value).toBe('2026-11-13')
+  expect(host.textContent).toContain('最近交易日 · 2026-11-13')
+  expect(host.textContent?.match(/2026-11-13 · 等待数据/g)).toHaveLength(1)
+  expect(host.textContent).not.toContain('今日生成状态')
+  expect(mocks.get.mock.calls.every(([date]) => date === '2026-11-13')).toBe(true)
+  await click('重试生成')
+  expect(mocks.rebuild).toHaveBeenCalledWith('2026-11-13', 'live')
+})
+it('手动选择历史日期后只显示所选日期状态，最近日失败不串入', async () => {
+  mocks.status.mockImplementation(async (date: string) => date
+    ? { date, status: 'waiting', reason: '所选日期等待输入' }
+    : { date: '2026-11-13', status: 'failed', reason: '最近日失败原因' })
+  mocks.get.mockImplementation(mocks.status)
+  await render()
+  expect(host.textContent).toContain('最近日失败原因')
+  await change('报告日期', '2026-11-02')
+  expect(host.textContent).toContain('所选日期等待输入')
+  expect(host.textContent?.match(/2026-11-02 · 等待数据/g)).toHaveLength(1)
+  expect(host.textContent).not.toContain('最近日失败原因')
+  expect(host.textContent).not.toContain('2026-11-13')
+})
+it('没有已知交易日时显示日历提示，不向自然日请求报告或提供生成操作', async () => {
+  mocks.dates.mockResolvedValue({ dates: [] })
+  mocks.status.mockResolvedValue({ date: '', status: 'waiting', reason: '交易日历尚未就绪，暂时无法确定最近交易日' })
+  await render('admin')
+  expect(host.textContent).toContain('暂时无法确定最近交易日')
+  expect(host.textContent).not.toContain('生成管理')
+  expect(mocks.get).not.toHaveBeenCalled()
+})
+
 it('只按最终名单顺序展示，最多5只且每股只出现一次', async () => {
   const report = fixture()
   report.records = Array.from({ length: 7 }, (_, i) => ({ ...report.records[0], symbol: `stock${i}`, name: `股票${i}` }))
@@ -84,7 +122,7 @@ it('零入选明确空态，不能回退显示未入选对象或审计计数', a
   expect(host.querySelectorAll('article')).toHaveLength(0)
   expect(host.textContent).not.toContain('148')
   expect(host.textContent).not.toContain('样例股份')
-  expect(host.textContent).toContain('今日等待数据')
+  expect(host.textContent).toContain('2026-11-02 · 等待数据')
 })
 it('使用实际入选题材及原始收盘价，比例和成交额单位正确且限制保留', async () => {
   const report = fixture()
@@ -142,7 +180,9 @@ it('添加中禁用按钮，阻止重复请求', async () => {
   await act(async () => {mocks.watched = [{symbol:'000001.SZ'}]; resolve({symbols:mocks.watched})})
 })
 it('未生成与读取失败不冒充有效空结果，普通用户没有生成操作', async () => {
-  mocks.get.mockResolvedValueOnce({date:'2026-11-02',status:'waiting',reason:'等待正式行情'})
+  const waiting = {date:'2026-11-02',status:'waiting',reason:'等待正式行情'}
+  mocks.get.mockResolvedValueOnce(waiting)
+  mocks.status.mockResolvedValueOnce(waiting)
   await render()
   expect(host.textContent).toContain('等待正式行情')
   expect(host.textContent).not.toContain('暂无符合条件的观察股票')

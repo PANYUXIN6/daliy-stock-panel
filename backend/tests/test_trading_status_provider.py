@@ -88,6 +88,13 @@ def test_only_full_day_suspensions_cover_missing_daily(source, changes, expected
     assert status.day == DAY
     assert status.source == "eastmoney"
     assert status.halted == (frozenset({"000016.SZ"}) if expected else frozenset())
+    if expected:
+        evidence = status.halted_evidence['000016.SZ']
+        assert evidence['suspend_start'] == halt_row(**changes)['SUSPEND_START_TIME']
+        assert evidence['suspend_end'] == halt_row(**changes)['SUSPEND_END_TIME']
+        assert evidence['source_report'] == HALT_REPORT
+    else:
+        assert status.halted_evidence == {}
     assert status.not_listed == frozenset()
     suspend_request = next(r for r in requests if r.url.params["reportName"] == HALT_REPORT)
     assert "2026-10-21" in suspend_request.url.params["filter"]

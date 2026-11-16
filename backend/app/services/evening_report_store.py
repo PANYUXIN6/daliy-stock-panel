@@ -95,6 +95,7 @@ def report_view(report: dict) -> dict:
         changes.append({key: value for key, value in item.items() if key not in ('added', 'removed', 'first_observed')}
                        | {key + '_count': len(item.get(key, [])) for key in ('added', 'removed', 'first_observed')})
     result['provenance'] = {'classifications': classifications, 'membership_changes': changes,
+                            'recovery': provenance.get('recovery'),
                             'sector_filter': provenance.get('sector_filter', {}),
                             'suspension_evidence_count': provenance.get('suspension_evidence_count', len(provenance.get('suspensions', [])))}
     return result

@@ -42,7 +42,8 @@ def input_versions(data_dir: Path, day: date) -> dict:
             'files': references}
 
 
-def save_ready(data_dir: Path, day: date, coverage, observations: list[dict], market: dict) -> dict:
+def save_ready(data_dir: Path, day: date, coverage, observations: list[dict], market: dict,
+               *, recovery: dict | None = None) -> dict:
     """Called only after required stages 1–8 succeeded, inside the pipeline slot."""
     if len(observations) != 2 or any(not o or o.get('complete') is not True for o in observations):
         raise DailyCoverageError('本轮概念及行业完整分类观察尚未就绪')
@@ -59,7 +60,7 @@ def save_ready(data_dir: Path, day: date, coverage, observations: list[dict], ma
     from app.services.sentiment_observations import load_observation
 
     # Freeze the same dated domain result displayed by the environment page.
-    sentiment = load_observation(data_dir, day.isoformat())
+    sentiment = market.get('sentiment') if recovery else load_observation(data_dir, day.isoformat())
     market = {**market, 'sentiment': sentiment}
 
     store = EveningReportStore(data_dir)
@@ -95,6 +96,8 @@ def save_ready(data_dir: Path, day: date, coverage, observations: list[dict], ma
     }
     if coverage.halted - coverage.halted_evidence.keys():
         raise DailyCoverageError('部分停牌股票缺少逐股来源证据')
+    if recovery:
+        evidence['recovery'] = recovery
     EveningReportStore(data_dir).save_readiness(day.isoformat(), evidence)
     return evidence
 
@@ -300,6 +303,7 @@ def load_inputs(data_dir: Path, day: date, evidence: dict, cancel_check=None):
                          provenance={'classifications': evidence['classifications'], 'sector_filter': sector_filter,
                                      'calendar': evidence['calendar'],
                                      'scope_version': evidence.get('scope_version'),
+                                     'recovery': evidence.get('recovery'),
                                      'suspensions': evidence['halted_evidence'] + historical_suspensions,
                                      'membership_changes': _classification_changes(data_dir, evidence, before),
                                      'input_versions': evidence['versions']})

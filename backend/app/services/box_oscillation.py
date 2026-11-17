@@ -8,6 +8,7 @@ from typing import Literal
 
 import polars as pl
 
+from app.indicators.box_activity import end_box_activity_at_gap
 from app.indicators.box_oscillation import PERIOD_CONFIG, compute_box_oscillation
 from app.indicators.pipeline import compute_indicators, filter_halt_days
 from app.market_time import CN_TZ, cn_now
@@ -40,10 +41,10 @@ def _period_closed(last: date, end: date, period: BoxPeriod, calendar: dict) -> 
     return not any(last.isoformat() < day <= natural_end.isoformat() for day in calendar["days"])
 
 
-def _prepare_daily(bars: pl.DataFrame, symbol: str, end: date, now: datetime) -> tuple[pl.DataFrame, list[str]]:
+def _prepare_daily(bars: pl.DataFrame, symbol: str, end: date, now: datetime) -> tuple[pl.DataFrame, list[str], list[date]]:
     diagnostics: list[str] = []
     if bars.is_empty():
-        return bars, diagnostics
+        return bars, diagnostics, []
     required = {"date", "open", "high", "low", "close"}
     if not required <= set(bars.columns):
         raise ValueError("本地日线缺少 OHLC 字段")
@@ -54,7 +55,7 @@ def _prepare_daily(bars: pl.DataFrame, symbol: str, end: date, now: datetime) ->
     bars = bars.filter(pl.col("date").is_not_null() & (pl.col("date") <= end))
     bars = bars.sort("date").unique("date", keep="last", maintain_order=True)
     if bars.is_empty():
-        return bars, diagnostics
+        return bars, diagnostics, []
     for column in ("volume", "amount", "quote_ts"):
         if column not in bars.columns:
             bars = bars.with_columns(pl.lit(None, dtype=pl.Float64).alias(column))
@@ -68,7 +69,7 @@ def _prepare_daily(bars: pl.DataFrame, symbol: str, end: date, now: datetime) ->
     )
     bars = filter_halt_days(bars)
     if bars.is_empty():
-        return bars, diagnostics
+        return bars, diagnostics, []
     valid_price = pl.all_horizontal(
         pl.col(column).is_finite() & (pl.col(column) > 0)
         for column in ("open", "high", "low", "close")
@@ -95,9 +96,11 @@ def _prepare_daily(bars: pl.DataFrame, symbol: str, end: date, now: datetime) ->
         diagnostics.append(f"已排除 {bad_prices} 根价格异常 K 线，箱体不会跨异常记录确认。")
     if stale_snapshots:
         diagnostics.append(f"有 {stale_snapshots} 根日线仍为未收盘快照，不参与箱体确认。")
+    # 保留被过滤的真实断点日期；正常尚未收盘的当日K不终止历史结构。
+    interruptions = bars.filter(day_closed & (~pl.col("_valid") | ~quote_complete.fill_null(False)))["date"].to_list()
     bars = bars.with_columns((~pl.col("_valid") | ~pl.col("is_complete")).cast(pl.Int64).cum_sum().alias("_segment"))
     bars = bars.filter(pl.col("_valid")).drop("_valid")
-    return bars, diagnostics
+    return bars, diagnostics, interruptions
 
 
 def _aggregate(bars: pl.DataFrame, period: BoxPeriod, end: date, now: datetime, calendar: dict) -> pl.DataFrame:
@@ -144,10 +147,14 @@ def get_box_oscillation(repo, symbol: str, start: date, end: date, period: BoxPe
                    "fine_pivot_window": config.fine_pivot_window,
                    "min_width_retention_ratio": config.min_width_retention_ratio,
                    "breakout_margin_ratio": config.breakout_margin_ratio,
-                   "breakout_closes": config.breakout_closes},
+                   "breakout_closes": config.breakout_closes,
+                   "activity_short_bars": config.activity_short_bars,
+                   "activity_long_bars": config.activity_long_bars,
+                   "touch_atr_cap": config.touch_atr_cap, "release_atr_cap": config.release_atr_cap,
+                   "breakout_atr_cap": config.breakout_atr_cap},
     }
     raw = repo.get_daily_asset(asset, symbol, date(1990, 1, 1), end, columns=_PRICE_COLUMNS)
-    bars, diagnostics = _prepare_daily(raw, symbol, end, now)
+    bars, diagnostics, interruptions = _prepare_daily(raw, symbol, end, now)
     report["diagnostics"] = diagnostics
     if bars.is_empty():
         return report
@@ -172,11 +179,13 @@ def get_box_oscillation(repo, symbol: str, start: date, end: date, period: BoxPe
     # 缺失/未完成的历史快照隔断判断，不能把缺口两边拼成新的往返。
     for chunk in complete.partition_by("_segment", maintain_order=True):
         found = compute_box_oscillation(chunk, period)
-        if chunk["date"][-1] != complete["date"][-1]:
+        interruption = next((day for day in interruptions if day > chunk["date"][-1]), None)
+        if interruption is not None:
             for box in found:
                 if box["status"] in {"candidate", "confirmed"}:
                     box["status"] = "invalidated"
                     box["missing_conditions"].append("后续记录不完整，结构已停止延续")
+                    end_box_activity_at_gap(box, interruption.isoformat())
         boxes.extend(box for box in found if box["status"] != "invalidated" or box["confirmed_date"])
     # 已结束结构仍可能在远期再次被触及；保留记录，由显示层决定显隐。
     report["boxes"] = [box for box in boxes if box["confirmed_date"] is not None

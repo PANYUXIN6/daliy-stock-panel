@@ -274,6 +274,62 @@ def test_unready_market_inputs_do_not_block_feedback_on_published_reports(histor
     assert all(item['status'] == 'unavailable' for item in row['performance'].values())
 
 
+def test_tracking_notification_failure_retries_after_restart_without_duplicate_records(history, monkeypatch):
+    from app.services import preferences, trading_day
+
+    report = history.publish(0)
+    day = report['date']
+    now = datetime.fromisoformat(day).replace(hour=16, tzinfo=CN_TZ)
+    registry = pipeline_jobs.JobStore(store_dir=history.root / 'jobs')
+    monkeypatch.setattr(pipeline_jobs, 'job_store', registry)
+    monkeypatch.setattr(pipeline, 'job_store', registry)
+    monkeypatch.setattr(pipeline_jobs, '_run_slot_owner', None)
+    monkeypatch.setattr(jobs, 'cn_now', lambda: now)
+    monkeypatch.setattr(preferences, 'get_pipeline_schedule', lambda: {'hour': 16, 'minute': 0})
+    monkeypatch.setattr(trading_day, 'is_trading_day', lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(trading_day, 'calendar_status', lambda *_: {'days': history.days})
+    repo = SimpleNamespace(store=SimpleNamespace(data_dir=history.root))
+    write_notification = shared_runtime.atomic_write_text
+
+    def fail_notification(*_args, **_kwargs):
+        raise OSError('更新通知暂时无法写入')
+
+    async def scheduled_check():
+        queued = await jobs.run_scheduled(repo)
+        while pipeline._tasks:
+            await asyncio.gather(*list(pipeline._tasks))
+        return queued
+
+    monkeypatch.setattr(shared_runtime, 'atomic_write_text', fail_notification)
+    first = asyncio.run(scheduled_check())
+    failed = registry.get(first['job_id'])
+    assert failed['status'] == 'failed' and '更新通知暂时无法写入' in failed['error']
+    assert history.store.get(day) == report
+    assert not tracking.refresh_completed(history.root, failed['request_key'])
+    # Registration succeeded before the notification failed; feedback must survive retry.
+    assert tracking.personal_report(history.root, day, report['version'])['ready']
+    feedback = mark(history, report, outcome='profit')
+
+    restarted = pipeline_jobs.JobStore(store_dir=history.root / 'jobs')
+    monkeypatch.setattr(pipeline_jobs, 'job_store', restarted)
+    monkeypatch.setattr(pipeline, 'job_store', restarted)
+    monkeypatch.setattr(shared_runtime, 'atomic_write_text', write_notification)
+    now += timedelta(minutes=15)
+    retried = asyncio.run(scheduled_check())
+    completed = restarted.get(retried['job_id'])
+    assert completed['request_key'] == failed['request_key']
+    assert completed['status'] == 'succeeded'
+    assert completed['result']['registered_reports'] == 0
+    assert tracking.refresh_completed(history.root, failed['request_key'])
+    notification = json.loads((history.root / 'runtime' / 'data_update.json').read_text())
+    assert notification['datasets'] == ['evening_report_tracking']
+    rows = tracking.personal_history(history.root)['records']
+    assert len(rows) == 1 and rows[0]['feedback']['starred'] == feedback['starred']
+    assert rows[0]['feedback']['outcome'] == 'profit'
+    assert len(tracking.personal_history(history.root)['events']) == 1
+    assert asyncio.run(scheduled_check()) is None
+
+
 def test_derived_request_key_changes_for_revision_with_identical_market_input(history, monkeypatch):
     from unittest.mock import AsyncMock
     report = history.publish(0)

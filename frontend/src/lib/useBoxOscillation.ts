@@ -5,6 +5,7 @@ import { QK } from '@/lib/queryKeys'
 
 export const KLINE_PERIOD_LABELS: Record<KlinePeriod, string> = { daily: '日K', weekly: '周K', monthly: '月K' }
 export const BOX_LEVEL_LABELS = { short: '小箱体', medium: '中箱体', long: '大箱体' } as const
+export const BOX_ACTIVITY_LABELS = { active: '活跃', weakening: '证据减弱', historical: '历史参考' } as const
 export type BoxLevelFilter = 'all' | BoxOscillation['level']
 export type BoxStatusFilter = 'all' | BoxOscillation['status']
 export type KlineDateRange = { start: string; end: string }
@@ -50,8 +51,9 @@ export function useBoxOscillation(symbol: string, range: KlineDateRange, startOv
   const [period, setPeriod] = useState<KlinePeriod>('daily')
   const [enabled, setEnabled] = useState(true)
   const [level, setLevel] = useState<BoxLevelFilter>('all')
-  const [status, setStatus] = useState<BoxStatusFilter>('confirmed')
+  const [status, setStatus] = useState<BoxStatusFilter>('all')
   const [selectedId, setSelectedId] = useState<string | null>(null)
+  const [showHistory, setShowHistory] = useState(false)
   const expandedRange = klineRangeForPeriod(range, period)
   const requestRange = { ...expandedRange, start: startOverrides?.[period] ?? expandedRange.start }
   const rangeError = !requestRange.start || !requestRange.end ? '请选择完整的起止日期'
@@ -69,17 +71,25 @@ export function useBoxOscillation(symbol: string, range: KlineDateRange, startOv
   const minDisplayBars = Math.max(period === 'daily' ? 15 : 3, report?.config?.min_bars ?? 0)
   const filteredBoxes = useMemo(() => (report?.boxes ?? [])
     .filter(box => box.start_date <= requestRange.end
-      && (box.end_date >= requestRange.start || (box.status === 'broken' && box.observed_until >= requestRange.start))
+      && (box.end_date >= requestRange.start || (box.confirmed_date != null && box.observed_until >= requestRange.start))
       && box.duration_bars >= minDisplayBars
       && (level === 'all' || box.level === level) && (status === 'all' || box.status === status))
     .sort((a, b) => (asOfClose == null ? 0 : distanceToBox(a, asOfClose) - distanceToBox(b, asOfClose))
       || a.width - b.width || b.start_date.localeCompare(a.start_date) || a.id.localeCompare(b.id)),
   [report, level, status, minDisplayBars, asOfClose, requestRange.start, requestRange.end])
-  const nearestBox = asOfClose == null ? undefined : filteredBoxes[0]
-  const selectedBox = filteredBoxes.find(box => box.id === selectedId) ?? filteredBoxes[0]
-  const boxes = useMemo(() => enabled && nearestBox ? [nearestBox] : [], [enabled, nearestBox])
+  const nearestBox = asOfClose == null ? undefined : filteredBoxes.find(box =>
+    box.status === 'confirmed' && box.activity?.state === 'active'
+    && box.activity.as_of === report?.as_of && box.breakout.status !== 'pending'
+    && box.lower <= asOfClose && asOfClose <= box.upper
+    && box.active_segments?.some(segment => segment.end_date === null))
+  const selectedBox = filteredBoxes.find(box => box.id === selectedId) ?? nearestBox
+    ?? filteredBoxes.find(box => box.confirmed_date != null) ?? filteredBoxes[0]
+  const displayedBox = showHistory ? selectedBox : nearestBox
+  const boxes = useMemo(() => enabled && displayedBox ? [displayedBox] : [], [enabled, displayedBox])
+  const pendingBoxes = filteredBoxes.filter(box => box.status === 'confirmed' && box.breakout.status === 'pending')
   return { period, setPeriod, enabled, setEnabled, level, setLevel, status, setStatus, minDisplayBars,
-    nearestBox, selectedBox, setSelectedId, boxes, filteredBoxes, report, query, requestRange, rangeError }
+    nearestBox, selectedBox, setSelectedId, boxes, filteredBoxes, report, query, requestRange, rangeError,
+    showHistory, setShowHistory, pendingBoxes }
 }
 
 export type BoxOscillationView = ReturnType<typeof useBoxOscillation>

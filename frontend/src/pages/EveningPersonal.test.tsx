@@ -61,6 +61,15 @@ it('历史保留原报告引用、窗口状态与取消事件，同过程反馈�
   expect(mocks.feedback).toHaveBeenCalledTimes(1)
   expect(buttons.every(button => button.getAttribute('aria-pressed') === 'true')).toBe(true)
   expect(history.records).toHaveLength(2)
+  const starFilter = host.querySelector<HTMLSelectElement>('[aria-label="星标"]')!
+  await act(async () => { starFilter.value = 'starred'; starFilter.dispatchEvent(new Event('change', { bubbles: true })) })
+  expect(host.querySelectorAll('[data-history-stock]')).toHaveLength(2)
+  await act(async () => buttons[0].click()); await settle(); await settle()
+  expect(host.textContent).toContain('没有符合当前筛选的观察记录')
+  expect(host.querySelectorAll('[data-history-stock]')).toHaveLength(0)
+  await click('清除筛选')
+  expect(host.querySelectorAll('[data-history-stock]')).toHaveLength(2)
+  expect(history.records.every(row => !row.feedback.starred)).toBe(true)
 })
 
 it('无反馈时概览不制造负样本或盈亏，价格表现有独立分母', async () => {

@@ -178,10 +178,14 @@ class EveningReportStore:
     def versions(self, day: str) -> list[dict]:
         return [self._load(day, entry) for entry in self.version_metadata(day)]
 
-    def get(self, day: str, version: str | None = None, *, view: bool = False) -> dict | None:
+    def get(self, day: str, version: str | None = None, *, view: bool = False, latest: bool = False) -> dict | None:
         entries = self.version_metadata(day)
-        entry = next((item for item in entries if item['version'] == version), None) if version else next(
-            (item for item in entries if item['kind'] == 'original'), None)
+        if version:
+            entry = next((item for item in entries if item['version'] == version), None)
+        elif latest:
+            entry = max(entries, key=lambda item: (item.get('generated_at') or '', item['version']), default=None)
+        else:
+            entry = next((item for item in entries if item['kind'] == 'original'), None)
         return self._load(day, entry, view=view) if entry else None
 
     def original_metadata(self, day: str) -> dict | None:

@@ -367,6 +367,28 @@ export interface PriceGapsResponse {
 
 export type KlinePeriod = 'daily' | 'weekly' | 'monthly'
 
+export interface BoxActivity {
+  state: 'active' | 'weakening' | 'historical'
+  state_change_date: string
+  as_of: string
+  upper_age_bars: number | null
+  lower_age_bars: number | null
+  roundtrip_age_bars: number | null
+  last_roundtrip_confirmed_date: string | null
+  reasons: string[]
+}
+
+export interface BoxActiveSegment {
+  id: string
+  start_date: string
+  /** 最后一根可填充K；null仅表示该段在识别截止时仍开放。 */
+  end_date: string | null
+  start_reason: 'first_active' | 'reactivated' | 'returned'
+  end_reason: 'activity_downgraded' | 'breakout_pending' | 'breakout' | 'data_interrupted' | null
+  end_event_date: string | null
+  duration_bars?: number
+}
+
 export interface BoxOscillation {
   id: string
   period: KlinePeriod
@@ -384,6 +406,17 @@ export interface BoxOscillation {
   observed_until: string
   confirmed_date: string | null
   duration_bars: number
+  /** 缺字段的旧响应不能据此推断当前活跃。候选为null。 */
+  activity?: BoxActivity | null
+  active_segments?: BoxActiveSegment[]
+  thresholds?: {
+    atr: number | null
+    atr_date: string | null
+    fallback_reason: 'atr_warmup_insufficient' | null
+    touch_tolerance: number
+    release_distance: number
+    breakout_margin: number
+  }
   status: 'candidate' | 'confirmed' | 'broken' | 'invalidated'
   upper_touches: { date: string; price: number; confirmed_date: string | null }[]
   lower_touches: { date: string; price: number; confirmed_date: string | null }[]
@@ -425,6 +458,11 @@ export interface BoxOscillationResponse {
     min_width_retention_ratio?: number
     breakout_margin_ratio: number
     breakout_closes: number
+    activity_short_bars?: number
+    activity_long_bars?: number
+    touch_atr_cap?: number
+    release_atr_cap?: number
+    breakout_atr_cap?: number
   }
 }
 
@@ -2857,7 +2895,7 @@ export interface EveningRecord {
   observation?: EveningObservation
 }
 export type EveningRole = 'true_leader' | 'fallback_leader' | 'emotion' | 'other'
-export type EveningDipStatus = 'confirmed' | 'cautious' | 'not_met' | 'pending' | 'environment_only'
+export type EveningDipStatus = 'full' | 'partial' | 'none'
 export interface EveningObservation {
   role: EveningRole | null
   role_status: 'qualified' | 'review_pending'
@@ -3017,16 +3055,11 @@ export interface EveningReportStatus {
   last_attempt_at?: string | null
   missing_dependencies?: string[]
 }
-export interface EveningReportDates {
-  dates: { date: string; status: string; versions: { version: string; kind: string; generated_at: string; branch_id?: string | null }[] }[]
-}
-
 export const api = {
   eveningPersonal: (date: string, version: string, signal?: AbortSignal) => request<EveningPersonal>(`/api/evening-report/personal?${new URLSearchParams({ date, version })}`, { signal, quiet: true }),
   eveningFeedback: (body: EveningFeedbackRequest) => request<EveningFeedback & { episode_id: string }>('/api/evening-report/feedback', { method: 'PUT', body: JSON.stringify(body), quiet: true }),
   eveningHistory: (month: string, signal?: AbortSignal) => request<EveningPersonalHistory>(`/api/evening-report/history?${new URLSearchParams({ month })}`, { signal, quiet: true }),
   eveningFeedbackOverview: (signal?: AbortSignal) => request<EveningFeedbackOverview>('/api/evening-report/overview', { signal, quiet: true }),
-  eveningReportDates: (signal?: AbortSignal) => request<EveningReportDates>('/api/evening-report/dates?mode=live', { signal, quiet: true }),
   eveningReport: (date: string, version = '', signal?: AbortSignal) => request<EveningReport | EveningReportStatus>(`/api/evening-report?${new URLSearchParams({ date, mode: 'live', ...(version ? { version } : {}) })}`, { signal, quiet: true }),
   // 未指定日期时返回本地日历中截至北京时间今日的最近交易日状态。
   eveningReportStatus: (date = '', signal?: AbortSignal) => request<EveningReportStatus>(`/api/evening-report/status${date ? `?date=${encodeURIComponent(date)}` : ''}`, { signal, quiet: true }),

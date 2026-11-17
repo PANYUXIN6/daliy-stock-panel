@@ -188,7 +188,7 @@ it('晚报发布仅刷新晚报查询，行情推送不改变归档事实', asyn
   Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true })
   vi.stubGlobal('EventSource', Stream)
   const qc = new QueryClient()
-  const reportKeys = [QK.eveningReportDates(), QK.eveningReport('2026-11-02', 'original'), QK.eveningReportStatus('2026-11-02')]
+  const reportKeys = [QK.eveningReport('2026-11-02'), QK.eveningReport('2026-11-02', 'original'), QK.eveningReportStatus('2026-11-02')]
   for (const key of [...reportKeys, QK.watchlist]) qc.setQueryData(key, { value: 1 })
   const host = document.createElement('div'); const root = createRoot(host)
   try {

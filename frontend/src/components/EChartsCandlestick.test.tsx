@@ -230,19 +230,28 @@ it('可见范围之前结束的箱体只延伸历史参考线，回访不恢复�
     revisits: [{ kind: 'touch', date: DAYS[30], boundary: 'upper' }, { kind: 'entered', date: DAYS[31], boundary: 'upper' }],
   })
   await act(async () => root.render(<EChartsCandlestick data={rows(10)} boxes={[historical]} />))
-  const overlay = (chart.setOption.mock.calls.at(-1)?.[0] as any).series.find((series: any) => series.name === '箱体区域')
+  const option = chart.setOption.mock.calls.at(-1)?.[0] as any
+  const overlay = option.series.find((series: any) => series.name === '箱体区域')
   expect(overlay.markArea.data).toEqual([])
-  expect(overlay.markLine.data.map((line: any) => [line[0].xAxis, line[1].xAxis, line[1].lineStyle.type])).toEqual([
-    [DAYS[0], DAYS[61], 'dotted'], [DAYS[0], DAYS[61], 'dotted'],
-  ])
-  expect(overlay.markLine.data[0][1].tooltip.formatter()).toContain('虚线不表示箱体仍在延续')
+  const lowerReference = option.series.find((series: any) => series.name === '箱体历史下沿')
+  const upperReference = option.series.find((series: any) => series.name === '箱体历史上沿')
+  expect(lowerReference.data).toEqual(DAYS.map(() => 8))
+  expect(upperReference.data).toEqual(DAYS.map(() => 12))
+  expect(lowerReference.lineStyle.type).toBe('dotted')
+  expect(lowerReference.tooltip.formatter()).toContain('虚线不表示箱体仍在延续')
   expect(overlay.markPoint.data.map((point: any) => point.label.formatter)).toEqual(['回访上沿', '再入原区间'])
   expect(overlay.markPoint.data.every((point: any) => !point.label.show && point.emphasis.label.show)).toBe(true)
   expect(overlay.markPoint.data[1].tooltip.formatter()).toContain('不会恢复其震荡状态')
 })
 
-it('箱体保持原始边界，裁剪时间范围并区分形成过程、首次确认与突破事件', async () => {
-  await act(async () => root.render(<EChartsCandlestick data={rows(10)} boxes={[boxFixture()]}
+it('箱体只填充活跃区段，恢复不跨越沉寂和越界空档，未完成K不延长填充', async () => {
+  const active_segments = [
+    { id: 'one', start_date: DAYS[20], end_date: DAYS[29], start_reason: 'first_active' as const, end_reason: 'breakout_pending' as const, end_event_date: DAYS[30] },
+    { id: 'two', start_date: DAYS[40], end_date: null, start_reason: 'reactivated' as const, end_reason: null, end_event_date: null },
+  ]
+  await act(async () => root.render(<EChartsCandlestick data={rows(10)} boxes={[boxFixture({ active_segments,
+    activity: { state: 'active', state_change_date: DAYS[40], as_of: DAYS[60], upper_age_bars: 5, lower_age_bars: 3,
+      roundtrip_age_bars: 2, last_roundtrip_confirmed_date: DAYS[58], reasons: [] } })]}
     ranges={[{ start: DAYS[2], end: DAYS[4], label: '原有区间' }]}
     markers={[{ date: DAYS[10], kind: 'buy', label: '买点' }]}
     priceGaps={[{ date: DAYS[8], direction: 'up', lower: 8.5, upper: 9, original_lower: 8.5, original_upper: 9 }]}
@@ -250,13 +259,15 @@ it('箱体保持原始边界，裁剪时间范围并区分形成过程、首次�
   const option = chart.setOption.mock.calls.at(-1)?.[0] as any
   const overlay = option.series.find((series: any) => series.name === '箱体区域')
   const areas = overlay.markArea.data
+  expect(option.yAxis[0].min({ min: 9.8, max: 10.2 })).toBeCloseTo(7.88)
+  expect(option.yAxis[0].max({ min: 9.8, max: 10.2 })).toBeCloseTo(12.12)
   expect(areas.map((area: any) => [area[0].xAxis, area[0].yAxis, area[1].xAxis, area[1].yAxis, area[0].itemStyle.borderType])).toEqual([
-    [DAYS[0], 8, DAYS[20], 12, 'dashed'],
-    [DAYS[20], 8, DAYS[40], 12, 'solid'],
+    [DAYS[20], 8, DAYS[29], 12, 'solid'],
+    [DAYS[40], 8, DAYS[60], 12, 'solid'],
   ])
-  expect(areas[0][0].tooltip.formatter()).toContain('当时尚未确认')
+  expect(areas[0][0].tooltip.formatter()).toContain('活跃区段')
   expect(areas[1][0].tooltip.formatter()).toContain('宽度：4.00（50.00%）')
-  expect(areas[1][0].tooltip.formatter()).toContain('持续：45 根日 K')
+  expect(areas[1][0].tooltip.formatter()).toContain('结构跨度：45 根日 K')
   expect(overlay.markLine.data.every((line: any) => [8, 12].includes(line[0].yAxis) && line[0].yAxis === line[1].yAxis)).toBe(true)
   const points = overlay.markPoint.data
   expect(points.map((point: any) => point.name)).not.toContain('2023-12-01')
@@ -280,11 +291,12 @@ it('周月 K 候选保持虚线和未确认触点，切换或关闭箱体会移�
     breakout: { status: 'none', direction: null, first_date: null, confirmed_date: null }, events: [],
   })])
   const candidate = (chart.setOption.mock.calls.at(-1)?.[0] as any).series.find((series: any) => series.name === '箱体区域')
-  expect(candidate.markArea.data).toHaveLength(1)
-  expect(candidate.markArea.data[0][0].itemStyle.borderType).toBe('dashed')
-  expect(candidate.markArea.data[0][1].xAxis).toBe(DAYS[61])
-  expect(candidate.markArea.data[0][0].tooltip.formatter()).toContain('周 K · 小箱体')
-  expect(candidate.markArea.data[0][0].tooltip.formatter()).toContain('尚缺条件：下沿独立试探不足')
+  expect(candidate.markArea.data).toHaveLength(0)
+  const reference = (chart.setOption.mock.calls.at(-1)?.[0] as any).series.find((series: any) => series.name === '箱体历史上沿')
+  expect(reference.lineStyle.type).toBe('dotted')
+  expect(reference.data).toEqual(DAYS.map(() => 12))
+  expect(reference.tooltip.formatter()).toContain('周 K · 小箱体')
+  expect(reference.tooltip.formatter()).toContain('尚缺条件：下沿独立试探不足')
   expect(candidate.markPoint.data.find((point: any) => point.name === DAYS[30]).symbol).toBe('emptyCircle')
 
   await render([boxFixture({ period: 'monthly', level: 'long', status: 'broken', breakout: {

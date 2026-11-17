@@ -1,6 +1,6 @@
 import type { EveningObservation, EveningPersonalRecord } from '@/lib/api'
 import { fmtPct, fmtPrice, fmtVolume, priceColorClass } from '@/lib/format'
-import { boardLabels, dipLabels, roleLabels } from './EveningFilters'
+import { boardLabels, dipLabel, roleLabels } from './EveningFilters'
 
 const variableNames: Record<string, string> = {
   raw_close: '报告日收盘价', amount_day: '当日成交额', amount_median_20d: '20日成交额中位数',
@@ -27,7 +27,7 @@ export function EveningObservationDetails({ observation }: { observation?: Eveni
   const gaps = observation.price_gaps
   const abnormal = observation.abnormal_move
   return <div className="space-y-4 text-sm leading-6">
-    <div className="flex flex-wrap gap-x-5 gap-y-1 text-secondary"><span>{roleLabels[observation.role ?? ''] ?? '角色待核验'}{observation.role_status === 'review_pending' ? ' · 跟踪待复核' : ''}</span><span>{boardLabels[observation.board ?? ''] ?? '交易板块待核验'}</span><span>低吸：{dipLabels[observation.dip.status] ?? '待核验'}</span></div>
+    <div className="flex flex-wrap gap-x-5 gap-y-1 text-secondary"><span>{roleLabels[observation.role ?? ''] ?? '角色待核验'}{observation.role_status === 'review_pending' ? ' · 跟踪待复核' : ''}</span><span>{boardLabels[observation.board ?? ''] ?? '交易板块待核验'}</span><span>低吸：{dipLabel(observation.dip)}</span></div>
     <p>{observation.reason}</p>
     {!!observation.related_themes.length && <p className="text-secondary">关联题材：{observation.related_themes.map(theme => theme.name).join('、')}</p>}
     {!!observation.dip.reasons.length && <div className="rounded-md bg-warning/5 p-3 text-warning"><p className="font-medium">低吸条件与待核验项</p><ul className="mt-1 list-inside list-disc">{observation.dip.reasons.map(reason => <li key={reason}>{reason}</li>)}</ul></div>}

@@ -238,3 +238,22 @@ def test_old_ended_boxes_and_later_revisits_survive_display_crop(tmp_path):
     earlier = next(box for box in before['boxes'] if box['id'] == old['id'])
     assert earlier['end_date'] == old['end_date']
     assert earlier['revisits'] == []
+
+
+@pytest.mark.parametrize('gap_kind', ['invalid', 'stale'])
+def test_data_interruption_closes_active_segment_on_last_valid_bar_even_at_tail(tmp_path, gap_kind):
+    closes = [105., 110., 100., 110., 100., 105., 110., 100., 110., 100., 105., 105.]
+    days = [date(2026, 1, 1) + timedelta(days=i) for i in range(len(closes))]
+    frame = prices(days, closes=closes)
+    if gap_kind == 'invalid':
+        frame = frame.with_columns(pl.when(pl.col('date') == days[-1]).then(None).otherwise(pl.col('high')).alias('high'))
+    else:
+        frame = frame.with_columns(pl.when(pl.col('date') == days[-1]).then(0.).otherwise(None).alias('quote_ts'))
+    repo, _ = repository(frame, tmp_path)
+    result = service.get_box_oscillation(repo, '600000.SH', days[0], days[-1], now=datetime(2026, 2, 1, tzinfo=CN_TZ))
+    box = next(box for box in result['boxes'] if box['confirmed_date'] is not None)
+    assert box['status'] == 'invalidated'
+    segment = box['active_segments'][-1]
+    assert segment['end_reason'] == 'data_interrupted'
+    assert segment['end_event_date'] == days[-1].isoformat()
+    assert segment['end_date'] == days[-2].isoformat()

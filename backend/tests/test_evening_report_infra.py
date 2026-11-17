@@ -475,6 +475,37 @@ def test_revision_failure_does_not_turn_into_automatic_original_retry(tmp_path, 
     assert jobs.status(tmp_path, str(day), mode='live')['status'] == 'published'
 
 
+def test_browser_defaults_to_latest_published_report_and_keeps_explicit_references(tmp_path, monkeypatch):
+    from app.services import evening_report_store
+
+    day = '2026-10-16'
+    store = EveningReportStore(tmp_path)
+    monkeypatch.setattr(evening_report_store, 'cn_now', lambda: datetime(2026, 10, 16, 18, tzinfo=CN_TZ))
+    original = store.save(day, {'rule_version': 'initial-rule', 'summary': '原始观察'}, {'input_id': 'a' * 32})
+    app = FastAPI()
+    app.state.repo = SimpleNamespace(store=SimpleNamespace(data_dir=tmp_path))
+    app.include_router(evening_report.router)
+    with TestClient(app) as client:
+        endpoint = f'/api/evening-report?date={day}'
+        assert client.get(endpoint).json()['version'] == original['version']
+        for hour in (19, 20):
+            monkeypatch.setattr(evening_report_store, 'cn_now',
+                                lambda hour=hour: datetime(2026, 10, 16, hour, tzinfo=CN_TZ))
+            branch = RevisionBranch(store)
+            updated = branch.append(day, {'rule_version': f'rule-{hour}', 'summary': f'更新观察{hour}'},
+                                    {'input_id': 'b' * 32})
+            assert client.get(endpoint).json()['version'] != updated['version']
+            branch.commit()
+            branch.close()
+            assert client.get(endpoint).json()['version'] == updated['version']
+        assert client.get('/api/evening-report').json()['summary'] == '更新观察20'
+        pinned = client.get(f'{endpoint}&version={original["version"]}').json()
+        assert pinned['summary'] == '原始观察'
+        assert pinned['rule_version'] == 'initial-rule'
+        assert client.get(f'{endpoint}&version={"0" * 32}').status_code == 404
+    assert store.get(day)['version'] == original['version']
+
+
 def test_browser_read_is_available_to_guest_but_shared_write_is_admin_only(tmp_path, monkeypatch):
     from app.api import auth
     from app.services.auth import AuthStore

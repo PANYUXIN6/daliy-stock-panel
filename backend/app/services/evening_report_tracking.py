@@ -666,9 +666,11 @@ def refresh_after_publication(data_dir: Path, day: str, cancel_check=None, reque
                                  trade_date=day, cutoff=cn_now().isoformat(), provenance={},
                                  prices=pl.DataFrame(schema={'symbol': pl.String, 'date': pl.String}))
     result = refresh_tracking(data_dir, inputs, cancel_check)
+    from app.services.shared_runtime import publish_data_update
+
+    # Failed notification writes must remain eligible for the scheduled retry.
+    publish_data_update(data_dir, ['evening_report_tracking'])
     if request_key:
         with _database(_shared_path(data_dir), write=True) as db:
             db.execute('INSERT OR REPLACE INTO refresh_runs VALUES(?,?)', (request_key, cn_now().isoformat()))
-    from app.services.shared_runtime import publish_data_update
-    publish_data_update(data_dir, ['evening_report_tracking'])
     return {**result, 'evaluation_ready': warning is None, 'evaluation_warning': warning}

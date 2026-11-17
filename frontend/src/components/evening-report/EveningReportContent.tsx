@@ -1,11 +1,13 @@
-import { useState, type ReactNode } from 'react'
+import { useId, useState, type ReactNode } from 'react'
+import { createPortal } from 'react-dom'
 import type { EveningPath, EveningRecord, EveningReport, EveningPersonalRecord, MarketSentimentClassification } from '@/lib/api'
 import type { ColumnConfig } from '@/lib/list-columns'
 import { fmtPct, fmtPrice, fmtVolume, priceColorClass } from '@/lib/format'
 import { StockDataTable } from '@/components/stock-table/StockDataTable'
 import { useTableSort } from '@/components/stock-table/useTableSort'
 import { SentimentClassification } from '@/components/SentimentClassification'
-import { EveningFilters, emptyEveningFilters, matchesEveningFilters, roleLabels, boardLabels, dipLabels, eveningControl } from './EveningFilters'
+import { Modal } from '@/components/Modal'
+import { EveningFilters, emptyEveningFilters, matchesEveningFilters, roleLabels, boardLabels, dipLabel, eveningControl } from './EveningFilters'
 import { EveningObservationDetails, EveningPerformanceDetails } from './EveningObservationDetails'
 
 /** 只消费归档入选顺序；不从完整候选数据中补名额或重新排名。 */
@@ -131,23 +133,24 @@ function riskNotes(row: EveningRecord): string[] {
 }
 
 /** 浏览筛选和排序仅处理归档中的最终名单；个人状态由外层批量加载。 */
-export function EveningReportContent({ report, renderActions, reportNotes, onOpenStock, personalRecords = [], feedbackReady = false, renderFeedback }: {
+export function EveningReportContent({ report, renderActions, reportNotes, onOpenStock, personalRecords = [], renderFeedback }: {
   report: EveningReport
   reportNotes?: string[]
-  renderActions?: (row: EveningRecord, selected: EveningRecord[]) => ReactNode
+  renderActions?: (row: EveningRecord, selected: EveningRecord[], closeDetails: () => void) => ReactNode
   onOpenStock?: (row: EveningRecord, selected: EveningRecord[]) => void
   personalRecords?: EveningPersonalRecord[]
-  feedbackReady?: boolean
   renderFeedback?: (row: EveningRecord) => ReactNode
 }) {
   const selected = selectedReportStocks(report)
   const [filters, setFilters] = useState({ ...emptyEveningFilters })
   const [detail, setDetail] = useState<string | null>(null)
+  const detailTitleId = useId()
   const sort = useTableSort<EveningRecord>(sortValue)
   const feedback = new Map(personalRecords.map(record => [record.symbol, record]))
   const themes = [...new Map(selected.flatMap(row => { const theme = themeOf(row); return theme?.id ? [[theme.id, theme] as const] : [] })).values()]
   const visible = sort.sortRows(selected.filter(row => matchesEveningFilters(row, filters, feedback.get(row.symbol)?.feedback, themeOf(row)?.id)), columns)
-  const expanded = visible.find(row => row.symbol === detail)
+  const detailRow = selected.find(row => row.symbol === detail)
+  const closeDetails = () => setDetail(null)
   const emptyReasons = uniqueReasons(report.statistics.zero_selection_reasons)
   const sentiment = report.market.sentiment as { classification?: MarketSentimentClassification } | undefined
   const classification = sentiment?.classification ?? report.market.classification as MarketSentimentClassification | undefined
@@ -158,12 +161,12 @@ export function EveningReportContent({ report, renderActions, reportNotes, onOpe
     if (column.id === 'stock') return <td className={`${className} sticky left-0 z-[1] w-32 min-w-32 max-w-32 bg-surface sm:w-40 sm:min-w-40 sm:max-w-40`} data-report-stock={row.symbol}>
       <button className="block max-w-[104px] truncate text-left font-semibold text-foreground underline-offset-4 hover:text-accent hover:underline focus-visible:outline-accent sm:max-w-40" onClick={() => onOpenStock ? onOpenStock(row, visible) : setDetail(row.symbol)} aria-label={`${row.name}查看当前行情`}>{row.name}</button>
       <div className="mt-1 font-mono text-xs text-muted">{row.symbol}</div><div className="mt-1 text-[11px] text-secondary">{boardLabels[observation?.board ?? ''] ?? '交易板块旧版未记录'}</div>
-      {observation && <div className="mt-1 text-[11px] text-secondary sm:hidden">{roleLabels[observation.role ?? ''] ?? '角色待核验'} · {dipLabels[observation.dip.status] ?? '待核验'}</div>}
+      {observation && <div className="mt-1 text-[11px] text-secondary sm:hidden">{roleLabels[observation.role ?? ''] ?? '角色待核验'} · {dipLabel(observation.dip)}</div>}
     </td>
     if (column.id === 'theme') return <td className={`${className} min-w-36`}><div className="max-w-44 break-words font-medium">{themeOf(row)?.name ?? '题材未记录'}</div><div className="mt-1 text-xs text-secondary">{observation ? roleLabels[observation.role ?? ''] ?? '角色待核验' : '角色旧版未记录'}</div>{observation?.role_status === 'review_pending' && <span className="text-xs text-warning">跟踪待复核</span>}</td>
     if (column.id === 'feedback') return <td className={`${className} sticky right-0 z-[1] min-w-[156px] bg-surface shadow-[-1px_0_0_0_hsl(var(--border))]`}>{renderFeedback?.(row) ?? <span className="text-xs text-muted">个人记录未加载</span>}</td>
-    if (column.id === 'reason') return <td className={`${className} min-w-60 max-w-72`}><p className="text-xs leading-5">{observation?.reason ?? selectionReason(selectedPath(row))}</p><p className="mt-1 text-xs text-secondary">低吸：{observation ? dipLabels[observation.dip.status] ?? '待核验' : '旧版未记录'}</p><button className="mt-1 min-h-8 text-xs font-medium text-accent underline-offset-4 hover:underline" aria-expanded={detail === row.symbol} aria-controls="evening-stock-details" onClick={() => setDetail(detail === row.symbol ? null : row.symbol)}>{detail === row.symbol ? '收起详情' : '查看详情'}</button></td>
-    if (column.id === 'risk') { const notes = riskNotes(row); return <td className={`${className} min-w-56 max-w-72`}><p className="text-xs leading-5 text-warning">{notes.slice(0, 2).join('；') || '无新增价格风险提示'}</p>{notes.length > 2 && <button className="min-h-8 text-xs text-accent" onClick={() => setDetail(row.symbol)}>另有 {notes.length - 2} 项，查看详情</button>}</td> }
+    if (column.id === 'reason') return <td className={`${className} min-w-60 max-w-72`}><p className="text-xs leading-5">{observation?.reason ?? selectionReason(selectedPath(row))}</p><p className="mt-1 text-xs text-secondary">低吸：{observation ? dipLabel(observation.dip) : '旧版未记录'}</p><button className="mt-1 min-h-8 text-xs font-medium text-accent underline-offset-4 hover:underline" aria-haspopup="dialog" onClick={() => setDetail(row.symbol)}>查看详情</button></td>
+    if (column.id === 'risk') { const notes = riskNotes(row); return <td className={`${className} min-w-56 max-w-72`}><p className="text-xs leading-5 text-warning">{notes.slice(0, 2).join('；') || '无新增价格风险提示'}</p>{notes.length > 2 && <button className="min-h-8 text-xs text-accent" aria-haspopup="dialog" onClick={() => setDetail(row.symbol)}>另有 {notes.length - 2} 项，查看详情</button>}</td> }
     const value = sortValue(row, column)
     const percent = column.id === 'change_pct' || column.id.startsWith('return_')
     return <td className={`${className} whitespace-nowrap text-right font-mono text-xs ${percent ? priceColorClass(value) : 'text-foreground'}`} title={value === null ? (observation ? '必要数据缺失，不能补零' : '旧版未记录') : undefined}>{value === null ? '—' : percent ? fmtPct(value) : column.id === 'amount_day' ? fmtVolume(value) : column.id === 'raw_close' ? fmtPrice(value) : value.toFixed(0)}</td>
@@ -179,20 +182,26 @@ export function EveningReportContent({ report, renderActions, reportNotes, onOpe
       {(report.late_generation || report.recovery_note) && <p className="text-xs text-warning">{report.recovery_note ?? '迟到生成'} · 实际生成时间：{report.generated_at}</p>}
     </header>
     {classification ? <SentimentClassification data={classification} /> : <p className="text-xs text-muted">温度、承接质量与变化方向：旧版未记录。</p>}
-    <EveningFilters value={filters} onChange={setFilters} themes={themes} feedbackReady={feedbackReady} />
+    <EveningFilters value={filters} onChange={setFilters} themes={themes} />
     <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-secondary"><span role="status">当前显示 {visible.length} / 本报告 {selected.length} 只</span><button className={eveningControl} disabled={!sort.sort} onClick={sort.reset}>恢复原报告顺序</button></div>
     {selected.length === 0 ? <div className="rounded-lg border border-border bg-surface px-5 py-6">
       <p className="font-medium text-foreground">暂无符合条件的观察股票</p>
       <p className="mt-2 text-sm leading-6 text-secondary">{emptyReasons.length ? emptyReasons.join('；') : '本期观察名单为空，具体原因未记录。'}</p>
     </div> : visible.length === 0 ? <div className="rounded-lg border border-border bg-surface px-5 py-8 text-center"><p>没有符合当前筛选的股票</p><p className="mt-2 text-xs text-secondary">本报告仍有 {selected.length} 只观察股票，清除筛选可恢复显示。</p></div> : <StockDataTable columns={columns} rows={visible} renderCell={renderCell} sort={sort.sort} onSortToggle={sort.toggle} sortableColumnIds={sortableColumns} minWidth={1580} className="overflow-x-auto rounded-lg border border-border bg-surface [&_th:first-child]:sticky [&_th:first-child]:left-0 [&_th:first-child]:z-[2] [&_th:first-child]:bg-elevated [&_th:last-child]:sticky [&_th:last-child]:right-0 [&_th:last-child]:z-[2] [&_th:last-child]:bg-elevated" />}
-    {expanded && <article id="evening-stock-details" className="space-y-4 rounded-lg border border-border bg-surface p-4 sm:p-5" aria-label={`${expanded.name}观察详情`}>
-      <div className="flex flex-wrap items-center justify-between gap-3"><h3 className="font-semibold">{expanded.name} · {report.trade_date} 观察详情</h3><button className={eveningControl} onClick={() => setDetail(null)}>关闭详情</button></div>
-      <EveningObservationDetails observation={expanded.observation} />
-      {!!riskNotes(expanded).length && <div className="text-sm leading-6 text-warning"><p className="font-medium">风险与待核验</p><ul className="list-inside list-disc">{riskNotes(expanded).map(reason => <li key={reason}>{reason}</li>)}</ul></div>}
-      <p className="text-sm text-secondary">后续观察：{uniqueReasons(expanded.wait_conditions ?? []).join('；') || '继续观察后续正式数据，未出现的条件不能视为已完成。'}</p>
-      {feedback.get(expanded.symbol) && <EveningPerformanceDetails record={feedback.get(expanded.symbol)!} />}
-      {renderActions?.(expanded, visible)}
-    </article>}
+    {detailRow && createPortal(<Modal key={detailRow.symbol} onClose={closeDetails} labelledBy={detailTitleId}
+      panelClassName="flex max-h-[85dvh] w-[calc(100vw-2rem)] max-w-4xl flex-col overflow-hidden break-words rounded-xl border border-border bg-surface text-foreground shadow-xl">
+      <header className="flex shrink-0 items-start justify-between gap-4 border-b border-border p-4 sm:px-6 sm:py-5">
+        <div className="min-w-0"><h3 id={detailTitleId} className="text-base font-semibold text-foreground sm:text-lg">{detailRow.name} · 观察详情</h3><p className="mt-1 text-xs text-secondary">{detailRow.symbol} · 报告日期 {report.trade_date}</p></div>
+        <button className={`${eveningControl} shrink-0`} onClick={closeDetails}>关闭详情</button>
+      </header>
+      <div className="min-h-0 space-y-5 overflow-y-auto overscroll-contain p-4 sm:p-6">
+        <EveningObservationDetails observation={detailRow.observation} />
+        {!!riskNotes(detailRow).length && <div className="text-sm leading-6 text-warning"><p className="font-medium">风险与待核验</p><ul className="list-inside list-disc">{riskNotes(detailRow).map(reason => <li key={reason}>{reason}</li>)}</ul></div>}
+        <p className="text-sm text-secondary">后续观察：{uniqueReasons(detailRow.wait_conditions ?? []).join('；') || '继续观察后续正式数据，未出现的条件不能视为已完成。'}</p>
+        {feedback.get(detailRow.symbol) && <EveningPerformanceDetails record={feedback.get(detailRow.symbol)!} />}
+      </div>
+      {renderActions && <footer className="shrink-0 border-t border-border p-4 sm:px-6">{renderActions(detailRow, visible, closeDetails)}</footer>}
+    </Modal>, document.body)}
     {(reportNotes ?? report.limitations ?? []).length > 0 && <p className="text-xs leading-5 text-secondary">报告说明：{uniqueReasons(reportNotes ?? report.limitations ?? []).join('；')}</p>}
     <p className="text-xs leading-5 text-muted">名单用于跟踪后续变化，不代表盈利预期或买点，不构成交易指令；未核验隔夜新闻公告。行情窗口展示当前行情，报告中的数据固定于所选日期。</p>
   </section>

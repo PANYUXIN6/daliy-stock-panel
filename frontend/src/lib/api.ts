@@ -2895,7 +2895,7 @@ export interface EveningRecord {
   observation?: EveningObservation
 }
 export type EveningRole = 'true_leader' | 'fallback_leader' | 'emotion' | 'other'
-export type EveningDipStatus = 'confirmed' | 'cautious' | 'not_met' | 'pending' | 'environment_only'
+export type EveningDipStatus = 'full' | 'partial' | 'none'
 export interface EveningObservation {
   role: EveningRole | null
   role_status: 'qualified' | 'review_pending'
@@ -3055,16 +3055,11 @@ export interface EveningReportStatus {
   last_attempt_at?: string | null
   missing_dependencies?: string[]
 }
-export interface EveningReportDates {
-  dates: { date: string; status: string; versions: { version: string; kind: string; generated_at: string; branch_id?: string | null }[] }[]
-}
-
 export const api = {
   eveningPersonal: (date: string, version: string, signal?: AbortSignal) => request<EveningPersonal>(`/api/evening-report/personal?${new URLSearchParams({ date, version })}`, { signal, quiet: true }),
   eveningFeedback: (body: EveningFeedbackRequest) => request<EveningFeedback & { episode_id: string }>('/api/evening-report/feedback', { method: 'PUT', body: JSON.stringify(body), quiet: true }),
   eveningHistory: (month: string, signal?: AbortSignal) => request<EveningPersonalHistory>(`/api/evening-report/history?${new URLSearchParams({ month })}`, { signal, quiet: true }),
   eveningFeedbackOverview: (signal?: AbortSignal) => request<EveningFeedbackOverview>('/api/evening-report/overview', { signal, quiet: true }),
-  eveningReportDates: (signal?: AbortSignal) => request<EveningReportDates>('/api/evening-report/dates?mode=live', { signal, quiet: true }),
   eveningReport: (date: string, version = '', signal?: AbortSignal) => request<EveningReport | EveningReportStatus>(`/api/evening-report?${new URLSearchParams({ date, mode: 'live', ...(version ? { version } : {}) })}`, { signal, quiet: true }),
   // 未指定日期时返回本地日历中截至北京时间今日的最近交易日状态。
   eveningReportStatus: (date = '', signal?: AbortSignal) => request<EveningReportStatus>(`/api/evening-report/status${date ? `?date=${encodeURIComponent(date)}` : ''}`, { signal, quiet: true }),

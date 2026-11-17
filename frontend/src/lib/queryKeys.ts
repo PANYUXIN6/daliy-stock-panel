@@ -9,7 +9,6 @@
 
 export const QK = {
   eveningReportRoot: ['evening-report'] as const,
-  eveningReportDates: (mode = 'live') => ['evening-report', 'dates', mode] as const,
   eveningReport: (date: string, version = '', mode = 'live') => ['evening-report', 'report', mode, date, version] as const,
   eveningReportStatus: (date = '') => ['evening-report', 'status', date] as const,
   eveningPersonalRoot: (userId: string) => ['evening-personal', userId] as const,

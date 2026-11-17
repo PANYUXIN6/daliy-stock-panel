@@ -122,6 +122,9 @@ def test_nested_inner_breakout_leaves_outer_structure_active():
                           and box["lower"] == pytest.approx(102.8))
     assert outer(before_breakout)["status"] == previous_small["status"] == "confirmed"
     assert previous_small["parent_id"] == outer(before_breakout)["id"]
+    assert previous_small["activity"]["state"] == "active"
+    assert outer(before_breakout)["activity"]["state"] == "weakening"
+    assert outer(before_breakout)["activity"]["last_roundtrip_confirmed_date"] == day(15)
     boxes = compute_box_oscillation(frame)
     large = outer(boxes)
     small = next(box for box in boxes if box["upper"] == pytest.approx(107.2)
@@ -175,6 +178,8 @@ def test_wick_alone_does_not_break_and_long_box_does_not_expire_at_120():
     assert box["level"] == "long"
     assert box["duration_bars"] == 149
     assert box["breakout"]["status"] == "none"
+    assert box["activity"]["state"] == "historical"
+    assert box["active_segments"][0]["end_date"] < day(60)
 
 
 @pytest.mark.parametrize("period,confirmation,minimum,medium,long", [
@@ -215,13 +220,52 @@ def test_candidate_medians_accept_price_regions_then_freeze_without_repainting()
                      if box['id'] == candidate['id'])
     assert confirmed['confirmed_date'] == day(15)
     assert confirmed['lower'] == pytest.approx((99.8 + 101.5) / 2)
-    frozen = ('lower', 'upper', 'lower_zone', 'upper_zone', 'confirmed_date')
+    frozen = ('lower', 'upper', 'lower_zone', 'upper_zone', 'confirmed_date', 'thresholds')
     for length in range(16, frame.height + 1):
         box = next(box for box in compute_box_oscillation(frame.head(length))
                    if box['id'] == confirmed['id'])
         assert {key: box[key] for key in frozen} == {key: confirmed[key] for key in frozen}
-    assert confirmed['lower_zone'] == pytest.approx([97.72, 101.88])
-    assert confirmed['upper_zone'] == pytest.approx([108.12, 112.28])
+    # 确认前14根的递推ATR为1.9549051144，小于箱高20%的2.08，接纳带因此收紧。
+    assert confirmed['thresholds']['atr_date'] == day(14)
+    assert confirmed['thresholds']['atr'] == pytest.approx(1.9549051144)
+    assert confirmed['lower_zone'] == pytest.approx([97.8450948856, 101.7549051144])
+    assert confirmed['upper_zone'] == pytest.approx([108.2450948856, 112.1549051144])
+
+
+def test_confirmation_revalidates_old_touches_against_final_atr_regions():
+    frame = wave([(0, 105), (2, 110), (6, 100), (10, 112), (14, 102),
+                  (18, 110), (22, 100), (26, 110), (30, 100), (34, 105)])
+    candidate = next(box for box in compute_box_oscillation(frame.head(16)) if box['start_date'] == day(2))
+    # 种子预热不足的2.08容差接纳了偏移2元的触点，最终ATR不足2元，不能直接确认。
+    assert len(candidate['upper_touches']) == len(candidate['lower_touches']) == 2
+    assert candidate['status'] == 'candidate'
+    later = next(box for box in compute_box_oscillation(frame) if box['id'] == candidate['id'])
+    assert later['confirmed_date'] > day(15)
+    for side in ('upper', 'lower'):
+        lower, upper = later[f'{side}_zone']
+        assert all(lower <= touch['price'] <= upper for touch in later[f'{side}_touches'])
+
+
+def test_atr_excludes_confirmation_bar_and_stays_frozen_through_breakout():
+    frame = established()
+    normal = outer(compute_box_oscillation(frame.head(16)))
+    spike = frame.with_columns(pl.when(pl.col('date') == date.fromisoformat(day(15)))
+                               .then(500.).otherwise(pl.col('high')).alias('high'))
+    after_spike = outer(compute_box_oscillation(spike))
+    assert after_spike['thresholds'] == normal['thresholds']
+    tail = prices([114., 115.]).with_columns(pl.col('date') + pl.duration(days=frame.height))
+    broken = outer(compute_box_oscillation(pl.concat([spike, tail])))
+    assert broken['status'] == 'broken'
+    assert broken['thresholds'] == normal['thresholds']
+    assert normal['thresholds']['release_distance'] > normal['thresholds']['touch_tolerance']
+
+
+def test_atr_warmup_requires_14_prior_completed_bars_even_when_ewm_has_value():
+    early = outer(compute_box_oscillation(prices([105, 110, 100, 110, 100, 105, 105, 105, 105])))
+    assert early['confirmed_date'] == day(8)
+    assert early['thresholds']['atr'] is None
+    assert early['thresholds']['fallback_reason'] == 'atr_warmup_insufficient'
+    assert early['thresholds']['touch_tolerance'] == pytest.approx(2.08)
 
 
 def test_single_recovered_wick_can_seed_range_but_repeated_excursions_cannot():
@@ -313,8 +357,9 @@ def test_jumping_to_opposite_side_does_not_report_a_close_inside_box():
 def test_historical_revisits_rearm_after_leaving_each_zone_inside_box(direction):
     frame = established()
     # 回箱后离开上下沿区域；贴边期间即使收盘离开，影线仍相交也不能重复计数。
-    tail = prices([114., 115., 109., 105., 109., 108., 109.,
-                   105., 101., 102., 101., 105., 109.]).with_columns(
+    # 108.7/101.3的影线仍贴着新的ATR接纳带，不能凭收盘位置重复计数。
+    tail = prices([114., 115., 109., 105., 109., 108.7, 109.,
+                   105., 101., 101.3, 101., 105., 109.]).with_columns(
         pl.col('date') + pl.duration(days=frame.height),
     )
     full = pl.concat([frame, tail])

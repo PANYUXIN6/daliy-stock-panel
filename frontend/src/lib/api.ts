@@ -367,6 +367,28 @@ export interface PriceGapsResponse {
 
 export type KlinePeriod = 'daily' | 'weekly' | 'monthly'
 
+export interface BoxActivity {
+  state: 'active' | 'weakening' | 'historical'
+  state_change_date: string
+  as_of: string
+  upper_age_bars: number | null
+  lower_age_bars: number | null
+  roundtrip_age_bars: number | null
+  last_roundtrip_confirmed_date: string | null
+  reasons: string[]
+}
+
+export interface BoxActiveSegment {
+  id: string
+  start_date: string
+  /** 最后一根可填充K；null仅表示该段在识别截止时仍开放。 */
+  end_date: string | null
+  start_reason: 'first_active' | 'reactivated' | 'returned'
+  end_reason: 'activity_downgraded' | 'breakout_pending' | 'breakout' | 'data_interrupted' | null
+  end_event_date: string | null
+  duration_bars?: number
+}
+
 export interface BoxOscillation {
   id: string
   period: KlinePeriod
@@ -384,6 +406,17 @@ export interface BoxOscillation {
   observed_until: string
   confirmed_date: string | null
   duration_bars: number
+  /** 缺字段的旧响应不能据此推断当前活跃。候选为null。 */
+  activity?: BoxActivity | null
+  active_segments?: BoxActiveSegment[]
+  thresholds?: {
+    atr: number | null
+    atr_date: string | null
+    fallback_reason: 'atr_warmup_insufficient' | null
+    touch_tolerance: number
+    release_distance: number
+    breakout_margin: number
+  }
   status: 'candidate' | 'confirmed' | 'broken' | 'invalidated'
   upper_touches: { date: string; price: number; confirmed_date: string | null }[]
   lower_touches: { date: string; price: number; confirmed_date: string | null }[]
@@ -425,6 +458,11 @@ export interface BoxOscillationResponse {
     min_width_retention_ratio?: number
     breakout_margin_ratio: number
     breakout_closes: number
+    activity_short_bars?: number
+    activity_long_bars?: number
+    touch_atr_cap?: number
+    release_atr_cap?: number
+    breakout_atr_cap?: number
   }
 }
 

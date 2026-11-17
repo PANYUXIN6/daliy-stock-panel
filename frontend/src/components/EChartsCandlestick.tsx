@@ -495,10 +495,11 @@ function markerTooltip(description?: string) {
 }
 
 function buildBoxOscillationSeries(boxes: BoxOscillation[] | undefined, dates: string[], dateIndexMap: Map<string, number>) {
-  if (!boxes?.length || !dates.length) return undefined
+  if (!boxes?.length || !dates.length) return []
   const areas: any[] = []
   const lines: any[] = []
   const points: any[] = []
+  const references: any[] = []
   const periodLabels = { daily: '日 K', weekly: '周 K', monthly: '月 K' }
   const levelLabels = { short: '小箱体', medium: '中箱体', long: '大箱体' }
   const statusLabels = { candidate: '形成中', confirmed: '已形成', broken: '已突破', invalidated: '已失效' }
@@ -510,10 +511,7 @@ function buildBoxOscillationSeries(boxes: BoxOscillation[] | undefined, dates: s
 
   for (const box of boxes) {
     if (box.upper <= box.lower || box.start_date > dates[dates.length - 1]) continue
-    if (box.end_date < dates[0] && box.status !== 'broken') continue
-    const startIndex = dates.findIndex(date => date >= box.start_date)
-    let endIndex = dates.length - 1
-    while (endIndex >= 0 && dates[endIndex] > box.end_date) endIndex -= 1
+    if (box.observed_until < dates[0]) continue
 
     const color = box.status === 'invalidated' ? CT().text : colors[box.level]
     const precision = box.lower.toFixed(2) === box.upper.toFixed(2) ? 4 : 2
@@ -523,7 +521,7 @@ function buildBoxOscillationSeries(boxes: BoxOscillation[] | undefined, dates: s
       `状态：${statusLabels[box.status]}`,
       `上下沿：${box.lower.toFixed(precision)}–${box.upper.toFixed(precision)}`,
       `宽度：${box.width.toFixed(precision)}（${box.width_pct.toFixed(2)}%）`,
-      `持续：${box.duration_bars} 根${periodLabels[box.period]}`,
+      `结构跨度：${box.duration_bars} 根${periodLabels[box.period]}，不代表连续活跃`,
       `独立试探：上沿 ${box.upper_touches.length} 次 / 下沿 ${box.lower_touches.length} 次`,
       `结构起点：${box.start_date}`,
       `首次确认：${box.confirmed_date ?? '尚未确认'}`,
@@ -536,9 +534,9 @@ function buildBoxOscillationSeries(boxes: BoxOscillation[] | undefined, dates: s
       ...(box.parent_id ? ['嵌套：此箱体位于另一箱体内部，突破状态单独判断。'] : []),
     ].join('\n')
 
-    const addSegment = (start: string, end: string, forming: boolean) => {
-      const lineStyle = { color, type: forming ? 'dashed' : 'solid', width: forming ? 1 : 1.5, opacity: 0.9 }
-      const tooltip = markerTooltip(`${description}\n${forming ? '该区间为形成过程，当时尚未确认。' : '该区间已确认形成箱体。'}`)
+    const addSegment = (start: string, end: string) => {
+      const lineStyle = { color, type: 'solid', width: 1.5, opacity: 0.9 }
+      const tooltip = markerTooltip(`${description}\n活跃区段：${start}–${end}；只填充当时有近期往返证据的区间。`)
       areas.push([
         {
           name: title, xAxis: start, yAxis: box.lower,
@@ -555,30 +553,28 @@ function buildBoxOscillationSeries(boxes: BoxOscillation[] | undefined, dates: s
       }
     }
 
-    // 历史形成过程保留虚线；首次确认日才开始画实线，不能把已形成状态回填到起点。
-    const confirmedIndex = box.status !== 'candidate' && box.confirmed_date
-      ? dates.findIndex(date => date >= box.confirmed_date!)
-      : -1
-    if (startIndex >= 0 && endIndex >= startIndex) {
-      if (confirmedIndex < 0 || confirmedIndex > endIndex) {
-        addSegment(dates[startIndex], dates[endIndex], true)
-      } else {
-        if (confirmedIndex > startIndex) addSegment(dates[startIndex], dates[confirmedIndex], true)
-        addSegment(dates[Math.max(startIndex, confirmedIndex)], dates[endIndex], false)
-      }
+    // 旧响应缺少区段时只显示参考，不把结构成立自动解释成全程活跃。
+    for (const segment of box.active_segments ?? []) {
+      const until = segment.end_date ?? box.activity?.as_of ?? box.observed_until
+      const start = dates.find(date => date >= segment.start_date)
+      const end = [...dates].reverse().find(date => date <= until)
+      if (start && end && start <= end) addSegment(start, end)
     }
 
-    if (box.status === 'broken' && box.breakout.confirmed_date) {
-      const historyStart = dates.find(date => date >= box.breakout.confirmed_date!)
+    if (box.status !== 'confirmed' || box.activity?.state !== 'active' || box.breakout.status === 'pending') {
+      const historyStart = dates.find(date => date >= box.start_date)
       const historyEnd = [...dates].reverse().find(date => date <= box.observed_until)
       if (historyStart && historyEnd && historyStart <= historyEnd) {
-        for (const value of [box.lower, box.upper]) {
-          lines.push([
-            { xAxis: historyStart, yAxis: value },
-            { xAxis: historyEnd, yAxis: value,
-              lineStyle: { color, type: 'dotted', width: 1, opacity: 0.5 }, label: { show: false },
-              tooltip: markerTooltip(`${title} · 历史边界参考\n${description}\n震荡已经结束，虚线不表示箱体仍在延续。`) },
-          ])
+        for (const [side, value] of [['下沿', box.lower], ['上沿', box.upper]] as const) {
+          // markLine要求两个端点同时在dataZoom内，会丢失从窗口外延伸的历史边界。
+          // 使用有日期的普通线段，随可见K一起裁剪，保持参考线可见。
+          references.push({
+            id: `box-reference:${box.id}:${side}`, name: `箱体历史${side}`, type: 'line',
+            data: dates.map(date => date >= historyStart && date <= historyEnd ? value : null),
+            symbol: 'none', connectNulls: false, animation: false, xAxisIndex: 0, yAxisIndex: 0,
+            lineStyle: { color, type: 'dotted', width: 1, opacity: 0.5 },
+            tooltip: markerTooltip(`${title} · ${box.status === 'candidate' ? '形成中候选' : '历史边界参考'}\n${description}\n虚线不表示箱体仍在延续；历史区间，非当前震荡。`),
+          })
         }
       }
     }
@@ -630,14 +626,14 @@ function buildBoxOscillationSeries(boxes: BoxOscillation[] | undefined, dates: s
     }
   }
 
-  if (!areas.length && !lines.length && !points.length) return undefined
-  return {
+  if (!areas.length && !lines.length && !points.length && !references.length) return []
+  return [{
     id: 'box-oscillation-overlay', name: '箱体区域', type: 'line', data: [], symbol: 'none', animation: false,
     xAxisIndex: 0, yAxisIndex: 0,
     markArea: { silent: false, data: areas, animation: false },
     markLine: { silent: false, symbol: 'none', data: lines, animation: false },
     markPoint: { data: points, animation: false, labelLayout: { hideOverlap: true } },
-  }
+  }, ...references]
 }
 
 function buildOption(
@@ -738,8 +734,8 @@ function buildOption(
   const series: any[] = []
   const xAxisIndices: number[] = []
 
-  const priceLineValues = (priceLines ?? [])
-    .map(line => line.value)
+  // 只有实际展示的箱体参与缩放；历史参考未开启时不会压缩当前价格视图。
+  const priceLineValues = [...(priceLines ?? []).map(line => line.value), ...(boxes ?? []).flatMap(box => [box.lower, box.upper])]
     .filter(value => Number.isFinite(value) && value > 0)
   const axisMin = priceLineValues.length > 0
     ? ({ min, max }: { min: number; max: number }) => {
@@ -888,8 +884,7 @@ function buildOption(
     markArea: { silent: false, data: gapAreas, animation: false },
   })
 
-  const boxSeries = buildBoxOscillationSeries(boxes, dates, dateIndexMap)
-  if (boxSeries) series.push(boxSeries)
+  series.push(...buildBoxOscillationSeries(boxes, dates, dateIndexMap))
 
   if (hasMA) {
     const maLine = (key: keyof OHLC, color: string, name: string) => ({

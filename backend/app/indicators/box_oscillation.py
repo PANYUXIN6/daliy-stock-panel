@@ -12,6 +12,9 @@ from typing import Literal
 
 import polars as pl
 
+from app.indicators.box_activity import attach_box_activity
+from app.indicators.pipeline import compute_indicators
+
 Period = Literal["daily", "weekly", "monthly"]
 Side = Literal["upper", "lower"]
 Direction = Literal["up", "down"]
@@ -31,12 +34,17 @@ class PeriodConfig:
     min_width_retention_ratio: float = 0.70
     breakout_margin_ratio: float = 0.15
     breakout_closes: int = 2
+    activity_short_bars: int = 20
+    activity_long_bars: int = 60
+    touch_atr_cap: float = 1.0
+    release_atr_cap: float = 1.25
+    breakout_atr_cap: float = 0.75
 
 
 PERIOD_CONFIG: dict[Period, PeriodConfig] = {
     "daily": PeriodConfig(2, 2, 8, 30, 60, fine_pivot_window=1),
-    "weekly": PeriodConfig(1, 1, 8, 13, 26),
-    "monthly": PeriodConfig(1, 1, 6, 12, 24),
+    "weekly": PeriodConfig(1, 1, 8, 13, 26, activity_short_bars=12, activity_long_bars=26),
+    "monthly": PeriodConfig(1, 1, 6, 12, 24, activity_short_bars=8, activity_long_bars=18),
 }
 
 # 每个新拐点与最近这些相反侧拐点构造种子；不限制已存在箱体的持续长度。
@@ -107,6 +115,8 @@ class _Box:
     previous_box_id: str | None = None
     previous_close_side: Side | None = None
     revisit_armed: set[Side] = field(default_factory=set)
+    atr: float | None = None
+    atr_index: int | None = None
 
     anchor_lower: float = field(init=False)
     anchor_upper: float = field(init=False)
@@ -122,6 +132,21 @@ class _Box:
     @property
     def width(self) -> float:
         return self.upper - self.lower
+
+
+def _distance(width: float, ratio: float, atr: float | None, cap: float) -> float:
+    proportional = width * ratio
+    return proportional if atr is None else min(proportional, atr * cap)
+
+
+def _tolerance(box: _Box, config: PeriodConfig) -> float:
+    return _distance(box.anchor_width, config.touch_tolerance_ratio, box.atr, config.touch_atr_cap)
+
+
+def _set_atr(box: _Box, index: int, atrs: list[float]) -> None:
+    # 不使用当根波动；至少有14根先前的同周期完成K，不能用EWM提前返回的值冒充预热完成。
+    box.atr_index = index - 1 if index >= 14 else None
+    box.atr = atrs[index - 1] if box.atr_index is not None else None
 
 
 def _pivots_at(
@@ -159,7 +184,7 @@ def _touch(
 ) -> None:
     if pivot.index < box.start_index or pivot.index <= box.last_touch_index:
         return
-    tolerance = box.anchor_width * config.touch_tolerance_ratio
+    tolerance = _tolerance(box, config)
     boundary = box.anchor_upper if pivot.side == "upper" else box.anchor_lower
     if abs(pivot.price - boundary) > tolerance + 1e-12:
         return
@@ -169,7 +194,7 @@ def _touch(
         if start > end:
             return
         # 离开距离独立于触碰容差；扩大接纳区域不会反过来收紧独立访问。
-        release = box.anchor_width * config.release_distance_ratio
+        release = _distance(box.anchor_width, config.release_distance_ratio, box.atr, config.release_atr_cap)
         left_boundary = (
             high_ranges.minimum(start, end) <= box.anchor_upper - release
             if pivot.side == "upper"
@@ -196,7 +221,7 @@ def _outside(box: _Box, close: float, config: PeriodConfig) -> Direction | None:
     # 候选尚未冻结代表价，历史失效按固定锚点判断；确认后只用冻结代表价。
     lower, upper = ((box.anchor_lower, box.anchor_upper) if box.confirmed_index is None
                     else (box.lower, box.upper))
-    margin = (upper - lower) * config.breakout_margin_ratio
+    margin = _distance(upper - lower, config.breakout_margin_ratio, box.atr, config.breakout_atr_cap)
     if close > upper + margin:
         return "up"
     if close < lower - margin:
@@ -245,7 +270,7 @@ def _advance_history(box: _Box, index: int, high: float, low: float, close: floa
     """只记录结束后的回访，不延长原框、累加原触点或改变突破结论。"""
     position = _position(box, close)
     side: Side | None = "upper" if position == "up" else "lower" if position == "down" else None
-    tolerance = box.anchor_width * config.touch_tolerance_ratio
+    tolerance = _tolerance(box, config)
     entered = record and side is None and box.previous_close_side is not None
     if entered:
         box.revisits.append(("entered", index, box.previous_close_side))
@@ -268,13 +293,27 @@ def _retains_range(box: _Box, config: PeriodConfig) -> bool:
             or upper[-1] - lower[-1] >= box.anchor_width * config.min_width_retention_ratio)
 
 
-def _confirm(box: _Box, index: int, config: PeriodConfig, closes: list[float]) -> None:
+def _confirm(box: _Box, index: int, config: PeriodConfig, closes: list[float],
+             atrs: list[float], history: list[_Pivot],
+             high_ranges: _RangePrices, low_ranges: _RangePrices) -> None:
     if box.status != "candidate" or index - box.start_index + 1 < config.min_bars:
         return
     if box.alternating < 4 or len(box.upper_touches) < 2 or len(box.lower_touches) < 2:
         return
     if not _retains_range(box, config):
         return
+    # 候选区域可以调整，已确认区域不能漂移。采用确认日前ATR复核全部形成证据，
+    # 避免缩小区域后仍保留已不被接纳的旧触点。失败时不修改候选的固定种子口径。
+    probe = _Box(box.id, box.start_index, box.anchor_lower, box.anchor_upper)
+    _set_atr(probe, index, atrs)
+    for pivot in history:
+        _touch(probe, pivot, config, high_ranges, low_ranges)
+    if (probe.alternating < 4 or len(probe.upper_touches) < 2 or len(probe.lower_touches) < 2
+            or not _retains_range(probe, config)):
+        return
+    for attribute in ("lower", "upper", "upper_touches", "lower_touches", "alternating",
+                      "last_side", "last_touch_index", "atr", "atr_index"):
+        setattr(box, attribute, getattr(probe, attribute))
     box.status = "confirmed"
     box.confirmed_index = index
     # 从此时起冻结代表边界，并用当时已知收盘重新核对连续越界。
@@ -317,6 +356,7 @@ def _seed(
     period: Period,
     high_ranges: _RangePrices,
     low_ranges: _RangePrices,
+    atrs: list[float],
 ) -> _Box | None:
     upper = first.price if first.side == "upper" else last.price
     lower = first.price if first.side == "lower" else last.price
@@ -326,9 +366,11 @@ def _seed(
     upper_pivot, lower_pivot = (first, last) if first.side == "upper" else (last, first)
     box = _Box(f"{period}:{dates[upper_pivot.index]}:{dates[lower_pivot.index]}",
                first.index, lower, upper)
+    # 从种子首触点前取值，历史合法性检查不会用后来的波动抬高门槛。
+    _set_atr(box, first.index, atrs)
     # 新种子不能跨越一个按其固定边界已确认的历史突破再复活旧结构。
     wick_excursions = 0
-    tolerance = box.anchor_width * config.touch_tolerance_ratio
+    tolerance = _tolerance(box, config)
     for prior in range(first.index, index + 1):
         outside_wick = (high_ranges.maximum(prior, prior) > upper + tolerance
                         or low_ranges.minimum(prior, prior) < lower - tolerance)
@@ -377,10 +419,18 @@ def _serialize(box: _Box, dates: list[str], config: PeriodConfig, period: Period
         "level": "long" if duration >= config.long_bars else "medium"
         if duration >= config.medium_bars else "short",
         "lower": box.lower, "upper": box.upper, "width": box.width,
-        "lower_zone": [max(0.0, box.anchor_lower - box.anchor_width * config.touch_tolerance_ratio),
-                       box.anchor_lower + box.anchor_width * config.touch_tolerance_ratio],
-        "upper_zone": [box.anchor_upper - box.anchor_width * config.touch_tolerance_ratio,
-                       box.anchor_upper + box.anchor_width * config.touch_tolerance_ratio],
+        "lower_zone": [max(0.0, box.anchor_lower - _tolerance(box, config)),
+                       box.anchor_lower + _tolerance(box, config)],
+        "upper_zone": [box.anchor_upper - _tolerance(box, config),
+                       box.anchor_upper + _tolerance(box, config)],
+        "thresholds": {
+            "atr": box.atr, "atr_date": dates[box.atr_index] if box.atr_index is not None else None,
+            "fallback_reason": "atr_warmup_insufficient" if box.atr is None else None,
+            "touch_tolerance": _tolerance(box, config),
+            "release_distance": _distance(box.anchor_width, config.release_distance_ratio, box.atr, config.release_atr_cap),
+            "breakout_margin": _distance(box.width if box.confirmed_index is not None else box.anchor_width,
+                                         config.breakout_margin_ratio, box.atr, config.breakout_atr_cap),
+        },
         "width_pct": box.width / box.lower * 100,
         "start_date": dates[box.start_index], "end_date": dates[end],
         "observed_until": dates[-1],
@@ -426,6 +476,9 @@ def compute_box_oscillation(bars: pl.DataFrame, period: Period = "daily") -> lis
            for prices in zip(opens, highs, lows, closes, strict=True)):
         raise ValueError("箱体识别需要有效的正数OHLC")
     config = PERIOD_CONFIG[period]
+    # 重用流水线的ATR定义；每段已完成K单独计算，不跨数据中断或周期借用日线指标。
+    atr_frame = frame.with_columns(pl.lit("box").alias("symbol"))
+    atrs = compute_indicators(atr_frame, needed={"atr_14"}, assume_sorted=True)["atr_14"].to_list()
     high_ranges, low_ranges = _RangePrices(highs), _RangePrices(lows)
     history: list[_Pivot] = []
     active: list[_Box] = []
@@ -458,13 +511,13 @@ def compute_box_oscillation(bars: pl.DataFrame, period: Period = "daily") -> lis
             history.sort(key=lambda item: item.index)
             for first in opposite:
                 box = _seed(first, pivot, index, history, active, dates, closes, config,
-                            period, high_ranges, low_ranges)
+                            period, high_ranges, low_ranges, atrs)
                 if box is not None:
                     active.append(box)
         retained = []
         for box in active:
             was_candidate = box.status == "candidate"
-            _confirm(box, index, config, closes)
+            _confirm(box, index, config, closes, atrs, history, high_ranges, low_ranges)
             if was_candidate and box.status == "confirmed":
                 previous = [other for other in [*completed, *active]
                             if other.status == "broken"
@@ -502,11 +555,13 @@ def compute_box_oscillation(bars: pl.DataFrame, period: Period = "daily") -> lis
                         and item.index < pivot.index][-_OPPOSITE_SEEDS:]
             for first in opposite:
                 box = _seed(first, pivot, len(dates) - 1, history, active, dates, closes,
-                            config, period, high_ranges, low_ranges)
+                            config, period, high_ranges, low_ranges, atrs)
                 if box is not None:
                     active.append(box)
 
     result = [_serialize(box, dates, config, period) for box in [*completed, *active]]
+    for box in result:
+        attach_box_activity(box, dates, closes, short=config.activity_short_bars, long=config.activity_long_bars)
     for child in result:
         parents = [parent for parent in result
                    if parent["confirmed_date"] is not None

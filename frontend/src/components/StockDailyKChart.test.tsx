@@ -23,6 +23,11 @@ let host: HTMLDivElement
 let root: ReturnType<typeof createRoot>
 let client: QueryClient
 const range = { start: '2026-01-01', end: '2026-01-31' }
+const activeEvidence = {
+  activity: { state: 'active', state_change_date: '2026-01-22', as_of: range.end,
+    upper_age_bars: 3, lower_age_bars: 5, roundtrip_age_bars: 3, last_roundtrip_confirmed_date: '2026-01-28', reasons: [] },
+  active_segments: [{ id: 'segment', start_date: '2026-01-22', end_date: null, start_reason: 'first_active', end_reason: null, end_event_date: null }],
+}
 const response = (symbol: string, value: number | null) => ({ symbol, rows: [{
   date: '2026-01-05', open: 10, high: 12, low: 9, close: 11, bull_bear_line: value,
 }] })
@@ -223,7 +228,7 @@ it('日周月独立读取，保留历史截止且不把日线标记、缺口和�
 
 it('收盘同时在多个已形成箱体内时只画较窄的箱体，详情选择独立于图层筛选', async () => {
   mocks.daily.mockResolvedValue(response('600000.SH', 10.25))
-  const base = { period: 'daily', lower: 10, upper: 12, width: 2, width_pct: 20, start_date: '2026-01-01', end_date: '2026-01-31',
+  const base = { ...activeEvidence, period: 'daily', lower: 10, upper: 12, width: 2, width_pct: 20, start_date: '2026-01-01', end_date: '2026-01-31',
     observed_until: '2026-01-31', confirmed_date: '2026-01-22', duration_bars: 22, status: 'confirmed',
     upper_touches: [{ date: '2026-01-05', price: 12, confirmed_date: '2026-01-07' }],
     lower_touches: [{ date: '2026-01-09', price: 10, confirmed_date: null }], missing_conditions: [], parent_id: null,
@@ -237,7 +242,7 @@ it('收盘同时在多个已形成箱体内时只画较窄的箱体，详情选�
   expect([...host.querySelectorAll('button')].find(button => button.textContent === '箱体')?.getAttribute('aria-pressed')).toBe('true')
   expect(mocks.boxes).toHaveBeenCalledWith('600000.SH', 'daily', range)
   expect(host.querySelector('[data-boxes]')?.textContent).toBe('small')
-  expect(host.textContent).toContain('最近箱体 · 小箱体')
+  expect(host.textContent).toContain('活跃箱体 · 小箱体')
   await clickPill('箱体详情（2）')
   expect(host.textContent).toContain('宽度 20.00%')
   expect(host.textContent).toContain('首次确认 2026-01-22')
@@ -257,7 +262,7 @@ it('收盘同时在多个已形成箱体内时只画较窄的箱体，详情选�
   const status = host.querySelector<HTMLSelectElement>('[aria-label="箱体状态"]')!
   await act(async () => { status.value = 'candidate'; status.dispatchEvent(new Event('change', { bubbles: true })) })
   expect(host.querySelector('[data-boxes]')?.textContent).toBe('')
-  expect(host.textContent).toContain('当前范围与筛选条件下没有箱体')
+  expect(host.textContent).toContain('暂无活跃箱体')
   await act(async () => { status.value = 'all'; status.dispatchEvent(new Event('change', { bubbles: true })) })
   expect(host.querySelector('[data-boxes]')?.textContent).toBe('large')
   await clickPill('箱体')
@@ -265,7 +270,7 @@ it('收盘同时在多个已形成箱体内时只画较窄的箱体，详情选�
   expect(host.querySelector('[aria-label="箱体大小"]')).toBeNull()
 })
 
-it('历史箱体可按状态回看，主图只展示离完成收盘最近的历史参考', async () => {
+it('历史参考默认关闭，开启后主图跟随所选历史结构', async () => {
   mocks.daily.mockResolvedValue(response('600000.SH', 30))
   const historical = { period: 'daily', level: 'short', lower: 8, upper: 12, width: 4, width_pct: 50,
     start_date: '2025-04-01', end_date: '2025-04-20', observed_until: range.end, confirmed_date: '2025-04-10',
@@ -281,6 +286,8 @@ it('历史箱体可按状态回看，主图只展示离完成收盘最近的历�
   expect(host.querySelector('[data-boxes]')?.textContent).toBe('')
   const status = host.querySelector<HTMLSelectElement>('[aria-label="箱体状态"]')!
   await act(async () => { status.value = 'broken'; status.dispatchEvent(new Event('change', { bubbles: true })) })
+  expect(host.querySelector('[data-boxes]')?.textContent).toBe('')
+  await clickPill('历史参考')
   expect(host.querySelector('[data-boxes]')?.textContent).toBe('near')
   await clickPill('箱体详情（2）')
   expect(host.textContent).toContain('2026-01-30 从上方再次进入原区间')
@@ -288,20 +295,20 @@ it('历史箱体可按状态回看，主图只展示离完成收盘最近的历�
   const selector = host.querySelector<HTMLSelectElement>('[aria-label="选择箱体"]')!
   expect([...selector.options].map(option => option.value)).toEqual(['near', 'far'])
   await act(async () => { selector.value = 'far'; selector.dispatchEvent(new Event('change', { bubbles: true })) })
-  expect(host.querySelector('[data-boxes]')?.textContent).toBe('near')
+  expect(host.querySelector('[data-boxes]')?.textContent).toBe('far')
   expect(host.textContent).toContain('范围 1.00–2.00')
 })
 
-it('最近箱体按完成收盘重排，并排除少于15根日K的结构', async () => {
+it('活跃箱体要求完成收盘在箱内，候选仅能主动查看并保留15根展示门槛', async () => {
   mocks.daily.mockResolvedValue(response('600000.SH', 10.25))
-  const base = { period: 'daily', level: 'short', width: 2, width_pct: 20,
+  const base = { ...activeEvidence, period: 'daily', level: 'short', width: 2, width_pct: 20,
     start_date: range.start, end_date: range.end, observed_until: range.end,
     confirmed_date: '2026-01-22', duration_bars: 15, status: 'confirmed', parent_id: null,
     missing_conditions: [], upper_touches: [], lower_touches: [],
     breakout: { status: 'none', direction: null, first_date: null, confirmed_date: null }, events: [] }
   const report = { symbol: '600000.SH', period: 'daily', status: 'ready', as_of: range.end, as_of_close: 10,
     diagnostics: [], config: { min_bars: 8 }, rows: [{ date: '2026-02-01', close: 21, is_complete: false }], boxes: [
-      { ...base, id: 'near-upper', lower: 7.8, upper: 9.8, upper_zone: [9.6, 10] },
+      { ...base, id: 'near-upper', lower: 8, upper: 10, upper_zone: [9.6, 10] },
       { ...base, id: 'far-current', lower: 13, upper: 15 },
       { ...base, id: 'short-confirmed', lower: 9, upper: 11, duration_bars: 14 },
       { ...base, id: 'two-bar-candidate', lower: 9, upper: 11, duration_bars: 2, status: 'candidate', confirmed_date: null },
@@ -310,18 +317,46 @@ it('最近箱体按完成收盘重排，并排除少于15根日K的结构', asyn
   mocks.boxes.mockResolvedValue(report)
   await render()
   expect(host.querySelector('[data-boxes]')?.textContent).toBe('near-upper')
-  await clickPill('箱体详情（2）')
+  await clickPill('箱体详情（3）')
   const selector = host.querySelector<HTMLSelectElement>('[aria-label="选择箱体"]')!
-  expect([...selector.options].map(option => option.value)).toEqual(['near-upper', 'far-current'])
+  expect([...selector.options].map(option => option.value)).toEqual(['near-upper', 'far-current', 'far-candidate'])
 
   await act(async () => client.setQueryData(QK.klineBoxes('600000.SH', 'daily', range.start, range.end), { ...report, as_of_close: 16 }))
   await settle()
-  expect(host.querySelector('[data-boxes]')?.textContent).toBe('far-current')
+  expect(host.querySelector('[data-boxes]')?.textContent).toBe('')
+  expect(host.textContent).toContain('暂无活跃箱体')
 
   const status = host.querySelector<HTMLSelectElement>('[aria-label="箱体状态"]')!
   await act(async () => { status.value = 'candidate'; status.dispatchEvent(new Event('change', { bubbles: true })) })
+  expect(host.querySelector('[data-boxes]')?.textContent).toBe('')
+  await clickPill('历史参考')
   expect(host.querySelector('[data-boxes]')?.textContent).toBe('far-candidate')
   expect([...selector.options].map(option => option.value)).toEqual(['far-candidate'])
+})
+
+it('历史大框与旧响应不冒充活跃，突破待确认和活跃性降级同时展示', async () => {
+  mocks.daily.mockResolvedValue(response('600000.SH', 10.25))
+  const old = { period: 'daily', level: 'long', lower: 5, upper: 25, width: 20, width_pct: 400,
+    start_date: '2025-01-01', end_date: range.end, observed_until: range.end, confirmed_date: '2025-03-01',
+    duration_bars: 200, status: 'confirmed', parent_id: null, upper_touches: [], lower_touches: [], missing_conditions: [],
+    breakout: { status: 'none', direction: null, first_date: null, confirmed_date: null }, events: [] }
+  const report = { symbol: '600000.SH', period: 'daily', status: 'ready', as_of: range.end, as_of_close: 10,
+    diagnostics: [], rows: [], boxes: [{ ...old, id: 'legacy' }, { ...old, id: 'historical',
+      activity: { ...activeEvidence.activity, state: 'historical', upper_age_bars: 100, reasons: ['upper_stale'] },
+      active_segments: [], breakout: { status: 'pending', direction: 'down', first_date: range.end, confirmed_date: null } }] }
+  mocks.boxes.mockResolvedValue(report)
+  await render()
+  expect(host.querySelector('[data-boxes]')?.textContent).toBe('')
+  expect(host.textContent).toContain('暂无活跃箱体')
+  expect(host.textContent).toContain('向下突破待确认 · 历史参考（上沿近期未验证）')
+  await act(async () => client.setQueryData(QK.klineBoxes('600000.SH', 'daily', range.start, range.end), { ...report, status: 'insufficient_data' }))
+  await settle()
+  expect(host.textContent).toContain('已完成K线不足')
+  mocks.boxes.mockRejectedValue(new Error('unavailable'))
+  await act(async () => { await client.invalidateQueries({ queryKey: QK.klineBoxes('600000.SH', 'daily', range.start, range.end) }) })
+  await settle()
+  expect(host.textContent).toContain('箱体读取失败')
+  expect(host.textContent).not.toContain('暂无活跃箱体')
 })
 
 it('轻量渲染优先保留本地专属图层，关闭多空线后可切换且保留ETF元数据', async () => {

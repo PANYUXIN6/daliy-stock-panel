@@ -48,7 +48,9 @@ def test_normalized_public_sources_do_not_promote_ordinary_risks_or_incomplete_p
     iso = "2026-09-23"
     stamp = int(datetime.fromisoformat(iso).replace(tzinfo=CN_TZ).timestamp() * 1000)
     titles = ["关于股票交易严重异常波动暨风险提示的公告", "关于股票交易异常波动、严重异常波动的复函",
-              "公司股票可能触及严重异常波动的风险提示公告", "可转换公司债券交易严重异常波动的公告"]
+              "公司股票可能触及严重异常波动的风险提示公告", "可转换公司债券交易严重异常波动的公告",
+              "关于公司股价严重异常波动的公告", "关于公司股价严重异常波动的澄清公告",
+              "关于公司股价可能出现严重异常波动的公告", "关于公司股价严重异常波动及可转债交易的公告"]
     notices = [{"announcementTitle": title, "secCode": "000993", "announcementTime": stamp,
                 "announcementId": str(i)} for i, title in enumerate(titles)]
     reasons = ["日换手率达到20%的前5只证券", "连续三个交易日内，涨幅偏离值累计达到20%的证券",
@@ -57,15 +59,15 @@ def test_normalized_public_sources_do_not_promote_ordinary_risks_or_incomplete_p
 
     def handle(request):
         if request.method == "POST":
-            return httpx.Response(200, json={"totalAnnouncement": 4, "announcements": notices, "hasMore": False})
+            return httpx.Response(200, json={"totalAnnouncement": len(notices), "announcements": notices, "hasMore": False})
         return httpx.Response(200, json={"code": 0, "success": True,
                                          "result": {"data": quotes, "pages": 1, "count": 4}})
 
     with httpx.Client(transport=httpx.MockTransport(handle)) as client:
         assert source._disclosures(client, iso, iso) == [
-            {"symbol": "000993.SZ", "date": iso, "id": "0", "title": titles[0]}]
+            {"symbol": "000993.SZ", "date": iso, "id": str(i), "title": titles[i]} for i in (0, 4)]
         assert source._ordinary_moves(client, iso, iso) == {("000993.SZ", iso, "涨"), ("000993.SZ", iso, "跌")}
     incomplete = httpx.MockTransport(lambda _: httpx.Response(
-        200, json={"totalAnnouncement": 5, "announcements": notices, "hasMore": False}))
+        200, json={"totalAnnouncement": len(notices) + 1, "announcements": notices, "hasMore": False}))
     with httpx.Client(transport=incomplete) as client, pytest.raises(ValueError, match="分页缺失"):
         source._disclosures(client, iso, iso)

@@ -15,6 +15,7 @@ from app.parquet import DAILY_STORAGE_SCHEMA, scan_daily_parquet, scan_enriched_
 from app.polars_guard import guarded_collect
 from app.services.daily_coverage import DailyCoverageError
 from app.services.evening_report_store import EveningReportStore
+from app.services.evening_report_wave import WINDOW
 from app.services.postmarket import read_suspensions
 from app.services.trading_day import calendar_status
 from app.tickflow.sector_review_reader import SectorReviewReader
@@ -170,9 +171,9 @@ def _factor_events(data_dir, day, symbols=None):
     return validated_factor_events(guarded_collect(source), through=day)
 
 
-def _history(repo, day, days, check):
+def _history(repo, day, calendar, check):
     reader = SectorReviewReader(repo.store.data_dir)
-    start = date.fromisoformat(days[0])
+    start = date.fromisoformat(calendar[-WINDOW:][0])
     paths = reader.files('kline_daily_enriched', start, day)
     if not paths:
         raise DailyCoverageError('正式历史指标为空')
@@ -185,7 +186,7 @@ def _history(repo, day, days, check):
         pl.col('high').alias('raw_high'), pl.col('low').alias('raw_low'), 'amount', 'volume')
     stored = stored.filter(pl.col('quote_ts').is_null()).drop('quote_ts', 'raw_close', 'raw_high', 'raw_low', 'amount', 'volume')
     frame = raw.join(stored, on=['symbol', 'date'], how='left')
-    # 历史连板来自相应交易日的正式指标；其余均线和 ATR 只取已预计算的共享缓存。
+    # 历史连板来自相应交易日的正式指标，均线等优先使用共享缓存。
     indicators = ['ma5', 'ma10', 'ma20', 'bull_bear_line', 'atr_14', 'high_60d', 'change_pct', 'vol_ratio_5d']
     span = repo.get_enriched_history_span()
     cached = (repo.get_enriched_range(max(start, span[0]), day, columns=[*indicators, 'quote_ts'])
@@ -197,6 +198,16 @@ def _history(repo, day, days, check):
         cached = cached.filter(pl.col('quote_ts').is_null()).drop('quote_ts')
     frame = frame.join(cached, on=['symbol', 'date'], how='left')
     frame = frame.with_columns(pl.lit(None, dtype=pl.Float64).alias(c) for c in indicators if c not in frame.columns)
+    if frame['ma10'].null_count():
+        # 波次窗口外只取前 30 个市场交易日的正式成交收盘，用于预热个股 MA10。
+        warmup_paths = [p for d in calendar[-(WINDOW + 30):-WINDOW]
+                        for p in sorted((repo.store.data_dir / 'kline_daily_enriched' / f'date={d}').glob('*.parquet'))]
+        if warmup_paths:
+            warmup = _deduplicate(scan_enriched_parquet(warmup_paths, hive_partitioning=True)).filter(
+                pl.col('quote_ts').is_null() & ~_raw_halt().fill_null(False)).select('symbol', 'date', 'close')
+            frame = pl.concat([guarded_collect(warmup), frame], how='diagonal')
+        local_ma10 = pl.col('close').rolling_mean(10).over('symbol', order_by='date')
+        frame = frame.with_columns(pl.coalesce('ma10', local_ma10).alias('ma10')).filter(pl.col('date') >= start)
     check()
     factors = _factor_events(repo.store.data_dir, day)
     if factors is not None:
@@ -219,8 +230,8 @@ def load_inputs(repo, day: date, evidence: dict, cancel_check=None):
     sessions = evidence['calendar']['days']
     today = day.isoformat()
     calendar = [d for d in sessions if d <= today]
-    window = calendar[-250:]
-    prices, raw_halts = _history(repo, day, window, check)
+    window = calendar[-WINDOW:]
+    prices, raw_halts = _history(repo, day, calendar, check)
     suspensions = {(r['symbol'], str(r['date'])): {**r, 'source': 'formal_daily_history', 'confirmed': True}
                    for r in raw_halts}
     data_dir = repo.store.data_dir

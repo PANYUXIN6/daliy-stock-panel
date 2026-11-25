@@ -150,19 +150,27 @@ class EveningReportStore:
             # 首版曾分别写出原件与页面视图。任一原件缺失都不会触发重新发布。
             snapshot = base.with_suffix('.view.json')
             if view and snapshot.is_file():
-                return read_json(snapshot)
-            report = read_json(base.with_suffix('.json'))
+                report = read_json(snapshot)
+                view = False  # 已是定稿视图，无需再次投影。
+            else:
+                report = read_json(base.with_suffix('.json'))
         else:
             report = read_json(base.with_suffix('.json.gz'))
         if report is None:
             logger.warning('已发布的晚报归档缺失或不可读 %s %s', day, entry['version'])
             return None
-        # 旧归档将数值存在 variables 中。只从请求的这一份文件取值。
-        if report.get('storage_version') == 'evening-storage-v2':
-            for row in report.get('records', []):
-                obs = row.get('observation') or {}
-                obs.setdefault('values', {k: v.get('value') for k, v in obs.get('variables', {}).items()})
-        return report_view(report) if view else report
+        try:
+            if not isinstance(report.get('records'), list):
+                raise TypeError('invalid records')
+            # 旧归档将数值存在 variables 中。只从请求的这一份文件取值。
+            if report.get('storage_version') == 'evening-storage-v2':
+                for row in report.get('records', []):
+                    obs = row.get('observation') or {}
+                    obs.setdefault('values', {k: v.get('value') for k, v in obs.get('variables', {}).items()})
+            return report_view(report) if view else report
+        except (TypeError, KeyError, AttributeError):
+            logger.warning('晚报归档内容无法读取 %s %s', day, entry['version'], exc_info=True)
+            return None
 
     def has_original(self, day: str) -> bool:
         return self.original_metadata(day) is not None

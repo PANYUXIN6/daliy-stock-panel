@@ -372,11 +372,11 @@ it('按当日角色筛选，并展示所选题材的归档热度和波次状态'
 
   }
   report.sectors = [{ id: 'theme0', name: '题材0', observation: { selected_count: 2, member_count: 18,
-    strength: 5.72, daily: [{ date: report.trade_date, limit_up: 4 }] } }]
+    strength: 5.72, missing_count: 3, daily: [{ date: report.trade_date, limit_up: 4 }] } }]
   mocks.get.mockResolvedValue(report)
   await render()
   await change('题材', 'theme0')
-  for (const text of ['题材0（2只入选）', '当日涨停 4 只 / 完整成员 18 只', '近5日强度 5.72']) expect(host.textContent).toContain(text)
+  for (const text of ['题材0（2只入选）', '当日涨停 4 只 / 完整成员 18 只', '近5日强度 5.72 · 近5日缺少 3 条成员日行情']) expect(host.textContent).toContain(text)
   for (const role of ['true_leader', 'emotion']) {
     await change('主角色', role)
     expect(displayed()).toEqual([])
@@ -393,6 +393,7 @@ it('低吸按归档三档筛选，资料待核验时显示具体原因', async (
   const report = newFixture(6)
   const statuses = ['full', 'partial', 'none', 'none', 'full', 'partial'] as const
   report.records.forEach((row, index) => { row.observation!.dip.status = statuses[index] })
+  report.records[1].observation.dip.primary_reason = '回调量能待核验'
   report.records[3].observation.dip.primary_reason = '必要资料待核验'
   mocks.get.mockResolvedValue(report)
   await render()
@@ -402,6 +403,9 @@ it('低吸按归档三档筛选，资料待核验时显示具体原因', async (
   expect(displayed()).toEqual([report.records[0].symbol, report.records[4].symbol])
   await change('低吸状态', 'partial')
   expect(displayed()).toEqual([report.records[1].symbol, report.records[5].symbol])
+  const stockCell = host.querySelector(`[data-report-stock="${report.records[1].symbol}"]`)
+  expect(stockCell?.textContent).toContain('回调量能待核验')
+  expect(stockCell?.closest('tr')?.textContent).toContain('低吸：部分符合 · 回调量能待核验')
   await change('低吸状态', 'none')
   expect(displayed()).toEqual([report.records[2].symbol, report.records[3].symbol])
   expect(host.textContent).toContain('低吸：无低吸点 · 必要资料待核验')

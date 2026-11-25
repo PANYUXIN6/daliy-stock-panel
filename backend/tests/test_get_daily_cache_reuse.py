@@ -9,9 +9,11 @@ from __future__ import annotations
 from datetime import date, timedelta
 
 import polars as pl
+import pytest
 from polars.testing import assert_frame_equal
 
-from app.tickflow.repository import KlineRepository
+from app.services.regime_builder import run_regime_batch
+from app.tickflow.repository import DataStore, KlineRepository
 
 SYM = "600001.SH"
 
@@ -104,3 +106,24 @@ def test_get_daily_falls_back_to_scan_when_cache_does_not_cover_start():
     result = repo.get_daily(SYM, dates[0] - timedelta(days=5), dates[-1])
     assert calls["scan"] == 1
     assert not result.is_empty()
+
+
+def test_yearly_chart_and_market_regime_have_warmed_averages_on_first_day(tmp_path):
+    day = pl.col("date").dt
+    raw = _raw_frame(350).filter(~(day.month().is_in([5, 10]) & (day.day() <= 7))).with_columns(
+        pl.lit(0, dtype=pl.UInt32).alias("consecutive_limit_ups"))
+    for (session,), bars in raw.partition_by("date", as_dict=True).items():
+        directory = tmp_path / "kline_daily_enriched" / f"date={session}"
+        directory.mkdir(parents=True)
+        bars.write_parquet(directory / "part.parquet")
+    repo = KlineRepository(DataStore(tmp_path))
+    repo.refresh_cache()
+    end = raw["date"].max()
+    start = end - timedelta(days=365)
+    chart = repo.get_daily(SYM, start, end).sort("date")
+    first = chart.row(0, named=True)
+    closes = raw.filter(pl.col("date") <= first["date"])["close"]
+    assert first["ma20"] == pytest.approx(closes.tail(20).mean())
+    assert first["ma60"] == pytest.approx(closes.tail(60).mean())
+    regime = run_regime_batch(repo, first["date"], first["date"]).row(0, named=True)
+    assert regime["ma20_valid_count"] == regime["ma60_valid_count"] == 1

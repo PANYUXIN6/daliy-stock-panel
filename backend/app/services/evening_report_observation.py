@@ -87,9 +87,10 @@ def stock_values(rows: dict[str, dict], calendar: list[str], halted: set[str]) -
     values = {"raw_close": point(calendar[-1], "raw_close", True), "amount_day": point(calendar[-1], "amount"),
               "consecutive_limit_ups": point(calendar[-1], "consecutive_limit_ups")}
     values["change_pct"] = _daily_change(rows, calendar, len(calendar) - 1, halted)
+    # 比例保留 12 位小数，使同收益在百分位、回退排名和最终排序中共用同一值。
     for count in (3, 5, 10, 20):
         start = point(calendar[-count - 1], "close", True) if len(calendar) > count else None
-        values[f"return_{count}d"] = close / start - 1 if close is not None and start else None
+        values[f"return_{count}d"] = round(close / start - 1, 12) if close is not None and start else None
     flags = [False if day in halted else rows.get(day, {}).get("signal_limit_up")
              if rows.get(day, {}).get("formal") is True else None for day in calendar[-20:]]
     values["limit_up_count_20d"] = sum(flags) if len(flags) == 20 and None not in flags else None
@@ -99,7 +100,7 @@ def stock_values(rows: dict[str, dict], calendar: list[str], halted: set[str]) -
     values["space_score"] = min(100, r20 / .8 * 100) if r20 is not None else None
     values["acceleration_5_20"] = r5 / r20 if r20 is not None and r20 > 0 and r5 is not None else None
     highs = [point(d, "high", True) for d in calendar[-60:] if d not in halted] if len(calendar) >= 60 else []
-    values["high_proximity"] = close / max(highs) if highs and close and None not in highs else None
+    values["high_proximity"] = round(close / max(highs), 12) if highs and close and None not in highs else None
     amounts = window("amount", 20)
     values["amount_median_20d"] = median(amounts) if amounts else None
     for key in ("ma5", "ma10", "ma20", "bull_bear_line"):

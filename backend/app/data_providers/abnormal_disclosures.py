@@ -44,7 +44,7 @@ def _disclosures(client, first: str, last: str):
         if not re.fullmatch(r"(?:60\d{4}|00\d{4}|30\d{4})", code):
             continue
         # 跟踪异常事实首次披露。澄清、纠错、进展和复牌核查结果不是新的发生公告。
-        subject = r"股票(?:交易|价格)?(?:异常波动[暨、及和与])?(?:出现|发生|触及)?严重异常波动"
+        subject = r"(?:股票(?:交易|价格)?|股价)(?:异常波动[暨、及和与])?(?:出现|发生|触及)?严重异常波动"
         if (not re.search(subject, title) or not title.endswith("公告")
                 or re.search(r"未触及|未发生|可能|预计|澄清|更正|补充|进展|结果|复牌|可转债|债券|回函|复函", title)):
             continue

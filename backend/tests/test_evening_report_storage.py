@@ -161,6 +161,18 @@ def test_missing_published_file_is_local_and_cannot_be_overwritten(tmp_path, dam
     assert store.original_metadata(first)['version'] == saved['version']
 
 
+def test_null_records_in_published_archive_returns_missing(tmp_path, caplog):
+    from app.api.evening_report import report as read_report
+
+    store = EveningReportStore(tmp_path)
+    day = date(2026, 10, 9)
+    saved = store.save(str(day), {'audit': {}, 'records': []}, {})
+    atomic_json(store._base(saved).with_suffix('.json.gz'), {**saved, 'records': None})
+    req = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(repo=SimpleNamespace(store=SimpleNamespace(data_dir=tmp_path)))))
+    assert read_report(req, day, saved['version'])['status'] == 'missing'
+    assert str(day) in caplog.text
+
+
 def test_retention_refuses_a_symlink_outside_the_module(tmp_path):
     store = EveningReportStore(tmp_path)
     saved = store.save('2026-08-09', build_report(observation_inputs()), {})

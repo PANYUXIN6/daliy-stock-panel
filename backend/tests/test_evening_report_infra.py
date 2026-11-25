@@ -669,6 +669,38 @@ def test_uses_shared_indicators_and_last_source_row_without_full_market_recalcul
         pl.col('symbol') == symbol).select('atr_14', 'bull_bear_line').row(0)
 
 
+def test_evening_ma10_uses_traded_closes_before_wave_window(tmp_path):
+    from test_evening_report_wave import SYMBOL, bars, dates
+
+    from app.services.evening_report_wave import WINDOW, compute_wave
+    from app.tickflow.repository import DataStore, KlineRepository
+
+    calendar = dates(WINDOW + 16)
+    pattern, _ = bars([(11.9, 11.2, 11.35, 50), (11.4, 10.7, 10.8, 50),
+                       (11.4, 10.8, 11.3, 150)])
+    # 最后一根放量收盘 11.30，仅站上 MA10，随后缩量横盘至报告日。
+    pattern_rows = list(pattern.values())
+    traded = dict(pattern_rows[0], close=10.7)
+    halt = dict(traded, open=0., high=0., volume=0.)
+    source = [traded] * 9 + [halt] * 7 + pattern_rows
+    source += [dict(pattern_rows[-1], volume=20)] * (len(calendar) - len(source))
+    frame = pl.DataFrame([{**row, 'symbol': SYMBOL, 'date': date.fromisoformat(day),
+                           'volume': float(row['volume']), 'amount': 1e8}
+                          for day, row in zip(calendar, source, strict=True)]).drop('ma10', 'formal')
+    write(tmp_path, 'kline_daily', frame)
+    write(tmp_path, 'kline_daily_enriched', frame)
+    repo = KlineRepository(DataStore(tmp_path))
+    repo.refresh_cache()
+    window = calendar[-WINDOW:]
+    history, _ = inputs._history(repo, date.fromisoformat(window[-1]), calendar, lambda: None)
+    rows = {str(row['date']): row for row in history.to_dicts()}
+    assert sorted(rows) == window
+    assert rows[window[0]]['ma10'] == pytest.approx((9 * 10.7 + 10.75) / 10)
+    wave, _ = compute_wave(SYMBOL, rows, window, set())
+    assert wave['second_wave_start']['date'] == window[len(pattern) - 1]
+    assert wave['current_wave_index'] == 2 and not wave['first_pullback_active']
+
+
 def test_restart_waits_for_shared_indicators_before_first_publication(accepted, monkeypatch):
     state = accepted
     store = EveningReportStore(state.root)

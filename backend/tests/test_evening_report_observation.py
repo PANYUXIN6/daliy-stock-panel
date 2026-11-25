@@ -323,3 +323,30 @@ def test_only_missing_member_day_is_skipped_for_strength_and_board_height():
     assert theme["strength"] == 1.5 and theme["missing_count"] == 1
     assert theme["daily"][-1] == {"date": inputs.trade_date, "limit_up": 1, "strong": 1,
                                   "max_consecutive": 3, "missing_count": 1}
+
+
+@pytest.mark.parametrize("size", [5, 6], ids=["return-rank", "percentile"])
+def test_equal_returns_from_cent_prices_share_ranks_and_quota_tiebreak(size):
+    inputs = observation_inputs()
+    template = inputs.prices.filter(pl.col("symbol") == "000000.SZ").to_dicts()
+    rows, metadata, members = [], [], []
+    for i in range(size):
+        symbol = f"{i + 1:06d}.SZ"
+        unit = 160 + i
+        metadata.append({**inputs.metadata.row(0, named=True), "symbol": symbol})
+        members.append({**inputs.memberships.row(0, named=True), "symbol": symbol})
+        for bar in template:
+            multiple = 6 if bar["date"] == inputs.trade_date else 5 if bar["date"] >= inputs.calendar[-6] else 4
+            price = multiple * unit / 100
+            rows.append({**bar, "symbol": symbol, **dict.fromkeys(
+                ("close", "open", "high", "low", "raw_close", "raw_open", "raw_high", "raw_low"), price)})
+    inputs.prices, inputs.metadata, inputs.memberships = map(pl.DataFrame, (rows, metadata, members))
+    report = build_report(inputs)
+    assert report["selected"] == ["000001.SZ", "000002.SZ"]
+    for row in report["records"]:
+        lead = row["observation"]["theme_lead_evidence"]
+        assert lead["return_20d_rank"] == 1
+        if size == 6:
+            assert lead["components"]["_p5"] == lead["components"]["_p20"] == 50
+        else:
+            assert lead["metric"] == "return_20d_rank"

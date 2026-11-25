@@ -8,7 +8,7 @@ from statistics import mean
 
 from app.services.evening_report_observation import _competition_tier
 from app.services.evening_report_rules import finite
-from app.services.evening_report_start_study import published_on_trade_date
+from app.services.evening_report_start_study import is_live_original
 from app.services.evening_report_tracking import (
     evaluate_performance,
     evaluation_data_version,
@@ -28,7 +28,7 @@ def baseline_symbols(records):
 
     def order(row):
         obs = row["observation"]
-        value = obs["variables"]["return_5d"]["value"]
+        value = obs["values"].get("return_5d")
         return _competition_tier(obs), value is None, -value if value is not None else 0, row["symbol"]
 
     return {row["symbol"] for (_, quota), group in groups.items()
@@ -48,20 +48,27 @@ def _peer_return(peers, dates, prices):
     return prod(daily) - 1
 
 
-def compare_observations(store, inputs):
+def compare_observations(store, as_of):
     """Formal frozen records only; no missing historical feature is reconstructed from today's membership."""
-    days = inputs.provenance.get("calendar", {}).get("days", inputs.calendar)
+    from app.services.evening_report_inputs import load_evaluation_inputs
+    from app.services.trading_day import calendar_status
+
+    through = as_of.isoformat()
+    days = sorted(set(calendar_status(store.root.parent).get("days", [])))
     symbols, price_days = set(), set()
     cases, skipped = [], []
     for entry in reversed(store.dates()):
         day = entry["date"]
-        if day > inputs.trade_date or day not in days:
+        if day > through:
             continue
         report = store.get(day)
-        if not report or not published_on_trade_date(report):
+        if not report or not is_live_original(report):
             continue
         if report.get("selection_policy_version") != "theme-observation-v2":
             skipped.append({"date": day, "version": report["version"], "reason": "当日缺少可核验的v2分配前证据"})
+            continue
+        if day not in days:
+            skipped.append({"date": day, "version": report["version"], "reason": "本地交易日历未覆盖报告日"})
             continue
         baseline = baseline_symbols(report["records"])
         selected = set(report["selected"])
@@ -75,12 +82,13 @@ def compare_observations(store, inputs):
         price_days.update(window)
         cases.append((report, records, selected, baseline, groups, window))
 
-    prices = evaluation_prices(inputs.prices, symbols, price_days)
-    benchmark = {str(row["date"]): row["close"] for row in inputs.benchmark.iter_rows(named=True)
-                 if row.get("formal") is True and finite(row.get("close"), positive=True)}
-    suspensions = {(row["symbol"], str(row["date"])) for row in inputs.provenance.get("suspensions", [])
-                   if row.get("confirmed") is True}
-    version = evaluation_data_version(inputs)
+    prices, suspensions, version, context = {}, set(), None, None
+    if symbols:
+        inputs = load_evaluation_inputs(store.root.parent, as_of, symbols=symbols, days=price_days)
+        prices = evaluation_prices(inputs.prices, symbols, price_days)
+        suspensions = {(row["symbol"], str(row["date"])) for row in inputs.provenance.get("suspensions", [])}
+        version = evaluation_data_version(inputs)
+        context = inputs.provenance.get("evaluation_context")
     comparisons = []
     phases = defaultdict(list)
     for report, records, selected, baseline, groups, window in cases:
@@ -89,17 +97,14 @@ def compare_observations(store, inputs):
         for row in records:
             symbol = row["symbol"]
             obs = row["observation"]
-            evaluation = evaluate_performance(symbol, day, calendar=days, as_of=inputs.trade_date,
+            evaluation = evaluate_performance(symbol, day, calendar=days, as_of=through,
                                               prices=prices, suspensions=suspensions, data_version=version,
-                                              evaluation_context=inputs.provenance.get("evaluation_context"))
+                                              evaluation_context=context)
             peers = [peer for peer in groups.get(obs["decision"]["final_theme"], []) if peer != symbol]
             for n, result in evaluation.items():
                 target = result["target_date"]
-                market_return = benchmark[target] / benchmark[day] - 1 if target in benchmark and day in benchmark else None
-                peer_return = _peer_return(peers, window[:int(n) + 1], prices) if target and target <= inputs.trade_date else None
+                peer_return = _peer_return(peers, window[:int(n) + 1], prices) if target and target <= through else None
                 stock_return = result["return"]
-                result["market_relative_return"] = ((1 + stock_return) / (1 + market_return) - 1
-                                                    if stock_return is not None and market_return is not None else None)
                 result["theme_relative_return"] = ((1 + stock_return) / (1 + peer_return) - 1
                                                    if stock_return is not None and peer_return is not None else None)
                 result["theme_peer_count"] = len(peers)
@@ -120,7 +125,7 @@ def compare_observations(store, inputs):
                                                          for item in observations)
                                               for field in ("selected", "baseline")} for n in ("1", "3", "5")},
                             "observations": observations})
-    return {"rule_version": VERSION, "as_of": inputs.trade_date, "data_version": version,
+    return {"rule_version": VERSION, "as_of": through, "data_version": version,
             "baseline_sort": "return_5d_desc_then_symbol_within_original_theme_and_role_tier",
-            "market_benchmark": "000001.SH", "theme_benchmark": "daily_equal_weight_excluding_self_min_5",
+            "theme_benchmark": "daily_equal_weight_excluding_self_min_5",
             "comparison": comparisons, "phase_groups": dict(phases), "uncovered_reports": skipped}

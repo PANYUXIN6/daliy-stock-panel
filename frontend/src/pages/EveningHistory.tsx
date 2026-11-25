@@ -5,7 +5,7 @@ import { api, type EveningPersonalHistory, type EveningPersonalRecord } from '@/
 import { useCurrentUser } from '@/lib/auth'
 import { QK } from '@/lib/queryKeys'
 import { eveningPerformanceQueryOptions, refreshEveningPerformance } from '@/lib/useSharedQueries'
-import { cnDateFromUtc, cnDateTimeFromUtc, priceColorClass } from '@/lib/format'
+import { cnDateFromUtc, priceColorClass } from '@/lib/format'
 import type { ColumnConfig } from '@/lib/list-columns'
 import { PageHeader } from '@/components/PageHeader'
 import { StockDataTable } from '@/components/stock-table/StockDataTable'
@@ -64,14 +64,12 @@ function HistoryContent({ userId, history, onOpenDetails }: { userId: string; hi
     setDetailId(opening ? id : null)
     if (opening) onOpenDetails()
   }
-  const events = detail ? history.events.filter(event => event.episode_id === detail.episode_id) : []
-  const actions: Record<string, string> = { star_set: '设置星标', star_cancel: '取消星标', profit_set: '标记盈利', profit_cancel: '取消盈利标记', loss_set: '标记亏损', loss_cancel: '取消亏损标记' }
   const renderCell = (record: EveningPersonalRecord, column: ColumnConfig) => {
     const cell = 'px-3 py-3 align-top'
     if (column.id === 'day') return <td className={`${cell} whitespace-nowrap text-xs`}><Link className="text-accent hover:underline" to={reportUrl(record)}>{record.day}</Link></td>
     if (column.id === 'stock') return <td className={`${cell} min-w-32`} data-history-stock={record.symbol}><p className="font-semibold">{record.name}</p><p className="mt-1 font-mono text-xs text-muted">{record.symbol}</p></td>
     if (column.id === 'theme') return <td className={`${cell} min-w-40`}><p className="text-xs">{record.observation?.primary_theme?.name ?? '题材未记录'}</p><p className="mt-1 text-xs text-secondary">{roleLabels[record.observation?.role ?? ''] ?? '角色待核验'}{record.observation?.role_status === 'review_pending' && ' · 待复核'}</p><EveningAllocationRank observation={record.observation} /></td>
-    if (column.id === 'detail') return <td className={`${cell} min-w-36 text-xs`}><p className="text-secondary">{record.ended_at ? `已结束 ${record.ended_at}` : '持续观察'}</p><button className="min-h-9 text-accent hover:underline" aria-expanded={detailId === record.id} onClick={() => toggleDetails(record.id)}>{detailId === record.id ? '收起记录' : '过程与反馈变更'}</button></td>
+    if (column.id === 'detail') return <td className={`${cell} min-w-36 text-xs`}><p className="text-secondary">{record.ended_at ? `已结束 ${record.ended_at}` : '持续观察'}</p><button className="min-h-9 text-accent hover:underline" aria-expanded={detailId === record.id} onClick={() => toggleDetails(record.id)}>{detailId === record.id ? '收起记录' : '查看跟踪过程'}</button></td>
     if (column.id === 'feedback') return <td className={`${cell} sticky right-0 z-[1] min-w-[156px] bg-surface`}><EveningFeedbackButtons name={record.name} record={record} state={feedback.states[record.episode_id]} onChange={feedback.change} onRetry={() => feedback.retry(record.episode_id)} /></td>
     const performance = record.performance[column.id as '1' | '3' | '5']
     return <td className={`${cell} text-right text-xs`}><p className={`whitespace-nowrap font-mono ${priceColorClass(performance?.return)}`}>{eveningPerformanceLabel(performance)}</p><p className="mt-1 max-w-44 text-[11px] text-muted">{performance?.reason ?? performance?.target_date}</p></td>
@@ -86,7 +84,6 @@ function HistoryContent({ userId, history, onOpenDetails }: { userId: string; hi
       <EveningObservationDetails observation={detail.observation} />
       <EveningPerformanceDetails record={detail} />
       <div><h3 className="text-sm font-medium">本月同一过程的记录</h3><div className="mt-2 flex flex-wrap gap-3 text-xs">{records.filter(record => record.episode_id === detail.episode_id).map(record => <Link key={record.id} to={reportUrl(record)} className="text-accent hover:underline">{record.day}{record.id === record.first_reference ? ' · 首次推荐锚点' : ''}</Link>)}</div></div>
-      <div><h3 className="text-sm font-medium">此过程的反馈变更</h3>{events.length ? <ol className="mt-2 space-y-2 text-xs text-secondary">{events.map(event => <li key={event.request_id}><time className="mr-3 font-mono">{cnDateTimeFromUtc(event.at) || event.at}</time>{event.actions.map(action => actions[action] ?? action).join('；')}</li>)}</ol> : <p className="mt-2 text-xs text-muted">尚无设置或取消记录，未标记不表示负面反馈。</p>}</div>
     </section>}
   </div>
 }

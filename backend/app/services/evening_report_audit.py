@@ -7,12 +7,10 @@ from __future__ import annotations
 
 from collections import Counter, defaultdict
 
-from app.services.evening_report_classification import exclusion
-
 VERSION = 'evening-audit-v1'
 SORT_VERSION = 'theme-role-order-v2'
-THEME_RANKING_VERSION = 'theme-role-order-v1'
-COHORT_VERSION = 'same-day-theme-quota-completeness-v1'
+THEME_RANKING_VERSION = 'valid-member-days-v2'
+COHORT_VERSION = 'same-day-theme-quota-role-v2'
 DEDUP_VERSION = 'strongest-top5-theme-v1'
 NON_INDEPENDENT_NOTE = '同交易日及重叠评价窗口的样本不独立；仅作关联性观察，不能据此认定收益因果。'
 
@@ -51,33 +49,22 @@ def _step(name: str, checks: dict[str, bool | None], *, executed=True) -> dict:
 
 def annotate_audit(inputs, records: list[dict], themes: list[dict]) -> dict:
     """Annotate the decisions already made, including rejected theme relations."""
-    source_rows = [row for item in inputs.provenance.get('classifications', []) for row in item.get('memberships', [])]
-    if not source_rows:
-        source_rows = inputs.memberships.to_dicts()
-    all_themes, relations = {}, defaultdict(set)
-    for row in source_rows:
-        if row['source'] != 'concept':
-            continue
-        key = 'concept:' + row['sector_id']
-        all_themes.setdefault(key, {'id': key, 'name': row['sector_name'], 'members': set()})['members'].add(row['symbol'])
-        relations[row['symbol']].add(key)
-    computed = {theme['id']: theme for theme in themes}
+    relations = defaultdict(set)
     ranked_count = sum(theme.get('rank') is not None for theme in themes)
     theme_snapshots = []
-    for key, theme in sorted(all_themes.items()):
-        current = computed.get(key, {})
-        excluded = exclusion(key.removeprefix('concept:')) or exclusion(theme['name'])
-        member_count = len(theme['members'])
-        reasons = ([excluded[0]] if excluded else []) + (['broad_concept'] if member_count > 120 else [])
+    for theme in sorted(themes, key=lambda t: t['id']):
+        reasons = theme['exclusion_reason_codes']
+        for symbol in theme['members']:
+            relations[symbol].add(theme['id'])
         theme_snapshots.append({
-            'id': key, 'name': theme['name'], 'theme_member_count': member_count,
-            'is_broad_concept': member_count > 120, 'is_region_theme': bool(excluded and excluded[0] == 'region'),
-            'exclusion_reason_codes': reasons, 'theme_strength_5d': current.get('strength'),
+            'id': theme['id'], 'name': theme['name'], 'theme_member_count': theme['member_count'],
+            'is_broad_concept': 'broad_concept' in reasons, 'is_region_theme': 'region' in reasons,
+            'exclusion_reason_codes': reasons, 'theme_strength_5d': theme['strength'],
             'strength_unit': '加权个数', 'strength_window_trade_days': 5,
-            'rank': current.get('rank'), 'selected_theme': current.get('selected_theme', False),
-            'ranking_status': 'not_executed' if reasons else 'unknown' if current.get('strength') is None else 'computed',
+            'rank': theme.get('rank'), 'selected_theme': theme['selected_theme'],
+            'ranking_status': 'not_executed' if reasons else 'unknown' if theme['strength'] is None else 'computed',
             'ranking_scope': 'eligible_positive_strength_concepts_with_full_classification_members',
-            'theme_total_count': ranked_count, 'observed_theme_count': len(all_themes),
+            'missing_count': theme['missing_count'], 'theme_total_count': ranked_count, 'observed_theme_count': len(themes),
             'ranking_as_of': inputs.trade_date, 'ranking_rule_version': THEME_RANKING_VERSION,
         })
     top5 = {theme['id'] for theme in themes if theme.get('selected_theme')}
@@ -85,7 +72,7 @@ def annotate_audit(inputs, records: list[dict], themes: list[dict]) -> dict:
     role_fields = {'true_leader': ['return_20d', 'identity_score', 'high_proximity'],
                    'fallback_leader': ['return_20d', 'identity_score'],
                    'emotion': ['return_5d', 'acceleration_5_20', 'return_20d']}
-    feature_keys = sorted({key for row in records for key in row['observation']['variables']} | {'price_gaps', 'abnormal_move'})
+    feature_keys = sorted({key for row in records for key in row['observation']['values']} | {'price_gaps', 'abnormal_move'})
     samples = []
     for row in records:
         obs, symbol = row['observation'], row['symbol']
@@ -94,9 +81,9 @@ def annotate_audit(inputs, records: list[dict], themes: list[dict]) -> dict:
         values = obs['values']
         role = obs['role']
         role_complete = completeness(values, role_fields.get(role, sorted({k for fields in role_fields.values() for k in fields})))
-        missing = sorted([key for key, value in values.items() if value is None]
-                         + [key for key in ('price_gaps', 'abnormal_move')
-                            if obs.get(key, {}).get('status') not in ('known', 'approximate')])
+        missing = sorted(key for key in feature_keys if (
+            obs.get(key, {}).get('status') not in ('known', 'approximate')
+            if key in ('price_gaps', 'abnormal_move') else values.get(key) is None))
         pre = obs['eligibility']['inputs']
         hard_checks = {code: pre.get(label) for code, label in (
             ('out_of_scope', '研究范围'), ('not_trading', '正常交易'),
@@ -127,23 +114,6 @@ def annotate_audit(inputs, records: list[dict], themes: list[dict]) -> dict:
         obs['related_theme_ids_all'] = related
         obs['related_theme_count_all'] = len(related)
         obs['related_theme_count_in_top5'] = len(set(related) & top5)
-        obs['verification'] = {
-            key: {'status': 'unknown', 'value': None, 'reason_code': 'definition_unverified'}
-            for key in ('severe_event', 'near_severe_event')}
-        wave = obs.get("wave") or {}
-        for key in ("first_wave_pullback", "current_wave_index", "completed_wave_count"):
-            value = values.get(key)
-            obs["verification"][key] = {"status": "verified" if value is not None else "unknown",
-                                        "value": value, "reason_code": wave.get("data_status", "price_basis_unavailable")}
-        for key, path in (("severe_event", "e2"), ("near_severe_event", "e1")):
-            applicable = obs["dip"][path].get("event_applicable")
-            if applicable is not None:
-                obs["verification"][key] = {"status": "verified" if applicable else "not_applicable",
-                                            "value": applicable, "reason_code": "event_evidence"}
-        catchup = [path.get('catchup', {}).get('value') for path in row.get('paths', [])]
-        obs['verification']['catchup'] = {
-            'status': 'verified' if True in catchup else 'unknown', 'value': True if True in catchup else None,
-            'reason_code': 'legacy_causal_evidence' if True in catchup else 'insufficient_evidence'}
         obs['decision'] = {
             'steps': steps, 'first_blocking_step': blocked['step'] if blocked else None,
             'blocking_reason_code': (blocked['failed_reason_codes'] + blocked['unknown_reason_codes'])[0] if blocked else None,
@@ -153,7 +123,7 @@ def annotate_audit(inputs, records: list[dict], themes: list[dict]) -> dict:
             'quota_limit': (1 if quota == 'emotion' else 2) if ready else None,
             'quota_fallback_allowed': False, 'rank_within_theme_role': obs.get('rank_within_theme_role'),
             'rank_global_role': obs.get('rank_global_role'), 'sorting_rule_version': SORT_VERSION,
-            'comparison_group': [inputs.trade_date, primary, quota, obs['role_status'], role_complete['status'], role_complete['missing_fields'], missing] if ready else None,
+            'comparison_group': [inputs.trade_date, primary, quota, role] if ready else None,
             'competed_themes': [t['id'] for t in themes if t.get('selected_theme') and t['id'] in relations[symbol]],
             'final_theme': primary, 'dedup_rule_version': DEDUP_VERSION,
             'dedup_decision_basis': 'theme_strength_then_limit_count_then_height_then_stable_id',

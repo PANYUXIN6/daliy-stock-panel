@@ -12,7 +12,6 @@ from test_evening_report_observation import observation_inputs
 
 from app.services import evening_report_tracking as tracking
 from app.services.evening_report_engine import build_report
-from app.services.evening_report_inputs import prepare_evaluation_inputs, wave_factor_inputs
 from app.services.evening_report_store import EveningReportStore
 
 
@@ -23,7 +22,7 @@ def test_selection_audit_preserves_quota_ranks_and_same_features_for_unselected(
     excluded = [row for row in samples if not row['selected']]
     assert len(excluded) == 5
     assert report['audit']['sample_counts'] == {'selected': 15, 'comparable_unselected': 5}
-    assert {theme['ranking_rule_version'] for theme in report['audit']['themes']} == {'theme-role-order-v1'}
+    assert {theme['ranking_rule_version'] for theme in report['audit']['themes']} == {'valid-member-days-v2'}
     assert report['audit']['sorting_rule_version'] == 'theme-role-order-v2'
     for row in excluded:
         obs = row['observation']
@@ -37,13 +36,9 @@ def test_selection_audit_preserves_quota_ranks_and_same_features_for_unselected(
         assert decision['rank_global_role'] is not None
         assert decision['comparison_eligible'] and not decision['quota_fallback_allowed']
         assert obs['price_gaps']['status'] == 'known'
-        assert obs['variables']['return_20d']['value'] == pytest.approx(.20)
-        assert obs['variables']['return_20d']['unit'] == '小数'
-        assert 'bucket_label_at_time' in obs['variables']['return_20d']
-        assert 'bucket_rule_version' in obs['variables']['return_20d']
+        assert obs['values']['return_20d'] == pytest.approx(.20)
+        assert report['variable_definitions']['return_20d']['unit'] == '小数'
         assert obs['snapshot']['as_of'] == inputs.trade_date
-        assert obs['verification']['current_wave_index']['status'] == 'unknown'
-        assert obs['verification']['current_wave_index']['reason_code']
     assert report['audit']['missingness']['price_gaps']['missing_rate_difference'] == 0
     assert report['audit']['non_independent_notice']
 
@@ -60,7 +55,7 @@ def test_unknown_failed_and_skipped_steps_are_distinct_and_theme_flags_stay_on_t
              for key in ('broad', '新疆振兴', 't1')]
     inputs.memberships = pl.concat([inputs.memberships, pl.DataFrame(broad + extra)])
     report = build_report(inputs)
-    rows = {row['symbol']: row['observation'] for row in report['records']}
+    rows = {row['symbol']: row['observation'] for row in report['calculations']}
     for symbol, status in [('000000.SZ', 'unknown'), ('000001.SZ', 'failed')]:
         decision = rows[symbol]['decision']
         steps = {item['step']: item['status'] for item in decision['steps']}
@@ -97,8 +92,7 @@ def test_full_audit_and_recommendations_share_outcomes_without_sharing_identity(
     assert unselected['performance']['1']['status'] == 'not_due'
     with pytest.raises(ValueError, match='已入选'):
         tracking.update_feedback(tmp_path, day=inputs.trade_date, version=original['version'],
-                                 symbol=unselected['symbol'], starred=True, outcome=None,
-                                 expected_revision=0, request_id='audit_request_test1')
+                                 symbol=unselected['symbol'], starred=True, outcome=None)
     tracking.refresh_tracking(tmp_path, inputs)
     personal = tracking.personal_history(tmp_path)['records']
     assert len(personal) == 15
@@ -180,47 +174,6 @@ def test_registered_audit_only_report_is_analysed_when_market_recovers(tmp_path,
     tracking.refresh_tracking(tmp_path, inputs)
     analysis, = tracking.audit_history(tmp_path, saved['version'])['analyses']
     assert analysis['payload']['same_cycle_sample_count'] == report['audit']['same_cycle_sample_count']
-
-
-def test_rebased_prices_use_raw_endpoints_and_ignore_future_factors(tmp_path):
-    days = ['2026-11-02', '2026-11-03', '2026-11-04']
-    symbol = '300001.SZ'
-    factor_path = tmp_path / 'adj_factor' / 'all.parquet'
-    factor_path.parent.mkdir()
-    pl.DataFrame({'symbol': [symbol, symbol, 'unrelated'],
-                  'trade_date': [date(2026, 11, 3), date(2026, 11, 4), date(2026, 11, 3)],
-                  'ex_factor': [2., 3., 0.]}).write_parquet(factor_path)
-    inputs = SimpleNamespace(trade_date=days[1], metadata=pl.DataFrame({'symbol': [symbol], 'is_st': [True]}),
-                             prices=pl.DataFrame({'symbol': [symbol, symbol], 'date': days[:2],
-                                                   'raw_close': [10., 6.], 'close': [999., 123.], 'formal': [True, True],
-                                                   'signal_limit_up': [False, True]}),
-                             provenance={'input_versions': {'files': [['adj_factor/all.parquet', 123, 456]]},
-                                         'calendar': {'days': days, 'updated_at': 'calendar-v1'}, 'suspensions': []})
-    inputs.wave_factors, inputs.provenance["wave_factor_source"] = wave_factor_inputs(
-        tmp_path, date.fromisoformat(inputs.trade_date), inputs.provenance["input_versions"])
-    prepare_evaluation_inputs(inputs)
-    prices = {(row['symbol'], str(row['date'])): row for row in inputs.prices.to_dicts()}
-    result = tracking.evaluate_performance(symbol, days[0], calendar=days, as_of=days[1],
-                                          prices=prices, suspensions=set(), data_version={'input_id': 'test'},
-                                          evaluation_context=inputs.provenance['evaluation_context'])['1']
-    assert result['d_close_raw'] == 10 and result['target_close_raw'] == 6
-    assert result['d_close_adjusted'] == 5 and result['target_close_adjusted'] == 6
-    assert result['d_adjustment_multiplier'] == .5 and result['target_adjustment_multiplier'] == 1
-    assert (result['target_close_raw'] * result['target_adjustment_multiplier'] /
-            (result['d_close_raw'] * result['d_adjustment_multiplier']) - 1) == pytest.approx(result['return'])
-    assert result['return'] == pytest.approx(.2) and result['return_unit'] == 'ratio'
-    assert result['status'] == 'evaluated'
-    assert result['adjust_method'] == 'qfq' and result['adjust_base_date'] == days[1]
-    assert result['calendar_version']['updated_at'] == 'calendar-v1'
-    assert result['trading_constraints'] == ['目标日涨停', '目标日ST']
-    assert result['constraint_coverage'][days[0]]['st_status'] == 'unknown'
-    assert result['evaluated_at'] and result['evaluation_rule_version']
-    # A malformed factor is unknown data, never identity adjustment.
-    pl.DataFrame({'symbol': [symbol], 'trade_date': [date(2026, 11, 3)], 'ex_factor': [0.]}).write_parquet(factor_path)
-    inputs.wave_factors, inputs.provenance["wave_factor_source"] = wave_factor_inputs(
-        tmp_path, date.fromisoformat(inputs.trade_date), inputs.provenance["input_versions"])
-    prepare_evaluation_inputs(inputs)
-    assert inputs.prices['close'].null_count() == 2
 
 
 def test_missingness_reports_selection_proxy_without_false_significance():

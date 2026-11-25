@@ -1,4 +1,4 @@
-import type { EveningObservation, EveningPerformance, EveningPersonalRecord } from '@/lib/api'
+import type { EveningObservation, EveningPerformance, EveningPersonalRecord, EveningVariable } from '@/lib/api'
 import { fmtPct, fmtPrice, fmtVolume, priceColorClass } from '@/lib/format'
 import { boardLabels, dipLabel, roleLabels } from './EveningFilters'
 
@@ -11,8 +11,10 @@ const variableNames: Record<string, string> = {
   volume_ratio_2_10: '2/10日量比', daily_amplitude: '日振幅', amplitude_ratio_2_10: '2/10日振幅比',
   rising_lows_3d: '三日低点抬高', intraday_drawdown: '日内高点回撤', first_wave_pullback: '首波回调',
   current_wave_index: '当前主升段', completed_wave_count: '已确认高点段数', first_impulse_return: '首段涨幅',
-  retrace_pct: '正式回撤比例', provisional_retrace_pct: '候选回撤比例', pivot_density: '20日摆动密度',
+  retrace_pct: '回撤占首段涨幅比例', provisional_retrace_pct: '候选回撤比例', pivot_density: '20日摆动密度',
   first_pullback_active: '首波观察窗口有效', atr14_pct: '14日ATR占收盘比',
+  low_vs_previous: '较前一交易日低点', pullback_volume_mean: '回调均量', impulse_volume_mean: '上涨段均量',
+  pullback_volume_ratio: '回调与上涨段均量比', close_vs_open: '收盘相对开盘涨幅', relative_lead_score: '综合领先分',
   severe_event: '严重异动事件', near_severe_event: '即将严重异动',
 }
 const dipCheckLabels: Record<string, string> = {
@@ -26,7 +28,7 @@ function variableValue(key: string, value: unknown, unit?: string) {
   if (value === null || value === undefined) return '待核验'
   if (typeof value === 'boolean') return value ? '是' : '否'
   if (typeof value !== 'number' || !Number.isFinite(value)) return String(value)
-  if (key.startsWith('return_') || key.startsWith('distance_') || ['change_pct', 'high_proximity', 'daily_amplitude', 'intraday_drawdown', 'first_wave_pullback', 'first_impulse_return', 'retrace_pct', 'provisional_retrace_pct', 'atr14_pct'].includes(key)) return fmtPct(value)
+  if (key.startsWith('return_') || key.startsWith('distance_') || ['change_pct', 'high_proximity', 'daily_amplitude', 'intraday_drawdown', 'first_wave_pullback', 'first_impulse_return', 'retrace_pct', 'provisional_retrace_pct', 'atr14_pct', 'low_vs_previous', 'close_vs_open'].includes(key)) return fmtPct(value)
   if (key.startsWith('amount') || key === 'start_amount') return `${fmtVolume(value)}元`
   if (unit === '元') return `${fmtPrice(value)}元`
   return `${Number(value.toFixed(3))}${unit === '分' || unit === '次' ? unit : ''}`
@@ -40,7 +42,7 @@ export function EveningAllocationRank({ observation, className = 'mt-1 text-xs t
   return <p className={className}>分配前第{decision.rank_within_theme_role}名（{decision.quota_limit}个名额）</p>
 }
 
-export function EveningObservationDetails({ observation }: { observation?: EveningObservation | null }) {
+export function EveningObservationDetails({ observation, definitions = {} }: { observation?: EveningObservation | null; definitions?: Record<string, EveningVariable> }) {
   if (!observation) return <p className="text-sm text-muted">缺少当日观察明细。</p>
   const gaps = observation.price_gaps
   const abnormal = observation.abnormal_move
@@ -49,16 +51,11 @@ export function EveningObservationDetails({ observation }: { observation?: Eveni
   const phaseLabels = { pullback_ge_5pct: '回撤达到5%', recovered_lt_5pct: '当前回撤不足5%', window_closed: '首波回调窗口已关闭' }
   const closeLabels = { closed_by_start: '第二段量价启动', closed_by_new_high: '第二段收盘创新高', closed_by_stale: '候选极值过期' }
   const waveStatuses = { known: '结构已核验', warming_up: '等待首组摆动点确认', data_gap: '存在日线缺口', rebuilding: '结构连续性待恢复' }
-  const pullback = wave?.context_refs?.pullback
-  const contextIssues = [...new Set([
-    ...(wave?.context_refs?.recommendation ?? []).map(ref => ({ ref, label: '推荐日' })),
-    ...(pullback?.references ?? []).map(ref => ({ ref, label: `回调期 ${ref.as_of ?? ''}` })),
-  ].flatMap(({ ref, label }) => {
-    const status = ref.current_reference_status ?? ref.reference_status
-    if (status === 'expired') return [`${label}研究引用已过期，不参与解释`]
-    const reason = ref.current_reason ?? ref.reason
-    return status === 'missing' ? [`${label}研究引用缺失（${reason ?? '未记录原因'}）`] : []
-  }))]
+  const variables = Object.entries({ ...observation.variables, ...observation.values }).map(([key]) => {
+    const variable = { ...definitions[key], ...observation.variables[key] }
+    const value = key in observation.values ? observation.values[key] : variable.value
+    return { key, variable, value }
+  })
   return <div className="space-y-4 text-sm leading-6">
     <div className="flex flex-wrap gap-x-5 gap-y-1 text-secondary"><span>{roleLabels[observation.role ?? ''] ?? '角色待核验'}{observation.role_status === 'review_pending' ? ' · 跟踪待复核' : ''}</span><span>{boardLabels[observation.board ?? ''] ?? '交易板块待核验'}</span><span>低吸：{dipLabel(observation.dip)}</span></div>
     <p>{observation.reason}</p>
@@ -71,9 +68,8 @@ export function EveningObservationDetails({ observation }: { observation?: Eveni
       <ul className="text-secondary">{points.map(([label, point]) => point && <li key={point.pivot_id}><span className="whitespace-nowrap">{label} {fmtPrice(point.price)}</span>{' · '}
         <span className="whitespace-nowrap">极值日 {point.extreme_date}</span>{' · '}
         <span className="whitespace-nowrap">确认日 {point.confirmed_at}</span></li>)}</ul>
+      {wave.pullback_volume && <p className="text-secondary">回调缩量按 {wave.pullback_volume.start_exclusive} 之后至 {wave.pullback_volume.end} 的 {wave.pullback_volume.sessions} 个成交日计算。</p>}
       {wave.provisional_extreme && <p className="text-secondary">候选{wave.provisional_extreme.kind === 'H' ? '高点' : '低点'} {fmtPrice(wave.provisional_extreme.price)} · {wave.provisional_extreme.extreme_date} · 静置 {wave.provisional_extreme.idle_sessions} 日</p>}
-      {pullback && <p className="text-secondary">回调区间（{pullback.start_exclusive}, {pullback.end_inclusive}] · 已核验引用 {pullback.references.filter(ref => (ref.current_reference_status ?? ref.reference_status) === 'valid').length} / {pullback.references.length}</p>}
-      {contextIssues.length > 0 && <p className="text-muted">{contextIssues.join('、')}</p>}
     </div> : <p className="text-muted">{observation.dip.rule_version ? '波次资料待核验' : '波次详情当时未记录'}</p>}
     {!!observation.related_themes.length && <p className="text-secondary">关联题材：{observation.related_themes.map(theme => theme.name).join('、')}</p>}
     {!!observation.dip.reasons.length && <div className="rounded-md bg-warning/5 p-3 text-warning"><p className="font-medium">低吸依据</p><ul className="mt-1 list-inside list-disc">{observation.dip.reasons.map(reason => <li key={reason}>{reason}</li>)}</ul></div>}
@@ -86,6 +82,8 @@ export function EveningObservationDetails({ observation }: { observation?: Eveni
           { label: 'E2 · 异动后形态', ...observation.dip.e2 },
         ]).map(group => <div key={group.label} className="min-w-0 text-xs">
           <p className="mb-1 font-medium">{group.label}</p>
+          {'event' in group && group.event?.title && <p className="text-secondary">{group.event.disclosed_on} · {group.event.title}</p>}
+          {'event' in group && group.event?.disclosure_days && <p className="text-secondary">同向异动 {group.event.count} 次，严重异动门槛 {group.event.threshold} 次。上榜日 {group.event.disclosure_days.join('、')}。</p>}
           {'event_applicable' in group && <p className="text-muted">事件依据{group.event_applicable === true ? '已核验' : group.event_applicable === false ? '不适用' : '待核验'}</p>}
           <dl>{group.checks?.map(check => <div className="flex justify-between gap-2" key={check.check_id}>
             <dt className="text-secondary">{dipCheckLabels[check.check_id] ?? check.check_id}</dt>
@@ -96,9 +94,9 @@ export function EveningObservationDetails({ observation }: { observation?: Eveni
     </details>}
     <div className="grid gap-4 md:grid-cols-2">
       <div><h4 className="font-medium">未回补价格缺口</h4>{gaps?.status === 'known' ? gaps.intervals.length ? <ul className="text-secondary">{gaps.intervals.map((gap, index) => <li key={`${gap.date}:${index}`}>{gap.date} · {gap.direction === 'up' ? '向上' : gap.direction === 'down' ? '向下' : gap.direction} · {fmtPrice(gap.lower)}—{fmtPrice(gap.upper)}</li>)}</ul> : <p className="text-secondary">截止 {gaps.as_of} 未发现未回补缺口。</p> : <p className="text-muted">{gaps?.reason ?? '缺口位置待核验'}</p>}</div>
-      <div><h4 className="font-medium">异常波动接近度 · 近似计算</h4>{abnormal?.status === 'approximate' && <ul className="text-secondary">{Object.entries(abnormal.windows ?? {}).map(([window, evidence]) => <li key={window}>{window}日 · 偏离 {fmtPct(evidence.value)} · 接近度 {evidence.closeness == null ? '未知' : `${(evidence.closeness * 100).toFixed(1)}%`}</li>)}</ul>}<p className="text-muted">{abnormal?.limitation ?? '事件级严重异动尚未核验，不能视为E1/E2前置已确认。'}</p></div>
+      <div><h4 className="font-medium">异常波动接近度 · 近似计算</h4>{abnormal?.status === 'approximate' && <ul className="text-secondary">{Object.entries(abnormal.windows ?? {}).map(([window, evidence]) => <li key={window}>{window}日 · 偏离 {fmtPct(evidence.value)} · 接近度 {evidence.closeness == null ? '未知' : `${(evidence.closeness * 100).toFixed(1)}%`}</li>)}</ul>}<p className="text-muted">{abnormal?.limitation ?? '偏离度为估算值，适用事件见上方 E1／E2 明细。'}</p></div>
     </div>
-    <details className="rounded-md border border-border"><summary className="cursor-pointer px-3 py-2 font-medium">变量值与计算依据</summary><dl className="grid gap-3 border-t border-border p-3 sm:grid-cols-2 xl:grid-cols-3">{Object.entries(observation.variables).map(([key, variable]) => <div key={key} className="min-w-0 rounded bg-elevated/40 p-3 text-xs"><dt className="font-medium text-foreground">{variableNames[key] ?? key}<span className="float-right ml-2 font-mono">{variableValue(key, variable.value, variable.unit)}</span></dt><dd className="mt-2 break-words text-secondary">{variable.formula}</dd><dd className="text-muted">{variable.price_basis} · {variable.as_of ?? '时点未知'}</dd>{variable.missing_reason && <dd className="text-warning">{variable.missing_reason}</dd>}</div>)}</dl></details>
+    <details className="rounded-md border border-border"><summary className="cursor-pointer px-3 py-2 font-medium">变量值与计算依据</summary><dl className="grid gap-3 border-t border-border p-3 sm:grid-cols-2 xl:grid-cols-3">{variables.map(({ key, variable, value }) => <div key={key} className="min-w-0 rounded bg-elevated/40 p-3 text-xs"><dt className="font-medium text-foreground">{variableNames[key] ?? key}<span className="float-right ml-2 font-mono">{variableValue(key, value, variable.unit)}</span></dt><dd className="mt-2 break-words text-secondary">{variable.formula}</dd><dd className="text-muted">{variable.price_basis} · {variable.as_of ?? '时点未知'}</dd>{variable.missing_reason && <dd className="text-warning">{variable.missing_reason}</dd>}</div>)}</dl></details>
   </div>
 }
 

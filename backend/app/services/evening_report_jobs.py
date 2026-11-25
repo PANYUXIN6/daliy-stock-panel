@@ -13,7 +13,6 @@ from app.market_time import CN_TZ, cn_now
 from app.services.daily_coverage import DailyCoverageError
 from app.services.evening_report_inputs import (
     load_inputs,
-    prepare_wave_history,
     require_ready,
 )
 from app.services.evening_report_store import (
@@ -69,9 +68,7 @@ def status(data_dir: Path, day: str | None = None) -> dict:
     if original:
         return {'date': day, 'status': 'published', 'version': original['version'], 'has_report': True}
     now = cn_now()
-    if day != now.date().isoformat():
-        return {'date': day, 'status': 'unpublished', 'reason': '该日无正式晚报'}
-    blocker = _generation_blocker(now.date(), now, data_dir)
+    blocker = _generation_blocker(date.fromisoformat(day), now, data_dir)
     can_generate = blocker is None
     attempt = {**_read_attempt(data_dir, day), 'can_generate': can_generate}
     job = job_store.get(attempt['job_id']) if attempt.get('job_id') else None
@@ -79,34 +76,27 @@ def status(data_dir: Path, day: str | None = None) -> dict:
         message = next((entry['msg'] for entry in reversed(job.get('log', [])) if not entry.get('task_id')), None)
         return {**attempt, 'date': day, 'status': 'generating', 'reason': message or '正在核验输入并计算每日晚报',
                 'progress': job.get('progress', 0)}
+    if day != now.date().isoformat():
+        return {'date': day, 'status': 'unpublished', 'reason': '该日无正式晚报'}
     if attempt.get('status') in ('failed', 'cancelled'):
         return {**attempt, 'date': day, 'has_report': store.has_original(day)}
     if job and job['status'] == 'failed':
         # JobStore startup recovery also covers a process dying before our callback.
         return {**attempt, 'date': day, 'status': 'cancelled' if job.get('outcome') == 'cancelled' else 'failed',
                 'reason': job.get('error')}
-    ready = store.readiness_status(day)
+    ready = store.readiness(day)
     complete = bool(ready and ready.get('complete'))
     return {'date': day, 'can_generate': can_generate, 'status': 'ready' if complete else 'waiting',
             'reason': blocker or ('输入已验收，等待执行槽' if complete else
                       (ready or {}).get('reason', '等待正式行情、分类与市场环境完成本轮验收'))}
 
 
-def _reference(evidence: dict) -> dict:
-    return {'input_id': evidence['input_id'], 'versions': evidence['versions'], 'cutoff': evidence['cutoff'],
-            'classifications': [o['id'] for o in evidence['classifications']]}
-
-
-def generate(repo, day: date, *, progress, authorize=None, diagnostics: bool = False) -> dict:
+def generate(repo, day: date, *, progress, diagnostics: bool = False) -> dict:
     from app.services.evening_report_engine import build_report
-    from app.services.evening_report_rules import RULE_VERSION
-    from app.services.evening_report_start_study import archive_study_market
 
     data_dir = repo.store.data_dir
     store = EveningReportStore(data_dir)
     report_date = day.isoformat()
-    if authorize:
-        authorize()
     original = store.original_metadata(report_date)
     if original:
         _notify_final(data_dir, report_date, original['version'])
@@ -114,31 +104,17 @@ def generate(repo, day: date, *, progress, authorize=None, diagnostics: bool = F
 
     def check():
         progress('evening_report', 20, '核验输入并计算每日晚报…', skip_log=True)
-        _require_preparation_time(day)
 
     check()
     evidence = require_ready(data_dir, day)
-    history = store.history(report_date, RULE_VERSION, allow_partial=True)
-    inputs = load_inputs(data_dir, day, evidence, check)
-    lookups = store.published_wave_lookups(report_date)
-    if inputs.wave_factors is not None:
-        checkpoint = history[-1].get('state', {}).get('wave', {}) if history else {}
-        prepare_wave_history(store, inputs, evidence, checkpoint)
-    published_start, published_close, published_structure_event = lookups
-    payload = build_report(inputs, history=history, cancel_check=check,
-                           published_start=published_start, published_close=published_close,
-                           published_structure_event=published_structure_event)
-    archive_study_market(store, inputs, payload, history)
-    require_ready(data_dir, day, input_id=evidence['input_id'])
+    inputs = load_inputs(repo, day, evidence, check)
+    previous_day = max((d for d in inputs.calendar if d < report_date), default=None)
+    previous = store.get(previous_day) if previous_day else None
+    payload = build_report(inputs, previous=previous, cancel_check=check)
     if diagnostics:
         store.save_diagnostic(payload, reason='administrator_requested')
-    def before_publish():
-        check()
-        if authorize:
-            authorize()
-
-    check()
-    report = store.save(report_date, payload, _reference(evidence), before_publish=before_publish)
+    reference = {key: evidence[key] for key in ('stock_generation', 'cutoff')}
+    report = store.save(report_date, payload, reference, before_publish=check)
     _notify_final(data_dir, report_date, report['version'])
     return {'date': report_date, 'status': 'published', 'version': report['version'], 'reused': False}
 
@@ -161,21 +137,19 @@ def _require_preparation_time(day: date) -> None:
 
 
 def _prepare_and_generate(repo, quote_service, capset, day: date, *,
-                          progress, automatic: bool, authorize, diagnostics: bool) -> dict:
+                          progress, automatic: bool, diagnostics: bool) -> dict:
     from app.api.pipeline import finalize_market_data
     from app.jobs import daily_pipeline
     from app.services import trading_day
 
     data_dir = repo.store.data_dir
-    if authorize:
-        authorize()
     if EveningReportStore(data_dir).has_original(day.isoformat()):
-        return generate(repo, day, progress=progress, authorize=authorize)
-    _require_preparation_time(day)
+        return generate(repo, day, progress=progress)
     progress('evening_report', 0, '核验每日晚报输入…')
     try:
         require_ready(data_dir, day)
     except DailyCoverageError:
+        _require_preparation_time(day)
         if automatic:
             raise
         if capset is None:
@@ -188,8 +162,6 @@ def _prepare_and_generate(repo, quote_service, capset, day: date, *,
         _require_preparation_time(day)
         if trading_day.is_trading_day(cn_now(), data_dir=data_dir) is not True:
             raise DailyCoverageError('目标日期不是已确认的交易日，不能准备晚报输入') from None
-        if authorize:
-            authorize()
 
         def preparation_progress(stage, pct, message, **kwargs):
             progress(stage, int(pct * .7), message, **kwargs)
@@ -201,26 +173,21 @@ def _prepare_and_generate(repo, quote_service, capset, day: date, *,
             # Preparation may have written data even when acceptance or cancellation fails.
             finalize_market_data(repo, quote_service)
         progress('evening_report', 75, '必要数据验收完成，开始生成每日晚报…')
-        _require_preparation_time(day)
         require_ready(data_dir, day)
-    return generate(repo, day, progress=progress, authorize=authorize, diagnostics=diagnostics)
+    return generate(repo, day, progress=progress, diagnostics=diagnostics)
 
 
 async def trigger(repo, quote_service=None, *, day: date, revision: bool = False, automatic: bool = False,
                   diagnostics: bool = False, capset=None) -> dict:
     from app.api.pipeline import _submit_job
-    from app.services.evening_report_rules import RULE_VERSION, SELECTION_POLICY_VERSION
 
     data_dir = repo.store.data_dir
     store = EveningReportStore(data_dir)
-    authorize = None
     if not automatic:
         from app.services.auth import AuthError, require_current_session
 
-        def authorize():
-            if require_current_session()['role'] != 'admin':
-                raise AuthError('共享晚报重建仅管理员可执行', 403, 'ADMIN_REQUIRED')
-        authorize()
+        if require_current_session()['role'] != 'admin':
+            raise AuthError('共享晚报生成仅管理员可执行', 403, 'ADMIN_REQUIRED')
     if revision:
         raise HTTPException(status_code=409, detail='每日晚报发布即定稿，修订写入口已关闭')
     report_date = day.isoformat()
@@ -236,22 +203,18 @@ async def trigger(repo, quote_service=None, *, day: date, revision: bool = False
         return {'date': report_date, 'status': 'unpublished', 'reason': '该日无正式晚报'}
     if blocker := _generation_blocker(day, now, data_dir):
         raise HTTPException(status_code=409, detail=blocker)
-    try:
-        evidence = require_ready(data_dir, day)
-    except DailyCoverageError as exc:
-        if automatic:
+    if automatic:
+        try:
+            require_ready(data_dir, day)
+        except DailyCoverageError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
-        evidence = None
     context = copy_context()
-    # The persisted observation IDs plus ready cutoff identify one accepted input;
-    # no digest or duplicate market-data snapshot is introduced.
-    input_key = f'{evidence["scope_version"]}:{evidence["input_id"]}' if evidence else 'prepare'
-    key = f'evening_report:{day}:live:{RULE_VERSION}:{SELECTION_POLICY_VERSION}:{input_key}'
+    key = f'evening_report:{day}:live'
     result = await _submit_job(
         repo, quote_service,
         lambda progress: lambda: context.run(_prepare_and_generate, repo, quote_service, capset, day,
                                              progress=progress,
-                                             automatic=automatic, authorize=authorize, diagnostics=diagnostics),
+                                             automatic=automatic, diagnostics=diagnostics),
         request_key=key, datasets=['evening_report'], finalize=lambda: None,
     )
     prior_attempt = _read_attempt(data_dir, report_date)
@@ -308,10 +271,15 @@ async def _queue_tracking(repo, day: str) -> dict | None:
     if not entries:
         return None
     day = max(day, entries[0]['date'])
-    evidence = store.readiness(day) or {}
+    from app.enriched_generation import EnrichedGenerationUnavailableError, get_enriched_generation
+
+    try:
+        generation = get_enriched_generation(data_dir, 'stock', initialize=False)
+    except EnrichedGenerationUnavailableError:
+        generation = 'unready'
     newest = max((entry['versions'][0] for entry in entries),
                  key=lambda value: (value.get('generated_at', ''), value['version']))
-    key = f'evening_tracking:{day}:v1:{newest["version"]}:{evidence.get("input_id", "unready")}'
+    key = f'evening_tracking:{day}:v2:{newest["version"]}:{generation or "unready"}'
     if refresh_completed(data_dir, key):
         return None
     # All automatic derivation paths pass here. Use persisted terminal outcomes

@@ -41,6 +41,13 @@ class DailyCoverage:
         current = frame.filter(pl.col("date").cast(pl.Date) == self.day)
         if "quote_ts" in current.columns:
             current = current.filter(pl.col("quote_ts").is_null())
+        current = current.unique("symbol", keep="last")
+        # 后一批正式订正取代同证券此前的状态。
+        refreshed = set(current["symbol"].drop_nulls().to_list())
+        self.active.difference_update(refreshed)
+        for symbol in self.halted.intersection(refreshed):
+            self.halted_evidence.pop(symbol, None)
+        self.halted.difference_update(refreshed)
         # 与 filter_halt_days 同口径，但缺值不能被归类为停牌。
         halted = current.filter(
             ((pl.col("open") == 0) & (pl.col("high") == 0))

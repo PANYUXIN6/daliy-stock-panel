@@ -8,7 +8,6 @@ import pytest
 from app.services.evening_report_engine import EveningInputs, build_report
 from app.services.evening_report_observation import (
     allocate,
-    apply_observation,
     classify_role,
     dip_labels,
     stock_values,
@@ -34,7 +33,7 @@ def test_role_priority_and_independent_or_paths(values, role):
 
 
 def test_true_leader_mismatch_is_review_not_fake_confirmed_downgrade():
-    previous = {"role": "true_leader", "last_true_date": "2026-11-10"}
+    previous = "2026-11-10"
     result = classify_role({"return_20d": .20, "identity_score": 0, "high_proximity": .6}, previous)
     assert result["role"] == "historical_leader" and result["role_status"] == "review_pending"
     assert result["daily_role"] == "other" and result["conditions"]["true_leader"] is False
@@ -46,7 +45,7 @@ def test_dip_emotion_side_tag_is_reachable_but_unverified_events_never_confirm()
               "identity_score": 60, "high_proximity": .90, "space_score": 31.25,
               "amount_day": 800_000_000, "return_3d": .15, "volume_ratio_2_10": .55,
               "distance_ma10": -.02, "amplitude_ratio_2_10": 1.2,
-              "rising_lows_3d": True, "distance_bull_bear": .05}
+              "low_vs_previous": 0., "distance_bull_bear": .05}
     role = classify_role(values)
     market = {"phase": "rally", "sentiment": {"classification": {
         "sentiment_state": "hot_fragile", "evidence": {"ge2_count": 5}}}}
@@ -68,7 +67,7 @@ def test_price_derived_exact_boundaries_keep_closed_and_open_semantics():
               "acceleration_5_20": (11.2 / 10 - 1) / .20, "identity_score": 0,
               "return_3d": .15, "volume_ratio_2_10": .55,
               "distance_ma10": 10.6 / 10 - 1, "amplitude_ratio_2_10": 1.2,
-              "rising_lows_3d": True, "distance_bull_bear": 10.5 / 10 - 1}
+              "low_vs_previous": 0., "distance_bull_bear": 10.5 / 10 - 1}
     role = classify_role(values)
     assert role["role"] == "emotion"
     dip = dip_labels(values, role, {}, "20%")
@@ -104,7 +103,7 @@ def observation_inputs():
                                "signal_limit_up": kind in (0, 1) and i in (65, 67, 69),
                                "signal_limit_down": False, "consecutive_limit_ups": 1 if kind in (0, 1) and i == 69 else 0})
     return EveningInputs(trade_date=days[-1], calendar=days, prices=pl.DataFrame(prices), metadata=pl.DataFrame(metadata),
-                         memberships=pl.DataFrame(memberships), benchmark=pl.DataFrame({"date": days, "close": [100.] * 70, "formal": [True] * 70}),
+                         memberships=pl.DataFrame(memberships),
                          market={"phase": "ebb", "state": "weak", "ge2_count": 0})
 
 
@@ -116,10 +115,9 @@ def test_five_themes_fifteen_unique_rows_on_first_report_despite_low_amount_and_
     for theme in range(5):
         rows = [r for r in selected if r["observation"]["primary_theme"]["id"] == f"concept:t{theme}"]
         assert [r["observation"]["role"] for r in sorted(rows, key=lambda r: r["observation"]["rank"])] == ["true_leader", "fallback_leader", "emotion"]
-    assert all(r["qualification"]["amount_ok"] is False for r in selected)
-    assert all(r["position"]["value"] is False for r in selected)
+    assert all(r["observation"]["values"]["amount_day"] < 100_000_000 for r in selected)
     assert all(r["observation"]["dip"]["status"] == "none" for r in selected)
-    assert all(r["observation"]["variables"]["return_20d"]["as_of"] == inputs.trade_date for r in selected)
+    assert report["variable_definitions"]["return_20d"]["as_of"] == inputs.trade_date
     from app.services.evening_report_store import report_view
     view = report_view(report)
     assert len(view["records"]) == 15 < len(report["records"])
@@ -136,11 +134,11 @@ def test_theme_membership_fixed_at_cutoff_full_member_limit_and_independent_miss
     report = build_report(inputs)
     assert len(report["selected"]) == 15
     assert report["statistics"]["theme_count"] == 5
-    by_id = {s["sector_id"]: s["observation"] for s in report["sectors"]}
-    assert by_id["宽概念"]["member_count"] == 121 and by_id["宽概念"]["exclusion"]
-    assert by_id["新疆振兴"]["exclusion"]
-    assert by_id["缺数主题"]["strength"] is None
-    assert isclose(by_id["t0"]["strength"], 2 * (1 + 2 ** (-2 / 2.5) + 2 ** (-4 / 2.5)))
+    by_id = {t["id"].removeprefix("concept:"): t for t in report["audit"]["themes"]}
+    assert by_id["宽概念"]["theme_member_count"] == 121 and by_id["宽概念"]["is_broad_concept"]
+    assert by_id["新疆振兴"]["exclusion_reason_codes"]
+    assert by_id["缺数主题"]["theme_strength_5d"] is None
+    assert isclose(by_id["t0"]["theme_strength_5d"], 2 * (1 + 2 ** (-2 / 2.5) + 2 ** (-4 / 2.5)))
 
 
 def test_primary_theme_is_stable_and_overlap_does_not_borrow_other_quota():
@@ -189,9 +187,6 @@ def test_theme_strength_needs_five_price_days_but_no_prior_classifications():
     inputs.calendar = inputs.calendar[-5:]
     # Every member seals up each of the five days: no prior close needed for U.
     inputs.prices = inputs.prices.filter(pl.col("date").is_in(inputs.calendar)).with_columns(pl.lit(True).alias("signal_limit_up"))
-    result = apply_observation(inputs, [], [], {}, inputs.calendar, lambda: None)
-    assert len(result["themes"]) == 5
-    assert all(t["complete"] for t in result["themes"])
     report = build_report(inputs)
     assert report["statistics"]["theme_count"] == 5
     assert report["selected"] == []  # 只有5日历史不足以证明20日角色条件。
@@ -210,19 +205,19 @@ def test_resumed_member_contributes_verified_daily_return_without_moving_window_
     )
     inputs.provenance["suspensions"] = [{"symbol": symbol, "date": day, "confirmed": True} for day in halted]
     report = build_report(inputs)
-    theme = next(s["observation"] for s in report["sectors"] if s["sector_id"] == "t0")
+    theme = next(s["observation"] for s in report["sectors"] if s["id"] == "concept:t0")
     rows = {row["date"]: row for row in inputs.prices.filter(peer).to_dicts()}
     values = stock_values(rows, inputs.calendar, set(halted))
-    assert theme["complete"] and theme["daily"][-1]["strong"] == 1
+    assert theme["missing_count"] == 0 and theme["daily"][-1]["strong"] == 1
     assert "000000.SZ" in report["selected"]
     assert values["change_pct"] == pytest.approx(.07)
-    assert values["return_5d"] is None and values["close_vs_previous_non_decreasing"] is None
+    assert values["return_5d"] is None
 
     inputs.provenance["suspensions"].pop()
     report = build_report(inputs)
-    theme = next(s["observation"] for s in report["sectors"] if s["sector_id"] == "t0")
-    assert not theme["complete"] and "000000.SZ" not in report["selected"]
-    assert {"symbol": symbol, "date": inputs.trade_date, "reason": "日涨幅端点缺失"} in theme["missing"]
+    theme = next(s["observation"] for s in report["sectors"] if s["id"] == "concept:t0")
+    assert theme["missing_count"] == 2
+    assert theme["daily"][-1]["missing_count"] == 1 and "000000.SZ" in report["selected"]
 
 
 def test_identity_only_role_survives_missing_20day_return_endpoint_and_60day_high():
@@ -247,7 +242,7 @@ def test_untrusted_current_price_excludes_only_affected_path_and_future_does_not
                                                .then(False).otherwise(pl.col("formal")).alias("formal"))
     result = build_report(inputs)
     assert "000000.SZ" not in result["selected"]
-    assert result["statistics"]["theme_count"] == 4
+    assert result["statistics"]["theme_count"] == 5
 
 
 def test_missing_historical_fill_bar_does_not_invent_a_known_open_gap():
@@ -298,46 +293,6 @@ def test_global_quota_rank_keeps_theme_order_instead_of_rescoring_between_themes
     assert [row["observation"]["rank_global_role"] for row in records] == [1, 2, 3]
 
 
-def test_second_wave_concentration_only_uses_volume_for_the_second_segment():
-    from test_evening_report_wave import BARS
-
-    inputs = observation_inputs()
-    third_pending, second_started, second_pending = "000000.SZ", "000001.SZ", "000004.SZ"
-    paths = {
-        third_pending: [*BARS[:12], (*BARS[12][:3], 50), (12., 11.7, 11.8, 65),
-                        (11.9, 11.6, 11.7, 65), (12.5, 11.8, 12.3, None)],
-        second_started: BARS,
-        second_pending: [*BARS[:-1], (*BARS[-1][:3], None)],
-    }
-    inputs.metadata = inputs.metadata.filter(pl.col("symbol").is_in(list(paths)))
-    inputs.memberships = inputs.memberships.filter(pl.col("symbol").is_in(list(paths)))
-    rows = []
-    for symbol, bars in paths.items():
-        by_date = dict(zip(inputs.calendar[-len(bars):], bars, strict=True))
-        for row in inputs.prices.filter(pl.col("symbol") == symbol).iter_rows(named=True):
-            high, low, close, volume = by_date.get(row["date"], (10.2, 10., 10.1, 100))
-            rows.append({**row, "high": high, "low": low, "open": low, "close": close, "ma10": 11.7,
-                         "raw_high": high, "raw_low": low, "raw_open": low, "raw_close": close,
-                         "volume": volume, "wave_volume": volume, "wave_amount": row["amount"], "wave_formal": True})
-    inputs.prices = pl.DataFrame(rows)
-    inputs.wave_factors = pl.DataFrame(schema={"symbol": pl.String, "trade_date": pl.String, "ex_factor": pl.Float64})
-    inputs.cutoff = f"{inputs.trade_date}T17:00:00+08:00"
-    inputs.wave_first_acceptances = dict.fromkeys(paths, inputs.cutoff)
-    inputs.provenance["wave_factor_source"] = ["accepted"]
-
-    report = build_report(inputs)
-    assert [(event["security_id"], event["segment_index"]) for event in report["wave_starts"]] == [(second_started, 2)]
-    waves = {record["symbol"]: record["observation"]["wave"] for record in report["records"]}
-    assert waves[third_pending]["second_wave_started"] is False
-    assert waves[third_pending]["second_wave_confirmed_by_new_high"]["date"] < inputs.trade_date
-    assert waves[third_pending]["start_evaluable"] is True
-    assert waves[second_pending]["start_evaluable"] is False
-    assert report["audit"]["start_concentration"] == {
-        "segment_index": 2, "pool_count": 3, "start_evaluable_count": 2, "start_unknown_count": 1,
-        "new_start_count": 1, "known_new_starts_per_pool": 1 / 3, "known_new_starts_per_evaluable": 1 / 2,
-    }
-
-
 def test_unknown_streak_preserves_limit_count_and_theme_strength():
     inputs = observation_inputs()
     extra = inputs.memberships.filter(pl.col("sector_id") == "t4").with_columns(pl.lit("t5").alias("sector_id"))
@@ -348,6 +303,23 @@ def test_unknown_streak_preserves_limit_count_and_theme_strength():
         .then(None).otherwise("consecutive_limit_ups").alias("consecutive_limit_ups"))
     report = build_report(inputs)
     before, after = (next(t for t in r["observation_themes"] if t["id"] == "concept:t0") for r in (baseline, report))
-    assert after["daily"][-1] == {**before["daily"][-1], "max_consecutive": None}
+    assert after["daily"][-1] == before["daily"][-1]  # 同题材另一只获证一板。
     assert after["daily"][-1]["limit_up"] == 2 and after["strength"] == before["strength"]
     assert before["selected_theme"] and after["rank"] == before["rank"] and after["selected_theme"]
+
+
+def test_only_missing_member_day_is_skipped_for_strength_and_board_height():
+    inputs = observation_inputs()
+    symbols = ["000000.SZ", "000001.SZ", "300002.SZ"]
+    inputs.memberships = inputs.memberships.filter(pl.col("symbol").is_in(symbols))
+    inputs.prices = inputs.prices.filter(pl.col("symbol").is_in(symbols)).with_columns(
+        pl.when((pl.col("date") == inputs.trade_date) & (pl.col("symbol") == symbols[0])).then(True)
+        .when((pl.col("date") == inputs.trade_date) & (pl.col("symbol") == symbols[2])).then(None)
+        .otherwise(False).alias("signal_limit_up"),
+        pl.when((pl.col("date") == inputs.trade_date) & (pl.col("symbol") == symbols[1])).then(10.8)
+        .otherwise(10.).alias("close"),
+        pl.when(pl.col("symbol") == symbols[0]).then(3).otherwise(0).alias("consecutive_limit_ups"))
+    theme, = build_report(inputs)["observation_themes"]
+    assert theme["strength"] == 1.5 and theme["missing_count"] == 1
+    assert theme["daily"][-1] == {"date": inputs.trade_date, "limit_up": 1, "strong": 1,
+                                  "max_consecutive": 3, "missing_count": 1}

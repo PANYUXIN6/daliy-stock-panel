@@ -2845,21 +2845,11 @@ function sectorReviewQuery(params: object): string {
   return new URLSearchParams(Object.entries(params).filter(([, v]) => v != null).map(([k, v]) => [k, String(v)])).toString()
 }
 
-export interface EveningJudgement {
-  value: boolean | null
-  failed_reasons: string[]
-  unknown_reasons: string[]
-  inputs?: Record<string, unknown>
-}
 export interface EveningRecord {
   symbol: string
   name: string
-  purpose: string | null
-  regime: string | null
-  risk: { risk_now: boolean | null; paused: boolean; clear_count: number; judgement: EveningJudgement }
-  position: EveningJudgement & { observation_eligibility?: EveningJudgement }
-  limitations: string[]
   selected: boolean
+  purpose?: string | null
   wait_conditions?: string[]
   observation: EveningObservation
 }
@@ -2875,14 +2865,24 @@ export interface EveningWavePoint {
   price: number
   extreme_date: string
   confirmed_at: string
-  known_at: string
+  known_at?: string
 }
-interface EveningContextReference {
+export interface EveningVariable {
+  value?: unknown
+  unit?: string
+  formula?: string
+  window?: unknown
+  price_basis?: string
   as_of?: string
-  reference_status: string
-  current_reference_status?: string
-  reason?: string | null
-  current_reason?: string | null
+  data_version?: unknown
+  rule_version?: string
+  missing_reason?: string | null
+}
+interface EveningEventPath {
+  [key: string]: unknown
+  checks?: EveningDipCheck[]
+  event_applicable?: boolean | null
+  event?: { source?: string; title?: string; disclosed_on?: string; count?: number; threshold?: number; disclosure_days?: string[] }
 }
 export interface EveningObservation {
   role: EveningRole | null
@@ -2891,7 +2891,7 @@ export interface EveningObservation {
   primary_theme: { id: string; name: string; strength: number | null } | null
   related_themes: { id: string; name: string; strength?: number | null }[]
   values: Record<string, number | boolean | string | null>
-  variables: Record<string, { value: unknown; unit?: string; formula?: string; window?: unknown; price_basis?: string; as_of?: string; data_version?: unknown; rule_version?: string; missing_reason?: string | null; bucket_label_at_time?: string | null; bucket_rule_version?: string | null }>
+  variables: Record<string, EveningVariable>
   daily_role?: EveningRole
   role_by_history_tracking?: EveningRole | null
   role_condition_completeness?: { status: 'complete' | 'partial' | 'unknown'; missing_fields: string[] }
@@ -2914,22 +2914,19 @@ export interface EveningObservation {
   dip: { status: EveningDipStatus; reasons: string[]; rule_version?: string; primary_reason?: string | null; primary_reason_code?: string | null
     checks?: EveningDipCheck[]
     gates: Record<string, unknown>
-    e1: Record<string, unknown> & { checks?: EveningDipCheck[]; event_applicable?: boolean | null }
-    e2: Record<string, unknown> & { checks?: EveningDipCheck[]; event_applicable?: boolean | null }
+    e1: EveningEventPath
+    e2: EveningEventPath
   }
   wave?: {
     data_status: 'known' | 'warming_up' | 'data_gap' | 'rebuilding'
     missing_from: string | null
+    pullback_volume?: { start_exclusive: string; end: string; sessions: number; mean: number | null } | null
     first_wave_start: EveningWavePoint | null
     first_wave_high: EveningWavePoint | null
     first_pullback_low: EveningWavePoint | null
     provisional_extreme: { kind: 'H' | 'L'; price: number; extreme_date: string; idle_sessions: number } | null
     pullback_phase_at_time: 'pullback_ge_5pct' | 'recovered_lt_5pct' | 'window_closed' | null
     window_close_reason_codes: ('closed_by_start' | 'closed_by_new_high' | 'closed_by_stale')[]
-    context_refs?: {
-      recommendation: EveningContextReference[]
-      pullback?: { start_exclusive: string; end_inclusive: string; references: EveningContextReference[] }
-    }
   } | null
   reason: string
   rank?: number | null
@@ -2940,7 +2937,6 @@ export interface EveningObservation {
 export interface EveningFeedback {
   starred: boolean
   outcome: 'profit' | 'loss' | null
-  revision: number
   updated_at: string | null
 }
 export interface EveningPerformance {
@@ -2995,12 +2991,10 @@ export interface EveningPersonal {
 }
 export interface EveningFeedbackRequest {
   date: string; version: string; symbol: string; starred: boolean; outcome: 'profit' | 'loss' | null
-  expected_revision: number; request_id: string
 }
 export interface EveningPersonalHistory {
   user_id: string
   records: EveningPersonalRecord[]
-  events: { request_id: string; episode_id: string; reference_id: string; month: string; at: string; actions: string[]; revision: number }[]
 }
 export interface EveningFeedbackOverview {
   user_id: string; episode_count: number; recommendation_count: number
@@ -3008,6 +3002,8 @@ export interface EveningFeedbackOverview {
   performance: Record<'1' | '3' | '5', { total: number; evaluated: number; not_due: number; overdue_pending_review: number; unavailable: number; mean_return: number | null }>
 }
 export interface EveningReport {
+  industry_status?: string
+  variable_definitions?: Record<string, EveningVariable>
   date: string
   trade_date: string
   next_trade_date: string | null
@@ -3025,24 +3021,18 @@ export interface EveningReport {
   wave_rule?: { version: string; parameters: Record<string, number> }
   storage_version?: string
   retention?: { audit_days: number; candidate_boundary_days: number; replay_scope: string; full_market_replay: boolean }
-  disclaimer: string
   summary?: string
   market: Record<string, unknown>
   records: EveningRecord[]
   selected: string[]
   limitations?: string[]
   sectors: { id: string; name: string; observation: Record<string, unknown>; membership_change?: Record<string, unknown> }[]
-  statistics: { scope_count: number; eligible_count: number; scored_count: number; unknown_count: number; failed_count: number; report_count: number; selected_count: number; purpose_counts: Record<string, number>; amount_coverage: Record<string, unknown>[]; sector_coverage: Record<string, unknown>; zero_selection_reasons: string[]
-    publication_frequency?: Record<string, unknown>
-    selection_blocking_counts?: Record<string, number>
-    risk_unknown_only_stock_count?: number
-    risk_unknown_mixed_stock_count?: number
-    suspension_sector_audit?: Record<string, unknown>[]
-    catchup_reference_coverage?: Record<string, number>
-    previous_open_identity_count?: number
-    unverified_identity_count?: number
-    unverified_identity_rate?: number | null
-    unverified_stock_count?: number
+  statistics: {
+    scope_count: number
+    eligible_count: number
+    report_count: number
+    selected_count: number
+    zero_selection_reasons: string[]
   }
   provenance: Record<string, unknown>
 }
@@ -3050,7 +3040,7 @@ export interface EveningReport {
 export interface EveningReportStatus {
   progress?: number
   date: string
-  status: 'waiting' | 'ready' | 'generating' | 'published' | 'failed' | 'cancelled' | 'unpublished'
+  status: 'waiting' | 'ready' | 'generating' | 'published' | 'failed' | 'cancelled' | 'unpublished' | 'missing'
   can_generate?: boolean
   reason?: string | null
   job_id?: string | null

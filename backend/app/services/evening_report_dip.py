@@ -1,12 +1,10 @@
 """五道共同门与适用事件路径。研究字段不参与低吸判断。"""
 from __future__ import annotations
 
-from datetime import datetime
+from app.services.evening_report_rules import all_of, any_of, compare, judgement
+from app.services.evening_report_wave import PARAMETERS
 
-from app.services.evening_report_rules import all_of, any_of, judgement
-from app.services.evening_report_wave import PARAMETERS, compare
-
-VERSION = "dip-rule-v2"
+VERSION = "dip-rule-v3"
 REASONS = {
     "phase_ebb": "市场处于退潮期",
     "state_cold": "市场情绪冰冷",
@@ -19,7 +17,6 @@ REASONS = {
     "pullback_below_min": "当前回撤不足5%",
     "first_impulse_below_min": "已确认摆动涨幅不足20%",
     "first_wave_unconfirmed": "首段高低点尚待确认",
-    "provisional_stale": "候选极值已过期",
     "missing_rows": "日线存在未解释缺口",
     "price_basis_unavailable": "价格复权依据待核验",
     "t4_unverified": "严重异动事件依据待核验",
@@ -32,7 +29,7 @@ REASONS = {
     "volume_quality_unknown": "正式回调缩量待核验",
     "volume_quality_not_met": "回调未缩量或首段量价证据未成立",
     "wave_quality_weak": "首波回撤质量未达标",
-    "all_gates_and_path_passed": "五道门、首波质量和适用形态均通过",
+    "all_gates_and_path_passed": "完全符合",
 }
 QUALITY_FIELDS = ("first_impulse_return", "first_impulse_evidence", "retracement", "volume", "support")
 
@@ -44,19 +41,6 @@ def _bounded(value, lower, upper):
 def _check(check_id, value, raw, threshold, unit, day, known_at):
     return {"check_id": check_id, "status": "passed" if value is True else "failed" if value is False else "unknown",
             "value": raw, "threshold": threshold, "unit": unit, "as_of": day, "known_at": known_at}
-
-
-def _event_for_day(event, day, cutoff):
-    if not event or event.get("applicable") is None or not event.get("known_at"):
-        return None
-    known_at = datetime.fromisoformat(event["known_at"])
-    if known_at.tzinfo is None or (cutoff and known_at > datetime.fromisoformat(cutoff)):
-        return None
-    if not event["applicable"]:
-        return False
-    if not event.get("valid_from") or not event.get("valid_until"):
-        return None
-    return event["valid_from"] <= day <= event["valid_until"]
 
 
 def _branch(name, applicable, passed, raw, threshold, unit, day, known_at):
@@ -144,17 +128,16 @@ def dip_labels(values, role, market, regime, *, wave=None, events=None, day="", 
         ],
         "e2": [
             ("volume_ratio_2_10", compare(values.get("volume_ratio_2_10"), .55, "le"), values.get("volume_ratio_2_10"), {"max": .55}),
-            ("rising_lows_3d", values.get("rising_lows_3d"), values.get("rising_lows_3d"), True),
+            ("low_vs_previous", compare(values.get("low_vs_previous"), 0), values.get("low_vs_previous"), {"min": 0}),
             ("distance_bull_bear", _bounded(bull_bear, -.05, .05), bull_bear, {"min": -.05, "max": .05}),
         ],
     }
     paths = {}
     for name, rules in specs.items():
-        event = events.get(name)
-        applicable = _event_for_day(event, day, cutoff)
+        applicable = events.get(name)
         path = judgement({key: value for key, value, _, _ in rules})
-        paths[name] = {**path, "event_applicable": applicable, "event": event,
-                       "checks": [_check(key, value, raw, threshold, "boolean" if key == "rising_lows_3d" else "ratio", day, cutoff)
+        paths[name] = {**path, "event_applicable": applicable,
+                       "checks": [_check(key, value, raw, threshold, "ratio", day, cutoff)
                                   for key, value, raw, threshold in rules]}
     applicable_paths = {name: path for name, path in paths.items() if path["event_applicable"] is True}
     evidence_passes = any(True in path["inputs"].values() for path in applicable_paths.values())

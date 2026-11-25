@@ -1,26 +1,20 @@
-"""Bounded publication snapshots; full-market calculations are transient.
-
-The engine still owns selection and continuity. This projection only decides
-which already computed facts survive publication, without selecting again.
-"""
+"""当期定稿、可比候选与限期审计的存储边界。"""
 from __future__ import annotations
 
 from collections import Counter, defaultdict
-from copy import deepcopy
 
-SCHEMA_VERSION = 'evening-storage-v2'
+SCHEMA_VERSION = 'evening-storage-v3'
 AUDIT_RETENTION_DAYS = 730
 INPUT_RETENTION_DAYS = 30
 DIAGNOSTIC_RETENTION_DAYS = 30
 ATTEMPT_RETENTION_DAYS = 90
-STATE_REPORTS = 7
 
 _REPORT_FIELDS = (
     'date', 'trade_date', 'next_trade_date', 'cutoff', 'generated_at', 'version',
     'kind', 'mode', 'status', 'rule_version',
     'scope_version', 'selection_policy_version', 'storage_version', 'disclaimer', 'summary', 'market',
     'selected', 'limitations', 'late_generation', 'recovery_note',
-    'wave_rule', 'dip_rule_version', 'wave_events', 'wave_starts', 'study_quotes', 'study_factors', 'study_quote_times', 'study_calendars',
+    'wave_rule', 'dip_rule_version', 'wave_starts', 'role_state', 'variable_definitions', 'industry_status',
 )
 _RECORD_FIELDS = ('symbol', 'name', 'purpose', 'regime', 'risk', 'position', 'qualification',
                   'limitations', 'selected', 'wait_conditions', 'observation')
@@ -36,7 +30,7 @@ def _audit_row(row: dict) -> dict:
     if 'untrusted_current_price' in reasons:
         keys.add('raw_close')
     variables = obs.get('variables', {})
-    values = {key: {'value': variables.get(key, {}).get('value'),
+    values = {key: {'value': obs.get('values', {}).get(key),
                     'unknown_reason': variables.get(key, {}).get('missing_reason')}
               for key in sorted(keys)}
     # Hard checks and role conditions are decision evidence, not another copy
@@ -86,11 +80,10 @@ securities or features outside the frozen allocation pool.
     permanent['statistics'] = {key: value for key, value in report.get('statistics', {}).items()
                                if key not in _LARGE_STATISTICS}
     permanent['input_reference'] = {key: value for key, value in report.get('input_reference', {}).items()
-                                     if key != 'versions'}
-    reference = report.get('input_reference', {}).get('versions', {})
-    permanent['data_version'] = {'input_id': permanent['input_reference'].get('input_id'),
-                                 'stock_generation': reference.get('stock_generation')}
+                                     if key in ('stock_generation', 'cutoff')}
+    permanent['data_version'] = permanent['input_reference']
     provenance = report.get('provenance', {})
+    permanent['industry_status'] = provenance.get('industry_status')
     permanent['provenance'] = {
         'membership_changes': provenance.get('membership_changes', []),
         'classifications': [{key: value for key, value in observation.items()
@@ -144,31 +137,3 @@ securities or features outside the frozen allocation pool.
                              'quota_limit': row['decision'].get('quota_limit')}
                             for row in audit_rows if row['decision']['comparison_eligible']]}
     return permanent, audit, boundary
-
-
-def pack_report(report: dict) -> dict:
-    """Store common variable definitions once; retain every value and override."""
-    result = deepcopy(report)
-    definitions = {}
-    for row in result.get('records', []):
-        obs = row['observation']
-        for key, variable in obs.get('variables', {}).items():
-            definition = definitions.setdefault(key, {
-                k: v for k, v in variable.items()
-                if k not in ('value', 'missing_reason', 'bucket_label_at_time', 'bucket_rule_version')})
-            obs['variables'][key] = {k: v for k, v in variable.items()
-                                     if k not in definition or v != definition[k]}
-        # values is the presentation projection of the canonical variables.
-        obs.pop('values', None)
-    result['variable_definitions'] = definitions
-    return result
-
-
-def unpack_report(report: dict) -> dict:
-    definitions = report.pop('variable_definitions', {})
-    for row in report.get('records', []):
-        obs = row['observation']
-        obs['variables'] = {key: {**definitions.get(key, {}), **value}
-                            for key, value in obs.get('variables', {}).items()}
-        obs['values'] = {key: value.get('value') for key, value in obs['variables'].items()}
-    return report

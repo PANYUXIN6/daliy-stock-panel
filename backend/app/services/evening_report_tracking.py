@@ -1,9 +1,4 @@
-"""Shared recommendation history and account-owned, reversible feedback.
-
-SQLite transactions keep an event and its current state indivisible across web
-workers. Read requests never create a database or calculate market data. History
-is indexed by recommendation month; no report or price history is copied here.
-"""
+"""共享推荐历史、客观回看与账号级反馈。"""
 from __future__ import annotations
 
 import json
@@ -17,9 +12,8 @@ from pathlib import Path
 import polars as pl
 
 from app.market_time import cn_now
-from app.services.evening_report_start_study import published_on_trade_date
+from app.services.evening_report_start_study import is_live_original
 from app.services.evening_report_store import EveningReportStore
-from app.services.evening_report_wave_context import project_context_refs
 from app.services.private_storage import private_path
 from app.services.trading_day import calendar_status
 from app.services.user_context import current_user
@@ -105,11 +99,6 @@ def _personal_schema(db):
     db.execute('''CREATE TABLE IF NOT EXISTS feedback(
         episode_id TEXT PRIMARY KEY, starred INTEGER NOT NULL, outcome TEXT,
         revision INTEGER NOT NULL, updated_at TEXT NOT NULL)''')
-    db.execute('''CREATE TABLE IF NOT EXISTS events(
-        request_id TEXT PRIMARY KEY, episode_id TEXT NOT NULL, reference_id TEXT NOT NULL,
-        month TEXT NOT NULL, at TEXT NOT NULL, payload TEXT NOT NULL,
-        actions TEXT NOT NULL, revision INTEGER NOT NULL)''')
-    db.execute('CREATE INDEX IF NOT EXISTS events_month ON events(month, at)')
 
 
 def _selected(report: dict) -> list[dict]:
@@ -157,6 +146,12 @@ def _register(db, report: dict, calendar: list[str], *, audit_rows: list[dict] |
         appearance = 1 + db.execute('SELECT COUNT(*) FROM recommendations WHERE episode_id=?',
                                     (episode,)).fetchone()[0]
         observation = row.get('observation') or {}
+        if report.get('variable_definitions'):
+            # 过程详情可直接读取本次推荐保存的定义及数值。
+            observation = {**observation, 'variables': {
+                key: {**report['variable_definitions'].get(key, {}), **observation.get('variables', {}).get(key, {})}
+                for key in observation.get('values', {})}}
+
         db.execute('''INSERT INTO recommendations(id,version,day,month,symbol,name,episode_id,observation,
                       appearance_seq,absence_count_at_recommendation)
                       VALUES(?,?,?,?,?,?,?,?,?,?)''',
@@ -180,7 +175,7 @@ def _register(db, report: dict, calendar: list[str], *, audit_rows: list[dict] |
     db.execute('INSERT INTO reports(version,day,kind,audit_feature_keys,audit_sample_count,forward_sample) VALUES(?,?,?,?,?,?)',
                (version, day, kind, json.dumps(report.get('audit', {}).get('feature_keys', [])),
                 report.get('audit', {}).get('same_cycle_sample_count'),
-                int(published_on_trade_date(report | {'trade_date': day}))))
+                int(is_live_original(report | {'trade_date': day}))))
 
 
 def _valid_price(row: dict | None) -> bool:
@@ -197,8 +192,7 @@ def evaluation_prices(frame: pl.DataFrame, symbols: set[str], days: set[str]) ->
 
 
 def evaluation_data_version(inputs) -> dict:
-    return {'input_id': inputs.provenance.get('input_id'),
-            'stock_generation': inputs.provenance.get('input_versions', {}).get('stock_generation'),
+    return {'stock_generation': inputs.provenance.get('stock_generation'),
             'cutoff': inputs.cutoff,
             'adjustment_source': inputs.provenance.get('evaluation_context', {}).get('adjustment_source')}
 
@@ -310,9 +304,7 @@ def refresh_tracking(data_dir: Path, inputs, cancel_check=None, *, evaluate=True
             if report and report.get('status') == 'published':
                 reports.append(report)
                 audits[version] = store.audit_rows(entry['date'], version)
-    context = inputs.provenance.get('evaluation_context', {})
     calendar = sorted(set(inputs.provenance.get('calendar', {}).get('days', inputs.calendar)))
-    suspensions = {(row['symbol'], str(row['date'])) for row in inputs.provenance.get('suspensions', [])}
     # Computation happens outside the write transaction; the second read merges
     # with another collector's already completed evaluations.
     with _database(path, write=True) as db:
@@ -327,14 +319,26 @@ def refresh_tracking(data_dir: Path, inputs, cancel_check=None, *, evaluate=True
             return {'registered_reports': len(reports), 'evaluated_recommendations': 0}
         pending = db.execute(f'SELECT * FROM outcome_evaluations WHERE ({_PENDING_EVALUATIONS}) AND day<=?',
                              (inputs.trade_date,)).fetchall()
-    version = evaluation_data_version(inputs)
     needed_days = set()
     for row in pending:
         check()
         if row['day'] in calendar:
             index = calendar.index(row['day'])
             needed_days.update(calendar[index:index + 6])
-    prices = evaluation_prices(inputs.prices, {row['symbol'] for row in pending}, needed_days)
+    symbols = {row['symbol'] for row in pending}
+    if not hasattr(inputs, 'prices'):
+        from app.services.daily_coverage import DailyCoverageError
+        from app.services.evening_report_inputs import load_evaluation_inputs
+
+        try:
+            inputs = load_evaluation_inputs(data_dir, date.fromisoformat(inputs.trade_date),
+                                            symbols=symbols, days=needed_days, include_constraints=True)
+        except DailyCoverageError as exc:
+            return {'registered_reports': len(reports), 'evaluated_recommendations': 0, 'evaluation_warning': str(exc)}
+    version = evaluation_data_version(inputs)
+    context = inputs.provenance.get('evaluation_context', {})
+    suspensions = {(row['symbol'], str(row['date'])) for row in inputs.provenance.get('suspensions', [])}
+    prices = evaluation_prices(inputs.prices, symbols, needed_days) if symbols and not inputs.prices.is_empty() else {}
     evaluations = {}
     for row in pending:
         check()
@@ -468,7 +472,6 @@ def audit_history(data_dir: Path, version: str) -> dict:
 def _feedback(row=None) -> dict:
     return {'starred': bool(row['starred']) if row else False,
             'outcome': row['outcome'] if row else None,
-            'revision': row['revision'] if row else 0,
             'updated_at': row['updated_at'] if row else None}
 
 
@@ -544,12 +547,11 @@ def personal_report(data_dir: Path, day: str, version: str) -> dict:
     rows = _recommendations(data_dir, day=day, version=version)
     with _database(_shared_path(data_dir)) as db:
         ready = bool(db and db.execute('SELECT 1 FROM reports WHERE version=? AND day=?', (version, day)).fetchone())
-    view = {'user_id': user.id, 'date': day, 'version': version, 'ready': ready, 'records': rows}
-    return project_context_refs(view, EveningReportStore(data_dir))
+    return {'user_id': user.id, 'date': day, 'version': version, 'ready': ready, 'records': rows}
 
 
 def update_feedback(data_dir: Path, *, day: str, version: str, symbol: str,
-                    starred: bool, outcome: str | None, expected_revision: int, request_id: str) -> dict:
+                    starred: bool, outcome: str | None) -> dict:
     report = EveningReportStore(data_dir).get(day, version, view=True)
     if not report or symbol not in {row['symbol'] for row in _selected(report)}:
         raise ValueError('只能记录该报告中已入选的股票')
@@ -561,47 +563,21 @@ def update_feedback(data_dir: Path, *, day: str, version: str, symbol: str,
     episode = row['episode_id']
     if outcome not in (None, 'profit', 'loss') or not isinstance(starred, bool):
         raise ValueError('反馈状态无效')
-    payload = json.dumps({'reference_id': reference, 'starred': starred, 'outcome': outcome,
-                          'expected_revision': expected_revision}, sort_keys=True)
     with _database(_personal_path(data_dir), write=True) as db:
         _personal_schema(db)
-        existing = db.execute('SELECT payload FROM events WHERE request_id=?', (request_id,)).fetchone()
-        current = _feedback(db.execute('SELECT * FROM feedback WHERE episode_id=?', (episode,)).fetchone())
-        if existing:
-            if existing['payload'] != payload:
-                raise FeedbackConflictError('重复请求标识对应不同修改，请刷新后重试')
-            return {'episode_id': episode, **current}
-        if current['revision'] != expected_revision:
-            raise FeedbackConflictError('记录已在其他页面更新，请刷新后重试')
-        actions = []
-        if current['starred'] != starred:
-            actions.append('star_set' if starred else 'star_cancel')
-        if current['outcome'] != outcome:
-            if current['outcome']:
-                actions.append(current['outcome'] + '_cancel')
-            if outcome:
-                actions.append(outcome + '_set')
         now = cn_now().isoformat()
-        revision = current['revision'] + bool(actions)
-        db.execute('INSERT OR REPLACE INTO feedback VALUES(?,?,?,?,?)',
-                   (episode, int(starred), outcome, revision, now))
-        db.execute('INSERT INTO events VALUES(?,?,?,?,?,?,?,?)',
-                   (request_id, episode, reference, now[:7], now, payload, json.dumps(actions), revision))
-        return {'episode_id': episode, 'starred': starred, 'outcome': outcome,
-                'revision': revision, 'updated_at': now}
+        # 既有数据库的 revision 列为必填，当前状态更新不依赖它。
+        db.execute("""INSERT INTO feedback(episode_id,starred,outcome,revision,updated_at) VALUES(?,?,?,0,?)
+                      ON CONFLICT(episode_id) DO UPDATE SET starred=excluded.starred,
+                      outcome=excluded.outcome,updated_at=excluded.updated_at""",
+                   (episode, int(starred), outcome, now))
+        return {'episode_id': episode, 'starred': starred, 'outcome': outcome, 'updated_at': now}
 
 
 def personal_history(data_dir: Path, month: str | None = None) -> dict:
     user = current_user()
     rows = _recommendations(data_dir, month=month)
-    episodes = {row['episode_id'] for row in rows}
-    with _database(_personal_path(data_dir)) as db:
-        events = [dict(row) for row in db.execute('SELECT * FROM events ORDER BY at DESC')] if db else []
-    for event in events:
-        event['actions'] = json.loads(event['actions'])
-        event.pop('payload')
-    view = {'user_id': user.id, 'records': rows, 'events': [e for e in events if e['episode_id'] in episodes]}
-    return project_context_refs(view, EveningReportStore(data_dir))
+    return {'user_id': user.id, 'records': rows}
 
 
 def personal_overview(data_dir: Path) -> dict:
@@ -665,26 +641,9 @@ def prune_tracking(data_dir: Path, today: date, cancel_check=None) -> dict:
 def refresh_after_publication(data_dir: Path, day: str, cancel_check=None, request_key=None) -> dict:
     from types import SimpleNamespace
 
-    from app.services.daily_coverage import DailyCoverageError
-    from app.services.evening_report_inputs import (
-        load_inputs,
-        prepare_evaluation_inputs,
-        require_ready,
-    )
-    target = date.fromisoformat(day)
-    warning = None
-    try:
-        evidence = require_ready(data_dir, target)
-        inputs = load_inputs(data_dir, target, evidence, cancel_check)
-        prepare_evaluation_inputs(inputs)
-        require_ready(data_dir, target, input_id=evidence['input_id'])
-    except DailyCoverageError as exc:
-        # Published recommendations remain recordable even if price inputs are
-        # currently unavailable. Only objective evaluation waits for new inputs.
-        warning = str(exc)
-        inputs = SimpleNamespace(calendar=calendar_status(data_dir).get('days', []),
-                                 trade_date=day, provenance={})
-    result = refresh_tracking(data_dir, inputs, cancel_check, evaluate=warning is None)
+    inputs = SimpleNamespace(calendar=calendar_status(data_dir).get('days', []), trade_date=day, provenance={})
+    result = refresh_tracking(data_dir, inputs, cancel_check)
+    warning = result.get('evaluation_warning')
     from app.services.shared_runtime import publish_data_update
 
     # Failed notification writes must remain eligible for the scheduled retry.

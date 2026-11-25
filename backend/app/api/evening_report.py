@@ -28,8 +28,6 @@ class FeedbackRequest(BaseModel):
     symbol: str = Field(pattern=r'^\d{6}\.(SH|SZ|BJ)$')
     starred: bool = Field(strict=True)
     outcome: Literal['profit', 'loss'] | None
-    expected_revision: int = Field(ge=0, strict=True)
-    request_id: str = Field(pattern=r'^[A-Za-z0-9_-]{16,80}$')
 
 
 @router.get('/personal')
@@ -43,8 +41,7 @@ def feedback(request: Request, body: FeedbackRequest) -> dict:
     try:
         return evening_report_tracking.update_feedback(
             request.app.state.repo.store.data_dir, day=body.date.isoformat(), version=body.version,
-            symbol=body.symbol, starred=body.starred, outcome=body.outcome,
-            expected_revision=body.expected_revision, request_id=body.request_id)
+            symbol=body.symbol, starred=body.starred, outcome=body.outcome)
     except evening_report_tracking.FeedbackConflictError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:
@@ -79,12 +76,14 @@ def report(request: Request, date: _date | None = None,
            mode: Literal['live'] = 'live') -> dict:
     store = EveningReportStore(request.app.state.repo.store.data_dir)
     if date is None:
-        entries = store.dates()
-        if not entries:
-            return evening_report_jobs.status(request.app.state.repo.store.data_dir)
-        date = _date.fromisoformat(entries[0]['date'])
+        latest = evening_report_jobs.status(request.app.state.repo.store.data_dir)
+        if latest['status'] != 'published':
+            return latest
+        date = _date.fromisoformat(latest['date'])
     result = store.get(date.isoformat(), version, view=True)
     if result is None:
+        if store.original_metadata(date.isoformat(), version):
+            return {'date': date.isoformat(), 'status': 'missing', 'reason': '该日晚报已定稿，归档文件暂不可读'}
         if version:
             raise HTTPException(status_code=404, detail='该日期的报告版本不存在')
         return evening_report_jobs.status(request.app.state.repo.store.data_dir, date.isoformat())

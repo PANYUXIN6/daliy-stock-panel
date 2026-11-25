@@ -92,3 +92,21 @@ def test_missing_custom_capability_never_falls_back_for_automatic_sync(monkeypat
         kline_sync.sync_and_persist_daily_batch(["600000.SH"], SimpleNamespace(
             store=SimpleNamespace(data_dir=tmp_path)), CapabilitySet({}), coverage=DailyCoverage(DAY))
     client.assert_not_called()
+
+
+def test_last_formal_row_determines_active_or_halted(tmp_path):
+    from app.services.postmarket import read_suspensions, save_suspensions
+
+    symbol = "600001.SH"
+    raw = pl.DataFrame({"symbol": [symbol, symbol], "date": [DAY, DAY],
+                        "open": [10., 0.], "high": [10., 0.], "low": [10., 0.],
+                        "close": [10., 10.], "volume": [100., 0.], "amount": [1000., 0.]})
+    coverage = DailyCoverage(DAY)
+    coverage.observe(raw)
+    assert coverage.halted == {symbol} and not coverage.active
+    save_suspensions(tmp_path, coverage)
+    assert [r["symbol"] for r in read_suspensions(tmp_path, [str(DAY)])] == [symbol]
+    coverage.observe(raw.head(1))
+    assert coverage.active == {symbol} and not coverage.halted
+    save_suspensions(tmp_path, coverage)
+    assert not read_suspensions(tmp_path, [str(DAY)])

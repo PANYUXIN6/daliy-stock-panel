@@ -2,15 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import json
-import multiprocessing
-import sqlite3
-from concurrent.futures import ProcessPoolExecutor
 from datetime import UTC, date, datetime, timedelta
 from types import SimpleNamespace
 
 import polars as pl
 import pytest
-from evening_receipt_fixture import current_receipt
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -56,10 +52,9 @@ def history(private_owner, tmp_path, monkeypatch):
     return SimpleNamespace(root=tmp_path, days=days, inputs=inputs, store=store, publish=publish)
 
 
-def mark(history, report, *, starred=True, outcome=None, revision=0, request_id='request_0000000001'):
+def mark(history, report, *, starred=True, outcome=None):
     return tracking.update_feedback(history.root, day=report['date'], version=report['version'],
-                                    symbol=SYMBOL, starred=starred, outcome=outcome,
-                                    expected_revision=revision, request_id=request_id)
+                                    symbol=SYMBOL, starred=starred, outcome=outcome)
 
 
 @pytest.mark.parametrize('calendar_state', ['known_target', 'short_calendar', 'unconfirmed_recommendation'])
@@ -69,7 +64,7 @@ def test_mature_window_pending_review_is_shared_by_history_detail_and_overview(h
     history.inputs.trade_date = history.days[1]
     if calendar_state == 'unconfirmed_recommendation':
         evening_report_store.atomic_json(history.root / 'calendar' / 'trading_days.json', {'days': history.days[1:]})
-        assert not tracking.refresh_after_publication(history.root, history.days[1])['evaluation_ready']
+        assert tracking.refresh_after_publication(history.root, history.days[1])['evaluation_ready']
     else:
         if calendar_state == 'short_calendar':
             history.inputs.calendar = history.days[:2]
@@ -87,7 +82,7 @@ def test_mature_window_pending_review_is_shared_by_history_detail_and_overview(h
     assert window()['status'] == 'not_due' and window()['target_date'] == target
     monkeypatch.setattr(tracking, 'cn_now', lambda: datetime.fromisoformat(target + 'T15:00:00+08:00'))
     overdue = window()
-    assert overdue['status'] == 'overdue_pending_review' and overdue['as_of'] == (None if calendar_state == 'unconfirmed_recommendation' else history.days[1])
+    assert overdue['status'] == 'overdue_pending_review' and overdue['as_of'] == history.days[1]
     assert tracking.personal_report(history.root, report['date'], report['version'])['records'][0]['performance']['3'] == overdue
     assert tracking.personal_overview(history.root)['performance']['3'] == {
         'total': 1, 'evaluated': 0, 'not_due': 0, 'overdue_pending_review': 1, 'unavailable': 0, 'mean_return': None,
@@ -97,35 +92,6 @@ def test_mature_window_pending_review_is_shared_by_history_detail_and_overview(h
     tracking.refresh_tracking(history.root, history.inputs)
     assert window()['status'] == 'evaluated'
     assert tracking.personal_overview(history.root)['performance']['3']['mean_return'] == pytest.approx(.03)
-
-
-def test_personal_history_and_report_recheck_archived_references(history):
-    source = history.publish(0)
-    ref = {'as_of': source['trade_date'], 'source_report_id': source['version'], 'version': source['version'],
-           'source_snapshot_id': f'observation/{SYMBOL}/return_20d', 'available_by': source['cutoff'],
-           'reference_status': 'valid'}
-    refs = {'recommendation': [ref], 'pullback': {'references': [ref, dict(ref, retention_until=source['cutoff'])]}}
-    report = history.publish(1, wave={'context_refs': refs})
-    tracking.refresh_tracking(history.root, history.inputs)
-    paths = [lambda: history.store.get(report['date'], view=True), lambda: tracking.personal_history(history.root),
-             lambda: tracking.personal_report(history.root, report['date'], report['version'])]
-    source_path = history.store.root / 'archive' / (source['version'] + '.json.gz')
-    original = source_path.read_bytes()
-    for expected, body in [('valid', original), ('missing', b'damaged archive'), ('valid', original)]:
-        source_path.write_bytes(body)
-        for read in paths:
-            checked = read()['records'][0]['observation']['wave']['context_refs']
-            assert checked['recommendation'][0]['current_reference_status'] == expected
-            assert [r['current_reference_status'] for r in checked['pullback']['references']] == [expected, 'expired']
-        if expected == 'missing':
-            day = history.days[2]
-            cutoff = day + 'T17:00:00+08:00'
-            published = history.store.save(day, {'trade_date': day, 'cutoff': cutoff, 'wave_rule': {'version': 'test'},
-                'provenance': {'calendar': {'days': history.days}}, 'audit': {}, 'records': [],
-                'wave_starts': [{'security_id': SYMBOL, 'start_id': 'start', 'rule_version': 'test',
-                                 'known_at': cutoff, 'evidence_date': source['date']}]}, {})
-            assert published['wave_starts'][0]['context_refs']['evidence'][0]['reference_status'] == 'missing'
-    assert history.store.get(report['date'])['records'][0]['observation']['wave']['context_refs'] == refs
 
 
 def test_episode_continues_through_theme_change_and_closes_after_five_valid_absences(history):
@@ -170,58 +136,18 @@ def test_cancel_switch_duplicate_retry_and_account_isolation(history):
     tracking.refresh_tracking(history.root, history.inputs)
     first = mark(history, report, outcome='loss')
     assert first['starred'] and first['outcome'] == 'loss'
-    assert mark(history, report, outcome='loss') == first
-    second = mark(history, report, starred=False, outcome='profit', revision=1, request_id='request_0000000002')
-    assert second['revision'] == 2
-    mark(history, report, starred=False, outcome=None, revision=2, request_id='request_0000000003')
+    assert mark(history, report, outcome='loss')['outcome'] == 'loss'
+    second = mark(history, report, starred=False, outcome='profit')
+    assert not second['starred'] and second['outcome'] == 'profit'
+    mark(history, report, starred=False, outcome=None)
     state = tracking.personal_report(history.root, report['date'], report['version'])['records'][0]['feedback']
-    assert state == {'starred': False, 'outcome': None, 'revision': 3, 'updated_at': state['updated_at']}
-    events = tracking.personal_history(history.root)['events']
-    assert len(events) == 3
-    assert 'star_cancel' in events[1]['actions']
-    assert 'loss_cancel' in events[1]['actions']
-    assert events[0]['actions'] == ['profit_cancel']
+    assert not state['starred'] and state['outcome'] is None
     overview = tracking.personal_overview(history.root)
     assert (overview['starred'], overview['profit'], overview['loss'], overview['unmarked']) == (0, 0, 0, 1)
     with user_scope(UserContext('b' * 32, 'guest', history.root)):
         other = tracking.personal_report(history.root, report['date'], report['version'])
-        assert other['records'][0]['feedback']['revision'] == 0
-        assert tracking.personal_history(history.root)['events'] == []
+        assert other['records'][0]['feedback']['updated_at'] is None
     assert history.store.get(report['date']) == report
-
-
-def _concurrent_mark(root, day, version, request_id):
-    from pathlib import Path
-    with user_scope(UserContext('a' * 32, 'admin', Path(root))):
-        try:
-            tracking.update_feedback(Path(root), day=day, version=version, symbol=SYMBOL,
-                                     starred=True, outcome=None, expected_revision=0, request_id=request_id)
-            return 'saved'
-        except tracking.FeedbackConflictError:
-            return 'conflict'
-
-
-def test_cross_process_version_conflict_preserves_one_event(history):
-    report = history.publish(0)
-    tracking.refresh_tracking(history.root, history.inputs)
-    with ProcessPoolExecutor(max_workers=2, mp_context=multiprocessing.get_context('spawn')) as pool:
-        futures = [pool.submit(_concurrent_mark, str(history.root), report['date'], report['version'], f'parallel_request_{n}')
-                   for n in range(2)]
-        assert sorted(f.result(timeout=20) for f in futures) == ['conflict', 'saved']
-    assert len(tracking.personal_history(history.root)['events']) == 1
-
-
-def test_failed_event_insert_rolls_back_current_feedback(history):
-    report = history.publish(0)
-    tracking.refresh_tracking(history.root, history.inputs)
-    mark(history, report)
-    with sqlite3.connect(tracking._personal_path(history.root)) as db:
-        db.execute("CREATE TRIGGER fail_write BEFORE INSERT ON events BEGIN SELECT RAISE(ABORT,'disk failure'); END")
-    with pytest.raises(sqlite3.IntegrityError):
-        mark(history, report, starred=False, revision=1, request_id='request_0000000002')
-    restored = tracking.personal_report(history.root, report['date'], report['version'])['records'][0]['feedback']
-    assert restored['starred'] and restored['revision'] == 1
-    assert len(tracking.personal_history(history.root)['events']) == 1
 
 
 def test_performance_uses_calendar_and_same_adjusted_basis_with_explicit_constraints(history):
@@ -278,12 +204,11 @@ def test_gets_are_readonly_and_feedback_has_exact_guest_permission(history):
         assert not (history.root / 'users' / guest['id'] / 'evening_report').exists()
         tracking.refresh_tracking(history.root, history.inputs)
         body = {'date': report['date'], 'version': report['version'], 'symbol': SYMBOL,
-                'starred': True, 'outcome': None, 'expected_revision': 0, 'request_id': 'request_0000000001'}
+                'starred': True, 'outcome': None}
         assert client.put('/api/evening-report/feedback', json=body).status_code == 200
         assert client.post('/api/evening-report/rebuild', json={'date': report['date']}).status_code == 403
         assert client.post('/api/evening-report/feedback', json=body).status_code == 403
         assert client.put('/api/evening-report/feedback', json={**body, 'owner': 'a' * 32}).status_code == 422
-        assert client.put('/api/evening-report/feedback', json={**body, 'request_id': 'request_0000000002'}).status_code == 409
         assert client.put('/api/evening-report/feedback', json=body,
                           headers={'Origin': 'https://evil.example'}).status_code == 403
     assert tracking.personal_overview(history.root)['starred'] == 0
@@ -379,7 +304,6 @@ def test_tracking_notification_failure_retries_after_restart_without_duplicate_r
     rows = tracking.personal_history(history.root)['records']
     assert len(rows) == 1 and rows[0]['feedback']['starred'] == feedback['starred']
     assert rows[0]['feedback']['outcome'] == 'profit'
-    assert len(tracking.personal_history(history.root)['events']) == 1
     assert asyncio.run(scheduled_check()) is None
 
 
@@ -403,7 +327,7 @@ def tracking_scheduler(history, monkeypatch):
 
     day = history.days[0]
     now = datetime.fromisoformat(day).replace(hour=16, tzinfo=CN_TZ)
-    history.store.save_readiness(day, current_receipt(day, now.isoformat(), input_id='b' * 32, scope_version='test'))
+    history.store.save_readiness(day, {'complete': True, 'stock_generation': 'b'})
     report = history.store.save(day, {'audit': {}, 'records': []}, {'input_id': 'b' * 32})
     registry = pipeline_jobs.JobStore(store_dir=history.root / 'jobs')
     monkeypatch.setattr(pipeline_jobs, 'job_store', registry)
@@ -438,7 +362,7 @@ def test_tracking_cancellation_blocks_auto_retries_and_survives_restart(tracking
     monkeypatch.setattr(pipeline, 'job_store', restarted)
     assert asyncio.run(jobs.run_scheduled(state.repo)) is None
     # A fresh input and another successful parent must not undo the user's stop.
-    state.store.save_readiness(state.day, current_receipt(state.day, state.now.isoformat(), input_id='c' * 32, scope_version='test'))
+    state.store.save_readiness(state.day, {'complete': True, 'stock_generation': 'c'})
     asyncio.run(jobs.after_job(state.repo, {'request_key': f'postmarket:{state.day}',
                                            'status': 'succeeded', 'id': 'parent'}))
     state.submit.assert_not_awaited()

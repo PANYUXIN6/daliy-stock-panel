@@ -20,7 +20,7 @@ import os
 import threading
 import uuid
 from collections.abc import Callable
-from contextlib import contextmanager, suppress
+from contextlib import suppress
 from copy import deepcopy
 from datetime import UTC, datetime
 from pathlib import Path
@@ -86,24 +86,6 @@ class JobCancelledError(BaseException):
 _CANCEL_FLAG_MAX = 32
 _CANCEL_FLAGS: dict[str, threading.Event] = {}
 _CANCEL_FLAGS_LOCK = threading.Lock()
-
-
-# Bound to the writer thread even when a task enters its saved user/session context.
-_worker = threading.local()
-
-
-@contextmanager
-def publication_guard():
-    """Order a worker's final pointer rename against cancellation of that same job."""
-    current = getattr(_worker, "job", None)
-    if current is None:
-        yield
-        return
-    job_id, event = current
-    with _CANCEL_FLAGS_LOCK:
-        if event is not None and event.is_set():
-            raise JobCancelledError(job_id)
-        yield
 
 
 def request_cancel(job_id: str) -> bool:
@@ -710,11 +692,7 @@ def run_with_capacity(job_id: str, fn: Callable[[], _Result]) -> _Result:
             if is_cancelled(job_id):
                 raise JobCancelledError(job_id)
             job_store.start(job_id)
-            _worker.job = (job_id, cancel_event)
-            try:
-                return fn()
-            finally:
-                del _worker.job
+            return fn()
     except HeavyJobCancelledError as exc:
         raise JobCancelledError(job_id) from exc
     except HeavyJobLimitTimeoutError as exc:

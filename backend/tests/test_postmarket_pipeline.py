@@ -66,6 +66,7 @@ def closing(tmp_path, monkeypatch):
     from app.services import evening_report_inputs
     from app.services.evening_report_store import atomic_json
 
+    monkeypatch.setattr("app.services.evening_report_events.fetch_disclosures", lambda *a: ([], []))
     monkeypatch.setattr(evening_report_inputs, "cn_now", lambda: datetime(2026, 10, 16, 16, tzinfo=CN_TZ))
     atomic_json(tmp_path / "calendar" / "trading_days.json", {"days": [str(DAY)], "start": str(DAY), "end": str(DAY)})
     monkeypatch.setattr(daily_pipeline, "cn_today", lambda: DAY)
@@ -335,7 +336,9 @@ def test_required_index_prefetch_failure_cannot_reuse_cached_inputs(closing, mon
     assert "indices" not in steps and "regime" not in steps and "publication" not in steps
 
 
-def test_classification_prefetch_failure_preserves_first_commit_but_blocks_publication(closing, monkeypatch):
+@pytest.mark.parametrize("manual", [False, True])
+def test_industry_failure_still_accepts_evening_but_keeps_main_pipeline_failure(closing, monkeypatch, manual):
+    from app.services.evening_report_inputs import require_ready
     repo, caps, steps, _ = closing
     prepare = ext_presets.prepare_preset
 
@@ -345,9 +348,15 @@ def test_classification_prefetch_failure_preserves_first_commit_but_blocks_publi
         return await prepare(config_id, data_dir, **kwargs)
 
     monkeypatch.setattr(ext_presets, "prepare_preset", fetch)
-    with pytest.raises(ValueError, match="行业取数失败"):
-        daily_pipeline.run_now(repo, caps, postmarket=True)
-    assert "classifications" in steps and "regime" not in steps and "publication" not in steps
+    if manual:
+        daily_pipeline.run_now(repo, caps, postmarket=True, evening_only=True)
+    else:
+        with pytest.raises(daily_pipeline.PipelineStageError, match="行业取数失败"):
+            daily_pipeline.run_now(repo, caps, postmarket=True)
+    evidence = require_ready(repo.store.data_dir, DAY)
+    assert evidence["industry_status"] == "missing"
+    assert [o["kind"] for o in evidence["classifications"]] == ["concept"]
+    assert "regime" in steps and "concept" in steps and "industry" not in steps and "publication" not in steps
 
 
 def test_optional_board_prefetch_error_is_reported_without_blocking_core_publication(closing, monkeypatch):
@@ -366,40 +375,19 @@ def test_optional_board_prefetch_error_is_reported_without_blocking_core_publica
     assert "publication" in steps
 
 
-@pytest.mark.parametrize("cancel_first", [True, False])
-def test_step_eight_acceptance_orders_commit_and_cancellation(closing, monkeypatch, cancel_first):
-    from contextvars import Context
-
+def test_cancel_during_step_eight_leaves_readiness_unpublished(closing, monkeypatch):
     from app.services import evening_report_store, pipeline_jobs
 
     repo, caps, _, _ = closing
     store = evening_report_store.EveningReportStore(repo.store.data_dir)
-    registry = JobStore(store_dir=repo.store.data_dir / "jobs")
-    monkeypatch.setattr(pipeline_jobs, "job_store", registry)
-    job_id, _ = registry.create()
-    write = evening_report_store.atomic_json
 
-    def cancel_at_index(path, value, **kwargs):
-        if path.parent.name != "acceptances":
-            return write(path, value, **kwargs)
-        if cancel_first:
-            check = kwargs["before_commit"]
-            def after_last_check():
-                check()
-                registry.terminate(job_id, "手动取消")
-            kwargs["before_commit"] = after_last_check
-        write(path, value, **kwargs)
-        if not cancel_first:
-            registry.terminate(job_id, "手动取消")
+    def cancel_before_ready(_stage, _pct, message, **_kwargs):
+        if message == "提交每日晚报正式验收…":
+            raise pipeline_jobs.JobCancelledError("手动取消")
 
-    monkeypatch.setattr(evening_report_store, "atomic_json", cancel_at_index)
     with pytest.raises(pipeline_jobs.JobCancelledError):
-        pipeline_jobs.run_with_capacity(job_id, lambda: Context().run(
-            daily_pipeline.run_now, repo, caps, postmarket=True, evening_only=True,
-            on_progress=lambda *args, **kwargs: registry.progress(job_id, *args, **kwargs)))
-    entries = store.acceptance_references()
-    assert bool(entries.get(str(DAY))) is not cancel_first
-    assert bool((store.readiness(str(DAY)) or {}).get("complete")) is not cancel_first
+        daily_pipeline.run_now(repo, caps, postmarket=True, evening_only=True, on_progress=cancel_before_ready)
+    assert not (store.readiness(str(DAY)) or {}).get("complete")
 
 
 @pytest.mark.parametrize("problem", ["paper", "publication", "evening_readiness"])

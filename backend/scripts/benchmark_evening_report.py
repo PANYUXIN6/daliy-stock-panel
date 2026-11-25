@@ -1,7 +1,7 @@
 """Synthetic evening-report scale check; never opens user data.
 
 Run from backend: uv run --no-sync python scripts/benchmark_evening_report.py
-Pass --history-days 8 to exercise bounded forward-state replay at full market scale.
+Use --history-days 8 to measure consecutive independent reports at full market scale.
 """
 
 from __future__ import annotations
@@ -25,7 +25,7 @@ from app.services.evening_report_store import EveningReportStore
 
 calendar = []
 d = date(2025, 1, 1)
-while len(calendar) < 120:
+while len(calendar) < 250:
     if d.weekday() < 5:
         calendar.append(d.isoformat())
     d += timedelta(days=1)
@@ -34,11 +34,14 @@ metadata = pl.DataFrame({"n": range(5000)}).with_columns(
         "symbol"
     )
 )
-prices = metadata.join(pl.DataFrame({"date": calendar, "i": range(120)}), how="cross").with_columns(
+prices = metadata.join(pl.DataFrame({"date": calendar, "i": range(250)}), how="cross").with_columns(
     (20 * (1 + 0.0001 * (pl.col("n") % 100 + 1)).pow(pl.col("i"))).alias("close")
 )
 prices = prices.with_columns(
     (pl.col("close") * 1.01).alias("high"),
+    (pl.col("close") * .98).alias("low"),
+    (pl.col("close") * .99).alias("open"),
+    pl.lit(100_000.).alias("volume"),
     (pl.col("close") * 0.99).alias("ma5"),
     (pl.col("close") * 0.98).alias("ma10"),
     (pl.col("close") * 0.97).alias("ma20"),
@@ -76,6 +79,7 @@ members = pl.concat(members).with_columns(pl.col("sector_id").alias("sector_name
 metadata = metadata.with_columns(
     pl.col("symbol").alias("name"),
     pl.lit(True).alias("in_scope"),
+    pl.when(pl.col("n") < 4000).then(pl.lit("main")).otherwise(pl.lit("chinext")).alias("board"),
     pl.lit(True).alias("trading_normal"),
     pl.lit(False).alias("suspension_window"),
     pl.lit(False).alias("qualification_pause"),
@@ -87,77 +91,28 @@ inputs = EveningInputs(
     prices=prices,
     metadata=metadata,
     memberships=members,
-    benchmark=pl.DataFrame({"date": calendar, "close": [100.0] * 120, "formal": [True] * 120}),
     market={"state": "strong", "phase": "rally", "promo_rate": 0.3, "seal_rate": 0.8},
 )
 parser = argparse.ArgumentParser()
 parser.add_argument("--history-days", type=int, choices=range(1, 31), default=1)
 parser.add_argument("--storage", action="store_true", help="Measure real tiered writes in a temporary directory")
-parser.add_argument("--waves", action="store_true", help="Include wave warmup and continuation")
 args = parser.parse_args()
-symbols = metadata['symbol'].to_list()
-first_acceptance = calendar[-args.history_days] + 'T16:00:00+08:00'
-inputs.wave_first_acceptances = dict.fromkeys(symbols, first_acceptance)
-if args.waves:
-    inputs.prices = inputs.prices.with_columns(
-        pl.col("formal").alias("wave_formal"),
-        pl.col("amount").alias("wave_amount"),
-        pl.lit(100_000.).alias("wave_volume"),
-    )
-    inputs.wave_factors = pl.DataFrame(schema={"symbol": pl.String, "trade_date": pl.String, "ex_factor": pl.Float64})
-    inputs.provenance["wave_factor_source"] = ["benchmark"]
 if args.storage:
     from tempfile import TemporaryDirectory
 
     temporary = TemporaryDirectory(prefix="evening-storage-benchmark-")
     store = EveningReportStore(Path(temporary.name))
-history = []
+previous = None
 elapsed = []
-for index in range(120 - args.history_days, 120):
+for index in range(len(calendar) - args.history_days, len(calendar)):
     current = replace(inputs, trade_date=calendar[index], calendar=calendar[: index + 1],
                       cutoff=calendar[index] + "T16:00:00+08:00")
     started = time.perf_counter()
-    result = build_report(current, history[-7:])
+    result = build_report(current, previous)
     elapsed.append(time.perf_counter() - started)
     if args.storage:
-        evidence = {'date': current.trade_date, 'complete': True, 'scope_version': result['scope_version'],
-                    'active_symbols': symbols, 'halted_symbols': [], 'halted_evidence': [], 'historical_suspensions': [],
-                    'sector_filter_config': {}, 'wave_first_acceptances': current.wave_first_acceptances,
-                    'wave_price_clocks': {'dates': {}, 'rows': {}, 'pending': {}}, 'wave_st_reentry': {},
-                    'wave_factor_known_at': current.cutoff, 'wave_factor_first_accepted': first_acceptance if args.waves else None,
-                    'wave_factor_facts': {} if args.waves else None,
-                    'classification_comparisons': [
-                        {'source': source, 'comparison': 'first_observation' if not history else 'adjacent_complete_observation',
-                         'observation_id': f'{current.trade_date}/{source}',
-                         'previous_observation_id': f'{calendar[index - 1]}/{source}' if history else None,
-                         'previous_obtained_at': calendar[index - 1] + 'T16:00:00+08:00' if history else None,
-                         'added': [], 'removed': [], 'first_observed_symbols': [] if history else symbols}
-                        for source in ('concept', 'industry')],
-                    'metadata': metadata.to_dicts(), 'calendar': {'days': current.calendar},
-                    'market': current.market, 'versions': {'stock_generation': 'benchmark', 'files': []},
-                    'cutoff': current.trade_date + 'T16:00:00+08:00',
-                    'classifications': [{'source': source, 'id': f'{current.trade_date}/{source}', 'complete': True,
-                                         'obtained_at': current.cutoff, 'symbols': symbols,
-                                         'memberships': members.filter(pl.col('source') == source).to_dicts()}
-                                        for source in ('concept', 'industry')]}
-        store.save_readiness(current.trade_date, evidence)
-        reference = {'input_id': evidence['input_id'], 'versions': evidence['versions']}
-        result['input_reference'] = reference
-        store.save(current.trade_date, result, reference)
-        store.prune(date.fromisoformat(current.trade_date))
-    history.append(
-        {
-            "trade_date": result["trade_date"],
-            "rule_version": result["rule_version"],
-            "state": result["state"],
-            "statistics": {"publication_frequency": result["statistics"]["publication_frequency"]},
-            "records": [
-                {"symbol": record["symbol"], "purpose": record["purpose"]}
-                for record in result["records"]
-            ],
-        }
-    )
-    history = history[-7:]
+        store.save(current.trade_date, result, {"stock_generation": "benchmark"})
+    previous = {"trade_date": result["trade_date"], "role_state": result["role_state"]}
 storage_result = None
 if args.storage:
     from collections import defaultdict
@@ -167,7 +122,7 @@ if args.storage:
         if path.is_file():
             group = path.relative_to(store.root).parts[0]
             if group == 'archive':
-                group = ('state' if '.state.' in path.name else 'audit' if '.audit.' in path.name
+                group = ('audit' if '.audit.' in path.name
                          else 'candidate_boundary' if '.candidates.' in path.name else 'permanent')
             sizes[group] += path.stat().st_size
     storage_result = {'bytes_by_tier': dict(sizes), 'total_bytes': sum(sizes.values()),
@@ -184,10 +139,10 @@ print(
             "storage": storage_result,
             "seconds": [round(value, 3) for value in elapsed],
             "report_objects": len(result["records"]),
-            "scored_stocks": result["statistics"]["scored_count"],
+            "eligible_stocks": result["statistics"]["eligible_count"],
             "json_mb": round(len(json.dumps(result, ensure_ascii=False).encode()) / 1024**2, 2),
             "retained_state_mb": round(
-                len(json.dumps(history, ensure_ascii=False).encode()) / 1024**2, 2
+                len(json.dumps(previous, ensure_ascii=False).encode()) / 1024**2, 2
             ),
             "peak_rss_mb": round(
                 resource.getrusage(resource.RUSAGE_SELF).ru_maxrss

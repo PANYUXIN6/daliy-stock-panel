@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 from contextlib import nullcontext
 from datetime import date, datetime, timedelta
 from types import SimpleNamespace
@@ -10,7 +9,6 @@ from unittest.mock import AsyncMock, Mock
 
 import polars as pl
 import pytest
-from evening_receipt_fixture import current_receipt
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 
@@ -23,8 +21,6 @@ from app.services import evening_report_jobs as jobs
 from app.services import evening_report_store as archive
 from app.services import ext_presets, pipeline_jobs, preferences, shared_runtime
 from app.services.daily_coverage import DailyCoverage, DailyCoverageError
-from app.services.evening_report_engine import SCOPE_VERSION, build_report
-from app.services.evening_report_rules import RULE_VERSION
 from app.services.evening_report_store import EveningReportStore, atomic_json
 
 
@@ -73,7 +69,7 @@ def market_batch(private_owner, tmp_path, monkeypatch):
     run_pipeline(tmp_path)
     atomic_json(tmp_path / 'calendar' / 'trading_days.json', {
         'days': [str(d) for d in calendar], 'start': str(calendar[0]), 'end': str(day)})
-    observations = [{'id': source, 'source': source, 'obtained_at': now.isoformat(),
+    observations = [{'kind': source, 'id': source, 'source': source, 'obtained_at': now.isoformat(),
                      'source_effective_date': None, 'source_published_at': None, 'source_version': None,
                      'complete': True, 'symbols': symbols,
                      'memberships': [{'source': source, 'symbol': s, 'sector_id': source + '-1',
@@ -81,7 +77,16 @@ def market_batch(private_owner, tmp_path, monkeypatch):
                     for source in ('concept', 'industry')]
     coverage = DailyCoverage(day)
     coverage.observe(raw.filter(pl.col('date') == day))
-    repo = SimpleNamespace(store=SimpleNamespace(data_dir=tmp_path), refresh_cache=lambda: None)
+    # The real shared cache supplies indicators; the narrow on-disk history carries adjusted OHLC.
+    from app.indicators.pipeline import compute_indicators
+    enriched = pl.read_parquet(sorted((tmp_path / "kline_daily_enriched").glob("date=*/*.parquet")))
+    cached = compute_indicators(enriched.sort("symbol", "date"), needed={"ma5", "ma10", "ma20", "atr_14", "bull_bear_line", "high_60d"})
+    def shared_range(start, end, *, columns):
+        return cached.filter(pl.col("date").is_between(start, end)).select(
+            "symbol", "date", *[k for k in columns if k in cached.columns])
+    repo = SimpleNamespace(store=SimpleNamespace(data_dir=tmp_path), refresh_cache=lambda: None,
+                           get_enriched_history_span=lambda: (calendar[0], day), get_enriched_range=shared_range)
+    monkeypatch.setattr("app.services.evening_report_events.fetch_disclosures", lambda *a: ([], []))
     return SimpleNamespace(root=tmp_path, day=day, calendar=calendar, raw=raw, symbols=symbols,
                            metadata=metadata, observations=observations, coverage=coverage, repo=repo, now=now,
                            market={'phase': 'repair', 'state': 'range', 'promo_rate': .3, 'seal_rate': .8})
@@ -92,120 +97,6 @@ def accepted(market_batch):
     state = market_batch
     state.evidence = inputs.save_ready(state.root, state.day, state.coverage, state.observations, state.market)
     return state
-
-
-def test_narrow_storage_rebuilds_real_indicators_and_full_group(accepted):
-    state = accepted
-    on_disk = pl.read_parquet(state.root / 'kline_daily_enriched' / f'date={state.day}' / 'part.parquet')
-    assert 'ma20' not in on_disk.columns and 'atr_14' not in on_disk.columns
-    loaded = inputs.load_inputs(state.root, state.day, state.evidence)
-    latest = loaded.prices.filter(pl.col('date') == state.day)
-    assert latest['formal'].all()
-    assert latest.select(pl.all_horizontal(pl.col(c).is_finite() for c in ('ma5', 'ma10', 'ma20', 'atr_14', 'high_60d')).all()).item()
-    report = build_report(loaded)
-    assert report['statistics']['eligible_count'] == 24
-    assert report['statistics']['scored_count'] == 24
-    assert {s['member_count'] for s in report['sectors']} == {24}
-
-
-def test_readiness_requires_stock_publication_but_not_an_index_marker(accepted):
-    state = accepted
-    assert not (state.root / '.matrix_generation_index.json').exists()
-    assert inputs.require_ready(state.root, state.day)['input_id'] == state.evidence['input_id']
-    (state.root / '.matrix_generation_stock.json').unlink()
-    with pytest.raises(DailyCoverageError, match='指标版本正在发布或不可用'):
-        inputs.require_ready(state.root, state.day)
-
-
-def test_duplicate_outside_report_does_not_block_publication(market_batch):
-    from app.tickflow.repository import DataStore, KlineRepository
-
-    state = market_batch
-    day = state.calendar[0]
-    bars = state.raw.filter(pl.col('date') == day)
-    extra = bars.head(1).with_columns(pl.lit('OUTSIDE').alias('symbol'))
-    repeated = pl.concat([bars, extra, extra])
-    repo = KlineRepository(DataStore(state.root))
-    repo.flush_live_daily(repeated)
-    path = state.root / 'kline_daily' / f'date={day}' / 'part.parquet'
-    assert pl.read_parquet(path).height == bars.height + 1
-    conflict = bars.head(1).with_columns((pl.col('close') - .01).alias('close'))
-    pl.concat([repeated, conflict]).write_parquet(path)
-    with pytest.raises(DailyCoverageError, match='冲突'):
-        inputs.save_ready(state.root, state.day, state.coverage, state.observations, state.market)
-    pl.concat([repeated, bars.head(1)]).write_parquet(path)
-    inputs.save_ready(state.root, state.day, state.coverage, state.observations, state.market)
-    report = jobs.generate(state.repo, state.day, progress=lambda *a, **kw: None)
-    assert report['status'] == 'published'
-
-
-def test_old_peer_snapshot_preserves_current_theme_and_selection(market_batch):
-    state = market_batch
-    target, peer = state.symbols[:2]
-    bars = state.raw.with_columns(
-        pl.when(pl.col('symbol') == target)
-        .then(1.018 ** pl.col('date').rank('dense') * pl.when(pl.col('date') == state.day).then(1.08).otherwise(1.))
-        .otherwise(1.).alias('_scale'))
-    bars = bars.with_columns((pl.col(c) * pl.col('_scale')).alias(c) for c in ('open', 'high', 'low', 'close')).drop('_scale')
-
-    def generate(raw):
-        write(state.root, 'kline_daily', raw)
-        run_pipeline(state.root)
-        receipt = inputs.save_ready(state.root, state.day, state.coverage, state.observations, state.market)
-        return build_report(inputs.load_inputs(state.root, state.day, receipt))
-
-    original = generate(bars)
-    assert original['selected'] == [target]
-    revised = generate(bars.with_columns(pl.when((pl.col('symbol') == peer) & (pl.col('date') == state.calendar[3]))
-                                         .then(pl.lit(123, dtype=pl.Int64)).alias('quote_ts')))
-    assert revised['selected'] == original['selected']
-    assert revised['observation_themes'][0]['strength'] == original['observation_themes'][0]['strength']
-
-
-def test_historical_snapshot_invalidates_recursive_state_even_when_today_is_formal(accepted):
-    state = accepted
-    old = state.calendar[3]
-    path = state.root / 'kline_daily' / f'date={old}' / 'part.parquet'
-    pl.read_parquet(path).with_columns(pl.when(pl.col('symbol') == state.symbols[0]).then(pl.lit(123, dtype=pl.Int64)).otherwise(None).alias('quote_ts')).write_parquet(path)
-    prices = inputs._prices(inputs.SectorReviewReader(state.root), state.day, state.metadata, calendar=state.calendar)
-    latest = prices.filter(pl.col('symbol') == state.symbols[0]).row(-1, named=True)
-    assert latest['formal'] and latest['ma20'] and latest['high_60d']
-    assert latest['atr_14'] is None and latest['bull_bear_line'] is None
-    assert prices.filter(pl.col('symbol') == state.symbols[1])['formal'].all()
-    with pytest.raises(DailyCoverageError, match='版本已变化'):
-        inputs.require_ready(state.root, state.day)
-
-
-def test_legitimate_historical_halt_does_not_poison_after_window_recovers(accepted):
-    state = accepted
-    day = state.calendar[2]
-    path = state.root / 'kline_daily' / f'date={day}' / 'part.parquet'
-    frame = pl.read_parquet(path).with_columns(
-        [pl.when(pl.col('symbol') == state.symbols[0]).then(0.).otherwise(pl.col(c)).alias(c)
-         for c in ('open', 'high', 'volume', 'amount')])
-    frame.write_parquet(path)
-    evidence = []
-    prices = inputs._prices(inputs.SectorReviewReader(state.root), state.day, state.metadata,
-                           suspension_evidence=evidence, calendar=state.calendar)
-    assert prices.filter(pl.col('symbol') == state.symbols[0])['formal'].all()
-    assert prices.filter((pl.col('symbol') == state.symbols[0]) & (pl.col('date') == day)).is_empty()
-    assert evidence == [{'symbol': state.symbols[0], 'date': day}]
-    metadata = inputs._metadata(state.evidence, [str(d) for d in state.calendar], evidence)
-    assert metadata.filter(pl.col('symbol') == state.symbols[0])['suspension_window'][0] is False
-
-
-@pytest.mark.parametrize('table', ['kline_daily', 'kline_index_daily'])
-def test_new_day_generation_does_not_block_recovery_but_rewritten_input_does(accepted, table):
-    state = accepted
-    future = state.day + timedelta(days=1)
-    write(state.root, 'kline_daily', state.raw.tail(1).with_columns(pl.lit(future).alias('date')))
-    bump_enriched_generation(state.root)
-    assert inputs.require_ready(state.root, state.day)['input_id'] == state.evidence['input_id']
-    path = state.root / table / f'date={state.calendar[0]}' / 'part.parquet'
-    frame = pl.read_parquet(path).with_columns((pl.col('amount') + 1).alias('amount'))
-    frame.write_parquet(path)
-    with pytest.raises(DailyCoverageError, match='版本已变化'):
-        inputs.require_ready(state.root, state.day)
 
 
 def test_classification_observation_uses_response_not_merged_table(tmp_path, monkeypatch):
@@ -228,216 +119,8 @@ def test_classification_missing_scope_blocks_readiness_and_unknown_effective_dat
     state = accepted
     observations = state.evidence['classifications']
     observations[0]['symbols'] = observations[0]['symbols'][1:]
-    with pytest.raises(DailyCoverageError, match='本轮分类响应缺少 1'):
+    with pytest.raises(DailyCoverageError, match='本轮概念分类'):
         inputs.save_ready(state.root, state.day, state.coverage, observations, {})
-
-
-def test_classification_archive_compares_to_last_acceptance_and_survives_input_expiry(market_batch):
-    state = market_batch
-    store = EveningReportStore(state.root)
-    previous = str(state.calendar[-2])
-    concept, industry = state.observations
-    concept['source'] = 'https://example.test/concepts'
-    members = concept['memberships']
-    # The later receipt already contains the first member. Only the second one is new today.
-    removed = {**members[0], 'sector_id': 'old-concept'}
-    absent_today = {**removed, 'symbol': '600999.SH'}
-    for hour, old_members in ((16, members[3:]), (17, [members[0], removed, absent_today, *members[3:]])):
-        cutoff = f'{previous}T{hour}:00:00+08:00'
-        prior = current_receipt(previous, cutoff, classifications=[
-            {**concept, 'id': f'concept-{hour}', 'obtained_at': cutoff, 'memberships': old_members,
-             'symbols': [s for s in [*concept['symbols'], absent_today['symbol']] if s != members[2]['symbol']]},
-            {**industry, 'obtained_at': cutoff}])
-        prior['classification_comparisons'] = inputs._classification_comparisons(prior, None)
-        store.save_readiness(previous, prior)
-        if hour == 16:
-            original = store.save(previous, {'audit': {}, 'trade_date': previous}, {'input_id': prior['input_id']})
-
-    empty_label_symbol = '600998.SH'
-    concept['symbols'] = [*concept['symbols'], empty_label_symbol]
-    accepted = inputs.save_ready(state.root, state.day, state.coverage, state.observations, state.market)
-    assert accepted['previous_accepted_input_id'] == prior['input_id']
-    retry = inputs.save_ready(state.root, state.day, state.coverage, state.observations, state.market)
-    (store.root / 'inputs' / f"{prior['input_id']}.json.gz").unlink()
-    loaded = inputs.load_inputs(state.root, state.day, retry)
-    payload = build_report(loaded)
-    added, = next(s for s in payload['sectors'] if s['source'] == 'concept')['membership_change']['added']
-    assert added == members[1]['symbol']
-    store.save(str(state.day), payload, {'input_id': retry['input_id']})
-    changes = store.get(str(state.day))['provenance']['membership_changes']
-    comparison = next(c for c in changes if c['source'] == concept['source'])
-    assert comparison['added'] == [[added, members[1]['sector_id']]]
-    assert comparison['removed'] == [[removed['symbol'], removed['sector_id']]]
-    assert comparison['first_observed'] == [[members[2]['symbol'], members[2]['sector_id']]]
-    assert comparison['first_observed_symbols'] == sorted((members[2]['symbol'], empty_label_symbol))
-    assert comparison['previous_observation_id'] == 'concept-17' and comparison['observation_id'] == concept['id']
-    public = store.get(str(state.day), view=True)['provenance']['membership_changes']
-    summary = next(c for c in public if c['source'] == concept['source'])
-    assert (summary['added_count'], summary['first_observed_count']) == (1, 2)
-    assert store.get(previous) == original
-
-
-def test_first_classification_counts_covered_stocks_including_empty_labels(tmp_path):
-    from app.services.evening_report_store import report_view
-
-    first = {'source': 'concept', 'id': 'first', 'symbols': ['A', 'B'], 'memberships': [
-        {'symbol': 'A', 'sector_id': 'x'}, {'symbol': 'A', 'sector_id': 'y'}]}
-    receipt = {'date': '2026-11-04', 'complete': True, 'classifications': [first]}
-    def check(evidence, expected_symbols, expected_members, prior=None):
-        evidence['classification_comparisons'] = inputs._classification_comparisons(evidence, prior)
-        changes = inputs._classification_changes(evidence)
-        assert changes[0]['first_observed_symbols'] == expected_symbols
-        assert changes[0]['first_observed'] == expected_members
-        public = report_view({'provenance': {'membership_changes': changes}})['provenance']['membership_changes'][0]
-        assert public['first_observed_count'] == len(expected_symbols)
-        assert 'first_observed_symbols' not in public
-
-    check(receipt, ['A', 'B'], [['A', 'x'], ['A', 'y']])
-    day = receipt['date']
-    cutoff = day + 'T17:00:00+08:00'
-    empty = current_receipt(day, cutoff, classifications=[{
-        'source': 'concept', 'id': 'empty', 'obtained_at': cutoff, 'complete': True, 'symbols': [], 'memberships': []}])
-    check(empty, [], [])
-    store = EveningReportStore(tmp_path)
-    store.save_readiness(day, empty)
-    assert store.readiness(day) == empty
-    second = {**receipt, 'date': '2026-11-05',
-              'classifications': [{**first, 'id': 'second', 'symbols': ['A', 'B', 'C']}]}
-    check(second, ['C'], [], receipt)
-    second['classifications'][0]['symbols'] = ['A', 'B']
-    check(second, [], [], receipt)
-
-
-def test_new_classification_semantics_start_new_scope_without_rewriting_old_evidence(accepted, monkeypatch):
-    from copy import deepcopy
-
-    state = accepted
-    old_scope = state.evidence['scope_version']
-    observations = deepcopy(state.evidence['classifications'])
-    for observation in observations:
-        observation['membership_semantics'] = 'fuyao-flat-v1'
-    updated = inputs.save_ready(state.root, state.day, state.coverage, observations, {})
-    assert updated['scope_version'] == old_scope + '/fuyao-flat-v1'
-    old = EveningReportStore(state.root).input_evidence(state.evidence['input_id'])
-    assert old['scope_version'] == old_scope
-    assert all('membership_semantics' not in observation for observation in old['classifications'])
-    monkeypatch.setattr(shared_runtime, 'publish_data_update', lambda *_: None)
-    submitted = AsyncMock(return_value={'job_id': 'queued'})
-    monkeypatch.setattr(pipeline, '_submit_job', submitted)
-    asyncio.run(jobs.trigger(state.repo, day=state.day, automatic=True))
-    assert f':{updated["scope_version"]}:' in submitted.call_args.kwargs['request_key']
-    jobs.generate(state.repo, state.day, progress=lambda *a, **k: None)
-    report = EveningReportStore(state.root).get(str(state.day))
-    assert report['scope_version'] == report['provenance']['scope_version'] == updated['scope_version']
-
-
-def test_generation_restarts_classification_continuity_and_reuses_matching_daily_scopes(tmp_path, monkeypatch):
-    from test_evening_report_engine import inputs_at
-
-    store = EveningReportStore(tmp_path)
-    repo = SimpleNamespace(store=SimpleNamespace(data_dir=tmp_path))
-    values = {value.trade_date: value for value in (inputs_at(index) for index in range(65, 71))}
-    days = list(values)
-    new_scope = SCOPE_VERSION + '/fuyao-flat-v1'
-    for index, day in enumerate(days):
-        store.save_readiness(day, current_receipt(day, day, calendar={'days': days},
-                                                  scope_version=SCOPE_VERSION if index < 3 else new_scope))
-
-    def ready(root, day, *, input_id=None):
-        return store.input_evidence(input_id) if input_id else store.readiness(str(day))
-
-    def load(root, day, evidence, check):
-        value = values[str(day)]
-        value.provenance['scope_version'] = evidence['scope_version']
-        return value
-
-    monkeypatch.setattr(jobs, 'require_ready', ready)
-    monkeypatch.setattr(jobs, 'load_inputs', load)
-    monkeypatch.setattr(shared_runtime, 'publish_data_update', lambda *_: None)
-    publication_clock = {'day': days[0]}
-    monkeypatch.setattr(jobs, 'cn_now', lambda: datetime.fromisoformat(publication_clock['day']).replace(hour=18, tzinfo=CN_TZ))
-    for day in days[:3]:
-        publication_clock['day'] = day
-        jobs.generate(repo, date.fromisoformat(day), progress=lambda *a, **k: None)
-    previous = store.get(days[2])
-    assert any(identity['valid'] is True for identity in store.state(days[2])['state']['identities'].values())
-
-    for day in days[3:]:
-        publication_clock['day'] = day
-        jobs.generate(repo, date.fromisoformat(day), progress=lambda *a, **k: None)
-    reports = [store.get(day) for day in days[3:]]
-
-    first, _second, third = reports
-    first_state, second_state, third_state = [store.state(report['date'], report['version'])['state'] for report in reports]
-    assert all(report['scope_version'] == new_scope for report in reports)
-    assert next(iter(first_state['rounds'].values()))['status'] == 'probing'
-    assert not any(identity['valid'] is True for identity in first_state['identities'].values())
-    assert first['statistics']['publication_frequency']['report_days'] == 1
-    assert next(iter(second_state['rounds'].values()))['status'] == 'active'
-    assert third['statistics']['publication_frequency']['report_days'] == 3
-    assert any(identity['valid'] is True for identity in third_state['identities'].values())
-    assert store.get(days[2]) == previous
-
-
-def test_concept_filter_uses_original_members_and_never_filters_industry():
-    rows = [{'symbol': str(i), 'sector_id': '宽基', 'sector_name': '宽基', 'source': 'concept'} for i in range(121)]
-    rows += [{'symbol': 'x', 'sector_id': '宽基', 'sector_name': '宽基', 'source': 'industry'}]
-    frame, evidence = inputs._memberships({'classifications': [{'memberships': rows}],
-                                          'sector_filter_config': {'min_members': 1, 'max_members': 7, 'blacklist': []}})
-    assert frame['source'].to_list() == ['industry']
-    assert evidence['excluded'][0]['members'] == 121
-
-
-def test_original_is_immutable_and_public_view_does_not_load_internal_archive(tmp_path, monkeypatch):
-    store = EveningReportStore(tmp_path)
-    original = store.save('2026-10-16', {'audit': {}, 'trade_date': '2026-10-16', 'rule_version': RULE_VERSION,
-                         'state': {'secret_internal': 'x' * 100_000}, 'records': [], 'sectors': [],
-                         'calculations': []}, {'input_id': 'a' * 32})
-    assert store.save('2026-10-16', {'audit': {}, 'state': 'replaced'}, {'input_id': 'b' * 32}) == original
-    original_read = archive.read_json
-    def read(path):
-        if path.parent.name == 'archive' and any(part in path.name for part in ('.state.', '.candidates.', '.audit.')):
-            raise AssertionError('GET不应解析内部恢复档案')
-        return original_read(path)
-    monkeypatch.setattr(archive, 'read_json', read)
-    view = store.get('2026-10-16', view=True)
-    assert 'state' not in view and 'calculations' not in view
-    assert len(json.dumps(view)) < 2000
-    assert store.dates()[0]['versions'][0]['version'] == original['version']
-
-
-def test_generation_archives_once_and_repeated_input_does_not_compute(accepted, monkeypatch):
-    from app.services import evening_report_engine
-    events = []
-    monkeypatch.setattr(shared_runtime, 'publish_data_update', lambda root, datasets: events.append(datasets))
-    state = accepted
-    first = jobs.generate(state.repo, state.day, progress=lambda *a, **k: None)
-    monkeypatch.setattr(evening_report_engine, 'build_report', lambda *a, **k: pytest.fail('同输入不得再次推进状态'))
-    second = jobs.generate(state.repo, state.day, progress=lambda *a, **k: None)
-    assert first['version'] == second['version'] and second['reused']
-    assert events == [['evening_report']]
-    assert EveningReportStore(state.root).get(str(state.day), view=True)['statistics']['scored_count'] == 24
-
-
-def test_history_reads_only_seven_state_files_regardless_of_archive_age(tmp_path, monkeypatch):
-    store = EveningReportStore(tmp_path)
-    for offset in range(250):
-        day = date(2025, 1, 1) + timedelta(days=offset)
-        store.save(str(day), {'audit': {}, 'trade_date': str(day), 'rule_version': RULE_VERSION,
-                              'state': {'forward': offset}, 'records': [], 'calculations': []},
-                   {'input_id': f'{offset:032x}'})
-    read = archive.read_json
-    state_reads = []
-    def watched(path):
-        if path.parent.name == 'archive':
-            assert path.name.endswith('.state.json.gz')
-            state_reads.append(path)
-        return read(path)
-    monkeypatch.setattr(archive, 'read_json', watched)
-    history = store.history('2026-01-01', RULE_VERSION)
-    assert len(history) == len(state_reads) == 7
-    assert history[-1]['state'] == {'forward': 249}
-    assert len(json.dumps(history)) < 4000
 
 
 @pytest.mark.parametrize(('today', 'expected'), [('2026-11-15', '2026-11-13'), ('2026-11-16', '2026-11-16'),
@@ -448,7 +131,7 @@ def test_default_status_uses_latest_calendar_trade_day_not_today_or_latest_repor
         'days': ['2026-09-30', '2026-10-09', '2026-11-12', '2026-11-13', '2026-11-16'],
         'start': '2026-09-30', 'end': '2026-11-16',
     })
-    EveningReportStore(tmp_path).save('2026-09-29', {'audit': {}, 'state': {}}, {'input_id': 'a' * 32})
+    EveningReportStore(tmp_path).save('2026-09-29', {'audit': {}, 'state': {}}, {'stock_generation': 'test'})
     jobs._save_attempt(tmp_path, '2026-11-15', {'status': 'failed', 'reason': '非交易日不能生成'})
     result = jobs.status(tmp_path)
     assert result['date'] == expected
@@ -464,7 +147,7 @@ def test_default_status_does_not_invent_trade_day_without_calendar_or_archive(tm
     assert result['date'] == ''
     assert result['status'] == 'waiting'
     assert '交易日历尚未就绪' in result['reason']
-    EveningReportStore(tmp_path).save('2026-11-13', {'audit': {}, 'state': {}}, {'input_id': 'a' * 32})
+    EveningReportStore(tmp_path).save('2026-11-13', {'audit': {}, 'state': {}}, {'stock_generation': 'test'})
     assert jobs.status(tmp_path)['date'] == '2026-11-13'
     assert jobs.status(tmp_path)['status'] == 'published'
 
@@ -479,7 +162,7 @@ def test_status_distinguishes_incomplete_ready_and_completed_job_without_callbac
     monkeypatch.setattr(pipeline_jobs, 'job_store', registry)
     job_id, _ = registry.create(request_key='evening_report:2026-10-16:live:v1:x')
     jobs._save_attempt(tmp_path, '2026-10-16', {'job_id': job_id, 'status': 'generating'})
-    store.save('2026-10-16', {'audit': {}, 'state': {}}, {'input_id': 'a' * 32})
+    store.save('2026-10-16', {'audit': {}, 'state': {}}, {'stock_generation': 'test'})
     registry.succeed(job_id, {})
     assert jobs.status(tmp_path, '2026-10-16')['status'] == 'published'
 
@@ -496,7 +179,7 @@ def test_published_original_takes_precedence_over_stale_attempt(tmp_path, monkey
     registry = pipeline_jobs.JobStore(store_dir=tmp_path / 'jobs')
     monkeypatch.setattr(pipeline_jobs, 'job_store', registry)
     store = EveningReportStore(tmp_path)
-    store.save(str(day), {'audit': {}, 'state': {}}, {'input_id': 'a' * 32})
+    store.save(str(day), {'audit': {}, 'state': {}}, {'stock_generation': 'test'})
     jobs._save_attempt(tmp_path, str(day), {'status': 'failed', 'reason': '刷新通知失败'})
     trigger = AsyncMock()
     monkeypatch.setattr(jobs, 'trigger', trigger)
@@ -514,7 +197,7 @@ def test_browser_serves_the_same_original_by_date_or_version(tmp_path, monkeypat
     day = '2026-10-16'
     store = EveningReportStore(tmp_path)
     monkeypatch.setattr(evening_report_store, 'cn_now', lambda: datetime(2026, 10, 16, 18, tzinfo=CN_TZ))
-    original = store.save(day, {'audit': {}, 'rule_version': 'initial-rule', 'summary': '原始观察'}, {'input_id': 'a' * 32})
+    original = store.save(day, {'audit': {}, 'rule_version': 'initial-rule', 'summary': '原始观察'}, {'stock_generation': 'test'})
     app = FastAPI()
     app.state.repo = SimpleNamespace(store=SimpleNamespace(data_dir=tmp_path))
     app.include_router(evening_report.router)
@@ -604,7 +287,7 @@ def test_manual_generation_prepares_only_when_needed_then_publishes(manual_runti
     if initial == 'missing':
         store.save_readiness(str(state.day), {'complete': False})
     if initial == 'changed':
-        write(state.root, 'kline_daily', state.raw)
+        bump_enriched_generation(state.root, 'stock')
     refreshed = Mock()
     monkeypatch.setattr(pipeline, 'finalize_market_data', refreshed)
     caps = object()
@@ -634,15 +317,15 @@ def test_manual_generation_prepares_only_when_needed_then_publishes(manual_runti
     job = registry.get(result['job_id'])
     assert job['status'] == 'succeeded', job.get('error')
     assert prepared.call_count == refreshed.call_count == (0 if initial == 'accepted' else 1)
-    assert store.get(str(state.day), job['result']['version'])['input_reference']['input_id'] == store.readiness(str(state.day))['input_id']
+    assert store.get(str(state.day), job['result']['version'])['input_reference']['stock_generation'] == store.readiness(str(state.day))['stock_generation']
     assert pipeline_jobs._run_slot_owner is None
 
 
-@pytest.mark.parametrize('failure', ['exception', 'unaccepted', 'cancel', 'revoked'])
+@pytest.mark.parametrize('failure', ['exception', 'unaccepted', 'cancel'])
 def test_manual_preparation_failure_never_publishes_and_refreshes_partial_data(manual_runtime, monkeypatch, failure):
     from app.jobs import daily_pipeline
 
-    state, registry, auth, token = manual_runtime
+    state, registry, _, _ = manual_runtime
     store = EveningReportStore(state.root)
     store.save_readiness(str(state.day), {'complete': False})
     refreshed = Mock()
@@ -654,10 +337,6 @@ def test_manual_preparation_failure_never_publishes_and_refreshes_partial_data(m
             raise DailyCoverageError('正式行情不完整')
         if failure == 'cancel':
             pipeline.cancel_job(pipeline_jobs._run_slot_owner)
-        if failure == 'revoked':
-            inputs.save_ready(state.root, state.day, state.coverage,
-                              state.evidence['classifications'], state.evidence['market'])
-            auth.revoke_session(token)
         return {}
 
     monkeypatch.setattr(daily_pipeline, 'run_now', prepare)
@@ -753,12 +432,11 @@ def test_manual_preparation_rechecks_date_after_waiting_for_execution(manual_run
     prepared.assert_not_called()
 
 
-def test_manual_generation_crossing_midnight_before_publication_keeps_originals(manual_runtime, monkeypatch):
+def test_submitted_job_can_publish_its_ready_day_after_midnight(manual_runtime, monkeypatch):
     from app.services import evening_report_engine
 
     state, registry, _, _ = manual_runtime
     store = EveningReportStore(state.root)
-    originals = store.dates()
     calculate = evening_report_engine.build_report
 
     def crossing_midnight(*args, **kwargs):
@@ -773,9 +451,8 @@ def test_manual_generation_crossing_midnight_before_publication_keeps_originals(
         return result
 
     result = asyncio.run(run())
-    assert registry.get(result['job_id'])['status'] == 'failed'
-    assert '跨日期' in registry.get(result['job_id'])['error']
-    assert store.dates() == originals
+    assert registry.get(result['job_id'])['status'] == 'succeeded'
+    assert store.has_original(str(state.day))
 
 
 def test_later_pipeline_failure_still_generates_independent_report_after_releasing_slot(task_runtime, monkeypatch):
@@ -838,7 +515,7 @@ def test_cancelled_parent_never_derives_evening_and_restart_keeps_cancellation(t
 
 def test_pending_evening_restart_is_failed_and_can_retry_only_its_step(task_runtime, monkeypatch):
     state, registry = task_runtime
-    key = f'evening_report:{state.day}:live:{RULE_VERSION}:{state.evidence["input_id"]}'
+    key = f'evening_report:{state.day}:live'
     job_id, _ = registry.create(request_key=key)
     jobs._save_attempt(state.root, str(state.day), {'job_id': job_id, 'status': 'generating'})
     restored = pipeline_jobs.JobStore(store_dir=state.root / 'jobs')
@@ -853,166 +530,6 @@ def test_pending_evening_restart_is_failed_and_can_retry_only_its_step(task_runt
     assert result['job_id'] != job_id
     assert restored.get(result['job_id'])['status'] == 'succeeded'
     assert all(job.get('request_key', '').startswith(('evening_report:', 'evening_tracking:')) for job in restored.list_recent())
-
-
-@pytest.mark.parametrize('scenario', ['same-day-retry', 'after-long-outage', 'only-original-after-long-outage'])
-def test_missing_last_input_takes_precedence_over_readable_history(market_batch, monkeypatch, scenario):
-    state = market_batch
-    store = EveningReportStore(state.root)
-    monkeypatch.setattr(inputs, 'cn_now', lambda: state.now + timedelta(hours=2))
-    same_day = scenario == 'same-day-retry'
-    older_day, missing_day = (state.calendar[-2], state.day) if same_day else state.calendar[:2]
-    older = current_receipt(str(older_day), f'{older_day}T16:00:00+08:00', active_symbols=state.symbols)
-    store.save_readiness(str(older_day), older)
-    missing = {**older, 'date': str(missing_day), 'cutoff': f'{missing_day}T17:00:00+08:00'}
-    del missing['input_id']
-    store.save_readiness(str(missing_day), missing)
-    store.save_readiness(str(missing_day), {'complete': False})
-    (store.root / 'inputs' / f"{missing['input_id']}.json.gz").unlink()
-    if scenario == 'only-original-after-long-outage':
-        store.save(str(missing_day), {'audit': {}, 'trade_date': str(missing_day)}, {'input_id': missing['input_id']})
-        (store.root / 'ready' / f'{missing_day}.json').unlink()
-        (store.root / 'acceptances' / f'{missing_day}.json').unlink()
-
-    receipt = inputs.save_ready(state.root, state.day, state.coverage, state.observations, state.market)
-    assert receipt.get('wave_previous_acceptance') == (None if scenario == 'only-original-after-long-outage' else missing['cutoff'])
-    assert receipt['wave_missing_predecessor_day'] == str(missing_day)
-    assert receipt.get('previous_accepted_input_id') == (None if scenario == 'only-original-after-long-outage' else missing['input_id'])
-    assert receipt['wave_first_acceptances'][state.symbols[0]] == older['cutoff']
-    assert 'wave_price_compared_after' not in receipt
-
-
-def test_same_input_uses_saved_historical_suspension_not_mutable_ready(accepted):
-    from app.services.evening_report_start_study import evaluate_start
-    from app.services.evening_report_wave import VERSION, PriceBasis, build_waves
-
-    state = accepted
-    symbol = state.symbols[0]
-    previous = str(state.calendar[-2])
-    store = EveningReportStore(state.root)
-    partition = state.root / 'kline_daily' / f'date={previous}' / 'part.parquet'
-    original_prices = pl.read_parquet(partition)
-    original_prices.filter(pl.col('symbol') != symbol).write_parquet(partition)
-    factors = state.root / 'adj_factor' / 'all.parquet'
-    factors.parent.mkdir(exist_ok=True)
-    pl.DataFrame(schema={'symbol': pl.String, 'trade_date': pl.Date, 'ex_factor': pl.Float64}).write_parquet(factors)
-    prior_evidence = current_receipt(
-        previous, previous + 'T16:00:00+08:00', halted_symbols=[symbol],
-        halted_evidence=[{'symbol': symbol, 'date': previous, 'confirmed': True, 'source': 'explicit_daily_status',
-                          'obtained_at': previous + 'T16:00:00+08:00'}],
-        classifications=state.evidence['classifications'])
-    prior_evidence['classification_comparisons'] = inputs._classification_comparisons(prior_evidence, None)
-    store.save_readiness(previous, prior_evidence)
-    evidence = inputs.save_ready(state.root, state.day, state.coverage, state.evidence['classifications'], state.evidence['market'])
-    before = inputs.load_inputs(state.root, state.day, evidence).metadata
-    store.save_readiness(previous, current_receipt(previous, previous + 'T17:00:00+08:00'))
-    assert store.input_evidence(evidence['input_id'])['historical_suspensions']
-    loaded = inputs.load_inputs(state.root, state.day, store.input_evidence(evidence['input_id']))
-    assert before.equals(loaded.metadata)
-    assert loaded.metadata.filter(pl.col('symbol') == symbol)['suspension_window'][0] is True
-    suspended = {
-        (row['symbol'], str(row['date'])) for row in loaded.provenance['suspensions'] if row['confirmed']
-    }
-    assert (symbol, previous) in suspended
-    wave, snapshots, _, _, _ = build_waves(loaded, [{'symbol': symbol}], {}, loaded.calendar, lambda: None)
-    assert snapshots[symbol]['missing_from'] is None
-    assert wave['stocks'][symbol]['state']['density_days'][previous] == 'suspended'
-
-    basis = PriceBasis([], loaded.provenance['wave_factor_source'], loaded.cutoff)
-    anchor_day = str(state.calendar[-3])
-    event = {'security_id': symbol, 'segment_index': 2, 'start_id': 'suspended-test', 'rule_version': VERSION,
-             'known_at': previous + 'T16:00:00+08:00', 'evidence_date': anchor_day,
-             'target_high': basis.evidence(100., 'high', anchor_day, anchor_day) | {'pivot_id': 'H1'},
-             'failure_low': basis.evidence(1., 'low', anchor_day, anchor_day) | {'pivot_id': 'L1'}}
-    evaluation = evaluate_start(event, calendar=loaded.calendar, prices={}, suspended=suspended, basis=basis,
-                                invalidated=None, as_of=loaded.trade_date, evaluated_at=loaded.cutoff)
-    assert evaluation['evaluation_reason_code'] == 'suspended'
-
-    original = store.save(previous, {'audit': {}, 'trade_date': previous}, {'input_id': prior_evidence['input_id']})
-    original_prices.write_parquet(partition)
-    restored = inputs.save_ready(state.root, state.day, state.coverage, state.evidence['classifications'], state.evidence['market'])
-    loaded = inputs.load_inputs(state.root, state.day, inputs.require_ready(state.root, state.day))
-    row = loaded.prices.filter((pl.col('date').cast(pl.String) == previous) & (pl.col('symbol') == symbol)).row(0, named=True)
-    assert row['formal'] and row['wave_formal']
-    suspended = {(ref['symbol'], str(ref['date'])) for ref in loaded.provenance['suspensions'] if ref['confirmed']}
-    _, snapshots, _, _, _ = build_waves(loaded, [{'symbol': symbol}], wave, loaded.calendar, lambda: None)
-    evaluation = evaluate_start(event, calendar=loaded.calendar, prices={(symbol, previous): row}, suspended=suspended,
-                                basis=basis, invalidated=None, as_of=previous, evaluated_at=restored['cutoff'])
-    assert (symbol, previous) not in suspended
-    assert loaded.metadata.filter(pl.col('symbol') == symbol)['suspension_window'][0] is False
-    assert snapshots[symbol]['pivot_density']['suspended'] == 1
-    assert evaluation['status'] == 'not_due'
-    assert store.input_evidence(original['input_reference']['input_id'])['halted_evidence'] == prior_evidence['halted_evidence']
-
-
-def test_replay_orders_recovered_trading_days_by_actual_acceptance_time(tmp_path):
-    store = EveningReportStore(tmp_path)
-    previous, day, tomorrow = '2026-11-04', '2026-11-05', '2026-11-06'
-    normal = current_receipt(day, day + 'T17:00:00+08:00')
-    recovered = current_receipt(previous, day + 'T18:00:00+08:00')
-    store.save_readiness(day, normal)
-    store.save_readiness(previous, recovered)
-    current = current_receipt(tomorrow, tomorrow + 'T17:00:00+08:00')
-    history, _ = inputs._accepted_history(store, store.acceptance_references(), current, day + 'T16:00:00+08:00', {})
-    assert [r['cutoff'] for r in history] == [normal['cutoff'], recovered['cutoff']]
-
-
-def test_receipt_dates_only_covered_stocks_in_the_same_partition(market_batch, monkeypatch):
-    state = market_batch
-    prior_day = state.calendar[-2]
-    prior_cutoff = datetime.combine(prior_day, state.now.timetz()).isoformat()
-    store = EveningReportStore(state.root)
-    factor_path = state.root / 'adj_factor' / 'all.parquet'
-    factor_path.parent.mkdir(exist_ok=True)
-    factors = pl.DataFrame({'symbol': [state.symbols[0]], 'trade_date': [prior_day], 'ex_factor': [1.01]})
-    factors.write_parquet(factor_path)
-    prior_coverage = DailyCoverage(prior_day)
-    prior_coverage.observe(state.raw.filter((pl.col('symbol') == state.symbols[0]) & (pl.col('date') == prior_day)))
-    with monkeypatch.context() as previous:
-        previous.setattr(inputs, 'cn_now', lambda: datetime.fromisoformat(prior_cutoff))
-        inputs.save_ready(state.root, prior_day, prior_coverage,
-                          [{**o, 'obtained_at': prior_cutoff} for o in state.observations], state.market)
-    evidence = inputs.save_ready(state.root, state.day, state.coverage, state.observations, state.market)
-    loaded = inputs.load_inputs(state.root, state.day, evidence)
-    prior_bars = loaded.prices.filter(pl.col('date') == prior_day)
-    assert prior_bars.filter(pl.col('symbol') == state.symbols[0])['known_at'].item() == prior_cutoff
-    assert prior_bars.filter(pl.col('symbol') != state.symbols[0])['known_at'].unique().to_list() == [evidence['cutoff']]
-    assert loaded.prices.filter(pl.col('date') == state.day)['known_at'].unique().to_list() == [evidence['cutoff']]
-    assert loaded.provenance['wave_factor_known_at'] == prior_cutoff
-    assert loaded.provenance['wave_factor_facts'][state.symbols[0]][str(prior_day)] == [1.01, prior_cutoff]
-
-    partition = state.root / 'kline_daily' / f'date={prior_day}' / 'part.parquet'
-    pl.read_parquet(partition).with_columns(pl.col('high') + 1).write_parquet(partition)
-    factors.with_columns(pl.lit(1.02).alias('ex_factor')).write_parquet(factor_path)
-    monkeypatch.setattr(inputs, 'cn_now', lambda: state.now + timedelta(minutes=15))
-    revised = inputs.save_ready(state.root, state.day, state.coverage, state.observations, state.market)
-    loaded = inputs.load_inputs(state.root, state.day, revised)
-    assert loaded.prices.filter(pl.col('date') == prior_day)['known_at'].unique().to_list() == [revised['cutoff']]
-    assert loaded.provenance['wave_factor_known_at'] == revised['cutoff']
-    assert loaded.provenance['wave_factor_facts'][state.symbols[0]][str(prior_day)] == [1.02, revised['cutoff']]
-    [earlier], _ = inputs._accepted_history(store, store.acceptance_references(), revised, prior_cutoff, {})
-    assert earlier['cutoff'] == evidence['cutoff']
-    assert earlier['facts'] == evidence['wave_factor_facts']
-    assert earlier['source'] == inputs.factor_file_reference(evidence['versions'])
-
-
-def test_automatic_generation_rejects_cross_day_before_any_publication(accepted, monkeypatch):
-    state = accepted
-    monkeypatch.setattr(jobs, 'cn_now', lambda: state.now + timedelta(days=1))
-    with pytest.raises(DailyCoverageError, match='跨日期'):
-        jobs.generate(state.repo, state.day, progress=lambda *a, **k: None)
-    assert not EveningReportStore(state.root).dates()
-
-
-def test_exact_non_industry_mapping_excludes_small_region_but_keeps_real_industry_labels():
-    rows = [{'symbol': f's{i}', 'sector_id': label, 'sector_name': label, 'source': 'concept'}
-            for label in ('天津自贸区', '沪股通', '沪深300', '2026三季报预增', '昨日涨停', '智慧城市', '东数西算', '中国AI 50')
-            for i in range(6)]
-    frame, evidence = inputs._memberships({'classifications': [{'memberships': rows}],
-                                          'sector_filter_config': {'min_members': 4, 'max_members': 600, 'blacklist': []}})
-    assert set(frame['sector_id']) == {'智慧城市', '东数西算', '中国AI 50'}
-    assert evidence['excluded_counts'] == {'region': 1, 'trading_channel': 1, 'index_constituent': 1, 'style': 1, 'review_attribute': 1}
-    assert evidence['rule_version'] == 'evening-classification-v2'
 
 
 @pytest.mark.parametrize('automatic', [False, True])
@@ -1077,33 +594,6 @@ def test_capacity_queued_evening_can_cancel_without_computing(task_runtime, monk
     assert pipeline_jobs._run_slot_owner is None
 
 
-@pytest.mark.parametrize('missing_input', [False, True])
-def test_explicit_rebuild_revalidates_revoked_session_before_delayed_execution(task_runtime, monkeypatch, missing_input):
-    from app.jobs import daily_pipeline
-    from app.services.auth import AuthStore
-    from app.services.user_context import UserContext, user_scope
-    state, registry = task_runtime
-    if missing_input:
-        EveningReportStore(state.root).save_readiness(str(state.day), {'complete': False})
-    prepared = Mock()
-    monkeypatch.setattr(daily_pipeline, 'run_now', prepared)
-    auth = AuthStore(state.root)
-    admin = auth.bootstrap('reviewadmin', 'initial-secret')
-    token, _ = auth.login('reviewadmin', 'initial-secret', 'ip', '')
-    actor = UserContext(admin['id'], 'admin', state.root, session_token=token)
-    async def run():
-        with user_scope(actor):
-            result = await jobs.trigger(state.repo, day=state.day, capset=object())
-            auth.revoke_session(token)
-            await drain_tasks()
-            return result
-    result = asyncio.run(run())
-    assert registry.get(result['job_id'])['status'] == 'failed'
-    assert '会话已过期' in registry.get(result['job_id'])['error']
-    assert not EveningReportStore(state.root).has_original(str(state.day))
-    prepared.assert_not_called()
-
-
 def test_historical_request_returns_existing_original_or_unpublished_without_submitting(manual_runtime, monkeypatch):
     state, _, _, _ = manual_runtime
     store = EveningReportStore(state.root)
@@ -1114,35 +604,13 @@ def test_historical_request_returns_existing_original_or_unpublished_without_sub
     missing = asyncio.run(jobs.trigger(state.repo, day=state.day))
     assert missing['status'] == 'unpublished'
     assert not store.has_original(date_key)
-    original = store.save(date_key, {'audit': {}, 'state': {}}, {'input_id': 'a' * 32})
+    original = store.save(date_key, {'audit': {}, 'state': {}}, {'stock_generation': 'test'})
     reused = asyncio.run(jobs.trigger(state.repo, day=state.day))
     assert reused['status'] == 'published' and reused['version'] == original['version']
     with pytest.raises(HTTPException) as exc:
         asyncio.run(jobs.trigger(state.repo, day=state.day, revision=True))
     assert exc.value.status_code == 409
     submit.assert_not_awaited()
-
-
-def test_limit_reference_requires_proof_for_each_intervening_session(accepted):
-    state = accepted
-    symbol = state.symbols[0]
-    first, second, resumed = state.calendar[3:6]
-    for day in (first, second):
-        path = state.root / 'kline_daily' / f'date={day}' / 'part.parquet'
-        pl.read_parquet(path).filter(pl.col('symbol') != symbol).write_parquet(path)
-
-    def signals(halts, instruments=state.metadata):
-        proofs = [{'symbol': symbol, 'date': d, 'confirmed': True} for d in halts]
-        frame = inputs._prices(inputs.SectorReviewReader(state.root), state.day, instruments,
-                               calendar=state.calendar, accepted_halts=proofs)
-        return frame.filter((pl.col('date') == resumed) & (pl.col('symbol') == symbol)).select(
-            'signal_limit_up', 'signal_limit_down', 'consecutive_limit_ups').row(0)
-
-    assert signals([first]) == (None, None, None)
-    assert signals([first, second]) == (False, False, 0)
-    close = state.raw.filter((pl.col('symbol') == symbol) & (pl.col('date') == resumed))['close'].item()
-    bounds = state.metadata.with_columns(pl.lit(resumed).alias('as_of'), pl.lit(close).alias('limit_up'))
-    assert signals([], bounds) == (True, None, None)
 
 
 @pytest.mark.parametrize(('now', 'allowed'), [('2026-11-20T10:00', False), ('2026-11-20T16:00', True),
@@ -1161,51 +629,105 @@ def test_generation_uses_close_time_and_confirmed_calendar_range(tmp_path, monke
         assert (exc.value.status_code, exc.value.detail) == (409, status['reason'])
 
 
-def test_accepted_daily_bounds_survive_metadata_rollover_without_prior_formal_close(market_batch, monkeypatch):
-    state = market_batch
-    up, down = state.symbols[:2]
-    folder = state.root / 'adj_factor'
-    folder.mkdir(exist_ok=True)
-    pl.DataFrame(schema={'symbol': pl.String, 'trade_date': pl.Date, 'ex_factor': pl.Float64}).write_parquet(folder / 'all.parquet')
-    earlier, prior, today = state.calendar[-3:]
-    raw = state.raw.filter(~((pl.col('symbol') == up) & (pl.col('date') < prior))).with_columns(
-        pl.when((pl.col('symbol') == down) & (pl.col('date') == earlier)).then(pl.lit(123, dtype=pl.Int64)).alias('quote_ts'))
-    write(state.root, 'kline_daily', raw)
-    run_pipeline(state.root)
-    for day in (prior, today):
-        now = datetime.combine(day, state.now.timetz())
-        monkeypatch.setattr(inputs, 'cn_now', lambda at=now: at)
-        rows = raw.filter(pl.col('date') == day)
-        bounds = rows.select('symbol', pl.col('close').alias('bound'))
-        metadata = state.metadata.join(bounds, on='symbol').with_columns(
-            pl.lit(day).alias('as_of'), pl.when(pl.col('symbol') == up).then('bound').alias('limit_up'),
-            pl.when(pl.col('symbol') == down).then('bound').alias('limit_down')).drop('bound')
-        metadata.write_parquet(state.root / 'instruments' / 'instruments.parquet')
-        coverage = DailyCoverage(day)
-        coverage.observe(rows)
-        receipt = inputs.save_ready(state.root, day, coverage,
-                                    [dict(o, obtained_at=now.isoformat()) for o in state.observations], state.market)
-        report_inputs = inputs.load_inputs(state.root, day, receipt)
-        loaded = report_inputs.prices.filter(pl.col('date') == prior)
-        assert loaded.filter(pl.col('symbol') == up).select('signal_limit_up', 'consecutive_limit_ups').row(0) == (True, None)
-        assert loaded.filter(pl.col('symbol') == down)['signal_limit_down'].item()
-        inputs.prepare_evaluation_inputs(report_inputs)
-        history = report_inputs.prices.filter(pl.col('date') == prior)
-        assert history.filter(pl.col('symbol') == up)['signal_limit_up'].item()
-        assert history.filter(pl.col('symbol') == down)['signal_limit_down'].item()
 
-
-def test_indicator_windows_recover_independently_after_an_unexplained_gap(accepted):
+def test_ready_replacement_requires_current_generation_and_uses_only_latest_concepts(accepted, monkeypatch):
     state = accepted
-    symbol, peer = state.symbols[:2]
-    gap = state.calendar[-8]
-    path = state.root / 'kline_daily' / f'date={gap}' / 'part.parquet'
+    first, second = state.observations
+    revised = {**first, 'memberships': [], 'id': 'latest'}
+    event = {'symbol': state.symbols[0], 'date': str(state.day), 'id': 'notice', 'title': '严重异常波动'}
+    monkeypatch.setattr('app.services.evening_report_events.fetch_disclosures', lambda *_: ([event], []))
+    last = inputs.save_ready(state.root, state.day, state.coverage, [revised], state.market)
+    assert last['industry_status'] == 'missing'
+    assert inputs.require_ready(state.root, state.day)['classifications'] == [revised]
+    data = inputs.load_inputs(state.repo, state.day, last)
+    assert data.memberships.is_empty() and data.provenance['industry_status'] == 'missing'
+    assert data.provenance['severe_events']['events'][state.symbols[0]]['e2']['announcement_id'] == 'notice'
+    assert list((state.root / 'evening_report' / 'ready').iterdir()) == [
+        state.root / 'evening_report' / 'ready' / f'{state.day}.json']
+    bump_enriched_generation(state.root, 'stock')
+    with pytest.raises(DailyCoverageError, match='指标代次'):
+        inputs.require_ready(state.root, state.day)
+    with pytest.raises(DailyCoverageError, match='概念分类'):
+        inputs.save_ready(state.root, state.day, state.coverage, [second], state.market)
+
+
+def test_uses_shared_indicators_and_last_source_row_without_full_market_recalculation(accepted):
+    state = accepted
+    symbol = state.symbols[0]
+    latest_path = state.root / 'kline_daily' / f'date={state.day}' / 'part.parquet'
+    raw = pl.read_parquet(latest_path)
+    before = raw.filter(pl.col('symbol') == symbol).with_columns(pl.lit(1.).alias('volume'))
+    pl.concat([before, raw]).write_parquet(latest_path)
+    missing_day = state.calendar[12]
+    path = state.root / 'kline_daily' / f'date={missing_day}' / 'part.parquet'
     pl.read_parquet(path).filter(pl.col('symbol') != symbol).write_parquet(path)
-    fields = ['ma5', 'ma10', 'ma20', 'high_60d', 'atr_14', 'bull_bear_line']
-    for confirmed in (False, True):
-        halts = [{'symbol': symbol, 'date': gap, 'confirmed': confirmed}]
-        prices = inputs._prices(inputs.SectorReviewReader(state.root), state.day, state.metadata,
-                                calendar=state.calendar, accepted_halts=halts).filter(pl.col('date') == state.day)
-        actual = prices.filter(pl.col('symbol') == symbol).select(fields).row(0)
-        assert [v is not None for v in actual] == [True, *([confirmed] * 5)]
-        assert all(v is not None for v in prices.filter(pl.col('symbol') == peer).select(fields).row(0))
+    reference = state.repo.get_enriched_range(state.day, state.day, columns=['atr_14', 'bull_bear_line'])
+    today = inputs.load_inputs(state.repo, state.day, state.evidence).prices.filter(
+        (pl.col('symbol') == symbol) & (pl.col('date') == state.day))
+    assert today.height == 1 and today['volume'].item() == 10000000.
+    assert today.select('atr_14', 'bull_bear_line').row(0) == reference.filter(
+        pl.col('symbol') == symbol).select('atr_14', 'bull_bear_line').row(0)
+
+
+def test_restart_waits_for_shared_indicators_before_first_publication(accepted, monkeypatch):
+    state = accepted
+    store = EveningReportStore(state.root)
+    with monkeypatch.context() as cold:
+        cold.setattr(state.repo, 'get_enriched_history_span', lambda: None)
+        with pytest.raises(DailyCoverageError, match='共享指标'):
+            jobs.generate(state.repo, state.day, progress=lambda *args, **kwargs: None)
+        assert not store.has_original(str(state.day))
+    assert jobs.generate(state.repo, state.day, progress=lambda *args, **kwargs: None)['status'] == 'published'
+
+
+def test_status_only_suspension_and_evaluation_after_ready_expiry(tmp_path):
+    from app.services.postmarket import read_suspensions, save_suspensions
+
+    symbol = '600001.SH'
+    k, halted, split = [date(2026, 11, n) for n in [16, 17, 18]]
+    days = [str(d) for d in (k, halted, split)]
+    atomic_json(tmp_path / 'calendar' / 'trading_days.json', {'days': days})
+    coverage = DailyCoverage(halted)
+    coverage.record_halted([symbol], source='trading_status', basis='full_session_suspension_status')
+    save_suspensions(tmp_path, coverage)
+    write(tmp_path, 'kline_daily', pl.DataFrame({'symbol': [symbol], 'date': [split], 'close': [5.5]}))
+    factor = tmp_path / 'adj_factor' / 'all.parquet'
+    factor.parent.mkdir()
+    pl.DataFrame({'symbol': [symbol], 'trade_date': [split], 'ex_factor': [2.]}).write_parquet(factor)
+    history = inputs.load_evaluation_inputs(tmp_path, split, symbols={symbol}, days=set(days), include_multipliers=True)
+    assert history.provenance['suspensions'][0]['date'] == str(halted)
+    multipliers = history.provenance['evaluation_multipliers'][symbol]
+    assert multipliers == {str(k): .5, str(halted): .5, str(split): 1.}
+    assert history.prices['close'].item() / multipliers[str(k)] == 11.
+    save_suspensions(tmp_path, DailyCoverage(halted))
+    assert read_suspensions(tmp_path, days) == []
+
+def test_evaluation_missing_local_sources_is_unavailable(tmp_path):
+    day = date(2026, 10, 16)
+    symbol = '600001.SH'
+    def evaluate():
+        return inputs.load_evaluation_inputs(tmp_path, day, days={str(day)}, symbols={symbol}, include_multipliers=True)
+    with pytest.raises(DailyCoverageError, match='日历'):
+        evaluate()
+    atomic_json(tmp_path / 'calendar' / 'trading_days.json', {'days': [str(day)]})
+    empty = evaluate()
+    assert empty.prices.is_empty() and empty.provenance['evaluation_multipliers'] == {}
+    write(tmp_path, 'kline_daily', pl.DataFrame({'symbol': [symbol], 'date': [day], 'close': [5.5]}))
+    assert evaluate().prices.select('raw_close', 'close').row(0) == (5.5, None)
+
+def test_evaluation_constraints_use_each_endpoint_facts(tmp_path):
+    symbol = '600001.SH'
+    first, second = date(2026, 11, 2), date(2026, 11, 3)
+    days = [str(first), str(second)]
+    atomic_json(tmp_path / 'calendar' / 'trading_days.json', {'days': days})
+    raw = pl.DataFrame({'symbol': [symbol] * 2, 'date': [first, second], 'close': [10., 11.]})
+    write(tmp_path, 'kline_daily', raw)
+    write(tmp_path, 'kline_daily_enriched', raw.with_columns(
+        pl.Series('consecutive_limit_ups', [0, 1], dtype=pl.UInt32),
+        pl.Series('consecutive_limit_downs', [0, 0], dtype=pl.UInt32)))
+    path = tmp_path / 'instruments' / 'instruments.parquet'
+    path.parent.mkdir()
+    pl.DataFrame({'symbol': [symbol], 'is_st': [False], 'as_of': [second]}).write_parquet(path)
+    result = inputs.load_evaluation_inputs(tmp_path, second, days=set(days), symbols={symbol}, include_constraints=True)
+    assert result.prices.sort('date').select('signal_limit_up', 'signal_limit_down', 'is_st').rows() == [
+        (False, False, None), (True, False, False)]

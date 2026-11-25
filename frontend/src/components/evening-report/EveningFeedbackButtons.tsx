@@ -1,12 +1,12 @@
 import { useRef, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { Star } from 'lucide-react'
-import { ApiError, api, type EveningFeedback, type EveningFeedbackRequest, type EveningPersonalRecord } from '@/lib/api'
+import { api, type EveningFeedback, type EveningFeedbackRequest, type EveningPersonalRecord } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 
 type SaveState = { pending: boolean; error?: string; retry?: EveningFeedbackRequest }
 
-/** 保存明确状态而非服务端翻转；未知网络结果重试使用同一请求标识。 */
+/** 重试时提交用户选定的星标与盈亏状态。 */
 export function useEveningFeedback(userId: string) {
   const client = useQueryClient()
   const inFlight = useRef(new Set<string>())
@@ -23,19 +23,13 @@ export function useEveningFeedback(userId: string) {
       setStates(previous => ({ ...previous, [episodeId]: { pending: false } }))
       void client.invalidateQueries({ queryKey: QK.eveningPersonalRoot(userId) })
     } catch (error) {
-      const conflict = error instanceof ApiError && error.status === 409
-      if (conflict) await client.invalidateQueries({ queryKey: QK.eveningPersonalRoot(userId) })
       setStates(previous => ({ ...previous, [episodeId]: { pending: false,
-        error: conflict ? '记录已在另一处更新，已重新读取，请确认后再操作。' : (error instanceof Error ? error.message : '保存失败，请重试'),
-        retry: conflict ? undefined : request,
+        error: error instanceof Error ? error.message : '保存失败，请重试', retry: request,
       } }))
     } finally { inFlight.current.delete(episodeId) }
   }
   const change = (record: EveningPersonalRecord, feedback: Pick<EveningFeedback, 'starred' | 'outcome'>) => {
-    // getRandomValues 同时适用于局域网 HTTP，不能依赖仅安全上下文提供的 randomUUID。
-    const requestId = [...crypto.getRandomValues(new Uint8Array(16))].map(value => value.toString(16).padStart(2, '0')).join('')
-    void submit(record.episode_id, { date: record.day, version: record.version, symbol: record.symbol, ...feedback,
-      expected_revision: record.feedback.revision, request_id: requestId })
+    void submit(record.episode_id, { date: record.day, version: record.version, symbol: record.symbol, ...feedback })
   }
   return { states, change, retry: (episodeId: string) => { const request = states[episodeId]?.retry; if (request) void submit(episodeId, request) } }
 }

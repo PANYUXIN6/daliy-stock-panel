@@ -13,7 +13,7 @@ import { EveningAllocationRank, EveningObservationDetails, EveningPerformanceDet
 /** 只消费归档入选顺序；不从完整候选数据中补名额或重新排名。 */
 export function selectedReportStocks(report: EveningReport): EveningRecord[] {
   const bySymbol = new Map(report.records.map(row => [row.symbol, row]))
-  return [...new Set(report.selected)].slice(0, 15).flatMap(symbol => {
+  return [...new Set(report.selected)].flatMap(symbol => {
     const row = bySymbol.get(symbol)
     return row ? [row] : []
   })
@@ -95,6 +95,17 @@ export function EveningReportContent({ report, renderActions, reportNotes, onOpe
   const detailTitleId = useId()
   const sort = useTableSort<EveningRecord>(sortValue)
   const feedback = new Map(personalRecords.map(record => [record.symbol, record]))
+  // 首版定稿只有当时的入选身份与说明，没有观察变量或低吸明细。
+  if (report.records.some(row => !row.observation)) {
+    return <section aria-label="历史晚报" className="space-y-3">
+      <h2 className="font-semibold">{report.trade_date}</h2><p>{report.summary}</p>
+      <ol className="space-y-2">{selected.map(row => <li key={row.symbol}>
+        <button className="text-accent" onClick={() => onOpenStock?.(row, selected)}>{row.name} · {row.symbol}</button>
+        {row.purpose && <span className="ml-3">{row.purpose}</span>}
+        {renderFeedback?.(row)}
+      </li>)}</ol>
+    </section>
+  }
   const themeNames = new Map<string, string>()
   for (const sector of report.sectors) {
     const count = sector.observation?.selected_count
@@ -144,7 +155,7 @@ export function EveningReportContent({ report, renderActions, reportNotes, onOpe
         <span className="text-sm text-secondary">{selected.length}只观察 · 最多5个题材，每题材2龙头+1情绪股</span>
       </div>
       <p className="text-sm text-secondary">{marketSentence(report.market)} 下个交易日：{report.next_trade_date ?? '待确认'}。</p>
-      <p className="text-xs leading-5 text-secondary">{classificationSentence(report.provenance)}</p>
+      <p className="text-xs leading-5 text-secondary">{classificationSentence(report.provenance)}{report.industry_status === 'missing' && ' · 行业缺失'}</p>
       {(report.late_generation || report.recovery_note) && <p className="text-xs text-warning">{report.recovery_note ?? '迟到生成'} · 实际生成时间：{report.generated_at}</p>}
     </header>
     {classification ? <SentimentClassification data={classification} /> : <p className="text-xs text-muted">情绪分类资料暂不可用。</p>}
@@ -165,9 +176,9 @@ export function EveningReportContent({ report, renderActions, reportNotes, onOpe
         <button className={`${eveningControl} shrink-0`} onClick={closeDetails}>关闭详情</button>
       </header>
       <div className="min-h-0 space-y-5 overflow-y-auto overscroll-contain p-4 sm:p-6">
-        <EveningObservationDetails observation={detailRow.observation} />
+        <EveningObservationDetails observation={detailRow.observation} definitions={report.variable_definitions} />
         {!!riskNotes(detailRow).length && <div className="text-sm leading-6 text-warning"><p className="font-medium">风险与待核验</p><ul className="list-inside list-disc">{riskNotes(detailRow).map(reason => <li key={reason}>{reason}</li>)}</ul></div>}
-        <p className="text-sm text-secondary">后续观察：{uniqueReasons(detailRow.wait_conditions ?? []).join('；') || '继续观察后续正式数据，未出现的条件不能视为已完成。'}</p>
+        {!!detailRow.wait_conditions?.length && <p className="text-sm text-secondary">后续观察：{uniqueReasons(detailRow.wait_conditions).join('；')}</p>}
         {feedback.get(detailRow.symbol) && <EveningPerformanceDetails record={feedback.get(detailRow.symbol)!} />}
       </div>
       {renderActions && <footer className="shrink-0 border-t border-border p-4 sm:px-6">{renderActions(detailRow, visible, closeDetails)}</footer>}

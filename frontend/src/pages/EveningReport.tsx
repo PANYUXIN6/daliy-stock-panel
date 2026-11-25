@@ -16,7 +16,7 @@ import { EveningPersonalNav } from '@/components/evening-report/EveningPersonalN
 
 const panel = 'rounded-xl border border-border bg-surface p-4 sm:p-5'
 const control = 'rounded border border-border bg-elevated px-3 py-2 text-xs text-foreground disabled:opacity-50'
-const statuses: Record<string, string> = { waiting: '等待数据', ready: '可生成', generating: '生成中', published: '已发布', failed: '生成失败', cancelled: '已取消', unpublished: '未发布' }
+const statuses: Record<string, string> = { waiting: '等待数据', ready: '可生成', generating: '生成中', published: '已发布', failed: '生成失败', cancelled: '已取消', unpublished: '未发布', missing: '归档暂不可读' }
 function Status({ value }: { value: EveningReportStatus }) {
   return <div className="space-y-2 text-sm" role="status"><p className="font-medium">{value.date && `${value.date} · `}{statuses[value.status] ?? value.status}</p>{value.reason && <p>{value.reason}</p>}{value.progress !== undefined && <p>生成进度：{value.progress}%</p>}{!!value.missing_dependencies?.length && <p>{value.missing_dependencies.join('；')}</p>}{value.last_attempt_at && <p className="text-muted">最后尝试：{value.last_attempt_at}</p>}</div>
 }
@@ -34,7 +34,7 @@ export function EveningReport() {
   const selectedStatus = useQuery({ queryKey: QK.eveningReportStatus(chosenDate), queryFn: ({ signal }) => api.eveningReportStatus(chosenDate, signal), enabled: !!chosenDate && chosenDate !== latest.data?.date, refetchInterval: query => query.state.data?.status === 'generating' ? 2_000 : 30_000 })
   const status = !chosenDate || chosenDate === latest.data?.date ? latest : selectedStatus
   const data = report.data && 'records' in report.data ? report.data : undefined
-  const displayStatus = status.data ?? (report.data && !data ? report.data as EveningReportStatus : undefined)
+  const displayStatus = report.data?.status === 'missing' ? report.data as EveningReportStatus : status.data ?? (report.data && !data ? report.data as EveningReportStatus : undefined)
   const refresh = () => { void qc.invalidateQueries({ queryKey: QK.eveningReportRoot }); if (user) void qc.invalidateQueries({ queryKey: QK.eveningPersonalRoot(user.id) }) }
   const job = useCollectorJob((submittedJob?.date === day ? submittedJob.id : null) ?? (user?.role === 'admin' ? status.data?.job_id ?? null : null), refresh)
   const rebuild = useMutation({

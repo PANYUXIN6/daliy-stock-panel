@@ -966,7 +966,8 @@ def _run_now(
         emit("evening_report_ready", 94, "记录每日晚报输入就绪证据…")
         try:
             save_ready(repo.store.data_dir, today, coverage, classification_observations,
-                       current.to_dicts()[0])
+                       current.to_dicts()[0], before_commit=lambda: emit(
+                           "evening_report_ready", 94, "提交每日晚报正式验收…", skip_log=True))
         except Exception as exc:  # noqa: BLE001 -- 晚报证据失败不阻断后续原有结算／采集
             logger.warning("每日晚报输入待就绪: %s", exc)
             stage_errors.append(f"evening_report_ready: {exc}")

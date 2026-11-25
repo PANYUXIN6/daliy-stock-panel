@@ -124,7 +124,7 @@ def test_missing_optional_atr_keeps_observation_and_marks_risk_unknown():
 def test_historical_snapshot_not_valid_formal_warmup():
     inputs = inputs_at()
     inputs.prices = inputs.prices.with_columns(
-        pl.when((pl.col("symbol") == "stock00") & (pl.col("date") == inputs.calendar[0]))
+        pl.when((pl.col("symbol") == "stock00") & (pl.col("date") == inputs.calendar[-60]))
         .then(False)
         .otherwise(pl.col("formal"))
         .alias("formal")

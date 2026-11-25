@@ -10,7 +10,8 @@ from collections import Counter, defaultdict
 from app.services.evening_report_classification import exclusion
 
 VERSION = 'evening-audit-v1'
-SORT_VERSION = 'theme-role-order-v1'
+SORT_VERSION = 'theme-role-order-v2'
+THEME_RANKING_VERSION = 'theme-role-order-v1'
 COHORT_VERSION = 'same-day-theme-quota-completeness-v1'
 DEDUP_VERSION = 'strongest-top5-theme-v1'
 NON_INDEPENDENT_NOTE = '同交易日及重叠评价窗口的样本不独立；仅作关联性观察，不能据此认定收益因果。'
@@ -77,7 +78,7 @@ def annotate_audit(inputs, records: list[dict], themes: list[dict]) -> dict:
             'ranking_status': 'not_executed' if reasons else 'unknown' if current.get('strength') is None else 'computed',
             'ranking_scope': 'eligible_positive_strength_concepts_with_full_classification_members',
             'theme_total_count': ranked_count, 'observed_theme_count': len(all_themes),
-            'ranking_as_of': inputs.trade_date, 'ranking_rule_version': SORT_VERSION,
+            'ranking_as_of': inputs.trade_date, 'ranking_rule_version': THEME_RANKING_VERSION,
         })
     top5 = {theme['id'] for theme in themes if theme.get('selected_theme')}
     theme_by_id = {theme['id']: theme for theme in theme_snapshots}
@@ -128,7 +129,17 @@ def annotate_audit(inputs, records: list[dict], themes: list[dict]) -> dict:
         obs['related_theme_count_in_top5'] = len(set(related) & top5)
         obs['verification'] = {
             key: {'status': 'unknown', 'value': None, 'reason_code': 'definition_unverified'}
-            for key in ('first_wave_pullback', 'wave_index', 'severe_event', 'near_severe_event')}
+            for key in ('severe_event', 'near_severe_event')}
+        wave = obs.get("wave") or {}
+        for key in ("first_wave_pullback", "current_wave_index", "completed_wave_count"):
+            value = values.get(key)
+            obs["verification"][key] = {"status": "verified" if value is not None else "unknown",
+                                        "value": value, "reason_code": wave.get("data_status", "price_basis_unavailable")}
+        for key, path in (("severe_event", "e2"), ("near_severe_event", "e1")):
+            applicable = obs["dip"][path].get("event_applicable")
+            if applicable is not None:
+                obs["verification"][key] = {"status": "verified" if applicable else "not_applicable",
+                                            "value": applicable, "reason_code": "event_evidence"}
         catchup = [path.get('catchup', {}).get('value') for path in row.get('paths', [])]
         obs['verification']['catchup'] = {
             'status': 'verified' if True in catchup else 'unknown', 'value': True if True in catchup else None,
@@ -137,6 +148,7 @@ def annotate_audit(inputs, records: list[dict], themes: list[dict]) -> dict:
             'steps': steps, 'first_blocking_step': blocked['step'] if blocked else None,
             'blocking_reason_code': (blocked['failed_reason_codes'] + blocked['unknown_reason_codes'])[0] if blocked else None,
             'all_reason_codes': reasons, 'selected': row['selected'], 'comparison_eligible': ready,
+            'competition_group': obs.get('theme_lead_evidence', {}).get('competition_group'),
             'competed_quota_type': quota, 'occupied_quota_type': quota if row['selected'] else None,
             'quota_limit': (1 if quota == 'emotion' else 2) if ready else None,
             'quota_fallback_allowed': False, 'rank_within_theme_role': obs.get('rank_within_theme_role'),
@@ -154,7 +166,7 @@ def annotate_audit(inputs, records: list[dict], themes: list[dict]) -> dict:
         samples.append({'selected': row['selected'], 'comparable': ready, 'missing_features': missing})
     return {'schema_version': VERSION, 'as_of': inputs.trade_date, 'data_cutoff': inputs.cutoff,
             'cohort_definition_version': COHORT_VERSION, 'sorting_rule_version': SORT_VERSION,
-            'dedup_rule_version': DEDUP_VERSION, 'cross_revision_default': 'first_published_revision',
+            'dedup_rule_version': DEDUP_VERSION, 'publication_sample_policy': 'original_per_trade_date',
             'themes': theme_snapshots, 'feature_keys': feature_keys,
             'sample_counts': dict(Counter('selected' if s['selected'] else 'comparable_unselected' if s['comparable'] else 'audit_only' for s in samples)),
             'same_cycle_sample_count': len(samples), 'distinct_trade_dates': 1,

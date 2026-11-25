@@ -12,6 +12,9 @@ MAIN_BOARD_ST_LIMIT_CHANGE_DATE = date(2026, 7, 6)
 # 创业板注册制改革首日: 此前创业板与主板同为 ±10% (风险警示股 ±5%), 当日起 ±20%。
 GEM_20PCT_LIMIT_START_DATE = date(2020, 8, 24)
 
+# A dated upper bound at or above this vendor sentinel denotes an unrestricted session.
+NO_PRICE_LIMIT_SENTINEL = 10000.0
+
 MAIN_BOARD_LIMIT = 0.10
 LEGACY_MAIN_BOARD_ST_LIMIT = 0.05
 GROWTH_BOARD_LIMIT = 0.20

@@ -4,12 +4,16 @@ from __future__ import annotations
 import gzip
 import json
 import os
-import shutil
 import threading
 import uuid
-from collections import Counter
+import zlib
+from bisect import bisect_left
+from collections import Counter, OrderedDict
+from contextlib import suppress
 from datetime import date, timedelta
+from functools import cache, lru_cache
 from pathlib import Path
+from typing import NamedTuple
 
 from app.market_time import cn_now
 from app.services.evening_report_archive import (
@@ -19,16 +23,51 @@ from app.services.evening_report_archive import (
     INPUT_RETENTION_DAYS,
     SCHEMA_VERSION,
     STATE_REPORTS,
-    compactable,
     pack_report,
     split_report,
     unpack_report,
 )
+from app.services.evening_report_receipt import (
+    valid_acceptance_cutoff,
+    valid_receipt_body,
+    valid_receipt_day,
+)
+from app.services.evening_report_receipt import valid_input_id as _valid_input_id
 
 _LOCK = threading.RLock()
+_BODY_CACHE_LOCK = threading.Lock()
+_VALID_BODIES = OrderedDict()
 
 
-def atomic_json(path: Path, value: dict) -> None:
+def last_accepted_reference(pointer: dict) -> tuple[str | None, str | None]:
+    if pointer.get('complete'):
+        return pointer.get('input_id'), pointer.get('cutoff')
+    return pointer.get('last_accepted_input_id'), pointer.get('last_accepted_cutoff')
+
+
+class _AcceptanceHeader(NamedTuple):
+    day: str
+    cutoff: str
+
+
+@lru_cache(maxsize=2048)
+def _input_header(path: Path, ctime_ns: int, size: int) -> _AcceptanceHeader | None:
+    header = _read_input(path, header_only=True)
+    if header is None:
+        # Retry transient access failures even if the file has not changed.
+        raise ValueError('验收暂不可读')
+    return header
+
+
+def _stored_header(path):
+    try:
+        stat = path.stat()
+        return _input_header(path, stat.st_ctime_ns, stat.st_size)
+    except (OSError, ValueError, TypeError):
+        return None
+
+
+def atomic_json(path: Path, value: dict, *, before_commit=None) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f'.{path.name}.{uuid.uuid4().hex}.tmp')
     try:
@@ -42,7 +81,14 @@ def atomic_json(path: Path, value: dict) -> None:
                 stream.write(payload)
             stream.flush()
             os.fsync(stream.fileno())
-        os.replace(temporary, path)
+        if before_commit:
+            from app.services.pipeline_jobs import publication_guard
+
+            before_commit()
+            with publication_guard():
+                os.replace(temporary, path)
+        else:
+            os.replace(temporary, path)
     finally:
         temporary.unlink(missing_ok=True)
 
@@ -57,22 +103,65 @@ def read_json(path: Path) -> dict | None:
         return None
 
 
+def _read_history_object(path: Path) -> dict | None:
+    """An unreadable historical artifact supplies no proof. Publication reads stay strict."""
+    try:
+        value = read_json(path)
+    except (OSError, EOFError, ValueError, zlib.error):
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def _read_input(path: Path, *, header_only=False) -> dict | _AcceptanceHeader | None:
+    try:
+        with path.open('rb') as stream:
+            stat = os.fstat(stream.fileno())
+            with gzip.GzipFile(fileobj=stream) as compressed:
+                receipt = json.load(compressed)
+    except (OSError, EOFError, ValueError, zlib.error):
+        return None
+    if (not isinstance(receipt, dict) or receipt.get('complete') is not True
+            or receipt.get('input_id') != path.name.removesuffix('.json.gz') or not valid_receipt_day(receipt)
+            or not valid_acceptance_cutoff(receipt.get('cutoff'))):
+        return None
+    if header_only:
+        return _AcceptanceHeader(receipt['date'], receipt['cutoff'])
+    # Cache only the verdict for the file actually opened. Restoration changes its identity.
+    identity = (stat.st_dev, stat.st_ino, stat.st_ctime_ns, stat.st_mtime_ns, stat.st_size)
+    with _BODY_CACHE_LOCK:
+        valid = _VALID_BODIES.get(identity)
+    if valid is None:
+        valid = valid_receipt_body(receipt)
+        with _BODY_CACHE_LOCK:
+            _VALID_BODIES[identity] = valid
+            if len(_VALID_BODIES) > 2048:
+                _VALID_BODIES.popitem(last=False)
+    if not valid:
+        return None
+    receipt.pop('_acceptance_index_day')
+    return receipt
+
+
+def _acceptance_manifest(path: Path) -> dict:
+    return {at: ref for at, ref in (_read_history_object(path) or {}).items()
+            if valid_acceptance_cutoff(at) and _valid_input_id(ref)}
+
+
 def report_view(report: dict) -> dict:
     """A response projection of permanent snapshots, excluding audit and state."""
     fields = ('date', 'trade_date', 'next_trade_date', 'cutoff', 'generated_at', 'version',
-              'parent_version', 'branch_id', 'kind', 'mode', 'status', 'rule_version',
+              'kind', 'mode', 'status', 'rule_version',
               'scope_version', 'selection_policy_version', 'disclaimer', 'summary', 'market', 'records', 'selected', 'limitations',
-              'events', 'late_generation', 'recovery_note', 'storage_version', 'retention', 'as_of')
+              'events', 'late_generation', 'recovery_note', 'storage_version', 'retention', 'as_of',
+              'wave_rule', 'dip_rule_version')
     result = {key: report[key] for key in fields if key in report}
-    if report.get('selection_policy_version') == 'theme-observation-v1':
-        # Comparable candidates stay in the archive, not every table response.
-        result['records'] = [row for row in report.get('records', []) if row.get('selected')]
+    result['records'] = [row for row in report.get('records', []) if row.get('selected')]
     result['sectors'] = [{key: value for key, value in sector.items() if key not in ('scores', 'members', 'classification_members')}
                          for sector in report.get('sectors', [])]
     for sector in result['sectors']:
         if 'observation' in sector:
             sector['observation'] = {key: value for key, value in sector['observation'].items()
-                                     if key not in ('members', 'missing')}
+                                     if key not in ('members', 'lead_source_members', 'missing')}
         sector['ranking_evidence'] = {
             kind: {'status': value.get('status'), 'missing_count': len(value.get('missing', [])),
                    'insufficient_count': len(value.get('insufficient', [])),
@@ -92,8 +181,10 @@ def report_view(report: dict) -> dict:
                                   'membership_count': item.get('membership_count', len(item.get('memberships', [])))})
     changes = []
     for item in provenance.get('membership_changes', []):
-        changes.append({key: value for key, value in item.items() if key not in ('added', 'removed', 'first_observed')}
-                       | {key + '_count': len(item.get(key, [])) for key in ('added', 'removed', 'first_observed')})
+        private = ('added', 'removed', 'first_observed', 'first_observed_symbols')
+        changes.append({key: value for key, value in item.items() if key not in private}
+                       | {key + '_count': len(item.get(key, [])) for key in ('added', 'removed')}
+                       | {'first_observed_count': len(item['first_observed_symbols'])})
     result['provenance'] = {'classifications': classifications, 'membership_changes': changes,
                             'recovery': provenance.get('recovery'),
                             'sector_filter': provenance.get('sector_filter', {}),
@@ -113,7 +204,7 @@ def history_view(report: dict) -> dict:
 
 def _metadata(report: dict) -> dict:
     return {key: report.get(key) for key in
-            ('version', 'kind', 'generated_at', 'parent_version', 'branch_id', 'rule_version', 'scope_version', 'selection_policy_version', 'storage_version')} | {
+            ('version', 'kind', 'generated_at', 'rule_version', 'scope_version', 'selection_policy_version', 'storage_version')} | {
                 'input_id': report.get('input_reference', {}).get('input_id')}
 
 
@@ -124,104 +215,140 @@ class EveningReportStore:
     def _path(self, day: str) -> Path:
         return self.root / 'reports' / f'{date.fromisoformat(day)}.json'
 
-    def branch_manifests(self) -> list[dict]:
-        return [read_json(path) for path in sorted((self.root / 'branches').glob('*.json'))]
-
-    def version_metadata(self, day: str) -> list[dict]:
+    def original_metadata(self, day: str, version: str | None = None) -> dict | None:
         entries = (read_json(self._path(day)) or {}).get('versions', [])
-        for manifest in self.branch_manifests():
-            if day in manifest['dates']:
-                entries.append(manifest['dates'][day])
-        return entries
+        if entries and (version is None or entries[0]['version'] == version):
+            return entries[0]
+        return None
 
-    def _load(self, day: str, entry: dict, *, view: bool = False) -> dict | None:
-        if entry.get('storage_version') == SCHEMA_VERSION:
-            path = self._base(day, entry).with_suffix('.json.gz')
-            result = read_json(path)
-            if result is None:
-                return None
-            result = unpack_report(result)
-            return report_view(result) if view else result
-        suffix = '.view.json' if view else '.json'
-        if entry.get('branch_id'):
-            path = self.root / 'revisions' / entry['branch_id'] / f'{day}{suffix}'
-        else:
-            path = self.root / 'archive' / f"{entry['version']}{suffix}"
-        return read_json(path)
-
-    def _base(self, day: str, entry: dict) -> Path:
-        if entry.get('branch_id'):
-            return self.root / 'revisions' / entry['branch_id'] / day
+    def _base(self, entry: dict) -> Path:
         return self.root / 'archive' / entry['version']
 
     def audit_rows(self, day: str, version: str) -> list[dict] | None:
-        entry = next((item for item in self.version_metadata(day) if item['version'] == version), None)
-        if not entry or entry.get('storage_version') != SCHEMA_VERSION:
+        entry = self.original_metadata(day, version)
+        if not entry:
             return None
-        audit = read_json(self._base(day, entry).with_suffix('.audit.json.gz'))
+        audit = read_json(self._base(entry).with_suffix('.audit.json.gz'))
         return audit['records'] if audit else []
 
     def candidate_boundary(self, day: str, version: str) -> dict | None:
-        entry = next((item for item in self.version_metadata(day) if item['version'] == version), None)
-        if not entry or entry.get('storage_version') != SCHEMA_VERSION:
-            return None
-        return read_json(self._base(day, entry).with_suffix('.candidates.json.gz'))
+        entry = self.original_metadata(day, version)
+        return read_json(self._base(entry).with_suffix('.candidates.json.gz')) if entry else None
+
+    def waiting_wave_bars(self, day: str) -> dict:
+        return (read_json(self._path(day)) or {}).get('waiting_wave_bars', {}) if day else {}
 
     def state(self, day: str, version: str | None = None) -> dict | None:
-        entry = (next((item for item in self.version_metadata(day) if item['version'] == version), None)
-                 if version else self.original_metadata(day))
-        if not entry:
+        entry = self.original_metadata(day, version)
+        return read_json(self._base(entry).with_suffix('.state.json.gz')) if entry else None
+
+    def _load(self, entry):
+        packed = read_json(self._base(entry).with_suffix('.json.gz'))
+        return unpack_report(packed) if packed is not None else None
+
+    def get(self, day: str, version: str | None = None, *, view: bool = False) -> dict | None:
+        entry = self.original_metadata(day, version)
+        report = self._load(entry) if entry else None
+        if not report or not view:
+            return report
+        from app.services.evening_report_wave_context import project_context_refs
+
+        public = report_view(report)
+        public['records'] = [dict(row) for row in public['records']]
+        return project_context_refs(public, self, report)
+
+    def referenced_report(self, day: str, version: str | None = None):
+        """A damaged optional reference supplies no context to its consumer."""
+        try:
+            return self.get(day, version)
+        except (OSError, EOFError, ValueError, zlib.error):
             return None
-        suffix = '.state.json.gz' if entry.get('storage_version') == SCHEMA_VERSION else '.state.json'
-        return read_json(self._base(day, entry).with_suffix(suffix))
-
-    def versions(self, day: str) -> list[dict]:
-        return [self._load(day, entry) for entry in self.version_metadata(day)]
-
-    def get(self, day: str, version: str | None = None, *, view: bool = False, latest: bool = False) -> dict | None:
-        entries = self.version_metadata(day)
-        if version:
-            entry = next((item for item in entries if item['version'] == version), None)
-        elif latest:
-            entry = max(entries, key=lambda item: (item.get('generated_at') or '', item['version']), default=None)
-        else:
-            entry = next((item for item in entries if item['kind'] == 'original'), None)
-        return self._load(day, entry, view=view) if entry else None
-
-    def original_metadata(self, day: str) -> dict | None:
-        return next((item for item in (read_json(self._path(day)) or {}).get('versions', [])
-                     if item['kind'] == 'original'), None)
 
     def has_original(self, day: str) -> bool:
         return self.original_metadata(day) is not None
 
+    def published_wave_lookups(self, before: str):
+        """Find immutable starts, structural events and first window closures in the original publications."""
+        from app.services.evening_report_wave import (
+            STRUCTURE_EVENT_TYPES,
+            start_key,
+            structure_event_key,
+        )
+
+        days = sorted(path.stem for path in (self.root / 'reports').glob('*.json') if path.stem < before)
+        if not days:
+            return None, None, None
+
+        @cache
+        def publication(day):
+            pointer = read_json(self._path(day)) or {}
+            entries = pointer.get('versions') or []
+            return (entries[0] if entries else None,
+                    {tuple(key) for key in pointer.get('wave_start_keys', ())}, pointer.get('wave_window_closes', {}))
+
+        @cache
+        def evidence(day):
+            original, _, _ = publication(day)
+            report = self._load(original) or {}
+            starts = {start_key(event): event for event in report.get('wave_starts', ())}
+            structure_events = {}
+            for event in report.get('wave_events', ()):
+                if event['type'] in STRUCTURE_EVENT_TYPES and event.get('round_id'):
+                    structure_events.setdefault(structure_event_key(event), event)
+            return starts, structure_events
+
+        def start_lookup(key, since):
+            for day in days[bisect_left(days, since):]:
+                original, keys, _ = publication(day)
+                if original and key in keys:
+                    event = evidence(day)[0].get(key)
+                    if event is not None:
+                        return event
+            return None
+
+        def close_lookup(round_id, since):
+            for day in days[bisect_left(days, since):]:
+                original, _, closes = publication(day)
+                if original:
+                    close = closes.get(round_id)
+                    if close is not None:
+                        return close
+            return None
+
+        def structure_event_lookup(event):
+            key = structure_event_key(event)
+            for day in days[bisect_left(days, event['date']):]:
+                if publication(day)[0] and (saved := evidence(day)[1].get(key)):
+                    return saved
+            return None
+
+        return start_lookup, close_lookup, structure_event_lookup
+
     def dates(self) -> list[dict]:
-        result = {}
+        result = []
         for path in sorted((self.root / 'reports').glob('*.json'), reverse=True):
             entries = (read_json(path) or {}).get('versions', [])
             if entries:
-                result[path.stem] = {'date': path.stem, 'status': 'published', 'versions': entries}
-        for manifest in self.branch_manifests():
-            for day, metadata in manifest['dates'].items():
-                result.setdefault(day, {'date': day, 'status': 'published', 'versions': []})['versions'].append(metadata)
-        return sorted(result.values(), key=lambda entry: entry['date'], reverse=True)
+                result.append({'date': path.stem, 'status': 'published', 'versions': entries})
+        return result
 
-    def history(self, before: str, rule_version: str) -> list[dict]:
+    def history(self, before: str, rule_version: str, *, allow_partial: bool = False) -> list[dict]:
         # All long-lived continuity is forwarded in state. Seven actual reports
         # cover every finite retrospective decision; calendar gaps stay explicit.
         selected = []
         for entry in self.dates():
             if entry['date'] >= before:
                 continue
-            original = next((v for v in entry['versions'] if v['kind'] == 'original'
-                             and v.get('rule_version') == rule_version), None)
-            if original:
+            original = entry['versions'][0]
+            if original.get('rule_version') == rule_version:
                 selected.append((entry['date'], original))
                 if len(selected) == STATE_REPORTS:
                     break
         history = []
         for day, entry in reversed(selected):
-            state = self.state(day, entry['version'])
+            state = _read_history_object(self._base(entry).with_suffix('.state.json.gz'))
+            if state is None and allow_partial and day != selected[0][0]:
+                continue  # Date-keyed lookbacks expose a missing observation as unknown.
             if state is None:
                 from app.services.daily_coverage import DailyCoverageError
                 raise DailyCoverageError(f'{day} 的完整运行状态已过保留期，不能精确重放此前全市场筛选')
@@ -229,11 +356,6 @@ class EveningReportStore:
         return history
 
     def _write(self, path: Path, report: dict) -> dict:
-        if not compactable(report):
-            atomic_json(path.with_suffix('.json'), report)
-            atomic_json(path.with_suffix('.view.json'), report_view(report))
-            atomic_json(path.with_suffix('.state.json'), history_view(report))
-            return report
         permanent, audit, boundary = split_report(report)
         packed = pack_report(permanent)
         atomic_json(path.with_suffix('.json.gz'), packed)
@@ -242,49 +364,224 @@ class EveningReportStore:
         atomic_json(path.with_suffix('.state.json.gz'), history_view(report))
         return unpack_report(packed)
 
-    def save(self, day: str, payload: dict, input_reference: dict) -> dict:
+    def save(self, day: str, payload: dict, input_reference: dict, *, before_publish=None) -> dict:
         with _LOCK:
             original = self.get(day)
             if original:
                 return original
             report = {**payload, 'date': day, 'mode': 'live', 'status': 'published',
-                      'version': uuid.uuid4().hex, 'kind': 'original', 'parent_version': None,
+                      'storage_version': SCHEMA_VERSION, 'version': uuid.uuid4().hex, 'kind': 'original',
                       'generated_at': cn_now().isoformat(), 'input_reference': input_reference}
+            if report.get('wave_rule'):
+                from app.services.evening_report_wave_context import add_context_refs
+
+                add_context_refs(report, self)
             path = self.root / 'archive' / report['version']
             report = self._write(path, report)
             # Readers see the complete tiered publication only after this pointer.
-            atomic_json(self._path(day), {'versions': [_metadata(report)]})
+            from app.services.evening_report_wave import start_key
+
+            pointer = {'versions': [_metadata(report)],
+                       'wave_start_keys': [start_key(event) for event in report.get('wave_starts', [])]}
+            if 'wave_window_closes' in payload:
+                pointer['wave_window_closes'] = payload['wave_window_closes']
+            waiting = {}
+            for symbol, stock in payload.get('state', {}).get('wave', {}).get('stocks', {}).items():
+                for session, cutoff in stock['state'].get('waiting_for_bars', {}).items():
+                    waiting.setdefault(session, {})[symbol] = cutoff
+            for window in payload.get('state', {}).get('study_windows', {}).values():
+                for session, symbols in window.get('missing', {}).items():
+                    for symbol in symbols:
+                        waiting.setdefault(session, {}).setdefault(symbol, payload['cutoff'])
+            if waiting:
+                pointer['waiting_wave_bars'] = waiting
+            atomic_json(self._path(day), pointer, before_commit=before_publish)
             return report
 
     def input_evidence(self, input_id: str) -> dict | None:
-        if len(input_id) != 32 or any(c not in '0123456789abcdef' for c in input_id):
+        if not _valid_input_id(input_id):
             raise ValueError('输入证据标识无效')
-        return (read_json(self.root / 'inputs' / f'{input_id}.json.gz')
-                or read_json(self.root / 'inputs' / f'{input_id}.json'))
+        path = self.root / 'inputs' / f'{input_id}.json.gz'
+        if receipt := _read_input(path):
+            return receipt
+        staged = path.parent / 'pending' / path.name
+        receipt = _read_input(staged)
+        if not receipt:
+            return None
+        day, at = receipt['date'], receipt['cutoff']
+        if (_acceptance_manifest(self.root / 'acceptances' / f'{day}.json').get(at) == input_id
+                or (at, input_id) in self.acceptance_references().get(day, ())):
+            return receipt
+        return None
+
+    def accepted_input(self, input_id, cutoff, *, day=None):
+        """Read the original identified by a successful acceptance reference."""
+        receipt = self.input_evidence(input_id) if input_id and cutoff else None
+        if receipt and receipt['cutoff'] == cutoff and (day is None or receipt['date'] == day):
+            return receipt
+        return None
+
+    def latest_readable_input(self, candidates):
+        """An unreadable success still orders batches, but supplies no stock facts."""
+        for at, ref in sorted(candidates, reverse=True):
+            if receipt := self.accepted_input(ref, at):
+                return receipt
+        return None
 
     def readiness_status(self, day: str) -> dict | None:
-        return read_json(self.root / 'ready' / f'{date.fromisoformat(day)}.json')
+        pointer = _read_history_object(self.root / 'ready' / f'{date.fromisoformat(day)}.json')
+        if pointer and 'pending_acceptance' in pointer:
+            pending = pointer.pop('pending_acceptance')
+            if isinstance(pending, dict) and pending.get('complete') is True and pending.get('date', day) == day:
+                input_id, at = last_accepted_reference(pending)
+                if (_valid_input_id(input_id) and valid_acceptance_cutoff(at)
+                        and _acceptance_manifest(self.root / 'acceptances' / f'{day}.json').get(at) == input_id):
+                    pointer = pending
+            pointer = pointer or None
+        if pointer:
+            if not isinstance(pointer.get('complete'), bool) or pointer.get('date', day) != day:
+                return None
+            input_id, cutoff = last_accepted_reference(pointer)
+            if (pointer['complete'] or input_id is not None) and not _valid_input_id(input_id):
+                return None
+            if input_id is not None and not valid_acceptance_cutoff(cutoff):
+                return None
+        return pointer
 
     def readiness(self, day: str) -> dict | None:
         pointer = self.readiness_status(day)
-        if pointer and pointer.get('input_id'):
-            return self.input_evidence(pointer['input_id'])
+        if pointer and pointer['complete']:
+            return self.accepted_input(pointer['input_id'], pointer['cutoff'], day=day)
         return pointer
 
-    def save_readiness(self, day: str, evidence: dict) -> None:
-        if evidence.get('complete'):
-            evidence.setdefault('input_id', uuid.uuid4().hex)
-            path = self.root / 'inputs' / f"{evidence['input_id']}.json.gz"
-            existing = self.input_evidence(evidence['input_id'])
-            if existing is not None and existing != json.loads(json.dumps(evidence, default=str, allow_nan=False)):
+    def _committed_entries(self, day):
+        entries = _acceptance_manifest(self.root / 'acceptances' / f'{date.fromisoformat(day)}.json')
+        directory = self.root / 'inputs'
+        for at, ref in list(entries.items()):
+            header = (_stored_header(directory / f'{ref}.json.gz')
+                      or _stored_header(directory / 'pending' / f'{ref}.json.gz'))
+            if header and (header.day != day or header.cutoff != at):
+                del entries[at]
+        return entries
+
+    def acceptance_references(self) -> dict[str, list[tuple[str, str]]]:
+        """Combine committed cutoff entries with receipts promoted after the index switch."""
+        dates = {}
+        indexed = set()
+        for path in (self.root / 'acceptances').glob('*.json'):
+            try:
+                day = date.fromisoformat(path.stem).isoformat()
+            except ValueError:
+                continue
+            if entries := self._committed_entries(day):
+                dates[day] = entries
+                indexed.update(entries.values())
+        directory = self.root / 'inputs'
+        # A final (or revoked) pointer may be the last record of a missing input
+        # after index loss. Keep its cutoff as a gap, including through maintenance.
+        for path in (self.root / 'ready').glob('*.json'):
+            try:
+                pointer = self.readiness_status(path.stem)
+            except ValueError:
+                continue
+            ref, at = last_accepted_reference(pointer or {})
+            if not ref or dates.get(path.stem, {}).get(at) == ref:
+                continue
+            name = f'{ref}.json.gz'
+            header = _stored_header(directory / name) or _stored_header(directory / 'pending' / name)
+            if header and (header.day != path.stem or header.cutoff != at):
+                continue
+            if dates.setdefault(path.stem, {}).setdefault(at, ref) == ref:
+                indexed.add(ref)
+        for path in directory.glob('*.json.gz'):
+            ref = path.name.removesuffix('.json.gz')
+            if ref not in indexed and _valid_input_id(ref) and (header := _stored_header(path)):
+                dates.setdefault(header.day, {}).setdefault(header.cutoff, ref)
+        for path in (directory / 'pending').glob('*.json.gz'):
+            ref = path.name.removesuffix('.json.gz')
+            if ref in indexed or not _valid_input_id(ref):
+                continue
+            header = _stored_header(path)
+            if header and (self.original_metadata(header.day) or {}).get('input_id') == ref:
+                dates.setdefault(header.day, {}).setdefault(header.cutoff, ref)
+        return {day: sorted(entries.items()) for day, entries in dates.items()}
+
+    def historical_reference(self, day, references=None):
+        """Select the latest recorded acceptance, including a reference to an unavailable payload."""
+        input_id, cutoff = last_accepted_reference(self.readiness_status(day) or {})
+        entries = references.get(day, ()) if references is not None else sorted(self._committed_entries(day).items())
+        if entries:
+            last_at, last_id = entries[-1]
+            if (not input_id and references is not None and (self.original_metadata(day) or {}).get('input_id') == last_id
+                    and self._committed_entries(day).get(last_at) != last_id):
+                return None, None
+            if not input_id or input_id == last_id or (cutoff and cutoff <= last_at):
+                return last_id, last_at
+        return input_id, cutoff
+
+    def last_accepted_input_id(self, day: str, *, after: str | None = None) -> str | None:
+        """Skip a receipt already covered by its pointer's cutoff."""
+        pointer = self.readiness_status(day) or {}
+        input_id, cutoff = last_accepted_reference(pointer)
+        if after and cutoff and cutoff <= after:
+            return None
+        return input_id
+
+    def save_readiness(self, day: str, evidence: dict, *, before_commit=None) -> None:
+        ready = self.root / 'ready' / f'{date.fromisoformat(day)}.json'
+        with _LOCK:
+            previous = self.readiness_status(day)
+            if not evidence.get('complete'):
+                pointer = dict(evidence)
+                last_accepted, cutoff = last_accepted_reference(previous or {})
+                if last_accepted:
+                    pointer['last_accepted_input_id'] = last_accepted
+                    if cutoff:
+                        pointer['last_accepted_cutoff'] = cutoff
+                atomic_json(ready, pointer)
+                return
+
+            cutoff = evidence.get('cutoff')
+            if evidence.get('date') != day or not valid_acceptance_cutoff(cutoff):
+                raise ValueError('完整验收必须包含对应交易日和有效截止时间')
+            input_id = evidence.setdefault('input_id', uuid.uuid4().hex)
+            if not _valid_input_id(input_id):
+                raise ValueError('输入证据标识无效')
+            path = self.root / 'inputs' / f'{input_id}.json.gz'
+            staged = path.parent / 'pending' / path.name
+            existing_path = next((file for file in (path, staged) if file.exists()), None)
+            if existing_path and _read_input(existing_path) != json.loads(json.dumps(evidence, default=str, allow_nan=False)):
                 raise ValueError('既有输入证据不可覆写，请创建新的输入版本')
-            if existing is None:
-                atomic_json(path, evidence)
-            pointer = {'date': day, 'complete': True, 'input_id': evidence['input_id'],
-                       'cutoff': evidence.get('cutoff'), 'scope_version': evidence.get('scope_version')}
-        else:
-            pointer = evidence
-        atomic_json(self.root / 'ready' / f'{date.fromisoformat(day)}.json', pointer)
+            from app.tickflow.daily_revisions import track_receipt
+            track_receipt(self.root, day)
+            pointer = {'date': day, 'complete': True, 'input_id': input_id,
+                       'cutoff': cutoff, 'scope_version': evidence.get('scope_version')}
+            index = self.root / 'acceptances' / f'{day}.json'
+            references = self._committed_entries(day)
+            prior_id, prior_at = last_accepted_reference(previous or {})
+            if existing_path is None:
+                if input_id in references.values() or input_id == prior_id:
+                    raise ValueError('原验收文件缺失，请为新验收创建新的输入版本')
+                atomic_json(staged, {**evidence, '_acceptance_index_day': day})
+            publish_history = references.get(cutoff) != input_id
+            if not publish_history:
+                # Without a new history entry only the live authorization needs to switch.
+                atomic_json(ready, pointer, before_commit=before_commit)
+            else:
+                if prior_at and prior_id:
+                    references.setdefault(prior_at, prior_id)
+                # Readers of the readiness pointer use its previous value until the index commits.
+                atomic_json(ready, {**(previous or {}), 'pending_acceptance': pointer})
+                references[cutoff] = input_id
+                atomic_json(index, references, before_commit=before_commit)
+            if not existing_path or existing_path == staged:
+                # Already committed. Readers can resolve the staged copy through the index.
+                with suppress(OSError):
+                    os.replace(staged, path)
+            # A finalized pointer can still witness its cutoff if the index and original are later lost.
+            if publish_history:
+                with suppress(OSError):
+                    atomic_json(ready, pointer)
 
     def save_diagnostic(self, report: dict, *, reason: str) -> None:
         """Only explicit per-run diagnostics retain full intermediate results."""
@@ -306,47 +603,63 @@ class EveningReportStore:
         if self.root.is_symlink() or self.root.resolve() != self.root.absolute():
             raise ValueError('晚报维护目录不能是符号链接')
         entries = self.dates()
-        originals = [entry for day in entries for entry in day['versions'] if entry['kind'] == 'original']
-        states = {entry['version'] for entry in originals[:STATE_REPORTS]}
+        states = {day['versions'][0]['version'] for day in entries[:STATE_REPORTS]}
         targets = []
         audit_cutoff = (today - timedelta(days=AUDIT_RETENTION_DAYS)).isoformat()
         for day in entries:
-            for entry in day['versions']:
-                if entry.get('storage_version') != SCHEMA_VERSION:
-                    continue  # Historical formats are readable, never silently rewritten.
-                base = self._base(day['date'], entry)
-                if day['date'] < audit_cutoff:
-                    targets.extend(base.with_suffix(suffix) for suffix in ('.audit.json.gz', '.candidates.json.gz'))
-                if entry['version'] not in states:
-                    targets.append(base.with_suffix('.state.json.gz'))
+            entry = day['versions'][0]
+            base = self._base(entry)
+            if day['date'] < audit_cutoff:
+                targets.extend(base.with_suffix(suffix) for suffix in ('.audit.json.gz', '.candidates.json.gz'))
+            if entry['version'] not in states:
+                targets.append(base.with_suffix('.state.json.gz'))
         expiry_timestamp = cn_now().replace(year=today.year, month=today.month, day=today.day,
                                            hour=0, minute=0, second=0, microsecond=0).timestamp() - INPUT_RETENTION_DAYS * 86400
-        # The legacy writer used plain JSON. Neither those inputs nor inputs
-        # shared with full-format originals/revisions belong to the new TTL.
-        protected_inputs = {entry.get('input_id') for day in entries for entry in day['versions']
-                            if entry.get('storage_version') != SCHEMA_VERSION}
-        protected_inputs.update(path.stem for path in (self.root / 'inputs').glob('*.json'))
-        inputs = sorted((self.root / 'inputs').glob('*.json.gz'), key=lambda path: path.stat().st_mtime_ns, reverse=True)
-        expired_inputs = set()
-        for path in inputs[1:]:
-            input_id = path.name.removesuffix('.json.gz')
-            if input_id not in protected_inputs and path.stat().st_mtime < expiry_timestamp:
+        input_cutoff_day = (today - timedelta(days=INPUT_RETENTION_DAYS)).isoformat()
+        references = self.acceptance_references()
+        accepted = sorted(((at, ref, day) for day, entries in references.items() for at, ref in entries), reverse=True)
+        directory = self.root / 'inputs'
+        # Protect the latest available complete acceptance by its own cutoff, even if
+        # restoring an older original has made that file appear newer on disk.
+        retained = set()
+        for at, ref, day in accepted:
+            check()
+            name = f'{ref}.json.gz'
+            receipt = _read_input(directory / name) or _read_input(directory / 'pending' / name)
+            if receipt and receipt['date'] == day and receipt['cutoff'] == at:
+                retained.add(ref)
+                break
+        if accepted:
+            retained.add(accepted[0][1])  # Preserve the cutoff of a missing or unreadable last input.
+        accepted_ids = {ref for _, ref, _ in accepted}
+        expired_inputs = []
+        for folder in (directory, directory / 'pending'):
+            for path in folder.glob('*.json.gz'):
+                ref = path.name.removesuffix('.json.gz')
+                if not _valid_input_id(ref) or ref in retained:
+                    continue
+                if path.stat().st_mtime < expiry_timestamp:
+                    expired_inputs.append((ref, path))
+                elif ref in accepted_ids:
+                    retained.add(ref)
+        targets.extend(path for ref, path in expired_inputs if ref not in retained)
+        for path in (self.root / 'acceptances').glob('*.json'):
+            if path.stem >= input_cutoff_day:
+                continue
+            manifest = _read_history_object(path)
+            if manifest is not None and all(_valid_input_id(ref) and ref not in retained for ref in manifest.values()):
                 targets.append(path)
-                expired_inputs.add(input_id)
+        writes = self.root / 'price_writes'
+        targets.extend(path for pattern in ('????-??-??_*.json*', 'factor_*.json*')
+                       for path in writes.glob(pattern) if path.stat().st_mtime < expiry_timestamp)
         # A process may die after staging files but before publishing the index.
         # Only our UUID-named artifacts older than the temporary-input TTL qualify.
-        versions = {entry['version'] for day in entries for entry in day['versions']}
-        branches = {entry.get('branch_id') for day in entries for entry in day['versions']}
+        versions = {day['versions'][0]['version'] for day in entries}
         for path in (self.root / 'archive').glob('*.gz'):
             identifier = path.name.split('.')[0]
             if (len(identifier) == 32 and all(c in '0123456789abcdef' for c in identifier)
                     and identifier not in versions and path.stat().st_mtime < expiry_timestamp):
                 targets.append(path)
-        for directory in (self.root / 'revisions').iterdir() if (self.root / 'revisions').is_dir() else []:
-            identifier = directory.name
-            if (directory.is_dir() and len(identifier) == 32 and all(c in '0123456789abcdef' for c in identifier)
-                    and identifier not in branches and directory.stat().st_mtime < expiry_timestamp):
-                targets.extend(path for path in directory.glob('*.json.gz') if path.is_file())
         for path in (self.root / 'diagnostics').glob('*.json.gz'):
             if path.name[:10] < (today - timedelta(days=DIAGNOSTIC_RETENTION_DAYS)).isoformat():
                 targets.append(path)
@@ -354,9 +667,15 @@ class EveningReportStore:
             for path in (self.root / directory).glob('*.json'):
                 if path.stem < (today - timedelta(days=days)).isoformat():
                     if directory == 'ready':
-                        pointer = read_json(path) or {}
-                        if pointer.get('complete') and pointer.get('input_id') not in expired_inputs:
-                            continue  # Preserve the entry point to retained/unknown input formats.
+                        try:
+                            pointer = self.readiness_status(path.stem)
+                        except ValueError:
+                            continue
+                        if pointer is None:
+                            continue
+                        input_id, _ = last_accepted_reference(pointer)
+                        if input_id in retained:
+                            continue
                     targets.append(path)
         count = size = 0
         for path in targets:
@@ -369,45 +688,3 @@ class EveningReportStore:
             path.unlink()
             count += 1
         return {'removed_files': count, 'removed_bytes': size}
-
-
-class RevisionBranch:
-    """Unpublished files become readable only through one atomic manifest commit."""
-    def __init__(self, store: EveningReportStore):
-        self.store = store
-        self.id = uuid.uuid4().hex
-        self.root = store.root / 'revisions' / self.id
-        self.dates: dict[str, dict] = {}
-        self.references: dict[str, str] = {}
-        self.rule_version = None
-        self.scope_version = None
-        self.selection_policy_version = None
-        self.gaps: list[str] = []
-        self.committed = False
-
-    def append(self, day: str, payload: dict, reference: dict) -> dict:
-        original = self.store.original_metadata(day)
-        report = {**payload, 'date': day, 'mode': 'live', 'status': 'published',
-                  'version': uuid.uuid4().hex, 'kind': 'revision', 'branch_id': self.id,
-                  'parent_version': original['version'] if original else None,
-                  'generated_at': cn_now().isoformat(), 'input_reference': reference}
-        report = self.store._write(self.root / str(date.fromisoformat(day)), report)
-        self.references[day] = reference['input_id']
-        self.rule_version = payload.get('rule_version')
-        self.scope_version = payload.get('scope_version')
-        self.selection_policy_version = payload.get('selection_policy_version')
-        self.dates[day] = _metadata(report)
-        return report
-
-    def commit(self) -> None:
-        if not self.dates:
-            raise ValueError('修订分支为空')
-        atomic_json(self.store.root / 'branches' / f'{self.id}.json',
-                    {'branch_id': self.id, 'dates': self.dates, 'input_ids': self.references,
-                     'rule_version': self.rule_version, 'scope_version': self.scope_version,
-                     'selection_policy_version': self.selection_policy_version, 'gaps': self.gaps, 'committed_at': cn_now().isoformat()})
-        self.committed = True
-
-    def close(self) -> None:
-        if not self.committed and self.root.is_dir():
-            shutil.rmtree(self.root)

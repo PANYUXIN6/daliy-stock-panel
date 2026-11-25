@@ -29,7 +29,7 @@
 
 [CI 入口](../scripts/ci_deploy.sh) 只上传 `git archive` 生成的本次提交源码。[服务器入口](../scripts/deploy_preproduction.sh) 将其放入运行根目录的 `releases/<SHA>/`，先构建新镜像，再用该版本的 Compose 定义、远端已有覆盖配置和精确镜像版本启动双服务。数据目录、环境文件及挂载配置始终从远端运行根解析，镜像版本覆盖不会改写原部署配置。首次自动发布可接管现有手动部署；后续版本通过 `current` 指向已验收的源码目录。发布不会上传金融数据或个人数据。
 
-新镜像继承远端现有 Compose 中 web 服务已解析的全部 `build.args`，包括 `BACKEND_EXTRAS`、`INCLUDE_STOCKSDK` 和镜像源选项；发布脚本不另行覆盖这些设置。
+新镜像继承远端现有 Compose 中 web 服务已解析的全部 `build.args`，包括 `BACKEND_EXTRAS` 和镜像源选项；发布脚本不另行覆盖这些设置。
 
 服务器文件锁覆盖发布和恢复过程。切换前若检测到未完成的持久化采集／挖掘任务，或仍运行的独立策略计算 worker，发布会失败，待任务结束后重跑 GitHub 工作流。进程内的信号／因子回测及尚未启动 worker 的排队任务不在这项检查范围内，发布前应结束这些任务；状态检查与实际切换之间也存在短暂竞态。若需要在持续运行研究任务时发布，应增加 collector 的维护准入机制，当前脚本不提供这项能力。
 
@@ -110,7 +110,7 @@ docker compose up -d
 
 不要只运行一个 `app.main:app` 容器：默认角色为网页，仅提供本地查询，显式同步需要采集服务。既有单容器部署应先停止旧容器，再启动双服务，保留原 `data/` 挂载。
 
-镜像默认不含 stock-sdk 插件或 `legacy-cpu` / `backtest` extras；需要这些能力时使用本地构建。
+需要 `legacy-cpu` 或 `backtest` 可选依赖时，请使用本地构建。
 
 ---
 
@@ -123,13 +123,6 @@ docker compose up --build
 ```
 
 Docker 使用同一镜像启动 `web` 和唯一的 `collector`，共享 `./data:/app/data`。只有 `web` 映射宿主机端口；`collector` 仅在 Compose 网络内可达，外部反向代理也只能指向 `web`。两个服务均配置健康检查和 `restart: unless-stopped`。
-
-stock-sdk 插件默认不打包。需要时显式启用构建参数；镜像会额外安装 Node.js 与插件依赖：
-
-```bash
-docker compose build --build-arg INCLUDE_STOCKSDK=1
-docker compose up -d
-```
 
 更新到新版本:
 

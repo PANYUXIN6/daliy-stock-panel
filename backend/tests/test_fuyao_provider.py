@@ -413,11 +413,14 @@ def test_loader_probe_plugin_key_dispatch(monkeypatch):
     assert loader.probe_plugin_key("fuyao", "bad") == (False, "bad")
 
 
-def test_loader_probe_plugin_key_unsupported_plugin():
+def test_loader_probe_plugin_key_unsupported_plugin(monkeypatch, tmp_path):
     from app.data_providers.custom import loader
 
-    # stock-sdk 未声明 api_key_env → 不支持界面配 Key
-    ok, reason = loader.probe_plugin_key("stocksdk", "x")
+    monkeypatch.setattr(loader, "plugins_dir", lambda: tmp_path)
+    plugin = tmp_path / "public_feed"
+    plugin.mkdir()
+    (plugin / "plugin.yaml").write_text("name: public_feed\n")
+    ok, reason = loader.probe_plugin_key("public_feed", "x")
     assert ok is False and "不支持" in reason
     ok, reason = loader.probe_plugin_key("no_such_plugin", "x")
     assert ok is False and "不存在" in reason
@@ -489,6 +492,18 @@ def test_manifest_declares_datasets():
     assert {"realtime", "daily", "adj_factor"} <= set(manifest.get("datasets") or [])
     assert manifest.get("runtime") == "none"
     assert manifest.get("api_key_env") == fp.API_KEY_ENV
+
+
+def test_builtin_source_cannot_be_edited_as_yaml(monkeypatch, tmp_path):
+    from app.data_providers.custom import loader
+
+    monkeypatch.setattr(loader, "data_sources_dir", lambda: tmp_path)
+    assert loader.is_builtin("fuyao")
+    assert loader.get_config_dict("fuyao") is None
+    with pytest.raises(ValueError, match="不可编辑"):
+        loader.save_config("fuyao", {})
+    with pytest.raises(ValueError, match="不可删除"):
+        loader.delete_config("fuyao")
 
 
 def test_hidden_plugin_not_registered():

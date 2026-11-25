@@ -34,6 +34,7 @@ from app.market_time import CN_TZ, cn_today
 from app.parquet import scan_enriched_parquet
 from app.polars_guard import guarded_collect
 from app.services.minute_adjust import apply_minute_adjustment, minute_basis_is_raw
+from app.tickflow import daily_revisions
 
 logger = logging.getLogger(__name__)
 
@@ -2204,12 +2205,14 @@ class KlineRepository:
         base = pl.DataFrame()
         if symbols is not None and paths:
             base = pl.concat([pl.read_parquet(p) for p in paths], how="diagonal_relaxed")
-            base = base.filter(~pl.col("symbol").is_in(symbols))
-        merged = pl.concat([base, incoming], how="diagonal_relaxed").unique(
+        untouched = base.filter(~pl.col("symbol").is_in(symbols)) if not base.is_empty() else base
+        merged = pl.concat([untouched, incoming], how="diagonal_relaxed").unique(
             subset=["symbol", "date"], keep="last",
         ).sort(["symbol", "date"])
         if merged.is_empty():
             raise ValueError("清理后整日日K为空, 需要完整日K数据, 原数据保持不变")
+        out = part / "part.parquet"
+        changes = daily_revisions.partition_changes(out, base, merged)
         with self._write_lock:
             if {p: self._partition_fingerprint(p) for p in part.glob("*.parquet")} != fingerprints:
                 raise ValueError("日K在修补期间发生变化, 请重新自检")
@@ -2218,8 +2221,7 @@ class KlineRepository:
                 self._validate_repair_path(path)
                 shutil.copy2(path, backup_dir / path.name)
             part.mkdir(parents=True, exist_ok=True)
-            out = part / "part.parquet"
-            self._atomic_write_parquet(merged, out)
+            self._atomic_write_parquet(merged, out, changes=changes, replaces_all=True)
             for path in paths:
                 if path != out:
                     path.unlink()
@@ -2475,7 +2477,7 @@ class KlineRepository:
             self.store._register_unified_views()
 
     @staticmethod
-    def _atomic_write_parquet(df: pl.DataFrame, out: Path) -> None:
+    def _atomic_write_parquet(df: pl.DataFrame, out: Path, *, changes=None, replaces_all=False) -> None:
         """先写临时文件再原子替换, 避免进程中断留下损坏的 parquet。
 
         直接 write_parquet(out) 在进程被 kill (dev.sh 清端口用 kill -9)
@@ -2485,7 +2487,22 @@ class KlineRepository:
         """
         tmp = out.with_name(out.name + ".tmp")
         df.write_parquet(tmp)
+        if changes is not None:
+            directory, difference = changes
+            try:
+                daily_revisions.record_rewrite(directory, out, tmp, difference, replaces_all=replaces_all)
+            except OSError:
+                # A missing link is explicitly treated as unknown at acceptance; keep the primary feed available.
+                logger.warning("无法暂存 %s 的晚报订正前值", out, exc_info=True)
         replace_with_retry(tmp, out)
+
+    @staticmethod
+    def _distinct_daily_rows(frame: pl.DataFrame) -> pl.DataFrame:
+        # Providers can repeat a bar within one response. Keep conflicting observations
+        # distinguishable for consumers that verify formal stock-day values.
+        if frame.select(pl.struct('symbol', 'date').is_duplicated().any()).item():
+            return frame.unique(maintain_order=True)
+        return frame
 
     def _write_daily_partition(self, df: pl.DataFrame, table: str) -> None:
         """按 date 分区写入 parquet，每个日期一个文件，支持 merge-upsert。"""
@@ -2506,7 +2523,7 @@ class KlineRepository:
             ds = dt.isoformat() if hasattr(dt, "isoformat") else str(dt)
             out = base / f"date={ds}" / "part.parquet"
             out.parent.mkdir(parents=True, exist_ok=True)
-            self._optimistic_upsert_partition(out, date_df, publication)
+            self._optimistic_upsert_partition(out, self._distinct_daily_rows(date_df), publication)
 
     @staticmethod
     def _partition_fingerprint(path: Path) -> tuple[int, int] | None:
@@ -2524,6 +2541,7 @@ class KlineRepository:
         publication: EnrichedPublication | None,
         *,
         retries: int = 3,
+        overwrite: bool = False,
     ) -> None:
         """单分区 merge-upsert: polars 读/合并/排序在 _write_lock 外, 锁内只做
         指纹校验 + 原子替换 + commit。
@@ -2535,16 +2553,20 @@ class KlineRepository:
         """
         def _read_existing() -> pl.DataFrame:
             try:
-                source = out.open("rb")
+                # 固定本次读取的文件，避免两次读取之间被替换而拼出损坏的 parquet。
+                with out.open("rb") as source:
+                    return pl.read_parquet(source)
             except FileNotFoundError:
                 return pl.DataFrame()
-            # 固定本次读取的文件，避免 Polars 按路径分阶段读取元数据/数据时
-            # 跨越一次原子替换，把不同版本拼在一起而报 parquet 损坏。
-            with source:
-                return pl.read_parquet(source)
+            except (OSError, pl.exceptions.PolarsError):
+                if not overwrite:
+                    raise
+                # A full flush can replace an unreadable partition; the receipt will mark its old values unknown.
+                logger.warning("旧日 K 不可读，保留全量覆写语义 %s", out, exc_info=True)
+                return pl.DataFrame()
 
         def _merge(existing: pl.DataFrame) -> pl.DataFrame:
-            if existing.is_empty():
+            if overwrite or existing.is_empty():
                 return incoming.sort(["symbol", "date"])
             return pl.concat([existing, incoming], how="diagonal_relaxed").unique(
                 subset=["symbol", "date"], keep="last"
@@ -2555,15 +2577,18 @@ class KlineRepository:
             base_fp = self._partition_fingerprint(out)
             existing = _read_existing()
             merged = _merge(existing)
+            changes = daily_revisions.partition_changes(out, existing, merged)
             with self._write_lock:
                 if self._partition_fingerprint(out) != base_fp:
                     continue  # 基底被并发写入者改过, 出锁重读重算
-                self._write_partition_locked(out, merged, existing, publication)
+                self._write_partition_locked(out, merged, existing, publication, changes)
             return
         # 乐观重试耗尽 (罕见: 高频并发写同一分区): 退回锁内全量模式保证正确性
         with self._write_lock:
             existing = _read_existing()
-            self._write_partition_locked(out, _merge(existing), existing, publication)
+            merged = _merge(existing)
+            changes = daily_revisions.partition_changes(out, existing, merged)
+            self._write_partition_locked(out, merged, existing, publication, changes)
 
     def _write_partition_locked(
         self,
@@ -2571,6 +2596,7 @@ class KlineRepository:
         merged: pl.DataFrame,
         existing: pl.DataFrame,
         publication: EnrichedPublication | None,
+        changes=None,
     ) -> None:
         """锁内的纯文件阶段: 无变化跳过; 否则原子替换 + 提交 generation。"""
         if not existing.is_empty() and existing.equals(merged):
@@ -2578,7 +2604,7 @@ class KlineRepository:
                 publication.commit()  # 未写入时为无害空提交
             return
         if publication is None:
-            self._atomic_write_parquet(merged, out)
+            self._atomic_write_parquet(merged, out, changes=changes)
         else:
             try:
                 publication.write_parquet(merged, out)
@@ -2698,12 +2724,16 @@ class KlineRepository:
         }.get(asset_type)
         if not table:
             return
+        df = self._distinct_daily_rows(df)
         base = self.store.data_dir / table
         dt = df["date"][0]
         ds = dt.isoformat() if hasattr(dt, "isoformat") else str(dt)
         out = base / f"date={ds}" / "part.parquet"
         out.parent.mkdir(parents=True, exist_ok=True)
         # 覆写语义: 排序在锁外, 锁内只做原子替换。
+        if daily_revisions.tracked_partition(out) is not None:
+            self._optimistic_upsert_partition(out, df, None, overwrite=True)
+            return
         df_sorted = df.sort(["symbol", "date"])
         with self._write_lock:
             self._atomic_write_parquet(df_sorted, out)
@@ -2719,6 +2749,7 @@ class KlineRepository:
         """覆写当天指定资产 enriched 分区 (实时 enriched 落盘, 非merge)。"""
         if df.is_empty() or "date" not in df.columns:
             return
+        df = self._distinct_daily_rows(df)
         dt = df["date"][0]
         cache_df = self._with_instrument_metadata(asset_type, df).sort(["symbol"])
         if asset_type == "stock":

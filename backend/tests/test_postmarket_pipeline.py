@@ -366,6 +366,42 @@ def test_optional_board_prefetch_error_is_reported_without_blocking_core_publica
     assert "publication" in steps
 
 
+@pytest.mark.parametrize("cancel_first", [True, False])
+def test_step_eight_acceptance_orders_commit_and_cancellation(closing, monkeypatch, cancel_first):
+    from contextvars import Context
+
+    from app.services import evening_report_store, pipeline_jobs
+
+    repo, caps, _, _ = closing
+    store = evening_report_store.EveningReportStore(repo.store.data_dir)
+    registry = JobStore(store_dir=repo.store.data_dir / "jobs")
+    monkeypatch.setattr(pipeline_jobs, "job_store", registry)
+    job_id, _ = registry.create()
+    write = evening_report_store.atomic_json
+
+    def cancel_at_index(path, value, **kwargs):
+        if path.parent.name != "acceptances":
+            return write(path, value, **kwargs)
+        if cancel_first:
+            check = kwargs["before_commit"]
+            def after_last_check():
+                check()
+                registry.terminate(job_id, "手动取消")
+            kwargs["before_commit"] = after_last_check
+        write(path, value, **kwargs)
+        if not cancel_first:
+            registry.terminate(job_id, "手动取消")
+
+    monkeypatch.setattr(evening_report_store, "atomic_json", cancel_at_index)
+    with pytest.raises(pipeline_jobs.JobCancelledError):
+        pipeline_jobs.run_with_capacity(job_id, lambda: Context().run(
+            daily_pipeline.run_now, repo, caps, postmarket=True, evening_only=True,
+            on_progress=lambda *args, **kwargs: registry.progress(job_id, *args, **kwargs)))
+    entries = store.acceptance_references()
+    assert bool(entries.get(str(DAY))) is not cancel_first
+    assert bool((store.readiness(str(DAY)) or {}).get("complete")) is not cancel_first
+
+
 @pytest.mark.parametrize("problem", ["paper", "publication", "evening_readiness"])
 def test_task_failure_is_attributed_to_the_actual_stage_not_successful_cleanup(closing, monkeypatch, problem):
     repo, caps, _, _ = closing

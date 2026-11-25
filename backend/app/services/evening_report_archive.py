@@ -17,18 +17,15 @@ STATE_REPORTS = 7
 
 _REPORT_FIELDS = (
     'date', 'trade_date', 'next_trade_date', 'cutoff', 'generated_at', 'version',
-    'parent_version', 'branch_id', 'kind', 'mode', 'status', 'rule_version',
-    'scope_version', 'selection_policy_version', 'disclaimer', 'summary', 'market',
+    'kind', 'mode', 'status', 'rule_version',
+    'scope_version', 'selection_policy_version', 'storage_version', 'disclaimer', 'summary', 'market',
     'selected', 'limitations', 'late_generation', 'recovery_note',
+    'wave_rule', 'dip_rule_version', 'wave_events', 'wave_starts', 'study_quotes', 'study_factors', 'study_quote_times', 'study_calendars',
 )
 _RECORD_FIELDS = ('symbol', 'name', 'purpose', 'regime', 'risk', 'position', 'qualification',
                   'limitations', 'selected', 'wait_conditions', 'observation')
 _LARGE_STATISTICS = {'selection_path_audit', 'identity_continuity_audit', 'legacy_confirmation_audit'}
 _ROLE_VARIABLES = ('return_20d', 'identity_score', 'high_proximity', 'return_5d', 'acceleration_5_20')
-
-
-def compactable(report: dict) -> bool:
-    return bool(report.get('audit')) and report.get('selection_policy_version') == 'theme-observation-v1'
 
 
 def _audit_row(row: dict) -> dict:
@@ -63,26 +60,27 @@ def _audit_row(row: dict) -> dict:
     }
 
 
+def retained_observation_rows(report: dict):
+    records = {row['symbol']: row for row in report.get('records', [])}
+    for row in report.get('calculations', report.get('records', [])):
+        if row['selected'] or row['observation']['decision']['comparison_eligible']:
+            yield records.get(row['symbol'], row)
+
+
 def split_report(report: dict) -> tuple[dict, dict, dict]:
     """Return the permanent report, medium-term audit, and candidate boundary.
 
-Revision identity and common versions live in the envelope, once. A boundary
+Publication identity and common versions live in the envelope, once. A boundary
 references the same full snapshots as recommendations; it cannot reconstruct
 securities or features outside the frozen allocation pool.
     """
-    records = {row['symbol']: row for row in report.get('records', [])}
     rows = report.get('calculations', report.get('records', []))
     audit_rows = [_audit_row(row) for row in rows]
-    retained = []
-    for row in rows:
-        if row['selected'] or row['observation']['decision']['comparison_eligible']:
-            source = records.get(row['symbol'], row)
-            retained.append({key: source[key] for key in _RECORD_FIELDS if key in source})
+    retained = [{key: row[key] for key in _RECORD_FIELDS if key in row} for row in retained_observation_rows(report)]
     # Keep the original recommendation order, including the stable tie breaks.
     order = {symbol: index for index, symbol in enumerate(report.get('selected', []))}
     retained.sort(key=lambda row: (not row['selected'], order.get(row['symbol'], 0), row['symbol']))
     permanent = {key: report[key] for key in _REPORT_FIELDS if key in report}
-    permanent['storage_version'] = SCHEMA_VERSION
     permanent['as_of'] = report.get('trade_date') or report['date']
     permanent['records'] = retained
     permanent['statistics'] = {key: value for key, value in report.get('statistics', {}).items()
@@ -94,7 +92,7 @@ securities or features outside the frozen allocation pool.
                                  'stock_generation': reference.get('stock_generation')}
     provenance = report.get('provenance', {})
     permanent['provenance'] = {
-        'recovery': provenance.get('recovery'),
+        'membership_changes': provenance.get('membership_changes', []),
         'classifications': [{key: value for key, value in observation.items()
                             if key not in ('symbols', 'memberships')}
                             | {'symbol_count': len(observation.get('symbols', [])),
@@ -110,7 +108,10 @@ securities or features outside the frozen allocation pool.
     if selected_themes is None:
         selected_themes = [sector['observation'] for sector in report.get('sectors', [])
                            if sector.get('observation', {}).get('selected_theme')]
-    permanent['sectors'] = [{'id': theme['id'], 'name': theme['name'], 'observation': theme}
+    sector_changes = {sector['id']: sector['membership_change'] for sector in report.get('sectors', [])
+                      if 'membership_change' in sector}
+    permanent['sectors'] = [{'id': theme['id'], 'name': theme['name'], 'observation': theme,
+                             **({'membership_change': sector_changes[theme['id']]} if theme['id'] in sector_changes else {})}
                              for theme in selected_themes]
     step_counts = defaultdict(Counter)
     for row in audit_rows:
@@ -137,6 +138,7 @@ securities or features outside the frozen allocation pool.
                 'records': [{'symbol': row['symbol'],
                              'snapshot_ref': f"{report['version']}:{row['symbol']}",
                              'comparison_group': row['decision']['comparison_group'],
+                             'competition_group': row['decision'].get('competition_group'),
                              'rank_within_theme_role': row['decision']['rank_within_theme_role'],
                              'rank_global_role': row['decision']['rank_global_role'],
                              'quota_limit': row['decision'].get('quota_limit')}
@@ -169,7 +171,4 @@ def unpack_report(report: dict) -> dict:
         obs['variables'] = {key: {**definitions.get(key, {}), **value}
                             for key, value in obs.get('variables', {}).items()}
         obs['values'] = {key: value.get('value') for key, value in obs['variables'].items()}
-        # Legacy paths are no longer archived for this policy. Keep the API
-        # collection shape while observation owns all current explanation.
-        row.setdefault('paths', [])
     return report

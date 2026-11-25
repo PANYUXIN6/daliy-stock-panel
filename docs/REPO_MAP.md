@@ -16,7 +16,7 @@ authority_status: observed
 | `backend/app/services/` | 同步、行情、筛选、扩展数据、任务管理、通知、偏好和认证等编排 |
 | `backend/app/tickflow/` | TickFlow SDK、档位策略与请求限速；`repository.py` 同时承载通用 `DataStore` 和 `KlineRepository` |
 | `backend/app/data_providers/` | 标准化模型、Provider 协议、能力矩阵，以及 `custom/` 下的 YAML 源和插件加载 |
-| `backend/app/plugins/` | 内置可选数据源插件，当前有 `fuyao/` 和 `stocksdk/` |
+| `backend/app/plugins/` | 内置可选数据源插件，当前有 `fuyao/` |
 | `backend/app/indicators/` | enriched 数据生产、指标和信号计算、关键价位；核心在 `pipeline.py` |
 | `backend/app/jobs/` | `daily_pipeline.py` 管理交易日 16:00 自动／手动盘后管道、盘前基础维护及可选 AI 定时任务 |
 | `backend/app/strategy/` | 策略加载执行、评分、信号、监控规则、持仓提醒、模拟盘；内置策略在 `builtin/` |
@@ -51,7 +51,7 @@ authority_status: observed
 | 行情纯本地查询 | `api/kline.py`、`api/indices.py` → 本机仓库／共享行情快照；`live` 不触发采集 | `test_local_market_reads.py` |
 | 普通分时、显式任务与取消 | `services/ordinary_minute.py` → 股票／ETF／指数分钟分区；`services/pipeline_jobs.py`、`api/pipeline.py`；数据页 `components/data/MinuteSyncConfig.tsx` 复用现有任务 API 与 `lib/useCollectorJob.ts`；单日分时空态 `components/StockIntradayChart.tsx`／`MinuteCollectionButton.tsx` → `POST /api/kline/minute/fetch` 显式补采所选标的和日期，在途共享任务、锁内复查已有数据，专用进度 GET 仅暴露分钟补采任务；浏览与刷新仍只读；财务按需入口见下文 | `test_minute_fetch_api.py`、`test_minute_fetch_access.py`；前端 `components/StockIntradayChart.test.tsx`、`components/data/MaintenanceControls.test.tsx`、`components/StockMultiDayIntradayChart.test.tsx`、`lib/minuteBatchIncremental.test.ts`、`pages/Financials.test.tsx` |
 | 当日复盘发布与 AI 归档 | `services/review_publication.py`、`analysis_archive.py` → `api/market_recap.py`、`financials.py`、`stock_analysis.py`；前端 `pages/Review.tsx`、分析报告 store | 前端 `pages/Review.test.tsx`、`lib/analysisArchival.test.ts` |
-| 每日晚报：题材观察名单与个人记录 | `api/evening_report.py` → `evening_report_inputs.py` 正式输入 → `evening_report_engine.py` 解释证据 + `evening_report_observation.py` 题材／角色／配额／低吸 + `evening_report_audit.py` 候选决策留痕 → `evening_report_archive.py` 分层投影 + `evening_report_store.py` 原发布／修订、滚动状态与保留期清理；`evening_report_recovery.py` 从当日保留资料重新验收缺少专用输入的历史首次生成；`evening_report_jobs.py` 核验完整修订依赖并保留提交日约束，手动缺今日输入时复用`daily_pipeline.run_now(..., evening_only=True)`完成盘后必需验收后生成、自动独立生成／维护及 `evening_report_tracking.py` 过程、共享候选回看、个人反馈、缺失率记录；共用情绪在 `market_sentiment.py`；前端 `pages/EveningReport.tsx`、`components/evening-report/` | `test_evening_report_{rules,engine,observation,audit,infra,tracking,storage}.py`、`test_market_sentiment.py`；前端晚报及个人历史测试；[方案与验收](evening-report-optimization-plan.md) |
+| 每日晚报、波次与个人记录 | 生成入口 `api/evening_report.py` → `evening_report_jobs.py`；输入 `evening_report_inputs.py`，整改目标为 `evening_report_engine.py` 只编排报告，`evening_report_observation.py` 负责名单、同题材比较组和综合领先分，`evening_report_wave.py`、`evening_report_dip.py` 分别负责波次与低吸。归档见 `evening_report_archive.py`、`evening_report_store.py`，回看与个人反馈见 `evening_report_tracking.py`，离线入口为 `backend/scripts/evaluate_evening_wave_starts.py`。前端见 `pages/EveningReport.tsx` 与 `components/evening-report/` | `test_evening_report_*.py`、晚报与个人历史页面测试；[名单设计](evening-report-optimization-plan.md)、[波次与验收](evening-report-dip-wave-spec.md) |
 | 板块复盘：事件共振／调整逆势 | `api/sector_review.py` → `services/sector_review.py`、`sector_review_rules.py` → `tickflow/sector_review_reader.py`；`KlineRepository.sector_review_reader` 只读正式原始日线与同版前复权收盘，不预热指标；前端独立 `pages/SectorReview.tsx`、`components/sector-review/` | `test_sector_review.py`；`pages/SectorReview.test.tsx`；规模脚本 `scripts/benchmark_sector_review.py`；[实现与验证记录](sector-review-implementation.md) |
 | 个人复盘提示词 | `api/market_recap.py::get_recap_prompt/update_recap_prompt` → `services/recap_prompt.py`、个人 preferences；`market_recap.py` 生成时固定模板快照；前端 `ReviewPromptDialog.tsx`，Pro／admin 可编辑 | `test_market_recap_prompt.py`；复盘页面、提示词弹窗与归档测试 |
 | 指标发布中断恢复 | `enriched_generation.py` 的发布锁和写入标记 → `indicators/pipeline.py::run_pipeline` 异常释放与完整重建，collector 启动恢复未写入状态 | `test_enriched_generation.py`、`test_enriched_full_rebuild.py`、`test_data_clear_generation.py` |
@@ -81,7 +81,7 @@ authority_status: observed
 | 未回补价格缺口区域 | `StockDailyKChart.tsx` 默认展示 → `api/kline.py::get_price_gaps` → `services/price_gaps.py` 读取截止日前全部已存前复权日线及实时尾部 → `indicators/price_gaps.py` 计算向上／向下缺口剩余区间；`EChartsCandlestick.tsx` 用价格带延伸到视图右侧，部分回补收窄、完全回补移除，日线 SSE 失效对应查询 | `test_price_gaps.py`、`StockDailyKChart.test.tsx`、`EChartsCandlestick.test.tsx` |
 | 日／周／月箱体震荡 | 个股 `StockDailyKChart.tsx`、指数 `pages/Indices.tsx` → 共享 `lib/useBoxOscillation.ts` 与 `BoxOscillationControls.tsx` → `api/kline.py::get_boxes` → `services/box_oscillation.py` 读取同源前复权日线、确认完成状态并按周期聚合和重算指标 → `indicators/box_oscillation.py` 因果识别触点、箱体、冻结ATR阈值、突破及历史回访事件，`indicators/box_activity.py` 派生活跃性与可填充区段；`EChartsCandlestick.tsx` 按区段绘制独立箱体图层，历史参考按需开启，查询随日线与日历更新失效 | `test_box_oscillation.py`、`test_box_activity.py`、`test_box_oscillation_service.py`；`StockDailyKChart.test.tsx`、`StockPanel.test.tsx`、`Indices.test.tsx`、`EChartsCandlestick.test.tsx`；[算法与验收](box-oscillation-design.md) |
 | 箱体轻量结构评估 | `scripts/evaluate_box_oscillation.py` → `services/box_evaluation.py` 校验显式 JSON 快照、完整复核区间与校准／验证两段切分 → `indicators/box_evaluation.py` 一对一匹配、边界误差、时间重叠及误／漏识别；按截止前缀调用原识别算法，不进入在线数据链 | `test_box_evaluation.py`、`test_box_evaluation_service.py`、`test_box_oscillation_baseline.py`；`tests/fixtures/box_oscillation/synthetic_baseline_v1.json`；[标注与评估](box-oscillation-evaluation.md) |
-| 交易日历或显式历史缺口检查 | `services/trading_day.py::sync_calendar` 由 collector 保存日历并累积重叠区间已确认日期（支持财报事件回放），`is_trading_day` 只读；历史检查仍在 `services/data_integrity.py` | `test_trading_day.py`、`test_data_integrity.py` |
+| 交易日历或显式历史缺口检查 | `services/trading_day.py::sync_calendar` 由 collector 维护共享标准交易日历，累积已确认日期，供财报事件与晚报读取，`is_trading_day` 只读；历史检查仍在 `services/data_integrity.py` | `test_trading_day.py`、`test_data_integrity.py` |
 | 日 K 自检与精准修补 | 数据页 `DataIntegrityPanel` → collector `api/data.py` 的 `/integrity` 报告与任务 → `data_integrity.py`、`daily_health.py`、`integrity_check.py` → `repair_daily.py` 暂存校验／备份 → 仓库定向替换 → `pipeline.recompute_daily_symbols` 与环境／主线范围重算 → 现有共享发布；管道先续修已登记异常 | `test_integrity_self_check.py`、`test_precise_daily_repair.py`、`test_daily_repair_history_discovery.py`、`test_data_integrity_api.py` |
 | 策略筛选、参数或评分 | `api/screener.py`、`api/strategy.py` → `services/screener.py`、`strategy/engine.py`、`strategy/scoring.py`、`strategy/overlay.py`、`strategy/config.py` | `test_strategy_registry.py`、`test_strategy_saved_params.py`、`test_strategy_overlay.py`、`test_strategy_scoring.py`、`test_screener_cache_api.py` |
 | 逐策略手动选股与任务恢复 | `api/screener.py::submit_manual_strategy/manual_tasks` → `services/screener_tasks.py` → `strategy_run_queue.py` 单线程独占槽；`review_publication.py` 提供正式盘后版本；`screener_snapshots.py` 保存逐策略、逐日个人快照；前端 `useScreenerRunStatus.ts` 批量恢复状态，`Screener.tsx` 仅点击标签提交 | `test_screener_tasks.py`、`test_screener_publication.py`、`test_strategy_run_queue.py`；前端 `useScreenerRunStatus.test.tsx`、`StrategyCard.test.tsx` |
@@ -117,12 +117,11 @@ authority_status: observed
           → 正式日线／因子／指标／核心指数验收 → 分类 → 环境／情绪／主线
           → 模拟盘／可选分钟／盘口／榜单 → 复盘发布 → 释放槽后按开关触发周度研究
 
-每日晚报：盘后步骤8保存输入就绪证据 → 主管道退出并释放槽
-          → evening_report_jobs 独立任务重新核对输入 → 题材强度／互斥角色／2加1配额／低吸与风险标签
-          → evening_report_store 原子发布 → data_updated(evening_report) → 只读表格
-          → evening_tracking 独立任务 → 过程／到期表现 → 按账号记录可取消反馈
-          回看统一派生入口核对JobStore当天取消记录及管理员显式恢复时间
-          后续非依赖步骤失败不阻止已就绪晚报；手动取消不自动派生
+每日晚报（整改目标）：盘后必需输入验收 → 步骤 8 写入当日就绪记录 → 主管道释放槽
+          → 独立生成任务 → 题材与 2 加 1 配额／近窗波次／低吸标签
+          → 按交易日原子定稿 → data_updated(evening_report) → 只读表格
+          → evening_tracking 从定稿登记推荐，使用本地正式行情计算到期价格表现
+          离线评价另读已发布的第二段启动与本地行情；个人反馈按账号保存
 
 筛选：api/screener → ScreenerService.build_strategy_context
       → StrategyEngine.run → 过滤、评分、排序 → 策略结果缓存 / 响应

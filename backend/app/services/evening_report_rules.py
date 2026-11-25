@@ -6,7 +6,7 @@ import math
 from typing import Any
 
 RULE_VERSION = "evening-v2"
-SELECTION_POLICY_VERSION = "theme-observation-v1"
+SELECTION_POLICY_VERSION = "theme-observation-v2"
 PURPOSES = (
     "风险暂停",
     "地位失效",

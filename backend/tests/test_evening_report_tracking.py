@@ -10,24 +10,25 @@ from types import SimpleNamespace
 
 import polars as pl
 import pytest
+from evening_receipt_fixture import current_receipt
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from app.api import auth, evening_report, pipeline
 from app.market_time import CN_TZ
 from app.services import evening_report_jobs as jobs
+from app.services import evening_report_store, pipeline_jobs, shared_runtime
 from app.services import evening_report_tracking as tracking
-from app.services import pipeline_jobs, shared_runtime
 from app.services.auth import AuthStore
 from app.services.auth_access import install_auth_middleware
-from app.services.evening_report_store import EveningReportStore, RevisionBranch
+from app.services.evening_report_store import EveningReportStore
 from app.services.user_context import UserContext, user_scope
 
 SYMBOL = '300001.SZ'
 
 
 @pytest.fixture
-def history(private_owner, tmp_path):
+def history(private_owner, tmp_path, monkeypatch):
     days, cursor = [], date(2026, 10, 12)
     while len(days) < 18:
         if cursor.weekday() < 5:
@@ -41,11 +42,16 @@ def history(private_owner, tmp_path):
                              cutoff=days[-1] + 'T16:00:00+08:00', provenance={})
     store = EveningReportStore(tmp_path)
 
-    def publish(index, selected=True, theme='题材甲'):
-        return store.save(days[index], {'trade_date': days[index], 'records': [
-            {'symbol': SYMBOL, 'name': '观察股', 'selected': selected,
-             'observation': {'role': 'fallback_leader', 'primary_theme': {'name': theme},
-                             'variables': {'return_20d': {'value': .35}}}}]}, {})
+    def publish(index, selected=True, theme='题材甲', wave=None):
+        day = days[index]
+        with monkeypatch.context() as patch:
+            patch.setattr(evening_report_store, 'cn_now', lambda: datetime.fromisoformat(day + 'T17:00:00+08:00'))
+            return store.save(day, {'trade_date': day, 'cutoff': day + 'T16:00:00+08:00', 'audit': {}, 'records': [
+                {'symbol': SYMBOL, 'name': '观察股', 'selected': selected,
+                 'observation': {**({'wave': wave} if wave else {}), 'decision': {'all_reason_codes': [], 'steps': [], 'comparison_eligible': selected,
+                                              'comparison_group': None, 'rank_global_role': 1, 'rank_within_theme_role': 1},
+                                 'role': 'fallback_leader', 'primary_theme': {'name': theme},
+                                 'variables': {'return_20d': {'value': .35}}}}]}, {})
 
     return SimpleNamespace(root=tmp_path, days=days, inputs=inputs, store=store, publish=publish)
 
@@ -54,6 +60,72 @@ def mark(history, report, *, starred=True, outcome=None, revision=0, request_id=
     return tracking.update_feedback(history.root, day=report['date'], version=report['version'],
                                     symbol=SYMBOL, starred=starred, outcome=outcome,
                                     expected_revision=revision, request_id=request_id)
+
+
+@pytest.mark.parametrize('calendar_state', ['known_target', 'short_calendar', 'unconfirmed_recommendation'])
+def test_mature_window_pending_review_is_shared_by_history_detail_and_overview(history, monkeypatch, calendar_state):
+    report = history.publish(0)
+    target = history.days[3]
+    history.inputs.trade_date = history.days[1]
+    if calendar_state == 'unconfirmed_recommendation':
+        evening_report_store.atomic_json(history.root / 'calendar' / 'trading_days.json', {'days': history.days[1:]})
+        assert not tracking.refresh_after_publication(history.root, history.days[1])['evaluation_ready']
+    else:
+        if calendar_state == 'short_calendar':
+            history.inputs.calendar = history.days[:2]
+        tracking.refresh_tracking(history.root, history.inputs)
+
+    def window():
+        return tracking.personal_history(history.root)['records'][0]['performance']['3']
+
+    monkeypatch.setattr(tracking, 'cn_now', lambda: datetime.fromisoformat(target + 'T14:59:59+08:00'))
+    if calendar_state == 'unconfirmed_recommendation':
+        assert window()['reason_code'] == 'calendar_unconfirmed'
+    if calendar_state != 'known_target':
+        assert window()['target_date'] is None
+        evening_report_store.atomic_json(history.root / 'calendar' / 'trading_days.json', {'days': history.days})
+    assert window()['status'] == 'not_due' and window()['target_date'] == target
+    monkeypatch.setattr(tracking, 'cn_now', lambda: datetime.fromisoformat(target + 'T15:00:00+08:00'))
+    overdue = window()
+    assert overdue['status'] == 'overdue_pending_review' and overdue['as_of'] == (None if calendar_state == 'unconfirmed_recommendation' else history.days[1])
+    assert tracking.personal_report(history.root, report['date'], report['version'])['records'][0]['performance']['3'] == overdue
+    assert tracking.personal_overview(history.root)['performance']['3'] == {
+        'total': 1, 'evaluated': 0, 'not_due': 0, 'overdue_pending_review': 1, 'unavailable': 0, 'mean_return': None,
+    }
+    history.inputs.trade_date = target
+    history.inputs.calendar = history.days
+    tracking.refresh_tracking(history.root, history.inputs)
+    assert window()['status'] == 'evaluated'
+    assert tracking.personal_overview(history.root)['performance']['3']['mean_return'] == pytest.approx(.03)
+
+
+def test_personal_history_and_report_recheck_archived_references(history):
+    source = history.publish(0)
+    ref = {'as_of': source['trade_date'], 'source_report_id': source['version'], 'version': source['version'],
+           'source_snapshot_id': f'observation/{SYMBOL}/return_20d', 'available_by': source['cutoff'],
+           'reference_status': 'valid'}
+    refs = {'recommendation': [ref], 'pullback': {'references': [ref, dict(ref, retention_until=source['cutoff'])]}}
+    report = history.publish(1, wave={'context_refs': refs})
+    tracking.refresh_tracking(history.root, history.inputs)
+    paths = [lambda: history.store.get(report['date'], view=True), lambda: tracking.personal_history(history.root),
+             lambda: tracking.personal_report(history.root, report['date'], report['version'])]
+    source_path = history.store.root / 'archive' / (source['version'] + '.json.gz')
+    original = source_path.read_bytes()
+    for expected, body in [('valid', original), ('missing', b'damaged archive'), ('valid', original)]:
+        source_path.write_bytes(body)
+        for read in paths:
+            checked = read()['records'][0]['observation']['wave']['context_refs']
+            assert checked['recommendation'][0]['current_reference_status'] == expected
+            assert [r['current_reference_status'] for r in checked['pullback']['references']] == [expected, 'expired']
+        if expected == 'missing':
+            day = history.days[2]
+            cutoff = day + 'T17:00:00+08:00'
+            published = history.store.save(day, {'trade_date': day, 'cutoff': cutoff, 'wave_rule': {'version': 'test'},
+                'provenance': {'calendar': {'days': history.days}}, 'audit': {}, 'records': [],
+                'wave_starts': [{'security_id': SYMBOL, 'start_id': 'start', 'rule_version': 'test',
+                                 'known_at': cutoff, 'evidence_date': source['date']}]}, {})
+            assert published['wave_starts'][0]['context_refs']['evidence'][0]['reference_status'] == 'missing'
+    assert history.store.get(report['date'])['records'][0]['observation']['wave']['context_refs'] == refs
 
 
 def test_episode_continues_through_theme_change_and_closes_after_five_valid_absences(history):
@@ -91,25 +163,6 @@ def test_missing_report_interrupts_absence_count_and_repeated_refresh_is_idempot
     rows = tracking.personal_history(history.root)['records']
     assert len({row['episode_id'] for row in rows}) == 1
     assert rows[0]['ended_at'] is None
-
-
-def test_revision_keeps_episode_and_first_original_anchor_without_overwriting_report(history):
-    original = history.publish(0)
-    tracking.refresh_tracking(history.root, history.inputs)
-    mark(history, original, outcome='profit')
-    branch = RevisionBranch(history.store)
-    revised = branch.append(original['date'], {'trade_date': original['date'], 'records': [
-        {'symbol': SYMBOL, 'name': '观察股', 'selected': True,
-         'observation': {'role': 'true_leader', 'primary_theme': {'name': '修订题材'}}}]}, {'input_id': 'b' * 32})
-    branch.commit()
-    tracking.refresh_tracking(history.root, history.inputs)
-    rows = tracking.personal_history(history.root)['records']
-    assert len(rows) == 2 and len({row['episode_id'] for row in rows}) == 1
-    assert {row['first_reference'] for row in rows} == {original['version'] + ':' + SYMBOL}
-    assert all(row['feedback']['outcome'] == 'profit' for row in rows)
-    assert tracking.personal_report(history.root, revised['date'], revised['version'])['records'][0]['observation']['role'] == 'true_leader'
-    assert history.store.get(original['date']) == original
-    assert tracking.personal_overview(history.root)['episode_count'] == 1
 
 
 def test_cancel_switch_duplicate_retry_and_account_isolation(history):
@@ -263,15 +316,15 @@ def test_derived_history_failure_keeps_publication_in_a_separate_job(history, mo
 def test_unready_market_inputs_do_not_block_feedback_on_published_reports(history, monkeypatch):
     report = history.publish(0)
     monkeypatch.setattr(shared_runtime, 'publish_data_update', lambda *_: None)
-    from app.services import trading_day
-    monkeypatch.setattr(trading_day, 'calendar_status', lambda *_: {'days': history.days})
+    monkeypatch.setattr(tracking, 'calendar_status', lambda *_: {'days': history.days})
     result = tracking.refresh_after_publication(history.root, history.days[-1], request_key='test_unready')
     assert result['evaluation_ready'] is False
     assert tracking.personal_report(history.root, report['date'], report['version'])['ready']
     assert mark(history, report)['starred']
-    assert tracking.refresh_completed(history.root, 'test_unready')
+    assert not tracking.refresh_completed(history.root, 'test_unready')
+    monkeypatch.setattr(tracking, 'cn_now', lambda: datetime.fromisoformat(history.days[-1] + 'T17:00:00+08:00'))
     row = tracking.personal_history(history.root)['records'][0]
-    assert all(item['status'] == 'unavailable' for item in row['performance'].values())
+    assert all(item['status'] == 'overdue_pending_review' for item in row['performance'].values())
 
 
 def test_tracking_notification_failure_retries_after_restart_without_duplicate_records(history, monkeypatch):
@@ -330,7 +383,7 @@ def test_tracking_notification_failure_retries_after_restart_without_duplicate_r
     assert asyncio.run(scheduled_check()) is None
 
 
-def test_derived_request_key_changes_for_revision_with_identical_market_input(history, monkeypatch):
+def test_derived_request_key_is_stable_for_same_report_and_market_input(history, monkeypatch):
     from unittest.mock import AsyncMock
     report = history.publish(0)
     submit = AsyncMock(return_value={'job_id': 'queued'})
@@ -338,12 +391,8 @@ def test_derived_request_key_changes_for_revision_with_identical_market_input(hi
     repo = SimpleNamespace(store=SimpleNamespace(data_dir=history.root))
     asyncio.run(jobs._queue_tracking(repo, report['date']))
     original_key = submit.call_args.kwargs['request_key']
-    branch = RevisionBranch(history.store)
-    revised = branch.append(report['date'], {'trade_date': report['date'], 'records': []}, {'input_id': 'b' * 32})
-    branch.commit()
     asyncio.run(jobs._queue_tracking(repo, report['date']))
-    revised_key = submit.call_args.kwargs['request_key']
-    assert original_key != revised_key and revised['version'] in revised_key
+    assert submit.call_args.kwargs['request_key'] == original_key
 
 
 @pytest.fixture
@@ -354,8 +403,8 @@ def tracking_scheduler(history, monkeypatch):
 
     day = history.days[0]
     now = datetime.fromisoformat(day).replace(hour=16, tzinfo=CN_TZ)
-    history.store.save_readiness(day, {'complete': True, 'input_id': 'b' * 32, 'scope_version': 'test'})
-    report = history.store.save(day, {'records': []}, {'input_id': 'b' * 32})
+    history.store.save_readiness(day, current_receipt(day, now.isoformat(), input_id='b' * 32, scope_version='test'))
+    report = history.store.save(day, {'audit': {}, 'records': []}, {'input_id': 'b' * 32})
     registry = pipeline_jobs.JobStore(store_dir=history.root / 'jobs')
     monkeypatch.setattr(pipeline_jobs, 'job_store', registry)
     monkeypatch.setattr(pipeline, 'job_store', registry)
@@ -389,15 +438,15 @@ def test_tracking_cancellation_blocks_auto_retries_and_survives_restart(tracking
     monkeypatch.setattr(pipeline, 'job_store', restarted)
     assert asyncio.run(jobs.run_scheduled(state.repo)) is None
     # A fresh input and another successful parent must not undo the user's stop.
-    state.store.save_readiness(state.day, {'complete': True, 'input_id': 'c' * 32, 'scope_version': 'test'})
+    state.store.save_readiness(state.day, current_receipt(state.day, state.now.isoformat(), input_id='c' * 32, scope_version='test'))
     asyncio.run(jobs.after_job(state.repo, {'request_key': f'postmarket:{state.day}',
                                            'status': 'succeeded', 'id': 'parent'}))
     state.submit.assert_not_awaited()
     assert state.store.get(state.day) == state.report
 
 
-@pytest.mark.parametrize('mode', ['ordinary_failure', 'next_day', 'manual_resume'])
-def test_tracking_failure_next_day_and_manual_resume_can_retry(tracking_scheduler, monkeypatch, mode):
+@pytest.mark.parametrize('mode', ['ordinary_failure', 'next_day', 'read_final'])
+def test_tracking_retry_respects_cancelled_state_after_reading_final(tracking_scheduler, monkeypatch, mode):
     from app.services import auth as auth_service
 
     state = tracking_scheduler
@@ -408,18 +457,57 @@ def test_tracking_failure_next_day_and_manual_resume_can_retry(tracking_schedule
         pipeline.cancel_job(job_id)
     if mode == 'next_day':
         monkeypatch.setattr(jobs, 'cn_now', lambda: state.now + timedelta(days=1))
-    elif mode == 'manual_resume':
+    elif mode == 'read_final':
         monkeypatch.setattr(auth_service, 'require_current_session', lambda: {'role': 'admin'})
         asyncio.run(jobs.trigger(state.repo, day=date.fromisoformat(state.day)))
         state.submit.reset_mock()
     result = asyncio.run(jobs._queue_tracking(state.repo, state.day))
-    assert result == {'job_id': 'queued'}
-    assert state.submit.call_args.kwargs['request_key'] == state.key
-    if mode == 'manual_resume':
-        # A new cancellation after the explicit resume takes precedence again.
-        monkeypatch.setattr(pipeline_jobs, '_now_iso', lambda: (state.now + timedelta(minutes=1)).isoformat())
-        job_id, _ = state.registry.create(request_key=state.key)
-        pipeline.cancel_job(job_id)
-        state.submit.reset_mock()
-        assert asyncio.run(jobs._queue_tracking(state.repo, state.day)) is None
+    if mode == 'read_final':
+        assert result is None
         state.submit.assert_not_awaited()
+    else:
+        assert result == {'job_id': 'queued'}
+        assert state.submit.call_args.kwargs['request_key'] == state.key
+
+
+def test_observation_path_keeps_signed_extremes_and_separates_missing_middle_row():
+    days = ['2026-11-09', '2026-11-10', '2026-11-11', '2026-11-12']
+    rows = {(SYMBOL, day): {'close': close, 'formal': True}
+            for day, close in zip(days, [100., 108., 95., 102.], strict=True)}
+
+    def evaluate():
+        return tracking.evaluate_performance(SYMBOL, days[0], calendar=days, as_of=days[-1],
+                                             prices=rows, suspensions=set(), data_version={})['3']
+
+    result = evaluate()
+    assert result['return'] == pytest.approx(.02)
+    assert result['path']['max_favorable_return'] == pytest.approx(.08)
+    assert result['path']['max_adverse_return'] == pytest.approx(-.05)
+    del rows[(SYMBOL, days[2])]
+    result = evaluate()
+    assert result['return'] == pytest.approx(.02)
+    assert result['path']['missing_count'] == 1
+    assert result['path']['max_favorable_return'] is None
+    assert result['path']['max_adverse_return'] is None
+
+
+def test_completed_endpoints_retry_only_the_missing_path(history):
+    report = history.publish(0)
+    inputs = history.inputs
+    middle = history.days[2]
+    complete = inputs.prices
+    inputs.prices = complete.filter(pl.col('date') != middle)
+    tracking.refresh_tracking(history.root, inputs)
+    before = tracking.personal_history(history.root)['records'][0]['performance']
+    assert all(item['status'] == 'evaluated' for item in before.values())
+    assert before['3']['path']['missing_count'] == 1
+    inputs.prices = complete.with_columns(pl.when(pl.col('date') == middle).then(9.).otherwise('close').alias('close'))
+    tracking.refresh_tracking(history.root, inputs)
+    after = tracking.personal_report(history.root, report['date'], report['version'])['records'][0]['performance']
+    assert tracking.personal_history(history.root)['records'][0]['performance'] == after
+    assert after['1'] == before['1']
+    for window in ('3', '5'):
+        assert after[window] == {**before[window], 'path': after[window]['path']}
+        assert after[window]['path']['missing_count'] == 0
+        assert after[window]['path']['max_adverse_return'] == pytest.approx(-.10)
+    assert tracking.refresh_tracking(history.root, inputs)['evaluated_recommendations'] == 0

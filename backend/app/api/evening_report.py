@@ -83,7 +83,7 @@ def report(request: Request, date: _date | None = None,
         if not entries:
             return evening_report_jobs.status(request.app.state.repo.store.data_dir)
         date = _date.fromisoformat(entries[0]['date'])
-    result = store.get(date.isoformat(), version, view=True, latest=True)
+    result = store.get(date.isoformat(), version, view=True)
     if result is None:
         if version:
             raise HTTPException(status_code=404, detail='该日期的报告版本不存在')

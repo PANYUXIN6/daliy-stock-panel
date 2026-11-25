@@ -26,6 +26,7 @@ from app.indicators.pipeline import filter_halt_days
 from app.market_time import CN_TZ, cn_now, cn_today
 from app.services import minute_adjust, preferences
 from app.services.daily_coverage import DailyCoverage
+from app.tickflow import daily_revisions
 from app.tickflow.capabilities import Cap, CapabilitySet
 from app.tickflow.client import get_client
 from app.tickflow.rate_limits import chunked, resolve_limit, sleep_between_batches
@@ -70,7 +71,7 @@ def _sdk_call_with_deadline(fn: Callable[[], Any], *, timeout_s: float = _SDK_CA
     return outcome.get("result")
 
 
-def _atomic_write_parquet(df: pl.DataFrame, out) -> None:
+def _atomic_write_parquet(df: pl.DataFrame, out, *, factor_changes=None) -> None:
     """先写临时文件再原子替换, 避免进程中断留下损坏的 parquet。
 
     与 repository._atomic_write_parquet 同语义。adj_factor 的 all.parquet 是全市场
@@ -82,6 +83,12 @@ def _atomic_write_parquet(df: pl.DataFrame, out) -> None:
     """
     tmp = out.with_name(out.name + ".tmp")
     df.write_parquet(tmp)
+    if factor_changes is not None:
+        try:
+            daily_revisions.record_factor_rewrite(out, tmp, factor_changes)
+        except OSError:
+            # The report treats a missing version link as unknown. Keep the primary feed available.
+            logger.warning("无法暂存 %s 的晚报因子订正范围", out, exc_info=True)
     replace_with_retry(tmp, out)
 
 
@@ -678,6 +685,7 @@ def _merge_adj_factor_store(out: Path, new_data: pl.DataFrame, *, only_missing: 
     ).height:
         raise ValueError("除权因子来源返回了无效记录，未写入数据")
     if not out.exists():
+        # No previous file bounds which stocks might first become usable under this source.
         _atomic_write_parquet(new_data.sort(["symbol", "trade_date"]), out)
         return new_data.height, sorted(new_data["symbol"].unique().to_list())
     existing = pl.read_parquet(out)
@@ -687,13 +695,13 @@ def _merge_adj_factor_store(out: Path, new_data: pl.DataFrame, *, only_missing: 
         new_data = new_data.join(valid.select("symbol", "trade_date"), on=["symbol", "trade_date"], how="anti")
         if new_data.is_empty():
             return 0, []
-    before = existing.height
     # ex_factor 变化判定 (明细回填不算): 与存量按 (symbol, trade_date) 对齐,
     # 旧值缺失 (新事件) 或值差超容差即视为变化。
-    diffed = new_data.select(["symbol", "trade_date", "ex_factor"]).join(
+    compared = new_data.select(["symbol", "trade_date", "ex_factor"]).join(
         existing.select(["symbol", "trade_date", "ex_factor"]),
-        on=["symbol", "trade_date"], how="left", suffix="_old",
-    ).filter(
+        on=["symbol", "trade_date"], how="left", suffix="_old", maintain_order="left",
+    )
+    diffed = compared.filter(
         pl.col("ex_factor_old").is_null()
         | (~pl.col("ex_factor_old").is_finite() | ((pl.col("ex_factor") - pl.col("ex_factor_old")).abs() > 1e-9))
     )
@@ -701,8 +709,12 @@ def _merge_adj_factor_store(out: Path, new_data: pl.DataFrame, *, only_missing: 
     merged = pl.concat([existing, new_data], how="diagonal").unique(
         subset=["symbol", "trade_date"], keep="last",
     ).sort(["symbol", "trade_date"])
-    _atomic_write_parquet(merged, out)
-    return merged.height - before, changed_symbols
+    changes = None
+    if (out.parent.name == "adj_factor"
+            and (out.parents[1] / "evening_report" / "price_writes" / "current.json").is_file()):
+        changes = daily_revisions.factor_change_rows(existing, merged, compared)
+    _atomic_write_parquet(merged, out, factor_changes=changes)
+    return merged.height - existing.height, changed_symbols
 
 
 def sync_adj_factor(symbols: list[str], repo: KlineRepository,
@@ -935,7 +947,6 @@ def _normalize_minute(df_in, default_symbol: str | None = None) -> pl.DataFrame:
     # datetime 列:优先用 timestamp(毫秒精度),其次 trade_time
     if "timestamp" in df.columns:
         # TickFlow 毫秒时间戳为 UTC 基准; 契约要求北京墙钟 naive
-        # (与 stock-sdk provider 归一口径一致, 见 CONTRIBUTING §3.3)
         df = df.with_columns(
             pl.from_epoch(pl.col("timestamp").cast(pl.Int64), time_unit="ms")
             .dt.replace_time_zone("UTC")

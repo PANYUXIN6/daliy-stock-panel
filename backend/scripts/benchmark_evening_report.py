@@ -21,7 +21,7 @@ import polars as pl
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.services.evening_report_engine import EveningInputs, build_report
-from app.services.evening_report_store import EveningReportStore, history_view, report_view
+from app.services.evening_report_store import EveningReportStore
 
 calendar = []
 d = date(2025, 1, 1)
@@ -93,33 +93,56 @@ inputs = EveningInputs(
 parser = argparse.ArgumentParser()
 parser.add_argument("--history-days", type=int, choices=range(1, 31), default=1)
 parser.add_argument("--storage", action="store_true", help="Measure real tiered writes in a temporary directory")
+parser.add_argument("--waves", action="store_true", help="Include wave warmup and continuation")
 args = parser.parse_args()
+symbols = metadata['symbol'].to_list()
+first_acceptance = calendar[-args.history_days] + 'T16:00:00+08:00'
+inputs.wave_first_acceptances = dict.fromkeys(symbols, first_acceptance)
+if args.waves:
+    inputs.prices = inputs.prices.with_columns(
+        pl.col("formal").alias("wave_formal"),
+        pl.col("amount").alias("wave_amount"),
+        pl.lit(100_000.).alias("wave_volume"),
+    )
+    inputs.wave_factors = pl.DataFrame(schema={"symbol": pl.String, "trade_date": pl.String, "ex_factor": pl.Float64})
+    inputs.provenance["wave_factor_source"] = ["benchmark"]
 if args.storage:
     from tempfile import TemporaryDirectory
 
     temporary = TemporaryDirectory(prefix="evening-storage-benchmark-")
     store = EveningReportStore(Path(temporary.name))
-legacy_bytes = 0
 history = []
 elapsed = []
 for index in range(120 - args.history_days, 120):
-    current = replace(inputs, trade_date=calendar[index], calendar=calendar[: index + 1])
+    current = replace(inputs, trade_date=calendar[index], calendar=calendar[: index + 1],
+                      cutoff=calendar[index] + "T16:00:00+08:00")
     started = time.perf_counter()
     result = build_report(current, history[-7:])
     elapsed.append(time.perf_counter() - started)
     if args.storage:
         evidence = {'date': current.trade_date, 'complete': True, 'scope_version': result['scope_version'],
+                    'active_symbols': symbols, 'halted_symbols': [], 'halted_evidence': [], 'historical_suspensions': [],
+                    'sector_filter_config': {}, 'wave_first_acceptances': current.wave_first_acceptances,
+                    'wave_price_clocks': {'dates': {}, 'rows': {}, 'pending': {}}, 'wave_st_reentry': {},
+                    'wave_factor_known_at': current.cutoff, 'wave_factor_first_accepted': first_acceptance if args.waves else None,
+                    'wave_factor_facts': {} if args.waves else None,
+                    'classification_comparisons': [
+                        {'source': source, 'comparison': 'first_observation' if not history else 'adjacent_complete_observation',
+                         'observation_id': f'{current.trade_date}/{source}',
+                         'previous_observation_id': f'{calendar[index - 1]}/{source}' if history else None,
+                         'previous_obtained_at': calendar[index - 1] + 'T16:00:00+08:00' if history else None,
+                         'added': [], 'removed': [], 'first_observed_symbols': [] if history else symbols}
+                        for source in ('concept', 'industry')],
                     'metadata': metadata.to_dicts(), 'calendar': {'days': current.calendar},
                     'market': current.market, 'versions': {'stock_generation': 'benchmark', 'files': []},
                     'cutoff': current.trade_date + 'T16:00:00+08:00',
-                    'classifications': [{'source': source, 'id': source, 'symbols': metadata['symbol'].to_list(),
+                    'classifications': [{'source': source, 'id': f'{current.trade_date}/{source}', 'complete': True,
+                                         'obtained_at': current.cutoff, 'symbols': symbols,
                                          'memberships': members.filter(pl.col('source') == source).to_dicts()}
                                         for source in ('concept', 'industry')]}
         store.save_readiness(current.trade_date, evidence)
         reference = {'input_id': evidence['input_id'], 'versions': evidence['versions']}
         result['input_reference'] = reference
-        legacy_bytes += sum(len(json.dumps(value, ensure_ascii=False, default=str).encode())
-                            for value in (result, report_view(result), history_view(result), evidence))
         store.save(current.trade_date, result, reference)
         store.prune(date.fromisoformat(current.trade_date))
     history.append(
@@ -148,7 +171,6 @@ if args.storage:
                          else 'candidate_boundary' if '.candidates.' in path.name else 'permanent')
             sizes[group] += path.stat().st_size
     storage_result = {'bytes_by_tier': dict(sizes), 'total_bytes': sum(sizes.values()),
-                      'legacy_layout_equivalent_bytes': legacy_bytes,
                       'retained_candidate_count': len(store.get(current.trade_date)['records'])}
     temporary.cleanup()
 print(

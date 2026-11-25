@@ -4,9 +4,19 @@
  * 实时数据走 SSE invalidation，无需前端轮询。
  * 只有管线进度等非 SSE 数据才用 refetchInterval。
  */
-import { useQuery } from '@tanstack/react-query'
+import { useQuery, type QueryClient, type QueryKey } from '@tanstack/react-query'
 import { api } from './api'
 import { QK } from './queryKeys'
+
+// The server projects review maturity at read time, including when a fresh cache crosses market close.
+export const eveningPerformanceQueryOptions = { refetchOnMount: 'always' } as const
+
+export async function refreshEveningPerformance(client: QueryClient, queryKey: QueryKey) {
+  const filters = { queryKey, exact: true, type: 'active' } as const
+  // Refetch alone reuses an in-flight initial read when there is no cached data.
+  await client.cancelQueries(filters)
+  await client.refetchQueries(filters)
+}
 
 // ===== 全局共享 =====
 

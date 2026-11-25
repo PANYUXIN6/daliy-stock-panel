@@ -1,16 +1,8 @@
 import type { EveningDipStatus, EveningFeedback, EveningObservation } from '@/lib/api'
 
-export const roleLabels: Record<string, string> = { true_leader: '真龙', fallback_leader: '兜底龙', emotion: '情绪股', other: '其他观察' }
+export const roleLabels: Record<string, string> = { historical_leader: '历史龙头', true_leader: '真龙', fallback_leader: '兜底龙', emotion: '情绪股', other: '其他观察' }
 export const dipLabels: Record<EveningDipStatus, string> = { full: '完全符合', partial: '部分符合', none: '无低吸点' }
-export function dipCategory(dip: EveningObservation['dip']): EveningDipStatus {
-  if (dip.status === 'full' || dip.status === 'partial' || dip.status === 'none') return dip.status
-  if (['confirmed', 'cautious', 'cautious_confirmed'].includes(dip.status)) return 'full'
-  // Old archives retain their facts; missing evidence alone is not a partial match.
-  if (dip.status === 'pending' && [dip.e1, dip.e2].some(path => path.value === true
-    || Object.values((path.inputs ?? {}) as Record<string, unknown>).some(value => value === true))) return 'partial'
-  return 'none'
-}
-export function dipLabel(dip: EveningObservation['dip']): string { return dipLabels[dipCategory(dip)] }
+export function dipLabel(dip: EveningObservation['dip']): string { return dipLabels[dip.status] }
 export const boardLabels: Record<string, string> = { main: '沪深主板', chinext: '创业板' }
 export const eveningControl = 'min-h-10 rounded-md border border-border bg-surface px-3 py-2 text-xs text-foreground outline-none focus-visible:ring-2 focus-visible:ring-accent disabled:opacity-50'
 export interface EveningFilterState {
@@ -18,15 +10,15 @@ export interface EveningFilterState {
 }
 export const emptyEveningFilters: EveningFilterState = { search: '', theme: '', role: '', roleStatus: '', board: '', dip: '', star: '', outcome: '' }
 
-export function matchesEveningFilters(row: { symbol: string; name: string; observation?: EveningObservation | null }, filters: EveningFilterState, feedback?: EveningFeedback, legacyTheme?: string): boolean {
+export function matchesEveningFilters(row: { symbol: string; name: string; observation?: EveningObservation | null }, filters: EveningFilterState, feedback?: EveningFeedback): boolean {
   const observation = row.observation
   const search = filters.search.trim().toLocaleLowerCase()
   return (!search || `${row.symbol} ${row.name}`.toLocaleLowerCase().includes(search))
-    && (!filters.theme || (observation?.primary_theme?.id ?? legacyTheme) === filters.theme)
+    && (!filters.theme || observation?.primary_theme?.id === filters.theme)
     && (!filters.role || observation?.role === filters.role)
     && (!filters.roleStatus || observation?.role_status === filters.roleStatus)
     && (!filters.board || observation?.board === filters.board)
-    && (!filters.dip || (!!observation && dipCategory(observation.dip) === filters.dip))
+    && (!filters.dip || (observation?.dip.status === filters.dip))
     && (!filters.star || (feedback !== undefined && feedback.starred === (filters.star === 'starred')))
     && (!filters.outcome || (feedback !== undefined && feedback.outcome === (filters.outcome === 'unmarked' ? null : filters.outcome)))
 }

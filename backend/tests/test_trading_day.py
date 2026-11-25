@@ -105,3 +105,12 @@ def test_calendar_disjoint_refresh_does_not_invent_unknown_coverage(calendar, mo
     trading_day.sync_calendar(root)
     assert trading_day.is_trading_day(datetime(2027, 10, 9, 10, tzinfo=CN_TZ), data_dir=root) is None
     assert trading_day.is_trading_day(datetime(2028, 10, 9, 10, tzinfo=CN_TZ), data_dir=root) is True
+
+
+def test_adjacent_coverage_continues_the_old_trading_calendar(calendar, monkeypatch):
+    root, provider = calendar
+    monkeypatch.setattr(trading_day, 'cn_now', lambda: datetime(2026, 10, 11, 8, tzinfo=CN_TZ))
+    trading_day.sync_calendar(root)
+    provider.trading_days.return_value = {date(2026, 10, 12)}
+    trading_day.sync_calendar(root)
+    assert trading_day.calendar_status(root)['days'] == ['2026-09-30', '2026-10-09', '2026-10-12']

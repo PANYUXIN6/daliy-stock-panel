@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock
 
 import polars as pl
 import pytest
+from evening_receipt_fixture import current_receipt
 from test_evening_report_engine import inputs_at
 from test_evening_report_observation import observation_inputs
 
@@ -26,7 +27,6 @@ from app.services.evening_report_observation import allocate
 from app.services.evening_report_rules import RULE_VERSION
 from app.services.evening_report_store import (
     EveningReportStore,
-    RevisionBranch,
     atomic_json,
     history_view,
 )
@@ -40,14 +40,17 @@ def rejected_inputs():
     return inputs
 
 
-def test_three_tiers_keep_comparable_snapshots_and_audit_denominators(tmp_path, private_owner):
+@pytest.mark.parametrize('selection_policy_version', ['theme-observation-v1', 'another-selection-policy'])
+def test_three_tiers_keep_comparable_snapshots_and_audit_denominators(tmp_path, private_owner, selection_policy_version):
     inputs = rejected_inputs()
     payload = build_report(inputs)
+    payload['selection_policy_version'] = selection_policy_version
     original = copy.deepcopy(payload)
     store = EveningReportStore(tmp_path)
     saved = store.save(inputs.trade_date, payload, {'input_id': 'a' * 32})
     assert payload == original  # Projection cannot mutate the live continuation state.
     assert saved['storage_version'] == SCHEMA_VERSION
+    assert saved['selection_policy_version'] == selection_policy_version
     assert saved == store.get(inputs.trade_date)
     expected = {r['symbol']: r for r in payload['calculations']
                 if r['selected'] or r['observation']['decision']['comparison_eligible']}
@@ -161,6 +164,12 @@ def test_rolling_state_keeps_next_day_decisions_identical(tmp_path):
     assert actual['selected'] == expected['selected']
     assert actual['state'] == expected['state']
     assert actual['statistics'] == expected['statistics']
+    older = actual_history[-3]['trade_date']
+    version = store.original_metadata(older)['version']
+    (store.root / 'archive' / (version + '.state.json.gz')).unlink()
+    partial = store.history(inputs.trade_date, RULE_VERSION, allow_partial=True)
+    assert [r['trade_date'] for r in partial] == [r['trade_date'] for r in actual_history if r['trade_date'] != older]
+    assert build_report(inputs, partial)['selected'] == actual['selected']
     with pytest.raises(DailyCoverageError, match='保留期'):
         store.history(history[2]['trade_date'], RULE_VERSION)
 
@@ -171,9 +180,10 @@ def test_temporary_evidence_and_explicit_diagnostics_expire(tmp_path, monkeypatc
     now = datetime.combine(old, datetime.min.time(), tzinfo=CN_TZ)
     monkeypatch.setattr(storage, 'cn_now', lambda: now)
     store = EveningReportStore(tmp_path)
-    first = {'date': old.isoformat(), 'complete': True, 'input_id': 'a' * 32}
-    second = {'date': today.isoformat(), 'complete': True, 'input_id': 'b' * 32}
+    first = current_receipt(old.isoformat(), now.isoformat(), input_id='a' * 32)
+    second = current_receipt(today.isoformat(), datetime.combine(today, now.timetz()).isoformat(), input_id='b' * 32)
     store.save_readiness(old.isoformat(), first)
+    store.save_readiness(old.isoformat(), {'date': old.isoformat(), 'complete': False})
     path = store.root / 'inputs' / ('a' * 32 + '.json.gz')
     os.utime(path, (now.timestamp(), now.timestamp()))
     store.save_readiness(today.isoformat(), second)
@@ -184,81 +194,171 @@ def test_temporary_evidence_and_explicit_diagnostics_expire(tmp_path, monkeypatc
     unrelated.write_text('personal asset')
     store.prune(today)
     assert store.input_evidence(first['input_id']) is None
+    assert store.readiness_status(old.isoformat()) is None
     assert store.input_evidence(second['input_id']) == second
+    assert store.acceptance_references() == {str(today): [(second['cutoff'], second['input_id'])]}
     assert not list((store.root / 'diagnostics').glob('*.gz'))
     assert unrelated.read_text() == 'personal asset'
 
 
-def test_retention_preserves_legacy_inputs_and_shared_revision_dependencies(tmp_path):
-    today = date(2026, 11, 13)
-    old = today - timedelta(days=35)
+def test_incomplete_reference_cannot_replace_accepted_input(tmp_path):
     store = EveningReportStore(tmp_path)
-    legacy = {'date': old.isoformat(), 'complete': True, 'input_id': 'a' * 32}
-    legacy_path = store.root / 'inputs' / (legacy['input_id'] + '.json')
-    atomic_json(legacy_path, legacy)
-    atomic_json(store.root / 'ready' / f'{old}.json',
-                {'date': str(old), 'complete': True, 'input_id': legacy['input_id']})
-    original = store.save(str(old), {'rule_version': RULE_VERSION}, {'input_id': legacy['input_id']})
-
-    # A full-format revision may share an input stored by the new writer.
-    shared = {'date': str(old), 'complete': True, 'input_id': 'b' * 32}
-    atomic_json(store.root / 'inputs' / (shared['input_id'] + '.json.gz'), shared)
-    branch = RevisionBranch(store)
-    revision = branch.append(str(old), {'rule_version': RULE_VERSION}, {'input_id': shared['input_id']})
-    branch.commit()
-    expired_day = old + timedelta(days=1)
-    expired = {'date': str(expired_day), 'complete': True, 'input_id': 'c' * 32}
-    store.save_readiness(str(expired_day), expired)
-    # Freeze mtimes so both old formats and the expired new input exceed the TTL.
-    timestamp = datetime.combine(old, datetime.min.time(), tzinfo=CN_TZ).timestamp()
-    for path in (store.root / 'inputs').iterdir():
-        os.utime(path, (timestamp, timestamp))
-    interrupted_legacy = store.root / 'revisions' / ('f' * 32) / f'{old}.json'
-    atomic_json(interrupted_legacy, original)
-    os.utime(interrupted_legacy.parent, (timestamp, timestamp))
-    latest = {'date': str(today), 'complete': True, 'input_id': 'd' * 32}
-    store.save_readiness(str(today), latest)
-
-    store.prune(today)
-    assert store.input_evidence(legacy['input_id']) == legacy
-    assert store.readiness(str(old)) == legacy
-    assert store.input_evidence(shared['input_id']) == shared
-    assert store.get(str(old)) == original
-    assert store.get(str(old), revision['version']) == revision
-    assert storage.read_json(interrupted_legacy) == original
-    assert store.input_evidence(expired['input_id']) is None
-    assert store.readiness_status(str(expired_day)) is None
-    assert store.input_evidence(latest['input_id']) == latest
+    day = '2026-11-04'
+    receipt = current_receipt(day, day + 'T17:00:00+08:00')
+    store.save_readiness(day, receipt)
+    for fields in ({'date': '2026-11-05'}, {'cutoff': None}):
+        with pytest.raises(ValueError, match='交易日和有效截止时间'):
+            store.save_readiness(day, {**receipt, **fields})
+    assert store.readiness(day) == receipt
+    assert store.acceptance_references() == {day: [(receipt['cutoff'], receipt['input_id'])]}
 
 
-@pytest.mark.parametrize('legacy_is_revision', [False, True])
-def test_retention_only_expires_audits_owned_by_new_format(tmp_path, private_owner, legacy_is_revision):
-    inputs = rejected_inputs()
+def test_acceptance_reader_rejects_malformed_nested_proofs(tmp_path):
     store = EveningReportStore(tmp_path)
-    modern_payload = build_report(inputs)
-    # Exercise the existing full-archive writer and unversioned metadata.
-    legacy_payload = {**modern_payload, 'selection_policy_version': 'observation-v3'}
-    original = store.save(inputs.trade_date, modern_payload if legacy_is_revision else legacy_payload,
-                          {'input_id': 'a' * 32})
-    branch = RevisionBranch(store)
-    revision = branch.append(inputs.trade_date, legacy_payload if legacy_is_revision else modern_payload,
-                              {'input_id': 'b' * 32})
-    branch.commit()
-    legacy, modern = (revision, original) if legacy_is_revision else (original, revision)
-    tracking.refresh_tracking(tmp_path, inputs)
-    # Before tiered storage, audit-only securities also had price evaluations.
-    with tracking._database(tracking._shared_path(tmp_path), write=True) as db:
-        db.execute('INSERT INTO outcome_evaluations VALUES(?,?,?)',
-                   (inputs.trade_date, '000003.SZ', json.dumps({'1': {'status': 'evaluated', 'return': .1}})))
-    legacy_before = tracking.audit_history(tmp_path, legacy['version'])
-    assert len(legacy_before['records']) == 20 and legacy_before['analyses']
-    today = date.fromisoformat(inputs.trade_date) + timedelta(days=AUDIT_RETENTION_DAYS + 1)
-    store.prune(today)
-    assert tracking.prune_tracking(tmp_path, today)['removed_audit_rows'] == 1
-    assert tracking.audit_history(tmp_path, legacy['version']) == legacy_before
-    modern_after = tracking.audit_history(tmp_path, modern['version'])
-    assert len(modern_after['records']) == 19
-    assert modern_after['analyses'] == []
+    day, symbol = '2026-11-04', '000001.SZ'
+    at = day + 'T17:00:00+08:00'
+    receipt = current_receipt(day, at, active_symbols=[symbol], versions={'files': [[f'kline_daily/date={day}/part.parquet', 100, 1]]})
+    store.save_readiness(day, receipt)
+    assert store.readiness(day) == receipt
+    path = store.root / 'inputs' / f"{receipt['input_id']}.json.gz"
+    original = storage.read_json(path)
+    damage = {
+        'active_symbols': [[symbol]], 'halted_symbols': None, 'metadata': [{'is_st': False}],
+        'historical_suspensions': [{'date': day}], 'halted_evidence': [{'date': day, 'symbol': [], 'confirmed': True}],
+        'versions': {'files': []}, 'calendar': {'days': [None]}, 'wave_price_clocks': {'dates': {}, 'rows': {}, 'pending': {day: {symbol: []}}},
+        'wave_first_acceptances': {}, 'wave_price_changes': {symbol: {day: {'volume': 60., 'known_at': []}}},
+        'wave_factor_facts': {symbol: {day: [0.0, at]}}, 'wave_st_reentry': {symbol: []},
+        'classifications': [{'source': 'industry', 'id': 'test', 'memberships': [{'symbol': symbol}]}],
+        'classification_comparisons': [{'source': 'industry', 'comparison': 'first_observation', 'added': [[symbol]]}],
+        'previous_accepted_input_id': ['wrong-id'],
+    }
+    for field in ('wave_first_acceptances', 'wave_price_clocks', 'wave_st_reentry', 'wave_factor_facts',
+                  'classification_comparisons'):
+        atomic_json(path, {k: v for k, v in original.items() if k != field})
+        assert store.readiness(day) is None, field
+        assert store.historical_reference(day) == (receipt['input_id'], at), field
+    atomic_json(path, {**original, 'wave_price_clocks': {**original['wave_price_clocks'], 'dates': {}}})
+    assert store.readiness(day) is None
+    for field, invalid in damage.items():
+        atomic_json(path, {**original, field: invalid})
+        assert store.readiness(day) is None, field
+        assert store.historical_reference(day) == (receipt['input_id'], at), field
+    # A successfully promoted file still proves its cutoff when its body and both pointers are unavailable.
+    (store.root / 'ready' / f'{day}.json').unlink()
+    (store.root / 'acceptances' / f'{day}.json').unlink()
+    assert store.historical_reference(day, store.acceptance_references()) == (receipt['input_id'], at)
+    assert store.input_evidence(receipt['input_id']) is None
+    for wrong_day in ([], '2026-11-05'):
+        atomic_json(path, {**original, '_acceptance_index_day': wrong_day})
+        assert store.input_evidence(receipt['input_id']) is None
+        assert store.acceptance_references() == {}
+    atomic_json(path, original)
+    assert store.input_evidence(receipt['input_id']) == receipt
+
+
+def test_broken_history_entries_preserve_recognizable_acceptance_references(tmp_path):
+    store = EveningReportStore(tmp_path)
+    day = '2026-11-04'
+    at = f'{day}T17:00:00+08:00'
+    receipt = current_receipt(day, at)
+    store.save_readiness(day, receipt)
+    input_id = receipt['input_id']
+    manifest = store.root / 'acceptances' / f'{day}.json'
+    manifest.write_text('{"truncated":')
+    (manifest.parent / '2016-01-04.json').write_text('[1]')
+    # A promoted receipt survives a damaged index.
+    unrelated = store.root / 'inputs' / ('b' * 32 + '.json.gz')
+    unrelated.write_bytes(gzip.compress(b'[]'))
+    refs = store.acceptance_references()
+    assert refs[day] == [(at, input_id)]
+    assert store.historical_reference(day, refs) == (input_id, at)
+    original = store.root / 'inputs' / f'{input_id}.json.gz'
+    held = original.read_bytes()
+    original.write_bytes(held[:-5])
+    atomic_json(manifest, {at: input_id, 'invalid entry': []})
+    assert store.acceptance_references()[day] == [(at, input_id)]
+    assert store.readiness(day) is None
+    original.write_bytes(held)
+    assert store.readiness(day) == receipt
+
+
+def test_same_cutoff_uses_the_committed_identity_after_index_loss(tmp_path):
+    store = EveningReportStore(tmp_path)
+    day, at = '2026-10-28', '2026-10-28T17:00:00+08:00'
+    old, latest = 'a' * 32, 'b' * 32
+    for ref in (old, latest):
+        store.save_readiness(day, current_receipt(day, at, input_id=ref))
+    (store.root / 'acceptances' / f'{day}.json').unlink()
+    assert store.acceptance_references()[day] == [(at, latest)]
+
+
+def test_wrong_index_cutoff_cannot_replace_the_promoted_cutoff(tmp_path):
+    store = EveningReportStore(tmp_path)
+    day = '2026-11-04'
+    at16, at17 = [f'{day}T{hour}:00:00+08:00' for hour in (16, 17)]
+    receipt = current_receipt(day, at16)
+    store.save_readiness(day, receipt)
+    ref = receipt['input_id']
+    atomic_json(store.root / 'acceptances' / f'{day}.json', {at17: ref})
+    refs = store.acceptance_references()
+    assert refs[day] == [(at16, ref)]
+    assert store.historical_reference(day, refs) == (ref, at16)
+
+
+def test_committed_acceptance_is_readable_after_interrupted_promotion(tmp_path, monkeypatch):
+    store = EveningReportStore(tmp_path)
+    day = '2026-11-04'
+    at = f'{day}T17:00:00+08:00'
+    receipt = current_receipt(day, at)
+    replace = storage.os.replace
+    def fail_promotion(src, target):
+        if src.parent.name == 'pending' and target.parent.name == 'inputs':
+            raise OSError('interrupted promotion')
+        return replace(src, target)
+    monkeypatch.setattr(storage.os, 'replace', fail_promotion)
+    store.save_readiness(day, receipt)
+    recovered = EveningReportStore(tmp_path)
+    assert recovered.readiness(day) == receipt
+    (store.root / 'ready' / f'{day}.json').unlink()
+    assert recovered.acceptance_references()[day] == [(at, receipt['input_id'])]
+    recovered.prune(date.fromisoformat(day) + timedelta(days=90))
+    assert recovered.input_evidence(receipt['input_id']) == receipt
+
+
+@pytest.mark.parametrize('latest_location', ['promoted', 'pending', 'damaged', 'missing', 'pointer_only'])
+def test_prune_preserves_latest_complete_cutoff_and_missing_reference_after_a_long_outage(tmp_path, latest_location):
+    store = EveningReportStore(tmp_path)
+    day = '2026-10-28'
+    resumed = date(2026, 12, 10)
+    by_hour = {}
+    for hour in (15, 16, 17):
+        receipt = current_receipt(day, f'{day}T{hour}:00:00+08:00')
+        store.save_readiness(day, receipt)
+        path = store.root / 'inputs' / f"{receipt['input_id']}.json.gz"
+        stamp = datetime.fromisoformat(receipt['cutoff']).timestamp()
+        os.utime(path, (stamp, stamp))
+        by_hour[hour] = (receipt, path)
+    first, recovered = by_hour[15]
+    older, _ = by_hour[16]
+    latest, last_path = by_hour[17]
+    # The restored copy is still within its file TTL, but cannot take the latest input exemption.
+    stamp = datetime.combine(resumed, datetime.min.time(), tzinfo=CN_TZ).timestamp()
+    os.utime(recovered, (stamp, stamp))
+    if latest_location == 'pending':
+        last_path.rename(last_path.parent / 'pending' / last_path.name)
+    elif latest_location == 'damaged':
+        last_path.write_bytes(b'truncated')
+    elif latest_location in ('missing', 'pointer_only'):
+        last_path.unlink()
+        if latest_location == 'pointer_only':
+            (store.root / 'acceptances' / f'{day}.json').unlink()
+
+    store.prune(resumed)
+    complete = latest_location in ('promoted', 'pending')
+    assert store.input_evidence(first['input_id']) == first
+    assert store.input_evidence(older['input_id']) == (None if complete else older)
+    assert store.input_evidence(latest['input_id']) == (latest if complete else None)
+    assert store.historical_reference(day) == (latest['input_id'], latest['cutoff'])
 
 
 def test_retention_refuses_a_symlink_outside_the_module(tmp_path):

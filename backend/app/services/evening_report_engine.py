@@ -13,6 +13,7 @@ from itertools import pairwise
 
 import polars as pl
 
+from app.services.evening_report_archive import SCHEMA_VERSION as STORAGE_VERSION
 from app.services.evening_report_rules import (
     PURPOSES,
     RULE_VERSION,
@@ -53,6 +54,19 @@ class EveningInputs:
     market: dict = field(default_factory=dict)
     provenance: dict = field(default_factory=dict)
     abnormal_benchmarks: pl.DataFrame = field(default_factory=pl.DataFrame)
+    wave_factors: pl.DataFrame | None = None
+    wave_factor_history: list[dict] = field(default_factory=list)
+    wave_factor_resumptions: dict[str, str] = field(default_factory=dict)
+    # Last factorless acceptance -> exclusive lower bound of the witnessed interruption.
+    wave_first_acceptances: dict[str, str] = field(default_factory=dict)
+    wave_st_reentry: dict[str, str | None] = field(default_factory=dict)
+    wave_price_revisions: dict[str, list[tuple[str, dict]]] = field(default_factory=dict)
+    wave_price_bootstrap: dict[str, str | dict[str, str]] = field(default_factory=dict)
+    wave_next_stock_acceptances: dict[str, str] = field(default_factory=dict)
+    wave_acceptance_gaps: list[tuple[str, str]] = field(default_factory=list)
+    wave_unverified_receipts: dict[str, tuple[str, str, str | dict[str, str | list[str]]]] = field(default_factory=dict)
+    wave_comparable_prefixes: set[str] = field(default_factory=set)
+    study_price_receipt: dict | None = field(default=None, repr=False)
 
 
 def _frame(frame: pl.DataFrame, defaults: dict) -> pl.DataFrame:
@@ -169,7 +183,7 @@ def _prepare(
     amount = pl.col("amount")
     boards = pl.col("consecutive_limit_ups")
     aggs = prices.group_by("symbol").agg(
-        pl.col("formal").eq(True).fill_null(False).all().alias("formal_all"),
+        pl.col("formal").tail(60).eq(True).fill_null(False).all().alias("warmup_formal"),
         (pl.col("formal").eq(True) & valid_close).sum().alias("warmup_count"),
         (
             (pl.col("date").filter(recent).len() == 21)
@@ -207,7 +221,7 @@ def _prepare(
         by_date = {r["date"]: r for r in agg.get("window", [])}
         window = [by_date.get(d, {}) for d in dates]
         warmup = agg.get("warmup_count", 0)
-        formal = True if agg.get("formal_all") is True else None
+        formal = True if agg.get("warmup_formal") is True else None
         near = agg.get("near") is True
         continuous = False if meta.get("suspension_window") is True else True if near else None
         pre = judgement(
@@ -404,6 +418,13 @@ def _build_sectors(
     members = inputs.memberships.unique(subset=["source", "sector_id", "symbol"]).sort(
         ["source", "sector_id", "symbol"]
     )
+    changes = {change["classification_type"]: change for change in inputs.provenance.get("membership_changes", [])
+               if change.get("classification_type")}
+    by_sector = defaultdict(list)
+    for source, change in changes.items():
+        for direction in ("added", "removed"):
+            for symbol, sector_id in change[direction]:
+                by_sector[source, sector_id, direction].append(symbol)
     sectors, scores = [], {}
     for (source, sector_id), group in members.partition_by(
         ["source", "sector_id"], as_dict=True
@@ -463,19 +484,17 @@ def _build_sectors(
             if coverage["computable"]
             else ["合格成员不足6只" if len(eligible) < 6 else "同组或市场基准数据缺失"],
         }
-        before = previous.get("sectors", {}).get(sid)
+        change = changes.get(source, {})
+        added = by_sector.get((source, sector_id, "added"), [])
+        removed = by_sector.get((source, sector_id, "removed"), [])
+        adjacent = change.get("comparison") == "adjacent_complete_observation"
         sector["membership_change"] = {
-            "added": sorted(set(classified) - set(before["classification_members"]))
-            if before
-            else [],
-            "removed": sorted(set(before["classification_members"]) - set(classified))
-            if before
-            else [],
-            "status": "observed_change" if before else "first_observed",
+            "added": added, "removed": removed,
+            "status": "observed_change" if adjacent else "first_observed",
             "note": "比较口径发生变化，排名变化原因尚未分离"
-            if before and set(before["members"]) != set(eligible)
+            if added or removed
             else "首次观测、此前归属未知"
-            if not before
+            if not adjacent
             else "成员口径未变化",
         }
         up_members = []
@@ -494,7 +513,7 @@ def _build_sectors(
         consec = [profiles[s]["features"].get("consecutive_limit_ups") for s in up_members]
         ecology = {
             "limit_up_count": len(up_members),
-            "max_boards": max(consec) if consec and all(finite(x) for x in consec) else 0,
+            "max_boards": max(consec, default=0) if not unknown_up_count and all(finite(x) for x in consec) else None,
             "ge2_count": sum(x >= 2 for x in consec if finite(x)),
             "rungs_filled": len({x for x in consec if finite(x) and x >= 2}),
         }
@@ -530,9 +549,9 @@ def _build_sectors(
         for p in paths:
             high = p.get("high_60d")
             proximity = p["close"] / high if finite(high, positive=True) else None
-            p["L"] = weighted(
-                [p["_p20"], p["_p5"], normalized(proximity, 0.85, 1)], [0.5, 0.3, 0.2]
-            )
+            p["lead_proximity"] = proximity
+            p["lead_proximity_score"] = normalized(proximity, 0.85, 1)
+            p["L"] = weighted([p["_p20"], p["_p5"], p["lead_proximity_score"]], [0.5, 0.3, 0.2])
             p["H_b"] = weighted([p.get("S"), p.get("I"), p["L"]], [0.25, 0.30, 0.25])
             p["H_t"] = weighted([p.get("S"), p["L"], p["V"]], [0.35, 0.30, 0.10])
             p["H_e"] = weighted([p.get("J"), p.get("A"), p["L"]], [0.35, 0.25, 0.20])
@@ -607,6 +626,10 @@ def _build_sectors(
                 for k in (
                     "X20",
                     "X5",
+                    "_p20",
+                    "_p5",
+                    "lead_proximity",
+                    "lead_proximity_score",
                     "L",
                     "V",
                     "H_b",
@@ -729,7 +752,10 @@ def _entry(p: dict, f: dict, kind: str, *, maintain=False) -> dict:
 
 
 def build_report(
-    inputs: EveningInputs, history: list[dict] | None = None, cancel_check: Callable | None = None
+    inputs: EveningInputs, history: list[dict] | None = None, cancel_check: Callable | None = None, *,
+    published_start: Callable[[tuple[str, str, str], str], dict | None] | None = None,
+    published_close: Callable[[str, str], dict | None] | None = None,
+    published_structure_event: Callable[[dict], dict | None] | None = None,
 ) -> dict:
     """Build a JSON-compatible report and forward state; history contains original prior releases only."""
     cancel = cancel_check or (lambda: None)
@@ -1171,8 +1197,20 @@ def build_report(
                 }
             )
     from app.services.evening_report_observation import apply_observation
+    from app.services.evening_report_wave import PARAMETERS as WAVE_PARAMETERS
+    from app.services.evening_report_wave import VERSION as WAVE_VERSION
+    from app.services.evening_report_wave import build_waves
 
-    observation = apply_observation(inputs, records, sectors, previous, calendar, cancel)
+    latest_state = max((r for r in (history or []) if r["trade_date"] < inputs.trade_date),
+                       key=lambda r: r["trade_date"], default={}).get("state", {})
+    wave_state, waves, wave_events, starts, window_closes = build_waves(
+        inputs, records, latest_state.get("wave", {}), calendar, cancel,
+        published_start=published_start, published_close=published_close, published_structure_event=published_structure_event)
+    state["wave"] = wave_state
+    receipt_gaps = inputs.wave_acceptance_gaps
+    if inputs.wave_factors is not None:
+        receipt_gaps = wave_state.pop("reported_acceptance_gaps", receipt_gaps)
+    observation = apply_observation(inputs, records, sectors, previous, calendar, cancel, waves, starts)
     selected = observation["selected"]
     state["observation_roles"] = observation["role_state"]
     # The old purpose/position judgement is explanatory evidence. A complete new
@@ -1351,6 +1389,13 @@ def build_report(
         "cutoff": inputs.cutoff,
         "rule_version": RULE_VERSION,
         "selection_policy_version": SELECTION_POLICY_VERSION,
+        "storage_version": STORAGE_VERSION,
+        "wave_rule": {"version": WAVE_VERSION, "parameters": WAVE_PARAMETERS,
+                      **({"acceptance_gaps": receipt_gaps} if receipt_gaps else {})},
+        "dip_rule_version": "dip-rule-v2",
+        "wave_events": wave_events,
+        "wave_starts": starts,
+        "wave_window_closes": window_closes,
         "scope_version": scope_version,
         "disclaimer": DISCLAIMER,
         "summary": f"{len(observation['themes'])}个重点题材，今日入选观察{len(selected)}只。"
@@ -1370,6 +1415,8 @@ def build_report(
             "观察规则为初值，识别与跟踪效果仍需积累记录；当前成员同组比较用于观察相对强弱",
             "停牌中断频率及持续时间尚未实测；持续积累逐日证据",
         ]
+        + (["波次验收记录存在缺口。无法核验首次获知时点的历史事件只记录最迟已知时间，启动研究只收录已核验样本。"]
+           if receipt_gaps else [])
         + (
             [inputs.provenance["sector_filter"]["limitation"]]
             if inputs.provenance.get("sector_filter", {}).get("limitation")

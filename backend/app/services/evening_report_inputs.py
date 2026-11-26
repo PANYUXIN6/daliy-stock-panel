@@ -1,194 +1,82 @@
-"""Accepted postmarket evidence and strictly local, formal evening-report inputs.
-
-File references detect a raw-only failed rewrite that does not advance enriched
-publication generation. They never establish formalness or classification coverage.
-"""
+"""盘后验收一次，晚报读取当日正式行情与共享指标。"""
 from __future__ import annotations
 
+from bisect import bisect_left
 from datetime import date
 from pathlib import Path
+from types import SimpleNamespace
 
 import polars as pl
 
 from app.enriched_generation import EnrichedGenerationUnavailableError, get_enriched_generation
+from app.indicators.pipeline import _apply_adj_factor, validated_factor_events
 from app.market_time import cn_now
-from app.parquet import scan_enriched_parquet
+from app.parquet import DAILY_STORAGE_SCHEMA, scan_daily_parquet, scan_enriched_parquet
 from app.polars_guard import guarded_collect
 from app.services.daily_coverage import DailyCoverageError
 from app.services.evening_report_store import EveningReportStore
+from app.services.evening_report_wave import WINDOW
+from app.services.postmarket import read_suspensions
 from app.services.trading_day import calendar_status
 from app.tickflow.sector_review_reader import SectorReviewReader
 
 
-def input_versions(data_dir: Path, day: date) -> dict:
-    reader = SectorReviewReader(data_dir)
-    paths = []
-    for table in ('kline_daily', 'kline_daily_enriched', 'kline_index_daily'):
-        paths.extend(reader.files(table, end=day))
-    factor_path = data_dir / 'adj_factor' / 'all.parquet'
-    if factor_path.exists():
-        paths.append(factor_path)
-    references = []
-    for path in sorted(paths):
-        try:
-            stat = path.stat()
-        except FileNotFoundError as exc:
-            raise DailyCoverageError('晚报输入文件已变化，请重新等待盘后验收') from exc
-        references.append([str(path.relative_to(data_dir)), stat.st_size, stat.st_mtime_ns])
-    # The benchmark consumes raw index daily bars, not index enriched data.
-    # Index writes have no enriched publication marker; their actual input
-    # partitions are covered by the file references above.
-    return {'stock_generation': get_enriched_generation(data_dir, 'stock', initialize=False),
-            'files': references}
-
-
 def save_ready(data_dir: Path, day: date, coverage, observations: list[dict], market: dict,
-               *, recovery: dict | None = None, recovered_metadata: list[dict] | None = None) -> dict:
-    """Called only after required stages 1–8 succeeded, inside the pipeline slot."""
-    if len(observations) != 2 or any(not o or o.get('complete') is not True for o in observations):
-        raise DailyCoverageError('本轮概念及行业完整分类观察尚未就绪')
-    if any(date.fromisoformat(o['obtained_at'][:10]) != day for o in observations):
-        raise DailyCoverageError('分类观察并非目标交易日取得，不能作为当晚原发布输入')
-    if recovered_metadata is not None and not recovery:
-        raise DailyCoverageError('恢复的证券资格必须附带历史核验依据')
-    metadata = (recovered_metadata if recovered_metadata is not None else
-                pl.read_parquet(data_dir / 'instruments' / 'instruments.parquet').to_dicts())
-    expected = {row['symbol'] for row in metadata if _scope(row) is True}
-    for observation in observations:
-        missing = expected - set(observation['symbols'])
-        if missing:
-            raise DailyCoverageError(f"本轮分类响应缺少 {len(missing)} 只范围内证券，不能由合并旧表补齐")
-    from app.services import evening_report_classification
-    from app.services.preferences import get_mainline_filter_config
+               *, before_commit=None) -> dict:
+    from app.services.evening_report_events import sync_events
     from app.services.sentiment_observations import load_observation
 
-    # Freeze the same dated domain result displayed by the environment page.
-    sentiment = market.get('sentiment') if recovery else load_observation(data_dir, day.isoformat())
-    market = {**market, 'sentiment': sentiment}
-
+    instruments = pl.read_parquet(data_dir / 'instruments' / 'instruments.parquet')
+    fields = ('symbol', 'name', 'type', 'exchange', 'board', 'security_type', 'is_st', 'is_current', 'listing_date')
+    metadata = instruments.select(c for c in fields if c in instruments.columns).to_dicts()
+    expected = {row['symbol'] for row in metadata if _scope(row) is True}
+    accepted = {}
+    for observation in observations:
+        if not observation:
+            continue
+        kind = observation['kind']
+        if (observation.get('complete') is True and observation['obtained_at'][:10] == day.isoformat()
+                and not expected.difference(observation['symbols'])):
+            accepted[kind] = observation
+    if 'concept' not in accepted:
+        raise DailyCoverageError('本轮概念分类未完整覆盖目标交易日及范围内证券')
+    halted = coverage.halted - coverage.active
+    if halted - coverage.halted_evidence.keys():
+        raise DailyCoverageError('部分停牌股票缺少逐股来源证据')
     store = EveningReportStore(data_dir)
     calendar = calendar_status(data_dir)
-    previous_days = [value for value in calendar.get('days', []) if value < day.isoformat()]
-    historical_suspensions = []
-    previous_classification_input_id = None
-    for prior_day in previous_days[-20:]:
-        original = store.original_metadata(prior_day)
-        prior = (store.input_evidence(original['input_id']) if original and original.get('input_id')
-                 else store.readiness(prior_day))
-        if prior and prior.get('complete'):
-            historical_suspensions.extend({**item, 'source_input_id': prior['input_id']}
-                                          for item in prior.get('halted_evidence', []))
-            if prior_day == previous_days[-1]:
-                previous_classification_input_id = prior['input_id']
-    # 关系源/行业语义变化后不续接旧来源的核心身份与连续轮次；历史证据不回写。
-    membership_semantics = sorted({o['membership_semantics'] for o in observations if o.get('membership_semantics')})
-    scope_version = 'main-chinext-nonst-v1/' + evening_report_classification.RULE_VERSION
-    if membership_semantics:
-        scope_version += '/' + '+'.join(membership_semantics)
+    sessions = [d for d in calendar.get('days', []) if d <= day.isoformat()]
+    if not sessions or sessions[-1] != day.isoformat():
+        raise DailyCoverageError('交易日历尚未确认目标日')
+    previous_day = sessions[-2] if len(sessions) > 1 else None
+    previous = store.readiness(previous_day) if previous_day else None
     evidence = {
-        'date': day.isoformat(), 'cutoff': cn_now().isoformat(),
-        'versions': input_versions(data_dir, day), 'classifications': observations,
-        'active_symbols': sorted(coverage.active), 'halted_symbols': sorted(coverage.halted),
-        'halted_evidence': list(coverage.halted_evidence.values()),
-        'market': market, 'complete': True, 'metadata': metadata,
-        'calendar': calendar, 'sector_filter_config': get_mainline_filter_config(),
-        'filter_rule_version': evening_report_classification.RULE_VERSION,
-        'scope_version': scope_version,
-        'historical_suspensions': historical_suspensions,
-        'previous_classification_input_id': previous_classification_input_id,
+        'date': day.isoformat(), 'complete': True, 'cutoff': cn_now().isoformat(),
+        'stock_generation': get_enriched_generation(data_dir, 'stock', initialize=False),
+        'market': {**market, 'sentiment': load_observation(data_dir, day.isoformat())},
+        'calendar': calendar, 'metadata': metadata, 'classifications': list(accepted.values()),
+        'industry_status': 'available' if 'industry' in accepted else 'missing',
+        'active_symbols': sorted(coverage.active), 'halted_symbols': sorted(halted),
+        'halted_evidence': [coverage.halted_evidence[s] for s in sorted(halted)],
+        'severe_events': sync_events(day, calendar=sessions),
     }
-    if coverage.halted - coverage.halted_evidence.keys():
-        raise DailyCoverageError('部分停牌股票缺少逐股来源证据')
-    if recovery:
-        evidence['recovery'] = recovery
-    EveningReportStore(data_dir).save_readiness(day.isoformat(), evidence)
+    evidence['classification_comparisons'] = _classification_comparisons(
+        evidence, previous if previous and previous.get('classifications') else None)
+    store.save_readiness(day.isoformat(), evidence, before_commit=before_commit)
     return evidence
 
 
-def require_ready(data_dir: Path, day: date, *, input_id: str | None = None) -> dict:
-    store = EveningReportStore(data_dir)
-    evidence = store.input_evidence(input_id) if input_id else store.readiness(day.isoformat())
-    if input_id and evidence is None:
-        raise DailyCoverageError(f'{day} 的完整输入证据已过保留期或不存在；可核验原快照，不能完整重演历史筛选')
-    if not evidence or not evidence.get('complete'):
-        raise DailyCoverageError('等待正式行情、分类与市场环境完成本轮验收')
-    if evidence.get('date') != day.isoformat() or not evidence.get('metadata') or not evidence.get('calendar'):
-        raise DailyCoverageError(f'{day} 缺少可恢复的当时证券资格或交易日历证据')
+def require_ready(data_dir: Path, day: date) -> dict:
+    evidence = EveningReportStore(data_dir).readiness(day.isoformat())
+    if not evidence or not evidence.get('complete') or evidence.get('date') != day.isoformat():
+        raise DailyCoverageError('等待正式行情、概念分类与市场环境完成本轮验收')
     try:
-        current = input_versions(data_dir, day)
+        generation = get_enriched_generation(data_dir, 'stock', initialize=False)
     except EnrichedGenerationUnavailableError as exc:
         raise DailyCoverageError('指标版本正在发布或不可用，等待正式输入恢复') from exc
-    if evidence['versions']['files'] != current['files']:
-        raise DailyCoverageError('就绪后输入版本已变化，等待新的盘后验收记录')
+    if evidence.get('stock_generation') != generation:
+        raise DailyCoverageError('股票指标代次已变化，等待新的盘后验收')
     return evidence
-
-
-def _prices(reader: SectorReviewReader, day: date, instruments: pl.DataFrame, cancel_check=None,
-            suspension_evidence: list[dict] | None = None) -> pl.DataFrame:
-    paths = reader.files('kline_daily', end=day)
-    if not paths:
-        raise DailyCoverageError('正式历史日线为空')
-    start = date.fromisoformat(paths[0].parent.name[5:])
-    raw = reader.raw('kline_daily', start, day).sort('symbol', 'date')
-    if raw.select(pl.struct('symbol', 'date').is_duplicated().any()).item():
-        raise DailyCoverageError('正式历史日线存在重复证券日期')
-    halt = (((pl.col('open') == 0) & (pl.col('high') == 0))
-            | ((pl.col('volume') == 0) & (pl.col('amount') == 0))).fill_null(False)
-    valid = (pl.all_horizontal(pl.col(c).is_finite() & (pl.col(c) > 0)
-                              for c in ('open', 'high', 'low', 'close'))
-             & (pl.col('high') >= pl.max_horizontal('open', 'close', 'low'))
-             & (pl.col('low') <= pl.min_horizontal('open', 'close'))
-             & pl.all_horizontal(pl.col(c).is_finite() & (pl.col(c) >= 0)
-                                 for c in ('volume', 'amount')))
-    raw = raw.with_columns(halt.alias('_halt'),
-                           (pl.col('quote_ts').is_null() & (halt | valid)).fill_null(False).alias('_formal_raw'))
-    # ATR is recursive: an earlier snapshot cannot silently become a formal seed.
-    if suspension_evidence is not None:
-        suspension_evidence.extend(raw.filter(pl.col('_halt') & pl.col('_formal_raw')).select('symbol', 'date').to_dicts())
-    raw = raw.with_columns(pl.col('_formal_raw').cum_min().over('symbol').alias('_formal_dependencies'))
-    enriched_paths = reader.files('kline_daily_enriched', start, day)
-    if not enriched_paths:
-        raise DailyCoverageError('正式历史指标为空')
-    lf = scan_enriched_parquet(enriched_paths, hive_partitioning=True)
-    names = set(lf.collect_schema().names())
-    wanted = ['symbol', 'date', 'open', 'low', 'close', 'high', 'ma5', 'ma10', 'ma20', 'bull_bear_line', 'atr_14', 'high_60d',
-              'signal_limit_up', 'signal_limit_down', 'consecutive_limit_ups',
-              'raw_close', 'raw_high', 'raw_low', 'amount', 'volume', 'quote_ts']
-    enriched = guarded_collect(lf.select([pl.col(c) if c in names else pl.lit(None).alias(c)
-                                         for c in wanted]))
-    if enriched.select(pl.struct('symbol', 'date').is_duplicated().any()).item():
-        raise DailyCoverageError('历史指标存在重复证券日期')
-    raw = raw.select('symbol', 'date', '_halt', '_formal_dependencies',
-                     *[pl.col(c).alias('_source_' + c) for c in ('open', 'high', 'low', 'close', 'amount', 'volume')])
-    frame = enriched.join(raw, on=['symbol', 'date'], how='left')
-    equality = pl.all_horizontal(
-        (pl.col(left) - pl.col('_source_' + right)).abs() < 0.005
-        for left, right in [('raw_close', 'close'), ('raw_high', 'high'), ('raw_low', 'low'),
-                            ('amount', 'amount'), ('volume', 'volume')])
-    frame = frame.filter(~pl.col('_halt').fill_null(False)).with_columns(
-        (pl.col('_formal_dependencies') & ~pl.col('_halt') & pl.col('quote_ts').is_null()
-         & equality).fill_null(False).alias('formal'),
-        pl.col('_source_open').alias('raw_open'),
-    ).drop([c for c in frame.columns if c.startswith('_')]).sort('symbol', 'date')
-    frame = frame.with_columns(pl.col('formal').cum_min().over('symbol').alias('formal'))
-    # Disk enriched partitions intentionally contain only storage columns. Reuse
-    # the indicator pipeline in bounded batches, including the entire recursive
-    # seed history checked above; never substitute missing disk columns with zero.
-    from app.indicators.pipeline import compute_indicators, compute_limit_signals
-
-    symbols = frame['symbol'].unique().sort().to_list()
-    parts = []
-    for offset in range(0, len(symbols), 256):
-        if cancel_check:
-            cancel_check()
-        batch = symbols[offset:offset + 256]
-        part = compute_indicators(frame.filter(pl.col('symbol').is_in(batch)),
-                                  needed={'ma5', 'ma10', 'ma20', 'bull_bear_line', 'atr_14', 'high_60d', 'change_pct', 'vol_ratio_5d'})
-        part = compute_limit_signals(part, instruments.filter(pl.col('symbol').is_in(batch)),
-                                     needed={'signal_limit_up', 'signal_limit_down', 'consecutive_limit_ups'})
-        keep = [column for column in [*wanted, 'formal', 'raw_open'] if column in part.columns]
-        parts.append(part.select(keep))
-    return pl.concat(parts, how='diagonal_relaxed')
 
 
 def _scope(record: dict) -> bool | None:
@@ -201,21 +89,18 @@ def _scope(record: dict) -> bool | None:
     return False if False in checks else (None if None in checks else True)
 
 
-def _metadata(data_dir: Path, evidence: dict, calendar: list[str], historical_suspensions: list[dict]) -> pl.DataFrame:
+def _metadata(evidence: dict, calendar: list[str]) -> pl.DataFrame:
     from app.price_limits import is_no_limit_day, parse_listing_date, price_limit_pct
 
     rows = []
     active, halted = set(evidence['active_symbols']), set(evidence['halted_symbols'])
-    recent = set(calendar[-21:])
-    historical_halts = {r['symbol'] for r in [*historical_suspensions, *evidence.get('historical_suspensions', [])]
-                        if str(r['date']) in recent}
     day = date.fromisoformat(evidence['date'])
     for record in evidence['metadata']:
         symbol = record['symbol']
         in_scope = _scope(record)
         normal = False if symbol in halted else (True if symbol in active else None)
         listing = parse_listing_date(record.get('listing_date'))
-        day_rank = sum(d >= listing.isoformat() for d in calendar) if listing else None
+        day_rank = len(calendar) - bisect_left(calendar, listing.isoformat()) if listing else None
         regime = None
         if record.get('board') and record.get('is_st') is not None:
             if is_no_limit_day(symbol, listing, day, day_rank=day_rank):
@@ -223,140 +108,209 @@ def _metadata(data_dir: Path, evidence: dict, calendar: list[str], historical_su
             else:
                 regime = f"{price_limit_pct(symbol, day, is_risk_warning=record['is_st']) * 100:g}%"
         rows.append({**record, 'in_scope': in_scope, 'trading_normal': normal, 'regime': regime,
-                     'suspension_window': symbol in historical_halts and symbol not in halted,
                      'qualification_pause': symbol in halted})
     return pl.DataFrame(rows, infer_schema_length=None)
 
 
-def _classification_changes(data_dir: Path, evidence: dict, calendar: list[str]) -> list[dict]:
-    prior_id = evidence.get('previous_classification_input_id')
-    previous = EveningReportStore(data_dir).input_evidence(prior_id) if prior_id else None
-    previous_by_source = {o['source']: o for o in previous.get('classifications', [])} if previous and previous.get('complete') else {}
-    changes = []
+def _member_keys(observation):
+    return {(row['symbol'], row['sector_id']) for row in observation['memberships']}
+
+
+def _classification_comparisons(evidence, previous):
+    previous_by_source = {o['source']: o for o in previous['classifications']} if previous else {}
+    result = []
     for observation in evidence['classifications']:
         prior = previous_by_source.get(observation['source'])
-        current_members = {(r['symbol'], r['sector_id']) for r in observation['memberships']}
-        prior_members = {(r['symbol'], r['sector_id']) for r in prior['memberships']} if prior else set()
-        changes.append({'source': observation['source'], 'comparison': 'adjacent_complete_observation' if prior else 'first_observation',
-                        'previous_observation_id': prior['id'] if prior else None,
-                        'added': sorted(current_members - prior_members) if prior else [],
-                        'removed': sorted(prior_members - current_members) if prior else [],
-                        'first_observed': sorted(current_members) if prior is None else [],
-                        'interpretation': '比较口径发生变化，排名变化原因尚未分离' if prior and current_members != prior_members else None})
-    return changes
+        if prior and prior.get('membership_semantics') != observation.get('membership_semantics'):
+            prior = None
+        current_scope = set(observation['symbols'])
+        added = removed = 0
+        first = len(current_scope)
+        if prior:
+            current_members, prior_members = _member_keys(observation), _member_keys(prior)
+            prior_scope = set(prior['symbols'])
+            added = sum(s in prior_scope for s, _ in current_members - prior_members)
+            removed = sum(s in current_scope for s, _ in prior_members - current_members)
+            first = len(current_scope - prior_scope)
+        result.append({
+            'source': observation['source'], 'classification_type': observation['kind'],
+            'comparison': 'adjacent_complete_observation' if prior else 'first_observation',
+            'observation_id': observation['id'], 'previous_observation_id': prior['id'] if prior else None,
+            'previous_obtained_at': prior.get('obtained_at') if prior else None,
+            'added_count': added, 'removed_count': removed, 'first_observed_count': first,
+        })
+    return result
 
 
-def _memberships(evidence: dict) -> tuple[pl.DataFrame, dict]:
-    from collections import Counter, defaultdict
-
-    from app.services import evening_report_classification
-
-    rows = [row for observation in evidence['classifications'] for row in observation['memberships']]
-    cfg = evidence['sector_filter_config']
-    counts = defaultdict(set)
-    for row in rows:
-        if row['source'] == 'concept':
-            counts[row['sector_id']].add(row['symbol'])
-    excluded = []
-    for sector_id, symbols in sorted(counts.items()):
-        declared = evening_report_classification.exclusion(sector_id)
-        reasons = [declared[1]] if declared else []
-        if len(symbols) > 120:
-            reasons.append('分类完整成员数超过120只')
-        if reasons:
-            excluded.append({'sector_id': sector_id, 'members': len(symbols), 'reasons': reasons,
-                             'category': declared[0] if declared else 'configured_filter'})
-    blocked = {entry['sector_id'] for entry in excluded}
-    kept = [row for row in rows if row['source'] != 'concept' or row['sector_id'] not in blocked]
-    frame = pl.DataFrame(kept, schema={'symbol': pl.String, 'sector_id': pl.String,
-                                      'sector_name': pl.String, 'source': pl.String})
-    return frame, {'config': {'max_members': 120}, 'previous_config': cfg,
-                   'rule_version': evening_report_classification.RULE_VERSION, 'excluded': excluded,
-                   'excluded_counts': dict(Counter(item['category'] for item in excluded)),
-                   'limitation': '明确非产业标签按版本化完整名称排除；成员上限按本轮完整分类统计，未列入语义映射的标签不凭名称猜测'}
+def _raw_halt():
+    return ((pl.col('open') == 0) & (pl.col('high') == 0)) | ((pl.col('volume') == 0) & (pl.col('amount') == 0))
 
 
-def load_inputs(data_dir: Path, day: date, evidence: dict, cancel_check=None):
+def _deduplicate(frame):
+    return frame.unique(['symbol', 'date'], keep='last', maintain_order=True)
+
+
+def _status_suspensions(data_dir, days, quotes):
+    proofs = read_suspensions(data_dir, days)
+    if not proofs:
+        return []
+    keys = pl.DataFrame([(p['symbol'], date.fromisoformat(p['date'])) for p in proofs],
+                        schema={'symbol': pl.String, 'date': pl.Date}, orient='row')
+    restored = quotes.filter(pl.col('formal')).select('symbol', 'date').join(keys, on=['symbol', 'date'], how='semi')
+    active = {(s, d.isoformat()) for s, d in restored.iter_rows()}
+    return [r for r in proofs if (r['symbol'], r['date']) not in active]
+
+
+def _factor_events(data_dir, day, symbols=None):
+    path = data_dir / 'adj_factor' / 'all.parquet'
+    if not path.exists():
+        return None
+    source = pl.scan_parquet(path)
+    if symbols is not None:
+        source = source.filter(pl.col('symbol').is_in(list(symbols)))
+    return validated_factor_events(guarded_collect(source), through=day)
+
+
+def _history(repo, day, calendar, check):
+    reader = SectorReviewReader(repo.store.data_dir)
+    start = date.fromisoformat(calendar[-WINDOW:][0])
+    paths = reader.files('kline_daily_enriched', start, day)
+    if not paths:
+        raise DailyCoverageError('正式历史指标为空')
+    stored = _deduplicate(guarded_collect(scan_enriched_parquet(paths, hive_partitioning=True)
+                                          .filter(pl.col('date').is_between(start, day))))
+    raw = _deduplicate(reader.raw('kline_daily', start, day)).filter(pl.col('quote_ts').is_null())
+    halts = raw.filter(_raw_halt()).select('symbol', 'date').to_dicts()
+    raw = raw.filter(~_raw_halt().fill_null(False)).select(
+        'symbol', 'date', pl.col('open').alias('raw_open'), pl.col('close').alias('raw_close'),
+        pl.col('high').alias('raw_high'), pl.col('low').alias('raw_low'), 'amount', 'volume')
+    stored = stored.filter(pl.col('quote_ts').is_null()).drop('quote_ts', 'raw_close', 'raw_high', 'raw_low', 'amount', 'volume')
+    frame = raw.join(stored, on=['symbol', 'date'], how='left')
+    # 历史连板来自相应交易日的正式指标，均线等优先使用共享缓存。
+    indicators = ['ma5', 'ma10', 'ma20', 'bull_bear_line', 'atr_14', 'high_60d', 'change_pct', 'vol_ratio_5d']
+    span = repo.get_enriched_history_span()
+    cached = (repo.get_enriched_range(max(start, span[0]), day, columns=[*indicators, 'quote_ts'])
+              if span and span[0] <= day <= span[1] else None)
+    if cached is None or cached.is_empty():
+        raise DailyCoverageError('当日共享指标缓存尚未就绪，待预热完成后重试')
+    cached = _deduplicate(cached)
+    if 'quote_ts' in cached.columns:
+        cached = cached.filter(pl.col('quote_ts').is_null()).drop('quote_ts')
+    frame = frame.join(cached, on=['symbol', 'date'], how='left')
+    frame = frame.with_columns(pl.lit(None, dtype=pl.Float64).alias(c) for c in indicators if c not in frame.columns)
+    if frame['ma10'].null_count():
+        # 波次窗口外只取前 30 个市场交易日的正式成交收盘，用于预热个股 MA10。
+        warmup_paths = [p for d in calendar[-(WINDOW + 30):-WINDOW]
+                        for p in sorted((repo.store.data_dir / 'kline_daily_enriched' / f'date={d}').glob('*.parquet'))]
+        if warmup_paths:
+            warmup = _deduplicate(scan_enriched_parquet(warmup_paths, hive_partitioning=True)).filter(
+                pl.col('quote_ts').is_null() & ~_raw_halt().fill_null(False)).select('symbol', 'date', 'close')
+            frame = pl.concat([guarded_collect(warmup), frame], how='diagonal')
+        local_ma10 = pl.col('close').rolling_mean(10).over('symbol', order_by='date')
+        frame = frame.with_columns(pl.coalesce('ma10', local_ma10).alias('ma10')).filter(pl.col('date') >= start)
+    check()
+    factors = _factor_events(repo.store.data_dir, day)
+    if factors is not None:
+        invalid = factors.filter(pl.col('ex_factor').is_null())['symbol'].unique()
+        if len(invalid):
+            frame = frame.with_columns(pl.when(~pl.col('symbol').is_in(invalid.implode())).then(c).alias(c)
+                                       for c in ['open', 'high', 'low', 'close', *indicators])
+    frame = frame.with_columns(
+        (pl.col('raw_close').is_finite() & (pl.col('raw_close') > 0)).fill_null(False).alias('formal'),
+        (pl.col('consecutive_limit_ups') > 0).alias('signal_limit_up'),
+        (pl.col('consecutive_limit_downs') > 0).alias('signal_limit_down'))
+    return frame.sort('symbol', 'date'), halts
+
+
+def load_inputs(repo, day: date, evidence: dict, cancel_check=None):
     from app.services.evening_report_engine import EveningInputs
 
     check = cancel_check or (lambda: None)
     check()
-    calendar = evidence.get('calendar', {}).get('days', [])
-    if day.isoformat() not in calendar:
-        raise DailyCoverageError('交易日历尚未确认目标日')
-    before = [d for d in calendar if d <= day.isoformat()]
-    future = [d for d in calendar if d > day.isoformat()]
-    reader = SectorReviewReader(data_dir)
-    instruments = pl.DataFrame(evidence['metadata'], infer_schema_length=None)
-    historical_suspensions = []
-    prices = _prices(reader, day, instruments, check, historical_suspensions)
-    for suspension in historical_suspensions:
-        suspension.update(confirmed=True, source='formal_daily_history', basis='formal_daily_zero_price_or_volume_amount',
-                          source_version=evidence['versions']['stock_generation'], obtained_at=evidence['cutoff'])
-    check()
-    all_benchmarks = reader.raw('kline_index_daily', date.fromisoformat(before[0]), day).with_columns(
+    sessions = evidence['calendar']['days']
+    today = day.isoformat()
+    calendar = [d for d in sessions if d <= today]
+    window = calendar[-WINDOW:]
+    prices, raw_halts = _history(repo, day, calendar, check)
+    suspensions = {(r['symbol'], str(r['date'])): {**r, 'source': 'formal_daily_history', 'confirmed': True}
+                   for r in raw_halts}
+    data_dir = repo.store.data_dir
+    for row in [*_status_suspensions(data_dir, window, prices), *evidence['halted_evidence']]:
+        suspensions[row['symbol'], str(row['date'])] = row
+    metadata = _metadata(evidence, calendar)
+    observations = evidence['classifications']
+    memberships = pl.DataFrame([row for o in observations for row in o['memberships']],
+                                schema=dict.fromkeys(['symbol', 'sector_id', 'sector_name', 'source'], pl.String))
+    benchmarks = _deduplicate(SectorReviewReader(data_dir).raw('kline_index_daily', date.fromisoformat(window[0]), day))
+    benchmarks = benchmarks.with_columns(
         (pl.col('quote_ts').is_null() & pl.col('close').is_finite() & (pl.col('close') > 0)).alias('formal'))
-    benchmark = all_benchmarks.filter(pl.col('symbol') == '000001.SH')
-    memberships, sector_filter = _memberships(evidence)
     check()
-    return EveningInputs(trade_date=day.isoformat(), next_trade_date=future[0] if future else None,
-                         cutoff=evidence['cutoff'], calendar=before, prices=prices,
-                         metadata=_metadata(data_dir, evidence, before, historical_suspensions), memberships=memberships,
-                         benchmark=benchmark, abnormal_benchmarks=all_benchmarks, market=evidence['market'],
-                         provenance={'classifications': evidence['classifications'], 'sector_filter': sector_filter,
-                                     'calendar': evidence['calendar'],
-                                     'scope_version': evidence.get('scope_version'),
-                                     'recovery': evidence.get('recovery'),
-                                     'suspensions': evidence['halted_evidence'] + historical_suspensions,
-                                     'membership_changes': _classification_changes(data_dir, evidence, before),
-                                     'input_versions': evidence['versions']})
+    return EveningInputs(
+        trade_date=today, next_trade_date=next((d for d in sessions if d > today), None), cutoff=evidence['cutoff'],
+        calendar=calendar, prices=prices, memberships=memberships, metadata=metadata, market=evidence['market'],
+        abnormal_benchmarks=benchmarks,
+        provenance={'industry_status': evidence['industry_status'], 'suspensions': list(suspensions.values()),
+                    'classifications': observations, 'membership_changes': evidence['classification_comparisons'],
+                    'severe_events': evidence.get('severe_events'), 'stock_generation': evidence['stock_generation']})
 
 
-def prepare_evaluation_inputs(data_dir: Path, inputs) -> None:
-    """Recompute both endpoints from raw closes at one explicit factor cutoff.
+def _constraint_history(data_dir, prices, symbols, days):
+    paths = [p for day in days for p in sorted((data_dir / 'kline_daily_enriched' / f'date={day}').glob('*.parquet'))]
+    if paths:
+        flags = _deduplicate(guarded_collect(scan_enriched_parquet(paths, hive_partitioning=True)
+            .filter(pl.col('symbol').is_in(list(symbols)) & pl.col('date').cast(pl.String).is_in(days))
+            .select('symbol', 'date', 'quote_ts', 'consecutive_limit_ups', 'consecutive_limit_downs')))
+        flags = flags.filter(pl.col('quote_ts').is_null()).select('symbol', 'date',
+            (pl.col('consecutive_limit_ups') > 0).alias('signal_limit_up'),
+            (pl.col('consecutive_limit_downs') > 0).alias('signal_limit_down'))
+        prices = prices.join(flags, on=['symbol', 'date'], how='left')
+    # 维表逐条带 as_of，仅附到同日的观察端点。
+    path = data_dir / 'instruments' / 'instruments.parquet'
+    if path.is_file() and {'symbol', 'as_of', 'is_st'} <= set(pl.read_parquet_schema(path)):
+        metadata = guarded_collect(pl.scan_parquet(path).filter(
+            pl.col('as_of').cast(pl.String).is_in(days) & pl.col('symbol').is_in(list(symbols))
+        ).select('symbol', pl.col('as_of').cast(pl.Date).alias('date'), 'is_st'))
+        prices = prices.join(_deduplicate(metadata), on=['symbol', 'date'], how='left')
+    return prices
 
-    Runs only in the post-publication evaluator, never while reading a report.
-    Report-date enriched values are not reused as evaluation prices.
-    """
-    from app.indicators.pipeline import _apply_adj_factor
 
-    path = data_dir / 'adj_factor' / 'all.parquet'
-    if not path.exists():
-        raise DailyCoverageError('客观回看缺少可核验复权因子文件')
-    try:
-        factors = pl.read_parquet(path).select(
-            pl.col('symbol'), pl.col('trade_date').cast(pl.Date, strict=False),
-            pl.col('ex_factor').cast(pl.Float64, strict=False))
-    except (OSError, pl.exceptions.PolarsError) as exc:
-        raise DailyCoverageError('客观回看复权因子不可读') from exc
-    if factors.select(pl.any_horizontal(pl.all().is_null()).any()).item():
-        raise DailyCoverageError('客观回看复权因子包含未知字段')
-    factors = factors.filter(pl.col('trade_date') <= date.fromisoformat(inputs.trade_date))
-    if (factors.select((~pl.col('ex_factor').is_finite() | (pl.col('ex_factor') <= 0)).any()).item()
-            or factors.select(pl.struct('symbol', 'trade_date').is_duplicated().any()).item()):
-        raise DailyCoverageError('客观回看复权因子无效或重复')
-    dates = (pl.col('date').str.to_date() if inputs.prices.schema['date'] == pl.String else pl.col('date').cast(pl.Date))
-    frame = inputs.prices.with_columns(dates)
-    raw = frame.select('symbol', 'date', pl.col('raw_close').alias('close'))
-    adjusted = _apply_adj_factor(raw, factors).select('symbol', 'date', 'close')
-    inputs.prices = frame.drop('close').join(adjusted, on=['symbol', 'date'], how='left')
-    if 'is_st' in inputs.metadata.columns:
-        inputs.prices = inputs.prices.join(inputs.metadata.select('symbol', pl.col('is_st').alias('_is_st_at_cutoff')),
-                                          on='symbol', how='left').with_columns(
-            pl.when(pl.col('date') == date.fromisoformat(inputs.trade_date))
-            .then(pl.col('_is_st_at_cutoff')).otherwise(None).alias('is_st')).drop('_is_st_at_cutoff')
-    # The current instrument table cannot establish historical ST status.
-    # Keep historical tradability unknown instead of applying today's regime.
-    inputs.prices = inputs.prices.with_columns([
-        pl.when(pl.col('date') == date.fromisoformat(inputs.trade_date)).then(pl.col(key)).otherwise(None).alias(key)
-        for key in ('signal_limit_up', 'signal_limit_down') if key in inputs.prices.columns])
-    calendar = inputs.provenance.get('calendar', {})
-    source = next((ref for ref in inputs.provenance['input_versions']['files']
-                   if ref[0] == 'adj_factor/all.parquet'), None)
-    inputs.provenance['evaluation_context'] = {
-        'adjust_method': 'qfq', 'adjust_base_date': inputs.trade_date,
-        'adjust_rule_version': 'raw-times-event-cumfactor-over-base-v1',
-        'adjustment_source': source,
-        'calendar_version': {key: calendar.get(key) for key in ('start', 'end', 'updated_at')},
-        'suspension_source': sorted({row.get('source', 'unspecified') for row in inputs.provenance.get('suspensions', [])}),
-    }
+def load_evaluation_inputs(data_dir: Path, as_of: date, *, symbols: set[str], days: set[str],
+                           include_multipliers=False, include_constraints=False):
+    """Read only requested securities/sessions and use one cumulative adjustment basis."""
+    calendar = calendar_status(data_dir)
+    if not calendar.get('days'):
+        raise DailyCoverageError('客观回看缺少本地标准交易日历')
+    dates = sorted(set(calendar['days']).intersection(days))
+    past = [d for d in dates if d <= as_of.isoformat()]
+    paths = [path for d in past for path in sorted((data_dir / 'kline_daily' / f'date={d}').glob('*.parquet'))]
+    raw = (_deduplicate(guarded_collect(scan_daily_parquet(paths, hive_partitioning=True)
+            .filter(pl.col('symbol').is_in(list(symbols)) & pl.col('date').cast(pl.String).is_in(past))))
+           if paths and symbols else pl.DataFrame(schema=DAILY_STORAGE_SCHEMA))
+    raw = raw.filter(pl.col('quote_ts').is_null())
+    halts = raw.filter(_raw_halt()).select('symbol', 'date').to_dicts()
+    raw = raw.filter(~_raw_halt().fill_null(False)).with_columns(
+        pl.col('close').alias('raw_close'), pl.col('high').alias('raw_high'), pl.col('low').alias('raw_low'),
+        (pl.col('close').is_finite() & (pl.col('close') > 0)).alias('formal'))
+    factors = _factor_events(data_dir, as_of, symbols)
+    prices = (_apply_adj_factor(raw, factors) if factors is not None else
+              raw.with_columns(pl.lit(None, dtype=pl.Float64).alias('close')))
+    if include_constraints and not prices.is_empty():
+        prices = _constraint_history(data_dir, prices, symbols, past)
+    ctx = {'adjust_method': 'qfq', 'adjust_rule_version': 'raw-times-event-cumfactor-over-base-v1',
+           'adjust_base_date': as_of.isoformat(), 'adjustment_source': 'adj_factor' if factors is not None else None,
+           'calendar_version': {k: calendar.get(k) for k in ('start', 'end', 'updated_at')},
+           'suspension_source': ['formal_daily_history', 'daily_trading_status']}
+    proofs = [r for r in _status_suspensions(data_dir, past, prices) if r['symbol'] in symbols]
+    provenance = {'calendar': calendar, 'evaluation_context': ctx, 'suspensions': [*halts, *proofs]}
+    if include_multipliers:
+        # 独立于 K 日是否仍有成交记录，从事件累计因子求 F(t)/F(as_of)。
+        multipliers = {}
+        if factors is not None and past and symbols:
+            units = pl.DataFrame({'symbol': sorted(symbols)}).join(
+                pl.DataFrame({'date': [date.fromisoformat(d) for d in past]}), how='cross'
+            ).with_columns(pl.lit(1.0).alias('close'))
+            for symbol, frame in _apply_adj_factor(units, factors).partition_by('symbol', as_dict=True).items():
+                multipliers[symbol[0]] = dict(frame.select(pl.col('date').cast(pl.String), 'close').iter_rows())
+        provenance['evaluation_multipliers'] = multipliers
+    return SimpleNamespace(trade_date=as_of.isoformat(), cutoff=cn_now().isoformat(), calendar=calendar['days'],
+                           prices=prices, provenance=provenance)

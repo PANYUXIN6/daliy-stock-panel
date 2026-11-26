@@ -242,12 +242,11 @@ def test_deploy_preserves_remote_state_and_uses_stable_management_entry(deployme
     assert str(runtime / "docker-compose.override.yml") in call
 
 
-def test_deploy_preserves_remote_plugin_mirror_and_optional_build_arguments(deployment):
+def test_deploy_preserves_remote_mirror_and_optional_build_arguments(deployment):
     runtime, state_file, _, _ = deployment
     state = json.loads(state_file.read_text())
     arguments = {
         "BACKEND_EXTRAS": "backtest legacy-cpu",
-        "INCLUDE_STOCKSDK": "1",
         "USE_CN_MIRROR": "1",
         "NPM_REGISTRY": "https://registry.example.test/",
         "PYPI_INDEX": "https://packages.example.test/simple",

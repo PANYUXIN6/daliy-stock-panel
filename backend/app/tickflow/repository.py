@@ -2545,7 +2545,7 @@ class KlineRepository:
 
         def _merge(existing: pl.DataFrame) -> pl.DataFrame:
             if existing.is_empty():
-                return incoming.sort(["symbol", "date"])
+                return incoming.unique(["symbol", "date"], keep="last").sort(["symbol", "date"])
             return pl.concat([existing, incoming], how="diagonal_relaxed").unique(
                 subset=["symbol", "date"], keep="last"
             ).sort(["symbol", "date"])
@@ -2704,7 +2704,7 @@ class KlineRepository:
         out = base / f"date={ds}" / "part.parquet"
         out.parent.mkdir(parents=True, exist_ok=True)
         # 覆写语义: 排序在锁外, 锁内只做原子替换。
-        df_sorted = df.sort(["symbol", "date"])
+        df_sorted = df.unique(["symbol", "date"], keep="last", maintain_order=True).sort(["symbol", "date"])
         with self._write_lock:
             self._atomic_write_parquet(df_sorted, out)
 
@@ -2720,6 +2720,7 @@ class KlineRepository:
         if df.is_empty() or "date" not in df.columns:
             return
         dt = df["date"][0]
+        df = df.unique(["symbol", "date"], keep="last", maintain_order=True)
         cache_df = self._with_instrument_metadata(asset_type, df).sort(["symbol"])
         if asset_type == "stock":
             table = "kline_daily_enriched"

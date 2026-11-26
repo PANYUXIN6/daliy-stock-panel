@@ -60,6 +60,8 @@ datasets:
 
 重点ETF资金看板复用 `daily`、`minute`、`fund_nav` 路由；分钟成交额需要有效的原始 `amount`，不能用成交量或价格近似补出。基金份额和分类目录使用固定公开交易所适配器，不混入股票主力资金流。具体单位、日期对齐与缺失处理见 [ETF看板契约](etf-flow-board.md)。
 
+晚报盘后准备时批量建立当日严重异动事件表，随当日就绪资料保存。E1 统计截至 D 最近九个市场交易日内，沪深主板和创业板分别已有三次、两次同向三日价格异常披露的股票。下一交易日再出现一次同向异常即可达到十日次数门槛。每只股票同日同向只计一次，最近一次严重异常公告披露日之后重新计数。E2 取前一交易日后至 D 正式披露的股票严重异常波动公告，在 D 适用。两项数据完整返回后，空表表示当期无适用记录；来源读取失败时显示待核验。E1 覆盖次数预警分支，E2 的日期是披露首次可用于晚报的交易日。[每日龙虎榜公开原因](https://data.eastmoney.com/stock/tradedetail.html)、[巨潮上市公司公告](https://www.cninfo.com.cn/new/commonUrl/pageOfSearch?url=disclosure/list/search)、[上交所主板严重异常波动](https://www.sse.com.cn/disclosure/diclosure/ycjyxx/main/)、[深交所交易规则第 5.4.4 条](https://docs.static.szse.cn/www/lawrules/rule/trade/current/W020260424690713155663.pdf)。
+
 - `adj_factor` 可提供 `dividend`、`bonus`、`allot`、`allot_price`、`prev_close`，用于等差显示投影和全精度因子链重建，缺省为空。
 - `realtime` 建议补充 `amount`、`change_pct`、`change_amount`、`amplitude`、`turnover_rate`、`name`、`timestamp`。涨跌额为元，时间戳为毫秒。
 - `minute/full_minute` 的 `amount` 可缺省；无法提供可靠成交额时留空，前端累计均价线停止绘制后续值并显示 `—`。

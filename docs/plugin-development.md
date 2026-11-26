@@ -1,6 +1,6 @@
 # 数据源插件
 
-Python 插件位于 `backend/app/plugins/<name>/`，与 [HTTP YAML 数据源](custom-data-source.md) 共用注册表和能力路由。现有实现是 `fuyao/` 和 `stocksdk/`；加载入口为 [`custom/loader.py`](../backend/app/data_providers/custom/loader.py)，方法实现可参考 [`GenericHTTPProvider`](../backend/app/data_providers/custom/provider.py)。
+Python 插件位于 `backend/app/plugins/<name>/`，与 [HTTP YAML 数据源](custom-data-source.md) 共用注册表和能力路由。现有实现是 `fuyao/`；加载入口为 [`custom/loader.py`](../backend/app/data_providers/custom/loader.py)，方法实现可参考 [`GenericHTTPProvider`](../backend/app/data_providers/custom/provider.py)。
 
 ## 清单与加载
 
@@ -22,7 +22,7 @@ homepage: https://example.com
 
 `name` 仅允许小写字母、数字和下划线。`entry` 指向可无参构造的 provider 类，`check` 为可选的可用性检测函数，返回 `(bool, reason)`。检测或导入失败只禁用该插件，设置页保留不可用原因；`hidden: true` 直接跳过注册与展示。
 
-`runtime` 为 `none/python/node`，用于展示和依赖安装选择：Python 插件从目录的 `requirements.txt` 安装，Node 插件在本目录安装包，`none` 无需额外安装。实际可用性由 `check` 决定。stock-sdk 的 Docker 镜像默认不包含依赖，需要时通过 `INCLUDE_STOCKSDK=1` 构建，见 [部署说明](deployment.md)。
+`runtime` 为 `none/python/node`，用于展示和依赖安装选择：Python 插件从目录的 `requirements.txt` 安装，Node 插件在本目录安装包，`none` 无需额外安装。实际可用性由 `check` 决定。
 
 声明 `api_key_env` 后，设置页支持输入 Key。entry 模块需提供 `probe_api_key(key) -> (ok, reason)`；候选 Key 探测有效后才保存并重载。provider 使用 `secrets_store.get_env_backed_secret("<name>_api_key", api_key_env)` 读取，`data/user_data/secrets.json`（0600 权限）优先于环境变量和 `.env`。
 
@@ -65,6 +65,8 @@ provider 无需继承基类，需有 `name`、`config.datasets` 和 `close()`；
 
 `iter_daily` 每批必须有明确大小上界，不能先收集全部结果再切批。未实现时继续使用 `get_daily`。同步流程已有的单标的软失败行为不因分批接口改变。
 
+`ex_factor` 表示单次除权事件的前收盘与除权参考价之比。
+
 ### 实时快照
 
 | 字段 | 要求 |
@@ -84,7 +86,7 @@ provider 无需继承基类，需有 `name`、`config.datasets` 和 `close()`；
 
 分钟入口的 `_enforce_minute_beijing_wallclock` 会转换带时区数据，并对整体具有 UTC 特征的 naive 时间作 +8 小时纠偏；无法识别时拒收并回退 TickFlow。provider 仍应直接返回北京墙钟。缺可靠成交额时返回空值，前端停止绘制后续累计均价并显示 `—`。
 
-可用类属性 `minute_history_days` 声明 1 分钟历史交易日深度；浅源会收窄前端可选范围，未声明按深历史处理。stock-sdk 当前为最近 5 个交易日。
+可用类属性 `minute_history_days` 声明 1 分钟历史交易日深度；浅源会收窄前端可选范围，未声明按深历史处理。
 
 声明 `full_minute` 后，在设置页将全量分钟路由到该源，由 `minute_refresh` 调度：
 
@@ -173,4 +175,4 @@ provider 返回 `[{symbol, concepts: [...]}]` 或 `[{symbol, industries: [...]}]
 
 ## 现有验证入口
 
-`backend/tests/test_fuyao_provider.py`、`test_stocksdk_provider.py`、`test_custom_depth_provider.py`、`test_custom_minute_config.py` 和 `test_custom_loader_install.py` 覆盖现有实现。修改 provider 时使用假 client 或桥接，不依赖真实 Key／网络，验证实际字段及单位、日期、空数据、失败／取消、分页和能力声明；更改 Key 或加载机制时检查探测、保存和失败隔离。
+`backend/tests/test_fuyao_provider.py`、`test_custom_depth_provider.py`、`test_custom_minute_config.py` 和 `test_custom_loader_install.py` 覆盖现有实现。修改 provider 时使用假 client 或桥接，不依赖真实 Key／网络，验证实际字段及单位、日期、空数据、失败／取消、分页和能力声明；更改 Key 或加载机制时检查探测、保存和失败隔离。

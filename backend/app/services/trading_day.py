@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 from app.market_time import cn_now
@@ -36,10 +36,10 @@ def sync_calendar(data_dir: Path | None = None) -> dict:
         "updated_at": now.isoformat(),
     }
     previous = calendar_status(data_dir)
-    # 供应商滚动一年窗口不能删掉已经确认的事件交易日；只合并重叠覆盖，
+    # 供应商滚动一年窗口不能删掉已经确认的事件交易日；合并连续的自然日覆盖，
     # 长期停采形成的未知区间不据此假装连续已知。
-    if (previous and payload["start"] <= previous["end"]
-            and previous["start"] <= payload["end"]):
+    if (previous and min(days) <= date.fromisoformat(previous["end"]) + timedelta(days=1)
+            and date.fromisoformat(previous["start"]) <= date.fromisoformat(payload["end"]) + timedelta(days=1)):
         payload["days"] = sorted(set(previous["days"]) | set(payload["days"]))
         payload["start"] = min(previous["start"], payload["start"])
         payload["end"] = max(previous["end"], payload["end"])

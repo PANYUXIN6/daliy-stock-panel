@@ -31,6 +31,7 @@ from app.indicators.volume_ratio import volume_time_factor
 from app.market_time import cn_today
 from app.parquet import scan_daily_parquet, scan_enriched_parquet, scan_parquet_compat
 from app.price_limits import (
+    NO_PRICE_LIMIT_SENTINEL,
     no_limit_window_days,
     no_limit_window_margin_days,
     parse_listing_date,
@@ -202,6 +203,18 @@ def _ema_alpha(span: int) -> float:
     return 2.0 / (span + 1)
 
 
+def validated_factor_events(factors: pl.DataFrame, *, through=None) -> pl.DataFrame:
+    """Mark an unusable security's factor series explicitly; no events means identity."""
+    factors = factors.select('symbol', pl.col('trade_date').cast(pl.Date, strict=False),
+                             pl.col('ex_factor').cast(pl.Float64, strict=False))
+    if through is not None:
+        factors = factors.filter(pl.col('trade_date').is_null() | (pl.col('trade_date') <= through))
+    factors = factors.unique()
+    invalid = (pl.col('trade_date').is_null() | pl.col('ex_factor').is_null() | ~pl.col('ex_factor').is_finite()
+               | (pl.col('ex_factor') <= 0) | pl.struct('symbol', 'trade_date').is_duplicated())
+    return factors.with_columns(pl.when(~invalid.any().over('symbol')).then('ex_factor').alias('ex_factor'))
+
+
 def _apply_adj_factor(raw: pl.DataFrame, factors: pl.DataFrame) -> pl.DataFrame:
     """对 raw K 线应用前复权 (forward adjustment)。
 
@@ -216,20 +229,19 @@ def _apply_adj_factor(raw: pl.DataFrame, factors: pl.DataFrame) -> pl.DataFrame:
     if factors.is_empty():
         return raw
 
-    # 确保类型一致
-    factors = factors.with_columns(
-        pl.col("trade_date").cast(pl.Date, strict=False),
-        pl.col("ex_factor").cast(pl.Float64, strict=False),
-    ).select("symbol", "trade_date", "ex_factor").drop_nulls()
+    factors = validated_factor_events(factors.filter(pl.col("symbol").is_in(raw["symbol"].unique().implode())))
+    unavailable = factors.filter(pl.col("ex_factor").is_null())["symbol"].unique()
+    if not unavailable.is_empty():
+        raw = raw.with_columns(pl.when(~pl.col("symbol").is_in(unavailable.implode())).then(pl.col(c)).alias(c)
+                               for c in ("open", "high", "low", "close") if c in raw.columns)
+        factors = factors.drop_nulls()
 
     if factors.is_empty():
-        return raw
+        return raw.with_columns(pl.lit(None, dtype=pl.Boolean).alias("ex_rights"))
 
     # 去重 + 排序 + 累积乘积 (一趟完成)
     factors_sorted = (
         factors.sort(["symbol", "trade_date"])
-        .unique(subset=["symbol", "trade_date"])
-        .sort(["symbol", "trade_date"])
         .with_columns(
             pl.col("ex_factor").cum_prod().over("symbol").alias("cum_factor"),
         )
@@ -699,8 +711,11 @@ def compute_limit_signals(
     instruments: pl.DataFrame,
     needed: set[str] | None = None,
     historical_shares: pl.DataFrame | None = None,
+    *, reference_continuous: pl.Expr | None = None, dated_limits: pl.DataFrame | None = None,
 ) -> pl.DataFrame:
     """计算涨跌停相关信号。
+
+    reference_continuous 约束依赖昨收推算的理论价。当日已有权威边界时直接使用。
 
     产出:
       signal_limit_up, consecutive_limit_ups
@@ -788,7 +803,8 @@ def compute_limit_signals(
     _adj_yesterday = pl.col("close").shift(1).over("symbol") / pl.col("raw_close").shift(1).over("symbol")
     _adj_changed = (_adj_today - _adj_yesterday).abs() > 1e-6
     df = df.with_columns(
-        pl.when(_adj_changed)
+        pl.when(_adj_today.is_null() | _adj_yesterday.is_null()).then(None)
+        .when(_adj_changed)
         .then(pl.col("close").shift(1).over("symbol") / _adj_today)  # 除权参考价
         .otherwise(pl.col("raw_close").shift(1).over("symbol"))  # 正常: 使用原始昨收
         .alias("_prev_raw_close")
@@ -800,57 +816,39 @@ def compute_limit_signals(
         .alias("_limit_pct")
     )
 
+    reference = pl.when(pl.col("_prev_raw_close") > 0).then(pl.col("_prev_raw_close"))
+    if reference_continuous is not None:
+        reference = pl.when(reference_continuous).then(reference)
     # 理论涨停价 = prev_close × (1 + limit_pct)  整数算术，避免浮点误差
     df = df.with_columns(
-        polars_limit_price(pl.col("_prev_raw_close"), pl.col("_limit_pct"), up=True)
+        polars_limit_price(reference, pl.col("_limit_pct"), up=True)
         .alias("_theoretical_limit_up")
     )
 
     # 理论跌停价 = prev_close × (1 - limit_pct)
     df = df.with_columns(
-        polars_limit_price(pl.col("_prev_raw_close"), pl.col("_limit_pct"), up=False)
+        polars_limit_price(reference, pl.col("_limit_pct"), up=False)
         .alias("_theoretical_limit_down")
     )
 
     # 生效涨跌停价: 维表日期与行情日期一致时使用权威值, 否则使用理论价。
     # 旧版维表没有 as_of, 保持仅在最新行情日使用权威值的兼容行为。
-    _sentinel = 10000.0
     if "_instrument_as_of" in df.columns:
         authoritative_date = (
             pl.col("_instrument_as_of") == pl.col("date").cast(pl.Date, strict=False)
         )
     else:
         authoritative_date = pl.col("date") == pl.col("date").max()
-    if "limit_up" in df.columns:
-        # >0 与实时路径 (_compute_limit_signals_today) 同守卫: 维表 limit_up 为 0
-        # (数据源未提供该字段的占位值) 不是权威价, 直接采用会让 raw_close >= -0.005
-        # 恒成立, 全部标的被判涨停。
-        effective_limit_up = pl.when(
-            authoritative_date
-            & pl.col("limit_up").is_not_null()
-            & (pl.col("limit_up") > 0)
-            & (pl.col("limit_up") < _sentinel)
-        ).then(pl.col("limit_up")).otherwise(pl.col("_theoretical_limit_up"))
-    else:
-        effective_limit_up = pl.col("_theoretical_limit_up")
-    if "limit_down" in df.columns:
-        effective_limit_down = pl.when(
-            authoritative_date
-            & pl.col("limit_down").is_not_null()
-            & (pl.col("limit_down") > 0)
-            & (pl.col("limit_down") < _sentinel)
-        ).then(pl.col("limit_down")).otherwise(pl.col("_theoretical_limit_down"))
-    else:
-        effective_limit_down = pl.col("_theoretical_limit_down")
-    # 维表 limit_up 为哨兵值 = 当日无涨跌停限制 (注册制新股上市前 5 日), 与实时路径
-    # _compute_limit_signals_today 同口径: 涨停/跌停/炸板/翘板一律不成立, 不回退理论价
-    no_price_limit = pl.lit(False)
-    if "limit_up" in df.columns:
-        no_price_limit = (
-            authoritative_date
-            & pl.col("limit_up").is_not_null()
-            & (pl.col("limit_up") >= _sentinel)
-        )
+    def dated_bound(column):
+        current = pl.when(authoritative_date).then(pl.col(column)) if column in df.columns else pl.lit(None)
+        return pl.coalesce(pl.col("_dated_" + column), current) if dated_limits is not None else current
+
+    if dated_limits is not None:
+        df = df.join(dated_limits, on=["symbol", "date"], how="left")
+    up, down = dated_bound("limit_up"), dated_bound("limit_down")
+    effective_limit_up = pl.when((up > 0) & (up < NO_PRICE_LIMIT_SENTINEL)).then(up).otherwise("_theoretical_limit_up")
+    effective_limit_down = pl.when((down > 0) & (down < NO_PRICE_LIMIT_SENTINEL)).then(down).otherwise("_theoretical_limit_down")
+    no_price_limit = (up >= NO_PRICE_LIMIT_SENTINEL).fill_null(False)
     # listing_date 窗口兜底: 哨兵只在「维表 as_of == 行情日」那一天生效, 窗口内其余
     # 交易日 (以及 as_of 漂移后的历史重算) 由 listing_date 判定补齐。精确性用
     # 「symbol 内日期序号 <= 窗口交易日数」门控 — 新股本地日K必从上市首日起;
@@ -877,8 +875,7 @@ def compute_limit_signals(
         df = df.with_columns(
         pl.when(pl.col("_no_price_limit")).then(False)
         .when(
-            pl.col("_prev_raw_close").is_not_null()
-            & (pl.col("_prev_raw_close") > 0)
+            (pl.col("_effective_limit_up") > 0)
             & (pl.col("raw_close") > 0)
         ).then(
             pl.col("raw_close") >= (pl.col("_effective_limit_up") - 0.005)
@@ -914,8 +911,7 @@ def compute_limit_signals(
         df = df.with_columns(
         pl.when(pl.col("_no_price_limit")).then(False)
         .when(
-            pl.col("_prev_raw_close").is_not_null()
-            & (pl.col("_prev_raw_close") > 0)
+            (pl.col("_effective_limit_down") > 0)
             & (pl.col("raw_close") > 0)
         ).then(
             pl.col("raw_close") <= (pl.col("_effective_limit_down") + 0.005)
@@ -952,11 +948,10 @@ def compute_limit_signals(
         df = df.with_columns(
         pl.when(pl.col("_no_price_limit")).then(False)
         .when(
-            pl.col("_prev_raw_close").is_not_null()
-            & (pl.col("_prev_raw_close") > 0)
+            (pl.col("_effective_limit_down") > 0)
             & (pl.col("raw_low") > 0)
         ).then(
-            (~pl.col("signal_limit_down").fill_null(False))              # 最终没跌停
+            (~pl.col("signal_limit_down"))              # 最终没跌停
             & (pl.col("raw_low") <= pl.col("_effective_limit_down") + 0.005)  # 曾触及跌停(原始价口径, 跌停价为原始价基准)
             & (pl.col("close") > pl.col("open"))                          # 收阳
         ).otherwise(None).cast(pl.Boolean)
@@ -969,18 +964,17 @@ def compute_limit_signals(
         df = df.with_columns(
         pl.when(pl.col("_no_price_limit")).then(False)
         .when(
-            pl.col("_prev_raw_close").is_not_null()
-            & (pl.col("_prev_raw_close") > 0)
+            (pl.col("_effective_limit_up") > 0)
             & (pl.col("raw_high") > 0)
         ).then(
-            (~pl.col("signal_limit_up").fill_null(False))               # 最终没封住涨停
+            (~pl.col("signal_limit_up"))               # 最终没封住涨停
             & (pl.col("raw_high") >= pl.col("_effective_limit_up") - 0.005)  # 曾触及涨停价
         ).otherwise(None).cast(pl.Boolean)
         .alias("signal_broken_limit_up")
         )
 
     # 清理临时列 + JOIN 引入的 instruments 列 (不存入 enriched)
-    cleanup = ["_prev_raw_close", "_limit_pct",
+    cleanup = ["_prev_raw_close", "_limit_pct", "_dated_limit_up", "_dated_limit_down",
                "_theoretical_limit_up", "_theoretical_limit_down",
                "_effective_limit_up", "_effective_limit_down", "_no_price_limit",
                "_grp_up", "_grp_down", "_instrument_as_of",
@@ -2421,7 +2415,6 @@ def _compute_limit_signals_today(df: pl.DataFrame, instruments: pl.DataFrame) ->
     # 生效涨跌停价: 维表日期与行情日期一致时优先使用交易所权威值;
     # 维表过期或价格缺失时回退自算理论价。旧版无 as_of 维表保持兼容。
     # 哨兵阈值 10000 用于识别 "新股无涨跌停限制" 的占位值 (实际涨停价不可能上万)。
-    _sentinel = 10000.0
     authoritative_date = (
         pl.col("_instrument_as_of") == trade_date.cast(pl.Date, strict=False)
         if "_instrument_as_of" in df.columns
@@ -2435,12 +2428,12 @@ def _compute_limit_signals_today(df: pl.DataFrame, instruments: pl.DataFrame) ->
             authoritative_date
             & pl.col("limit_up").is_not_null()
             & (pl.col("limit_up") > 0)
-            & (pl.col("limit_up") < _sentinel)
+            & (pl.col("limit_up") < NO_PRICE_LIMIT_SENTINEL)
         )
         no_price_limit = (
             authoritative_date
             & pl.col("limit_up").is_not_null()
-            & (pl.col("limit_up") >= _sentinel)
+            & (pl.col("limit_up") >= NO_PRICE_LIMIT_SENTINEL)
         )
         effective_limit_up = pl.when(
             has_authoritative_up
@@ -2452,7 +2445,7 @@ def _compute_limit_signals_today(df: pl.DataFrame, instruments: pl.DataFrame) ->
             authoritative_date
             & pl.col("limit_down").is_not_null()
             & (pl.col("limit_down") > 0)
-            & (pl.col("limit_down") < _sentinel)
+            & (pl.col("limit_down") < NO_PRICE_LIMIT_SENTINEL)
         )
         effective_limit_down = pl.when(
             has_authoritative_down

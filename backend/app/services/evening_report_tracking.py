@@ -1,9 +1,4 @@
-"""Shared recommendation history and account-owned, reversible feedback.
-
-SQLite transactions keep an event and its current state indivisible across web
-workers. Read requests never create a database or calculate market data. History
-is indexed by recommendation month; no report or price history is copied here.
-"""
+"""共享推荐历史、客观回看与账号级反馈。"""
 from __future__ import annotations
 
 import json
@@ -11,19 +6,25 @@ import math
 import sqlite3
 from collections import Counter, defaultdict
 from contextlib import contextmanager
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 import polars as pl
 
 from app.market_time import cn_now
+from app.services.evening_report_start_study import is_live_original
 from app.services.evening_report_store import EveningReportStore
 from app.services.private_storage import private_path
+from app.services.trading_day import calendar_status
 from app.services.user_context import current_user
 
-EVALUATION_VERSION = 'close-forward-qfq-v2'
+EVALUATION_VERSION = 'close-forward-qfq-v3'
 ANALYSIS_VERSION = 'audit-missingness-v1'
-_PENDING_EVALUATIONS = ' OR '.join(f"json_extract(performance, '$.\"{window}\".status') IS NOT 'evaluated'" for window in (1, 3, 5))
+_PENDING_EVALUATIONS = ' OR '.join(
+    f"""json_extract(performance, '$."{window}".status') IS NOT 'evaluated'
+        OR json_extract(performance, '$."{window}".path.missing_count') > 0"""
+    for window in (1, 3, 5)
+)
 
 
 class FeedbackConflictError(ValueError):
@@ -66,7 +67,7 @@ def _database(path: Path, *, write: bool = False):
 
 def _schema(db):
     db.execute('CREATE TABLE IF NOT EXISTS refresh_runs(request_key TEXT PRIMARY KEY, completed_at TEXT NOT NULL)')
-    db.execute("CREATE TABLE IF NOT EXISTS reports(version TEXT PRIMARY KEY, day TEXT NOT NULL, kind TEXT NOT NULL, audit_feature_keys TEXT NOT NULL DEFAULT '[]')")
+    db.execute("CREATE TABLE IF NOT EXISTS reports(version TEXT PRIMARY KEY, day TEXT NOT NULL, kind TEXT NOT NULL, audit_feature_keys TEXT NOT NULL DEFAULT '[]', audit_sample_count INTEGER, forward_sample INTEGER NOT NULL)")
     db.execute('''CREATE TABLE IF NOT EXISTS episodes(
         id TEXT PRIMARY KEY, symbol TEXT NOT NULL, first_reference TEXT NOT NULL,
         started_at TEXT NOT NULL, last_seen TEXT NOT NULL, absence_count INTEGER NOT NULL,
@@ -75,14 +76,14 @@ def _schema(db):
     db.execute('''CREATE TABLE IF NOT EXISTS recommendations(
         id TEXT PRIMARY KEY, version TEXT NOT NULL, day TEXT NOT NULL, month TEXT NOT NULL,
         symbol TEXT NOT NULL, name TEXT, episode_id TEXT NOT NULL, observation TEXT NOT NULL,
-        appearance_seq INTEGER, revision_seq INTEGER, first_revision_id TEXT,
+        appearance_seq INTEGER NOT NULL,
         absence_count_at_recommendation INTEGER)''')
     db.execute('CREATE INDEX IF NOT EXISTS recommendations_month ON recommendations(month, day)')
     db.execute('CREATE INDEX IF NOT EXISTS recommendations_episode ON recommendations(episode_id)')
     db.execute('''CREATE TABLE IF NOT EXISTS outcome_evaluations(
         day TEXT NOT NULL, symbol TEXT NOT NULL, performance TEXT NOT NULL,
         PRIMARY KEY(day,symbol))''')
-    db.execute(f'CREATE INDEX IF NOT EXISTS outcome_pending ON outcome_evaluations(day,symbol) WHERE {_PENDING_EVALUATIONS}')
+    db.execute(f'CREATE INDEX IF NOT EXISTS outcome_pending_paths ON outcome_evaluations(day,symbol) WHERE {_PENDING_EVALUATIONS}')
     db.execute('''CREATE TABLE IF NOT EXISTS audit_cohorts(
         id TEXT PRIMARY KEY, version TEXT NOT NULL, day TEXT NOT NULL, symbol TEXT NOT NULL,
         selected INTEGER NOT NULL, comparable INTEGER NOT NULL, missing_features TEXT NOT NULL,
@@ -92,48 +93,12 @@ def _schema(db):
         version TEXT NOT NULL, rule_version TEXT NOT NULL, data_version TEXT NOT NULL,
         evaluated_at TEXT NOT NULL, payload TEXT NOT NULL,
         PRIMARY KEY(version,rule_version,data_version))''')
-    # Only the collector migrates storage; GET remains read-only. Reuse known
-    # revisions/dates, but do not invent a legacy snapshot's knowledge timestamp.
-    for table, additions in {
-        'reports': {'audit_feature_keys': "TEXT NOT NULL DEFAULT '[]'", 'audit_sample_count': 'INTEGER'},
-        'episodes': {'end_known_at': 'TEXT', 'end_reason': 'TEXT'},
-        'recommendations': {'appearance_seq': 'INTEGER', 'revision_seq': 'INTEGER',
-                            'first_revision_id': 'TEXT', 'absence_count_at_recommendation': 'INTEGER'},
-    }.items():
-        columns = {row['name'] for row in db.execute(f'PRAGMA table_info({table})')}
-        for column, kind in additions.items():
-            if column not in columns:
-                db.execute(f'ALTER TABLE {table} ADD COLUMN {column} {kind}')
-    columns = {row['name'] for row in db.execute('PRAGMA table_info(recommendations)')}
-    if 'performance' in columns:
-        for row in db.execute('SELECT day,symbol,performance FROM recommendations ORDER BY rowid'):
-            existing = db.execute('SELECT performance FROM outcome_evaluations WHERE day=? AND symbol=?',
-                                  (row['day'], row['symbol'])).fetchone()
-            incoming = json.loads(row['performance'])
-            as_of = max((item.get('as_of', '') for item in incoming.values()), default='')
-            merged = _merge_performance(json.loads(existing[0]) if existing else {}, incoming, as_of)
-            db.execute('INSERT OR REPLACE INTO outcome_evaluations VALUES(?,?,?)',
-                       (row['day'], row['symbol'], json.dumps(merged, ensure_ascii=False, allow_nan=False)))
-        db.execute('ALTER TABLE recommendations DROP COLUMN performance')
-    for row in db.execute('SELECT * FROM recommendations WHERE appearance_seq IS NULL ORDER BY day,rowid').fetchall():
-        appearance = db.execute('SELECT COUNT(DISTINCT day) FROM recommendations WHERE episode_id=? AND day<=?',
-                                (row['episode_id'], row['day'])).fetchone()[0]
-        revisions = db.execute('SELECT id FROM recommendations WHERE episode_id=? AND day=? ORDER BY rowid',
-                               (row['episode_id'], row['day'])).fetchall()
-        ids = [item['id'] for item in revisions]
-        db.execute('UPDATE recommendations SET appearance_seq=?,revision_seq=?,first_revision_id=? WHERE id=?',
-                   (appearance, ids.index(row['id']) + 1, ids[0], row['id']))
 
 
 def _personal_schema(db):
     db.execute('''CREATE TABLE IF NOT EXISTS feedback(
         episode_id TEXT PRIMARY KEY, starred INTEGER NOT NULL, outcome TEXT,
         revision INTEGER NOT NULL, updated_at TEXT NOT NULL)''')
-    db.execute('''CREATE TABLE IF NOT EXISTS events(
-        request_id TEXT PRIMARY KEY, episode_id TEXT NOT NULL, reference_id TEXT NOT NULL,
-        month TEXT NOT NULL, at TEXT NOT NULL, payload TEXT NOT NULL,
-        actions TEXT NOT NULL, revision INTEGER NOT NULL)''')
-    db.execute('CREATE INDEX IF NOT EXISTS events_month ON events(month, at)')
 
 
 def _selected(report: dict) -> list[dict]:
@@ -146,8 +111,8 @@ def _register(db, report: dict, calendar: list[str], *, audit_rows: list[dict] |
         return
     day = report.get('trade_date') or report['date']
     kind = report.get('kind', 'original')
-    last = db.execute("SELECT MAX(day) FROM reports WHERE kind='original'").fetchone()[0]
-    historical = kind != 'original' or bool(last and day <= last)
+    last = db.execute('SELECT MAX(day) FROM reports').fetchone()[0]
+    historical = bool(last and day <= last)
     rows = _selected(report)
     symbols = {row['symbol'] for row in rows}
     if not historical:
@@ -166,12 +131,8 @@ def _register(db, report: dict, calendar: list[str], *, audit_rows: list[dict] |
     for row in rows:
         symbol = row['symbol']
         reference = f'{version}:{symbol}'
-        # A revision of an existing recommendation references the same episode;
-        # new historical observations never rewrite a live episode or feedback.
-        existing = db.execute('SELECT episode_id FROM recommendations WHERE day=? AND symbol=? ORDER BY rowid LIMIT 1',
-                              (day, symbol)).fetchone()
-        episode = (existing['episode_id'] if existing else None)
-        if not episode and not historical:
+        episode = None
+        if not historical:
             active = db.execute('SELECT id FROM episodes WHERE symbol=? AND ended_at IS NULL AND historical=0',
                                 (symbol,)).fetchone()
             episode = active['id'] if active else None
@@ -182,26 +143,28 @@ def _register(db, report: dict, calendar: list[str], *, audit_rows: list[dict] |
                        (episode, symbol, reference, day, day, int(historical)))
         elif not historical:
             db.execute('UPDATE episodes SET last_seen=?,absence_count=0 WHERE id=?', (day, episode))
-        revisions = db.execute('SELECT * FROM recommendations WHERE episode_id=? AND day=? ORDER BY rowid',
-                               (episode, day)).fetchall()
-        appearance = (revisions[0]['appearance_seq'] if revisions else
-                      1 + db.execute('SELECT COUNT(DISTINCT day) FROM recommendations WHERE episode_id=?', (episode,)).fetchone()[0])
-        first_revision = revisions[0]['id'] if revisions else reference
+        appearance = 1 + db.execute('SELECT COUNT(*) FROM recommendations WHERE episode_id=?',
+                                    (episode,)).fetchone()[0]
         observation = row.get('observation') or {}
+        if report.get('variable_definitions'):
+            # 过程详情可直接读取本次推荐保存的定义及数值。
+            observation = {**observation, 'variables': {
+                key: {**report['variable_definitions'].get(key, {}), **observation.get('variables', {}).get(key, {})}
+                for key in observation.get('values', {})}}
+
         db.execute('''INSERT INTO recommendations(id,version,day,month,symbol,name,episode_id,observation,
-                      appearance_seq,revision_seq,first_revision_id,absence_count_at_recommendation)
-                      VALUES(?,?,?,?,?,?,?,?,?,?,?,?)''',
+                      appearance_seq,absence_count_at_recommendation)
+                      VALUES(?,?,?,?,?,?,?,?,?,?)''',
                    (reference, version, day, day[:7], symbol, row.get('name'), episode,
-                    json.dumps(observation, ensure_ascii=False, allow_nan=False), appearance,
-                    len(revisions) + 1, first_revision, 0))
+                    json.dumps(observation, ensure_ascii=False, allow_nan=False), appearance, 0))
     # Selected and comparable features live in the permanent snapshot. Audit-only
     # securities have compact decisions and never acquire a personal identity.
     if report.get('audit'):
         if not audit_rows:
-            # Legacy full archives, or long-term candidates after the audit TTL.
+            # Long-term candidate snapshots remain available after the audit retention period.
             audit_rows = [{**row, 'decision': row.get('observation', {}).get('decision', {}),
                            'missing_features': row.get('observation', {}).get('data_completeness', {}).get('missing_fields', [])}
-                          for row in report.get('calculations', report.get('records', []))]
+                          for row in report.get('records', [])]
         for row in audit_rows:
             decision = row['decision']
             db.execute('INSERT OR IGNORE INTO audit_cohorts VALUES(?,?,?,?,?,?,?,?)',
@@ -209,14 +172,29 @@ def _register(db, report: dict, calendar: list[str], *, audit_rows: list[dict] |
                         int(decision.get('comparison_eligible', False)),
                         json.dumps(row['missing_features']),
                         json.dumps(decision.get('comparison_group'))))
-    db.execute('INSERT INTO reports(version,day,kind,audit_feature_keys,audit_sample_count) VALUES(?,?,?,?,?)',
+    db.execute('INSERT INTO reports(version,day,kind,audit_feature_keys,audit_sample_count,forward_sample) VALUES(?,?,?,?,?,?)',
                (version, day, kind, json.dumps(report.get('audit', {}).get('feature_keys', [])),
-                report.get('audit', {}).get('same_cycle_sample_count')))
+                report.get('audit', {}).get('same_cycle_sample_count'),
+                int(is_live_original(report | {'trade_date': day}))))
 
 
 def _valid_price(row: dict | None) -> bool:
     return bool(row and row.get('formal') is True and isinstance(row.get('close'), (float, int))
                 and math.isfinite(row['close']) and row['close'] > 0)
+
+
+def evaluation_prices(frame: pl.DataFrame, symbols: set[str], days: set[str]) -> dict:
+    fields = ['symbol', 'date', 'close', 'formal', 'raw_close', 'raw_high', 'raw_low',
+              'volume', 'amount', 'is_st', 'signal_limit_up', 'signal_limit_down']
+    rows = (frame.filter(pl.col('symbol').is_in(symbols) & pl.col('date').cast(pl.String).is_in(days))
+            .select([column for column in fields if column in frame.columns]))
+    return {(row['symbol'], str(row['date'])): row for row in rows.iter_rows(named=True)}
+
+
+def evaluation_data_version(inputs) -> dict:
+    return {'stock_generation': inputs.provenance.get('stock_generation'),
+            'cutoff': inputs.cutoff,
+            'adjustment_source': inputs.provenance.get('evaluation_context', {}).get('adjustment_source')}
 
 
 def evaluate_performance(symbol: str, day: str, *, calendar: list[str], as_of: str,
@@ -289,11 +267,24 @@ def evaluate_performance(symbol: str, day: str, *, calendar: list[str], as_of: s
                              reason_code='valid_price_endpoints',
                              **{'return': end['close'] / start['close'] - 1},
                              trading_constraints=constraints)
+        if target and target <= as_of:
+            days = calendar[position + 1:position + window + 1]
+            halted = [item for item in days if (symbol, item) in suspensions]
+            observed = [prices.get((symbol, item)) for item in days if item not in halted]
+            missing = sum(not _valid_price(row) for row in observed)
+            path_complete = _valid_price(start) and not missing and (symbol, day) not in suspensions
+            returns = [0., *(row['close'] / start['close'] - 1 for row in observed)] if path_complete else []
+            value['path'] = {'status': 'evaluated' if path_complete else 'unavailable',
+                             'max_favorable_return': max(returns) if returns else None,
+                             'max_adverse_return': min(returns) if returns else None,
+                             'expected_count': len(days), 'valid_count': len(observed) - missing,
+                             'missing_count': missing, 'suspended_count': len(halted),
+                             'as_of': as_of, 'data_version': data_version, 'adjust_base_date': value['adjust_base_date']}
         results[str(window)] = value
     return results
 
 
-def refresh_tracking(data_dir: Path, inputs, cancel_check=None) -> dict:
+def refresh_tracking(data_dir: Path, inputs, cancel_check=None, *, evaluate=True) -> dict:
     """Run after publication, with accepted local inputs. Failure never unpublishes."""
     store = EveningReportStore(data_dir)
     path = _shared_path(data_dir)
@@ -307,18 +298,13 @@ def refresh_tracking(data_dir: Path, inputs, cancel_check=None) -> dict:
         check()
         if entry['date'] > inputs.trade_date:
             continue
-        for metadata in sorted(entry['versions'], key=lambda item: (item['kind'] != 'original', item.get('generated_at', ''))):
-            if metadata['version'] not in known:
-                report = store.get(entry['date'], metadata['version'])
-                if report and report.get('status') == 'published':
-                    reports.append(report)
-                    audits[report['version']] = store.audit_rows(entry['date'], report['version'])
-    context = inputs.provenance.get('evaluation_context', {})
+        version = entry['versions'][0]['version']
+        if version not in known:
+            report = store.get(entry['date'], version)
+            if report and report.get('status') == 'published':
+                reports.append(report)
+                audits[version] = store.audit_rows(entry['date'], version)
     calendar = sorted(set(inputs.provenance.get('calendar', {}).get('days', inputs.calendar)))
-    suspensions = {(row['symbol'], str(row['date'])) for row in inputs.provenance.get('suspensions', [])}
-    version = {'input_id': inputs.provenance.get('review_input_id'),
-               'stock_generation': inputs.provenance.get('input_versions', {}).get('stock_generation'),
-               'cutoff': inputs.cutoff, 'adjustment_source': context.get('adjustment_source')}
     # Computation happens outside the write transaction; the second read merges
     # with another collector's already completed evaluations.
     with _database(path, write=True) as db:
@@ -329,6 +315,8 @@ def refresh_tracking(data_dir: Path, inputs, cancel_check=None) -> dict:
         db.execute('''INSERT OR IGNORE INTO outcome_evaluations(day,symbol,performance)
                       SELECT day,symbol,'{}' FROM recommendations UNION
                       SELECT day,symbol,'{}' FROM audit_cohorts WHERE comparable=1''')
+        if not evaluate:
+            return {'registered_reports': len(reports), 'evaluated_recommendations': 0}
         pending = db.execute(f'SELECT * FROM outcome_evaluations WHERE ({_PENDING_EVALUATIONS}) AND day<=?',
                              (inputs.trade_date,)).fetchall()
     needed_days = set()
@@ -336,14 +324,21 @@ def refresh_tracking(data_dir: Path, inputs, cancel_check=None) -> dict:
         check()
         if row['day'] in calendar:
             index = calendar.index(row['day'])
-            needed_days.update(calendar[index + offset] for offset in (0, 1, 3, 5)
-                               if index + offset < len(calendar))
-    fields = ['symbol', 'date', 'close', 'formal', 'raw_close', 'raw_high', 'raw_low',
-              'volume', 'amount', 'is_st', 'signal_limit_up', 'signal_limit_down']
-    frame = (inputs.prices.filter(pl.col('symbol').is_in({row['symbol'] for row in pending})
-                                  & pl.col('date').cast(pl.String).is_in(needed_days))
-             .select([column for column in fields if column in inputs.prices.columns]))
-    prices = {(row['symbol'], str(row['date'])): row for row in frame.to_dicts()}
+            needed_days.update(calendar[index:index + 6])
+    symbols = {row['symbol'] for row in pending}
+    if not hasattr(inputs, 'prices'):
+        from app.services.daily_coverage import DailyCoverageError
+        from app.services.evening_report_inputs import load_evaluation_inputs
+
+        try:
+            inputs = load_evaluation_inputs(data_dir, date.fromisoformat(inputs.trade_date),
+                                            symbols=symbols, days=needed_days, include_constraints=True)
+        except DailyCoverageError as exc:
+            return {'registered_reports': len(reports), 'evaluated_recommendations': 0, 'evaluation_warning': str(exc)}
+    version = evaluation_data_version(inputs)
+    context = inputs.provenance.get('evaluation_context', {})
+    suspensions = {(row['symbol'], str(row['date'])) for row in inputs.provenance.get('suspensions', [])}
+    prices = evaluation_prices(inputs.prices, symbols, needed_days) if symbols and not inputs.prices.is_empty() else {}
     evaluations = {}
     for row in pending:
         check()
@@ -359,7 +354,12 @@ def refresh_tracking(data_dir: Path, inputs, cancel_check=None) -> dict:
             fresh = _merge_performance(current, fresh, inputs.trade_date)
             db.execute('UPDATE outcome_evaluations SET performance=? WHERE day=? AND symbol=?',
                        (json.dumps(fresh, ensure_ascii=False, allow_nan=False, default=str), day, symbol))
-    affected_days = {day for day, _symbol in evaluations} | {report.get('trade_date') or report['date'] for report in reports}
+        missing_analyses = {row[0] for row in db.execute(
+            """SELECT r.day FROM reports r WHERE r.day<=?
+               AND EXISTS (SELECT 1 FROM audit_cohorts a WHERE a.version=r.version)
+               AND NOT EXISTS (SELECT 1 FROM audit_analyses h WHERE h.version=r.version AND h.rule_version=?)""",
+            (inputs.trade_date, ANALYSIS_VERSION))}
+    affected_days = missing_analyses | {day for day, _symbol in evaluations}
     _save_audit_analyses(path, version, inputs.trade_date, affected_days, check)
     return {'registered_reports': len(reports), 'evaluated_recommendations': len(evaluations)}
 
@@ -367,6 +367,14 @@ def refresh_tracking(data_dir: Path, inputs, cancel_check=None) -> dict:
 def _merge_performance(previous: dict, fresh: dict, as_of: str) -> dict:
     for key, value in previous.items():
         if value.get('status') == 'evaluated' or value.get('as_of', '') > as_of:
+            current = fresh.get(key, {})
+            path, updated = value.get('path', {}), current.get('path', {})
+            if (value.get('status') == current.get('status') == 'evaluated'
+                    and value['target_date'] == current['target_date']
+                    and updated and path and path['missing_count'] > updated['missing_count']
+                    and path.get('as_of', value['as_of']) <= updated.get('as_of', current['as_of'])):
+                # Freeze the accepted endpoint. Only the incomplete path acquires later evidence.
+                value = {**value, 'path': updated}
             fresh[key] = value
             continue
         current = fresh.get(key)
@@ -421,8 +429,7 @@ def _save_audit_analyses(path: Path, data_version: dict, as_of: str, days: set[s
         complete_audit = samples[0]['audit_sample_count'] in (None, len(samples))
         payload = {
             'as_of': as_of, 'rule_version': ANALYSIS_VERSION, 'cohort_definition_version': COHORT_VERSION,
-            'sample_identity': 'single_report_revision', 'report_revision': version,
-            'cross_revision_default': 'first_published_revision',
+            'report_version': version,
             'report_kind': samples[0]['kind'],
             'same_cycle_sample_count': len(samples), 'comparable_sample_count': len(comparable),
             'distinct_trade_dates': 1, 'non_independent_notice': NON_INDEPENDENT_NOTE,
@@ -445,7 +452,7 @@ def _save_audit_analyses(path: Path, data_version: dict, as_of: str, days: set[s
 def audit_history(data_dir: Path, version: str) -> dict:
     """Read-only audit export; candidate IDs cannot be used as feedback IDs."""
     with _database(_shared_path(data_dir)) as db:
-        if not db or not db.execute("SELECT 1 FROM sqlite_master WHERE name='audit_cohorts'").fetchone():
+        if not db:
             return {'records': [], 'analyses': []}
         rows = [dict(row) for row in db.execute('''SELECT a.*,o.performance FROM audit_cohorts a
                     LEFT JOIN outcome_evaluations o ON a.day=o.day AND a.symbol=o.symbol
@@ -465,13 +472,40 @@ def audit_history(data_dir: Path, version: str) -> dict:
 def _feedback(row=None) -> dict:
     return {'starred': bool(row['starred']) if row else False,
             'outcome': row['outcome'] if row else None,
-            'revision': row['revision'] if row else 0,
             'updated_at': row['updated_at'] if row else None}
 
 
 def _all_feedback(data_dir: Path) -> dict:
     with _database(_personal_path(data_dir)) as db:
         return {row['episode_id']: _feedback(row) for row in db.execute('SELECT * FROM feedback')} if db else {}
+
+
+def _project_performance(performance: dict, calendar: list[str], position: int | None,
+                         closed_through: str) -> dict:
+    projected = dict(performance)
+    for window in (1, 3, 5):
+        key = str(window)
+        value = performance.get(key, {})
+        calendar_unconfirmed = value.get('status') == 'unavailable' and value.get('reason_code') == 'calendar_unconfirmed'
+        if value and value['status'] != 'not_due' and not calendar_unconfirmed:
+            continue
+        target = value.get('target_date')
+        if target is None and position is not None and position + window < len(calendar):
+            target = calendar[position + window]
+        if target is None and position is None and (calendar or calendar_unconfirmed):
+            projected[key] = {'window': window, 'as_of': None, 'return': None, 'trading_constraints': [],
+                              'data_version': None, **value, 'target_date': None, 'status': 'unavailable',
+                              'reason_code': 'calendar_unconfirmed', 'reason': '推荐日不在已确认交易日历中'}
+            continue
+        as_of = value.get('as_of')
+        pending = bool(target and target <= closed_through)
+        status = 'overdue_pending_review' if pending else 'not_due'
+        reason = '目标交易日待确认' if target is None else '目标日尚未收盘'
+        if pending:
+            reason = f'最近评价截至 {as_of}' if as_of else '尚无回看结果'
+        projected[key] = {'window': window, 'as_of': None, 'return': None, 'trading_constraints': [], 'data_version': None,
+                          **value, 'target_date': target, 'status': status, 'reason_code': status, 'reason': reason}
+    return projected
 
 
 def _recommendations(data_dir: Path, *, day: str | None = None, version: str | None = None,
@@ -484,28 +518,26 @@ def _recommendations(data_dir: Path, *, day: str | None = None, version: str | N
     with _database(_shared_path(data_dir)) as db:
         rows = []
         if db:
-            modern = bool(db.execute("SELECT 1 FROM sqlite_master WHERE name='outcome_evaluations'").fetchone())
-            sql = '''SELECT r.*,e.started_at,e.last_seen,e.ended_at,e.first_reference,e.historical'''
-            if modern:
-                sql += ",e.end_known_at,e.end_reason,COALESCE(o.performance,'{}') AS performance"
-            sql += ' FROM recommendations r JOIN episodes e ON r.episode_id=e.id'
-            if modern:
-                sql += ' LEFT JOIN outcome_evaluations o ON r.day=o.day AND r.symbol=o.symbol'
+            sql = """SELECT r.*,e.started_at,e.last_seen,e.ended_at,e.first_reference,e.historical,
+                            p.kind AS report_kind,p.forward_sample,e.end_known_at,e.end_reason,
+                            COALESCE(o.performance,'{}') AS performance
+                     FROM recommendations r JOIN episodes e ON r.episode_id=e.id
+                     JOIN reports p ON p.version=r.version
+                     LEFT JOIN outcome_evaluations o ON r.day=o.day AND r.symbol=o.symbol"""
             if clauses:
                 sql += ' WHERE ' + ' AND '.join(clauses)
             sql += ' ORDER BY r.day DESC,r.rowid'
             rows = [dict(row) for row in db.execute(sql, params)]
-            latest = {(row['episode_id'], row['day']): row['id'] for row in db.execute('''
-                SELECT episode_id,day,id FROM recommendations WHERE rowid IN (
-                    SELECT MAX(rowid) FROM recommendations GROUP BY episode_id,day)''')}
-            for row in rows:
-                row['latest_revision_id'] = latest[(row['episode_id'], row['day'])]
     feedback = _all_feedback(data_dir)
+    calendar = calendar_status(data_dir).get('days', []) if rows else []
+    positions = {value: index for index, value in enumerate(calendar)}
+    now = cn_now()
+    closed_through = (now.date() - timedelta(days=now.hour < 15)).isoformat()
     for row in rows:
         row['observation'] = json.loads(row['observation'])
-        row['performance'] = json.loads(row['performance'])
+        row['performance'] = _project_performance(json.loads(row['performance']), calendar,
+                                                 positions.get(row['day']), closed_through)
         row['feedback'] = feedback.get(row['episode_id'], _feedback())
-        row['sample_identity_policy'] = 'first_revision_per_trade_date'
         row['count_key'] = [current_user().id, row['symbol'], row['episode_id'], row['day']]
     return rows
 
@@ -519,7 +551,7 @@ def personal_report(data_dir: Path, day: str, version: str) -> dict:
 
 
 def update_feedback(data_dir: Path, *, day: str, version: str, symbol: str,
-                    starred: bool, outcome: str | None, expected_revision: int, request_id: str) -> dict:
+                    starred: bool, outcome: str | None) -> dict:
     report = EveningReportStore(data_dir).get(day, version, view=True)
     if not report or symbol not in {row['symbol'] for row in _selected(report)}:
         raise ValueError('只能记录该报告中已入选的股票')
@@ -531,47 +563,21 @@ def update_feedback(data_dir: Path, *, day: str, version: str, symbol: str,
     episode = row['episode_id']
     if outcome not in (None, 'profit', 'loss') or not isinstance(starred, bool):
         raise ValueError('反馈状态无效')
-    payload = json.dumps({'reference_id': reference, 'starred': starred, 'outcome': outcome,
-                          'expected_revision': expected_revision}, sort_keys=True)
     with _database(_personal_path(data_dir), write=True) as db:
         _personal_schema(db)
-        existing = db.execute('SELECT payload FROM events WHERE request_id=?', (request_id,)).fetchone()
-        current = _feedback(db.execute('SELECT * FROM feedback WHERE episode_id=?', (episode,)).fetchone())
-        if existing:
-            if existing['payload'] != payload:
-                raise FeedbackConflictError('重复请求标识对应不同修改，请刷新后重试')
-            return {'episode_id': episode, **current}
-        if current['revision'] != expected_revision:
-            raise FeedbackConflictError('记录已在其他页面更新，请刷新后重试')
-        actions = []
-        if current['starred'] != starred:
-            actions.append('star_set' if starred else 'star_cancel')
-        if current['outcome'] != outcome:
-            if current['outcome']:
-                actions.append(current['outcome'] + '_cancel')
-            if outcome:
-                actions.append(outcome + '_set')
         now = cn_now().isoformat()
-        revision = current['revision'] + bool(actions)
-        db.execute('INSERT OR REPLACE INTO feedback VALUES(?,?,?,?,?)',
-                   (episode, int(starred), outcome, revision, now))
-        db.execute('INSERT INTO events VALUES(?,?,?,?,?,?,?,?)',
-                   (request_id, episode, reference, now[:7], now, payload, json.dumps(actions), revision))
-        return {'episode_id': episode, 'starred': starred, 'outcome': outcome,
-                'revision': revision, 'updated_at': now}
+        # 既有数据库的 revision 列为必填，当前状态更新不依赖它。
+        db.execute("""INSERT INTO feedback(episode_id,starred,outcome,revision,updated_at) VALUES(?,?,?,0,?)
+                      ON CONFLICT(episode_id) DO UPDATE SET starred=excluded.starred,
+                      outcome=excluded.outcome,updated_at=excluded.updated_at""",
+                   (episode, int(starred), outcome, now))
+        return {'episode_id': episode, 'starred': starred, 'outcome': outcome, 'updated_at': now}
 
 
 def personal_history(data_dir: Path, month: str | None = None) -> dict:
     user = current_user()
     rows = _recommendations(data_dir, month=month)
-    episodes = {row['episode_id'] for row in rows}
-    with _database(_personal_path(data_dir)) as db:
-        events = [dict(row) for row in db.execute('SELECT * FROM events ORDER BY at DESC')] if db else []
-    for event in events:
-        event['actions'] = json.loads(event['actions'])
-        event.pop('payload')
-    return {'user_id': user.id, 'records': rows,
-            'events': [event for event in events if event['episode_id'] in episodes]}
+    return {'user_id': user.id, 'records': rows}
 
 
 def personal_overview(data_dir: Path) -> dict:
@@ -579,17 +585,18 @@ def personal_overview(data_dir: Path) -> dict:
     rows = _recommendations(data_dir)
     episodes = {row['episode_id']: row for row in rows if row['id'] == row['first_reference']}
     states = [row['feedback'] for row in episodes.values()]
+    forward = [row for row in episodes.values() if row['forward_sample']]
     performance = {}
     for window in ('1', '3', '5'):
-        samples = [row['performance'].get(window, {'status': 'not_due'}) for row in episodes.values()]
+        samples = [row['performance'][window] for row in forward]
         counts = Counter(row['status'] for row in samples)
         valid = [row['return'] for row in samples if row['status'] == 'evaluated']
         performance[window] = {'total': len(samples), 'evaluated': counts['evaluated'],
-                               'not_due': counts['not_due'], 'unavailable': counts['unavailable'],
+                               'not_due': counts['not_due'], 'overdue_pending_review': counts['overdue_pending_review'],
+                               'unavailable': counts['unavailable'],
                                'mean_return': sum(valid) / len(valid) if valid else None}
     return {'user_id': user.id, 'episode_count': len(episodes),
-            'recommendation_count': len({(row['episode_id'], row['day']) for row in rows}),
-            'revision_count': len(rows),
+            'recommendation_count': len(rows),
             'starred': sum(row['starred'] for row in states),
             'unstarred': sum(not row['starred'] for row in states),
             'profit': sum(row['outcome'] == 'profit' for row in states),
@@ -603,13 +610,10 @@ def refresh_completed(data_dir: Path, request_key: str) -> bool:
 
 
 def prune_tracking(data_dir: Path, today: date, cancel_check=None) -> dict:
-    """Expire only new-format audit indexes; retain legacy facts and outcomes."""
-    from datetime import timedelta
-
+    """Expire audit-only tracking rows after their publication retention period."""
     from app.services.evening_report_archive import (
         ATTEMPT_RETENTION_DAYS,
         AUDIT_RETENTION_DAYS,
-        SCHEMA_VERSION,
     )
 
     check = cancel_check or (lambda: None)
@@ -620,19 +624,14 @@ def prune_tracking(data_dir: Path, today: date, cancel_check=None) -> dict:
     if path.is_symlink() or path.resolve().parent != (Path(data_dir) / 'evening_report').resolve():
         raise ValueError('晚报维护数据库超出模块目录')
     cutoff = (today - timedelta(days=AUDIT_RETENTION_DAYS)).isoformat()
-    # Publication metadata is authoritative for storage format, including each
-    # revision. A date or an audit row alone cannot authorize its deletion.
-    expired_versions = [(entry['version'],) for day in EveningReportStore(data_dir).dates()
-                        if day['date'] < cutoff for entry in day['versions']
-                        if entry.get('storage_version') == SCHEMA_VERSION]
+    expired_versions = [(day['versions'][0]['version'],) for day in EveningReportStore(data_dir).dates()
+                        if day['date'] < cutoff]
     with _database(path, write=True) as db:
         check()
         _schema(db)
         removed = db.executemany('DELETE FROM audit_cohorts WHERE version=? AND selected=0 AND comparable=0',
                                  expired_versions).rowcount
         db.executemany('DELETE FROM audit_analyses WHERE version=?', expired_versions)
-        # Outcomes are shared across report formats/revisions. New audit-only
-        # rows never create them; existing legacy evaluations remain permanent.
         db.execute('DELETE FROM refresh_runs WHERE completed_at<?',
                    ((today - timedelta(days=ATTEMPT_RETENTION_DAYS)).isoformat(),))
         check()  # Cancellation rolls back the database transaction before commit.
@@ -642,35 +641,14 @@ def prune_tracking(data_dir: Path, today: date, cancel_check=None) -> dict:
 def refresh_after_publication(data_dir: Path, day: str, cancel_check=None, request_key=None) -> dict:
     from types import SimpleNamespace
 
-    from app.services.daily_coverage import DailyCoverageError
-    from app.services.evening_report_inputs import (
-        load_inputs,
-        prepare_evaluation_inputs,
-        require_ready,
-    )
-    from app.services.trading_day import calendar_status
-
-    target = date.fromisoformat(day)
-    warning = None
-    try:
-        evidence = require_ready(data_dir, target)
-        inputs = load_inputs(data_dir, target, evidence, cancel_check)
-        prepare_evaluation_inputs(data_dir, inputs)
-        require_ready(data_dir, target, input_id=evidence['input_id'])
-        inputs.provenance['review_input_id'] = evidence['input_id']
-    except DailyCoverageError as exc:
-        # Published recommendations remain recordable even if price inputs are
-        # currently unavailable. Only objective evaluation waits for new inputs.
-        warning = str(exc)
-        inputs = SimpleNamespace(calendar=calendar_status(data_dir).get('days', []),
-                                 trade_date=day, cutoff=cn_now().isoformat(), provenance={},
-                                 prices=pl.DataFrame(schema={'symbol': pl.String, 'date': pl.String}))
+    inputs = SimpleNamespace(calendar=calendar_status(data_dir).get('days', []), trade_date=day, provenance={})
     result = refresh_tracking(data_dir, inputs, cancel_check)
+    warning = result.get('evaluation_warning')
     from app.services.shared_runtime import publish_data_update
 
     # Failed notification writes must remain eligible for the scheduled retry.
     publish_data_update(data_dir, ['evening_report_tracking'])
-    if request_key:
+    if request_key and (warning is None or request_key.endswith(':unready')):
         with _database(_shared_path(data_dir), write=True) as db:
             db.execute('INSERT OR REPLACE INTO refresh_runs VALUES(?,?)', (request_key, cn_now().isoformat()))
     return {**result, 'evaluation_ready': warning is None, 'evaluation_warning': warning}

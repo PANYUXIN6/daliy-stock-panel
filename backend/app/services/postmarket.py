@@ -1,6 +1,7 @@
 """交易日盘后入口与当日行情／指标验收；执行复用原有管道和 JobStore。"""
 from __future__ import annotations
 
+import json
 import logging
 from datetime import date
 from pathlib import Path
@@ -67,6 +68,36 @@ def reconcile_daily_status(coverage: DailyCoverage, expected: list[str], *,
     logger.info("%s 缺行状态核验(%s)：确认停牌 %d 只，尚未上市 %d 只，未解释 %d 只",
                 coverage.day, status.source, len(halted), len(not_listed),
                 len(missing - halted - not_listed))
+
+
+def save_suspensions(data_dir: Path, coverage: DailyCoverage) -> None:
+    """保存验收确认的全天停牌，含标准化时从正式日线剔除的零量行。"""
+    from app.services.fs_utils import atomic_write_text
+
+    path = data_dir / "trading_status" / f"{coverage.day}.json"
+    rows = [proof for symbol, proof in coverage.halted_evidence.items() if symbol not in coverage.active]
+    if rows or path.exists():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        atomic_write_text(path, json.dumps(rows, ensure_ascii=False, default=str))
+
+
+def read_suspensions(data_dir: Path, days: list[str]) -> list[dict]:
+    directory = data_dir / "trading_status"
+    if not directory.exists():
+        return []
+    result = []
+    for day in days:
+        path = directory / f"{day}.json"
+        try:
+            rows = json.loads(path.read_text())
+            if isinstance(rows, list):
+                result.extend(r for r in rows if isinstance(r, dict) and r.get("symbol")
+                              and r.get("date") == day and r.get("confirmed") is True)
+        except FileNotFoundError:
+            continue
+        except (OSError, ValueError):
+            logger.warning("无法读取 %s 的交易状态", day, exc_info=True)
+    return result
 
 
 def require_enriched(data_dir: Path, coverage: DailyCoverage, *, asset_type: str = "stock") -> dict:

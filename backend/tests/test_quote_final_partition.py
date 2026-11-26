@@ -77,3 +77,18 @@ def test_final_snapshot_preserves_unconfirmed_symbols_and_partitions(
         assert displayed["close"][0] == (13.0 if fresh_asset == "index" else 12.0)
     finally:
         repo.db.close()
+
+
+def test_daily_append_and_full_flush_keep_last_source_row(tmp_path):
+    repo = KlineRepository(DataStore(tmp_path))
+    day = datetime(2026, 10, 9).date()
+    path = tmp_path / "kline_daily" / f"date={day}" / "part.parquet"
+    incoming = pl.DataFrame({"symbol": ["600001.SH", "600002.SH", "600001.SH"],
+                             "date": [day] * 3, "close": [10., 20., 11.]})
+    try:
+        repo.append_daily(incoming)
+        assert pl.read_parquet(path).select("symbol", "close").rows() == [("600001.SH", 11.), ("600002.SH", 20.)]
+        repo.flush_live_daily(incoming.filter(pl.col("symbol") == "600001.SH").reverse())
+        assert pl.read_parquet(path).select("symbol", "close").rows() == [("600001.SH", 10.)]
+    finally:
+        repo.db.close()

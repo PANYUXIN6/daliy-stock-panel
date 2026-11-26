@@ -506,6 +506,7 @@ def _run_now(
             check_cancel=lambda: emit("sync_daily", 45, "核对当日停复牌与新股上市状态…", skip_log=True),
         )
         readiness["daily"] = coverage.require(universe)
+        postmarket_service.save_suspensions(repo.store.data_dir, coverage)
         emit("sync_daily", 45,
              f"{today} 正式日线验收通过：交易 {readiness['daily']['active']} 只，"
              f"停牌 {readiness['daily']['halted']} 只，"
@@ -841,11 +842,24 @@ def _run_now(
         from app.services import ext_presets
         classifications: dict[str, int] = {}
         classification_observations: list[dict] = []
-        for task_id in ("prefetch_concept", "prefetch_industry"):
-            prepared = prefetch.result(task_id)
-            classifications[prepared.config.id] = ext_presets.commit_prepared_preset(prepared, repo.store.data_dir)
-            classification_observations.append(getattr(prepared, "observation", None))
-            emit("sync_classifications", 89, f"{prepared.config.label}同步完成，{classifications[prepared.config.id]} 行")
+        industry_available = False
+        for kind in ("concept", "industry"):
+            try:
+                prepared = prefetch.result("prefetch_" + kind)
+                classifications[prepared.config.id] = ext_presets.commit_prepared_preset(prepared, repo.store.data_dir)
+                observation = getattr(prepared, "observation", None)
+                if observation:
+                    classification_observations.append({**observation, "kind": kind})
+                if kind == "industry":
+                    industry_available = True
+                emit("sync_classifications", 89, f"{prepared.config.label}同步完成，{classifications[prepared.config.id]} 行")
+            except Exception as exc:
+                if kind == "concept":
+                    raise
+                logger.warning("当日行业分类缺失: %s", exc)
+                emit.finish("failed", str(exc))
+                if not evening_only:
+                    stage_errors.append(f"industry classification: {exc}")
         # 概念映射有进程缓存，刷新后供本轮主线和复盘读取。
         from app.services.rps_rotation import invalidate_cache as invalidate_rotation_cache
         invalidate_rotation_cache()
@@ -938,25 +952,32 @@ def _run_now(
         skipped.append("mainline")
         emit.task("compute_mainline", "计算市场主线", "skipped", message="手动同步未启用环境计算")
     else:
-        try:
-            emit("compute_mainline", 93, "计算市场主线…")
-            from app.services import market_mainline
-            for _kind in ("concept", "industry"):
+        from app.services import market_mainline
+
+        emit("compute_mainline", 93, "计算市场主线…")
+        mainline_errors = []
+        for kind in ("concept", "industry"):
+            if postmarket and kind == "industry" and not industry_available:
+                continue
+            try:
                 rows = market_mainline.compute_mainline_incremental(
-                    repo, repo.store.data_dir, kind=_kind,
+                    repo, repo.store.data_dir, kind=kind,
                     **({"refresh_today": True} if postmarket else {}),
                     **({"refresh_from": (override_start_date or new_regime["date"].min())}
                        if with_analysis and (override_start_date is not None or not new_regime.is_empty()) else {}),
                 )
                 mainline_rows += rows.height if not rows.is_empty() else 0
-            if mainline_rows:
-                logger.info("compute_mainline: %d rows", mainline_rows)
-            emit("compute_mainline", 94, f"市场主线 {mainline_rows} 行")
-        except Exception as e:  # noqa: BLE001 -- 独立阶段隔离，保留warning及原任务错误汇总
-            logger.warning("compute_mainline failed (soft): %s", e, exc_info=True)
-            stage_errors.append(f"compute_mainline: {e}")
-            skipped.append("mainline")
-            emit.finish("failed", str(e))
+            except Exception as exc:  # noqa: BLE001 -- 概念、行业独立记录，失败保留到所属任务。
+                logger.warning("compute_mainline %s failed: %s", kind, exc)
+                mainline_errors.append(str(exc))
+                if kind == "concept" or not evening_only:
+                    stage_errors.append(f"compute_mainline ({kind}): {exc}")
+                if kind == "concept" or not postmarket:
+                    skipped.append("mainline")
+                    break
+        emit("compute_mainline", 94, f"市场主线 {mainline_rows} 行")
+        if mainline_errors:
+            emit.finish("failed", "; ".join(mainline_errors))
 
     if postmarket and "mainline" not in skipped:
         # Readiness belongs to steps 1–8, not to optional minute/book/list stages.
@@ -966,7 +987,8 @@ def _run_now(
         emit("evening_report_ready", 94, "记录每日晚报输入就绪证据…")
         try:
             save_ready(repo.store.data_dir, today, coverage, classification_observations,
-                       current.to_dicts()[0])
+                       current.to_dicts()[0], before_commit=lambda: emit(
+                           "evening_report_ready", 94, "提交每日晚报正式验收…", skip_log=True))
         except Exception as exc:  # noqa: BLE001 -- 晚报证据失败不阻断后续原有结算／采集
             logger.warning("每日晚报输入待就绪: %s", exc)
             stage_errors.append(f"evening_report_ready: {exc}")
